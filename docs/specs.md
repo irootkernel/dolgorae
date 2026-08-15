@@ -51,10 +51,16 @@ Codex app-server 0.147.0.
 [PATH]` MUST explicitly opt a general directory into Gomchi. A run MUST NOT
 start in an uninitialized workspace.
 
-In Git mode, the canonical workspace is libc `realpath(3)` applied to the
-existing directory returned by `git rev-parse --show-toplevel`, even when the
-supplied path is a subdirectory. In non-Git mode it is `realpath(3)` applied to
-the existing initialized directory. The canonical path is the returned absolute
+In Git mode, Gomchi runs
+`git -c core.quotePath=true -C <supplied-existing-directory> rev-parse --show-toplevel`
+without a shell and requires exit 0 and exactly one LF-terminated stdout
+result; bounded stderr is diagnostic only when exit is zero. A double-quoted result is decoded with Git's documented
+C-style path quoting (including octal byte escapes); an unquoted result is the
+bytes before the sole final LF. Invalid quoting, trailing output, or NUL is a
+Git discovery failure. The canonical workspace is libc `realpath(3)` applied to
+that decoded existing directory, even when the supplied path is a subdirectory.
+In non-Git mode it is `realpath(3)` applied to the existing initialized
+directory. The canonical path is the returned absolute
 POSIX byte sequence with no trailing slash except for root. Gomchi performs no
 additional Unicode normalization or case folding: filesystem alias resolution,
 including symlink and case-insensitive lookup, belongs to `realpath(3)`.
@@ -68,7 +74,10 @@ socket name is RFC 4648 uppercase unpadded base32 of the first 160 bits of
 SHA-256 over
 `"gomchi-socket-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The manifest
 records both the canonical path bytes in the lossless path representation and
-the full workspace digest. Every component MUST use these same preimages.
+the full workspace digest. Here `workspace_digest_bytes` is the raw 32-byte
+SHA-256 result, not its hex text, and `run_uuid_bytes` is the UUID's 16 bytes in
+RFC 4122/network order, not its hyphenated text. Every component MUST use these
+same preimages.
 
 Each linked Git worktree has its own canonical top-level path and is therefore
 a separate Gomchi workspace, run store, and writer lease. Gomchi supports one
@@ -330,9 +339,11 @@ Failure envelope:
 }
 ```
 
-JSON field names use `snake_case`. Additive fields are compatible within schema
-version 1; removing or changing a field's meaning requires a new schema version.
-Consumers MUST ignore unknown fields.
+JSON field names use `snake_case`. Machine-output schema version 1 is closed:
+producers MUST NOT add fields and consumers MUST reject unknown fields. Any
+additive, removed, or meaning-changing producer field requires a new schema
+version. This is distinct from the Codex-input compatibility rule, where Gomchi
+records and tolerates unknown additive app-server data.
 
 The checked [machine-output schema](protocol/gomchi-machine-v1.schema.json) and
 [error contract](protocol/gomchi-error-contract-v1.json) are normative.
@@ -540,7 +551,9 @@ they are the sorted unique workspace-relative paths from
 `.gomchi/` are excluded. In non-Git mode they are the changed regular files from
 no-follow pre/post `(device,inode,size,mtime_ns)` snapshots, also excluding
 `.gomchi/`. Valid UTF-8 paths are strings; other POSIX bytes use
-`{"$gomchi_path_bytes":"<base64>"}`. At most 4,096 paths are retained and
+`{"$gomchi_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
+The machine schemas enforce the alphabet, four-character grouping, and exact
+terminal padding in addition to declaring `contentEncoding`. At most 4,096 paths are retained and
 `truncated` reports omission. Gomchi MUST NOT claim that Codex caused every
 reported change. Full diff inspection is delegated to Git; Gomchi has no
 `run diff` command.
@@ -767,8 +780,6 @@ The lifecycle states are:
 - `idle`
 - `running`
 - `waiting_approval`
-- `waiting_input`
-- `waiting_mcp`
 - `paused`
 - `closed`
 - `start_failed`
@@ -777,14 +788,14 @@ The lifecycle states are:
 Normal transitions are:
 
 ```text
-starting -> idle -> running <-> waiting_*
+starting -> idle -> running <-> waiting_approval
 running -> idle
-waiting_* -> idle
+waiting_approval -> idle
 idle <-> paused
 idle -> closed
 paused -> closed
 starting -> start_failed
-running|waiting_* -> outcome_unknown
+running|waiting_approval -> outcome_unknown
 outcome_unknown -> paused
 outcome_unknown -> closed
 ```
@@ -823,7 +834,7 @@ generation cleanup are allowed.
 History-copying fork is allowed from idle, paused, closed, and outcome-unknown
 runs after required absence proof, but not from running or waiting runs. The
 read-only `fork --fresh` escape is additionally allowed when a `running` or
-`waiting_*` source socket is unreachable and its process identity is
+`waiting_approval` source socket is unreachable and its process identity is
 `Unverifiable`. The source is immutable. A fork uses the same
 target snapshot, defaults to read access, and inherits the source model unless
 another model is explicitly selected. It inherits the source's immutable
@@ -874,13 +885,18 @@ value returns `INVALID_ARGUMENT`; an unadvertised value returns
 The checked [Codex required-subset manifest](protocol/codex-0.147.0-required-subset.json)
 maps stable server requests as follows:
 
-- `item/commandExecution/requestApproval`,
-  `item/fileChange/requestApproval`, and
-  `item/permissions/requestApproval` become `waiting_approval`;
-- `item/tool/requestUserInput` becomes `waiting_input`;
-- `mcpServer/elicitation/request` becomes `waiting_mcp`.
+- `item/commandExecution/requestApproval` and
+  `item/fileChange/requestApproval` are supported and become
+  `waiting_approval`;
+- `item/permissions/requestApproval`, `item/tool/requestUserInput`, and
+  `mcpServer/elicitation/request` are recognized but unsupported in v1. Gomchi
+  records their bounded shape, replies JSON-RPC method-not-found, and lets Codex
+  determine the turn result. They never create a pending request or lifecycle
+  state. Permissions/granular approval is live-proven to require
+  `experimentalApi` on the pinned target, while SPEC-012 deliberately forbids
+  that API. User-input and MCP elicitation are excluded by the v1 product scope.
 
-They are represented as structured pending requests. `run pending` returns the
+The two supported approval requests are represented as structured pending requests. `run pending` returns the
 generation-qualified request ID, closed kind, redacted payload, and exact
 response-schema identifier from that manifest. `run respond` accepts exactly
 one JSON response source, validates it against that schema, and forwards it to
@@ -902,14 +918,7 @@ Command- and file-change approval decisions exposed by Gomchi are:
 - `cancel`
 
 For command and file-change approvals they map respectively to the pinned wire
-values `accept`, `acceptForSession`, `decline`, and `cancel`. A permissions
-request does not use that decision enum: its response MUST validate the required
-`permissions` profile plus optional `scope` and `strictAutoReview` fields in
-`PermissionsRequestApprovalResponse`; declining or cancelling it interrupts the
-turn instead of inventing a response. User input validates an `answers` object
-against `ToolRequestUserInputResponse`. MCP elicitation validates `action` as
-exactly `accept`, `decline`, or `cancel`, with `content` allowed only for
-`accept`, against `McpServerElicitationRequestResponse`.
+values `accept`, `acceptForSession`, `decline`, and `cancel`.
 
 Generation approval maps to app-server's live session-scoped approval and
 expires whenever the worker/app-server generation ends. Gomchi MUST NOT present

@@ -399,10 +399,8 @@ and seal `start_failed`. Present `Unverifiable` generations are never rewritten.
 | --- | --- | --- | --- | --- |
 | `starting` | Maybe | Maybe | No | `idle` or `start_failed` |
 | `idle` | Yes | Yes | Yes | `running`, `paused`, or `closed` |
-| `running` | Yes | Yes | No | `idle`, `waiting_*`, or `outcome_unknown` |
+| `running` | Yes | Yes | No | `idle`, `waiting_approval`, or `outcome_unknown` |
 | `waiting_approval` | Yes | Yes | No | `running`, `idle`, or `outcome_unknown` |
-| `waiting_input` | Yes | Yes | No | `running`, `idle`, or `outcome_unknown` |
-| `waiting_mcp` | Yes | Yes | No | `running`, `idle`, or `outcome_unknown` |
 | `paused` | No | No | No | `idle` after resume or `closed` |
 | `closed` | No | No | No | Final |
 | `start_failed` | No | No | No | Final |
@@ -579,7 +577,7 @@ thread with stable history APIs only after prior generation absence is proved.
   source projection. It creates an empty threadless read-only run and
   records source run, observed lifecycle state, and unresolved-turn provenance
   without asserting an outcome. It is therefore available even when a source
-  in `running` or `waiting_*` has an unreachable socket and unverifiable process
+  in `running` or `waiting_approval` has an unreachable socket and unverifiable process
   identity. Explicit `--access write` is rejected rather than downgraded.
 
 Every fork copies the source target snapshot and immutable run instructions,

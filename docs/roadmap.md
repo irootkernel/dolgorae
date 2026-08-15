@@ -290,16 +290,18 @@ roots, access-policy mappings, and generation replacement on promote/demote.
 
 Status: `PLANNED`
 
-Implement normalized approval, user-input, and MCP-elicitation requests;
-generation-qualified request IDs; `pending` and schema-validated `respond`;
-reader auto-decline; explicit writer decisions; and generation-scoped approval
-expiry.
+Implement normalized command/file approval requests; generation-qualified
+request IDs; `pending` and schema-validated `respond`; reader auto-decline;
+explicit writer decisions; and generation-scoped approval expiry. Recognize the
+three pinned unsupported request methods and reply method-not-found without
+creating pending lifecycle state.
 
-Verification: fake server-request coverage for each kind and decision, stale
+Verification: fake server-request coverage for both supported kinds and every decision, stale
 generation responses, unknown request kinds, malformed responses, indefinite
 waiting, interrupt during waiting, writer lease retention, no replay after
-restart, exact response schemas, reader auto-decline, and live-observed approval/
-input/MCP request mappings.
+restart, exact response schemas, reader auto-decline, live-observed command/file
+request mappings, and method-not-found behavior for all recognized unsupported
+methods.
 
 ### TASK-009-A: Pause, Close, and Lifecycle Shutdown
 
@@ -449,7 +451,7 @@ Run opt-in live smoke tests against the prepared `codex` and `codex-hsy`
 targets, both at app-server 0.147.0 or a separately recorded compatible version.
 Cover target-home isolation, read session, writer conflict, multi-turn resume,
 effort change, approval round trip, pause/resume, fork, audit verification, and
-export, including input and MCP elicitation plus pending-request restart. Do not
+export, including command/file approval plus pending-request restart. Do not
 persist credentials or secret-bearing raw output in fixtures.
 
 Verification: both target reports pass on Apple Silicon macOS; required-subset
