@@ -1,0 +1,7 @@
+.omc/
+.omx/
+.claude/
+.codex/
+.codegraph/
+__pycache__/
+*.py[cod]
