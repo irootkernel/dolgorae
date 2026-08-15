@@ -2,7 +2,7 @@
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and Round-4
 stabilization `TASK-000-A` remain complete. Round-5 stabilization
-`TASK-000-B` is active; no production implementation Task is active.
+`TASK-000-B` is also complete; no production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -118,14 +118,14 @@ and TASK-001 remains planned until this Task is complete.
 
 ## EPIC-000-B: Round-5 End-to-End Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Reconcile Round 5's end-to-end lifecycle, OS-substrate, checked-artifact,
 machine-contract, and closure-integrity findings without production code.
 
 ### TASK-000-B: Round-5 Contract, Traceability, and Probe Closure
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Preserve the immutable Round-5 input and create one owner-disposition row per
 finding. Reconcile spawn-image identity, APFS/firmlink workspace identity,
@@ -150,7 +150,8 @@ as bounded secret-free evidence.
 Epic acceptance: every Round-5 row is individually verified or rejected with
 evidence, no fix exists only in disposition prose, all required live/offline
 gates pass, NOTE-003 links task-scoped commits, no production source exists, and
-TASK-001 remains planned. Until then TASK-000-B and EPIC-000-B remain ACTIVE.
+TASK-001 remains planned. These conditions were independently confirmed at
+`aacb1b2`; TASK-000-B and EPIC-000-B are complete.
 
 ## EPIC-001: Foundation and Durable State
 
