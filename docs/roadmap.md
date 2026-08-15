@@ -1,8 +1,8 @@
 # Dolgorae Roadmap
 
-Status: Ordered implementation roadmap. Historical `TASK-000` and Round-4
-stabilization `TASK-000-A` remain complete. Round-5 stabilization
-`TASK-000-B` is also complete; no production implementation Task is active.
+Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
+Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete; no production
+implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -155,7 +155,7 @@ TASK-001 remains planned. These conditions were independently confirmed at
 
 ## EPIC-000-C: Singleton, Local-State, and Writer Contract Stabilization
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Goal: Replace the pre-implementation per-run server and target vocabulary with
 profile-scoped singleton, project-local state, and cross-profile lazy-writer
