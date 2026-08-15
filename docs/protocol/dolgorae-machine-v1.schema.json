@@ -49,12 +49,11 @@
     "workspace": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace_id", "canonical_path", "mode", "state_root", "default_access", "created"],
+      "required": ["workspace_id", "canonical_path", "mode", "default_access", "created"],
       "properties": {
         "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "canonical_path": { "$ref": "#/$defs/path" },
         "mode": { "enum": ["git", "non_git"] },
-        "state_root": { "$ref": "#/$defs/path" },
         "default_access": { "enum": ["read", "write"] },
         "created": { "type": "boolean" }
       }
@@ -102,7 +101,7 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace_id", "run_id", "state", "access", "server_epoch", "run_generation", "profile", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_lease", "identity_verdict", "last_terminal"],
+      "required": ["workspace_id", "run_id", "state", "access", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_lease", "identity_verdict", "last_terminal"],
       "properties": {
         "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "run_id": { "$ref": "#/$defs/uuid" },
@@ -110,6 +109,7 @@
         "access": { "enum": ["read", "write"] },
         "server_epoch": { "type": ["integer", "null"], "minimum": 0 },
         "run_generation": { "type": "integer", "minimum": 0 },
+        "control_socket_epoch": { "type": "integer", "minimum": 0 },
         "profile": { "type": "string" },
         "thread_id": { "type": ["string", "null"] },
         "active_turn_id": { "type": ["string", "null"] },

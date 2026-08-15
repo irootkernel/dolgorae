@@ -64,6 +64,8 @@ to app-server.
 - Socket paths live under a fixed short user-private `/tmp/dolgorae-<uid>/` root
   and their actual location is recorded in workspace runtime state; discovery
   does not depend on the caller's `$TMPDIR`.
+- A worker recreates an accidentally deleted private socket path and advances a
+  persisted socket epoch; a foreign replacement fails closed.
 - Worker loss ends only its proxy connection; recovery validates the singleton
   epoch and opens a new run generation.
 - WebSocket instability and port management are avoided.
@@ -135,9 +137,8 @@ idle, running, and waiting writer states and released on start failure. The
 canonical identity is domain-separated SHA-256 of libc `realpath(3)` bytes with
 no extra case/Unicode folding; sockets and both locks reuse that digest. The
 lease is close-on-exec and is never inherited by app-server. Unknown quarantine
-is lease-free. The private lock root is resolved once at workspace init (or
-explicitly selected with `--state-root`) and its canonical path/device/inode are
-workspace and manifest authority; later XDG changes do not move it. An
+is lease-free. Permanent lock pathnames live below
+`.dolgorae/runtime/locks/` on the already-required local APFS workspace. An
 unverifiable generation blocks same-thread recovery. A stale foreign-run
 `writer.json` does not override the kernel acquisition attempt, but it gates
 workspace writer activation, including effective-write new-run start, until its
@@ -192,7 +193,8 @@ wrapper changes must not silently move an existing thread between account homes.
 
 ### Decision
 
-Store profile definitions in the XDG user config. Snapshot profile name, argv,
+Store profile definitions in ignored project-local `.dolgorae/local.yaml`.
+Snapshot profile name, argv,
 and expected `CODEX_HOME` into each run. Set that home explicitly and reject an
 `initialize` response whose `codexHome` differs. Never rebind a run or fork
 across profiles.
@@ -200,7 +202,7 @@ across profiles.
 ### Consequences
 
 - Existing runs remain bound to the account that created them.
-- Profile registry edits affect only future runs.
+- Project-local profile edits affect only future runs.
 - Executable updates at the same path require generation-time compatibility
   validation but do not change the expected home.
 - Dolgorae does not install, update, or authenticate Codex.
@@ -535,6 +537,10 @@ The safe dependency/mechanism table in architecture.md is normative, and every
 new runtime dependency requires an ADR amendment. The shared fake app-server is
 an independent Python stdio subprocess owned by TASK-004 and driven by
 manifest-validated declarative scenarios.
+
+Project configuration uses pinned `serde_yaml_ng` 0.10 behind typed adapters
+that reject duplicate and unknown keys. YAML values are never used as untyped
+protocol or ledger input.
 
 ### Consequences
 

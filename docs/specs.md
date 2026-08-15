@@ -120,16 +120,18 @@ In Git mode, initialization creates exactly these tracked project policy files:
 ```text
 .dolgorae/
   .gitignore
-  config.toml
+  config.yaml
 ```
 
-`config.toml` contains exactly `schema_version = 1`, `mode = "git"|"non_git"`,
-and `default_access = "read"|"write"`. The initial default access is `read`.
-Unknown or duplicate keys, wrong types, unsupported schema versions, and
-malformed TOML return `CONFIG_INVALID`. The file is hand-editable, but Dolgorae
+`config.yaml` is strict YAML and contains exactly `schema_version: 1`,
+`mode: git|non_git`, and `default_access: read|write`; the initial default is
+`read`. Unknown or duplicate keys, wrong types, unsupported schema versions, and
+malformed YAML return `CONFIG_INVALID`. The file is hand-editable, but Dolgorae
 never rewrites it except during first initialization. `.dolgorae/.gitignore`
-ignores `runs/`, `runtime/`, and `cache/`, but MUST NOT ignore `.dolgorae` as a
-whole.
+contains exactly `/local.yaml`, `/runs/`, `/runtime/`, `/evidence/`, and
+`/cache/`; it MUST NOT ignore `.dolgorae` as a whole. Initialization also creates
+an untracked mode-0600 `.dolgorae/local.yaml` with `schema_version: 1` and an
+empty `profiles` mapping.
 
 Non-Git initialization creates the same two files and the same ignore contents,
 but makes no claim that either file is tracked. The ignore file remains useful
@@ -137,18 +139,18 @@ if the directory is later placed below a version-control workspace.
 
 Initialization uses create-exclusive temporary files, file `fsync`, rename,
 and parent-directory `fsync`. Repeating `init` succeeds with `created:false`
-only when the recorded mode, canonical workspace, state-root authority, schema,
+only when the recorded mode, canonical workspace, schema,
 and existing policy files are byte-for-byte compatible. It never overwrites an
 existing tracked policy file. A partial layout, nested workspace, changed mode,
-changed state root, or conflicting policy returns
+or conflicting policy returns
 `WORKSPACE_INITIALIZATION_CONFLICT`.
 
 ## SPEC-003: Profile, Account, and Singleton Binding
 
-The user-global profile registry lives at:
+The project-local profile configuration lives at:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/dolgorae/profiles.toml
+<canonical-workspace>/.dolgorae/local.yaml
 ```
 
 A profile contains:
@@ -157,17 +159,19 @@ A profile contains:
 - shell-free executable argv;
 - an absolute expected `CODEX_HOME`.
 
-`profiles.toml` has top-level `schema_version = 1` and a `profiles` table keyed by
-name. Each entry contains only nonempty `argv = [string, ...]` and absolute
-`codex_home = string`. Unknown or duplicate keys, empty argv, relative homes,
-wrong types, malformed TOML, and unsupported schema versions return
-`PROFILE_CONFIG_INVALID`. Profile add/remove holds a user-registry lock and uses
+`local.yaml` is strict YAML with top-level `schema_version: 1` and a `profiles`
+mapping keyed by name. Each entry contains only nonempty `argv: [string, ...]`
+and absolute `codex_home: string`. Unknown or duplicate keys, empty argv, relative homes,
+wrong types, malformed YAML, and unsupported schema versions return
+`PROFILE_CONFIG_INVALID`. Profile add/remove holds a workspace-local config lock and uses
 write-temp, file `fsync`, rename, and directory `fsync`; the registry is
 hand-editable and stores no environment values.
-The containing configuration directory is mode 0700 and `profiles.toml` is mode
+The `.dolgorae` private directory is mode 0700 and `local.yaml` is mode
 0600; creation and replacement reject a wrong-owner or more-permissive file.
 
-Profile names are unique. `profile add` MUST reject an existing name with
+Profile names are unique within one project. Every profile command MUST resolve
+an initialized workspace through `--workspace` or normal upward discovery.
+`profile add` MUST reject an existing name with
 `PROFILE_ALREADY_EXISTS`; it MUST NOT overwrite a profile implicitly. Replacement
 requires an explicit remove followed by add.
 
@@ -175,7 +179,7 @@ Dolgorae MUST set the profile's `CODEX_HOME`, inherit the ordinary parent proces
 environment, and strip inherited Dolgorae-internal variables before starting
 Codex. It then injects a fresh, non-secret managed-run context marker used to
 reject recursive Dolgorae control from that process tree. A profile MAY use wrapper
-argv for additional environment preparation. The registry MUST NOT support an
+argv for additional environment preparation. The configuration MUST NOT support an
 arbitrary secret environment map.
 
 `run start` MUST require an explicit profile. Before use, Dolgorae MUST validate
@@ -226,6 +230,16 @@ shared mixed event stream or search another run's frames. The CLI-worker socket 
 user-private runtime path derived from the canonical workspace identity and run
 ID; durable state remains under `.dolgorae/runs/`.
 
+The actual worker socket node is the sole per-run exception to project-local
+runtime storage and lives below `/tmp/dolgorae-<uid>/s/`; its identity authority
+lives in `.dolgorae/runtime/runs/<run-id>.json`. A live worker MUST detect a
+missing socket pathname or private directory, safely recreate the private root,
+bind a replacement listener, increment `control_socket_epoch`, and atomically
+replace the runtime record without restarting its active proxy or turn. Existing
+accepted connections remain valid. A foreign occupant, unsafe root, or failed
+rebind MUST interrupt an active turn and enter `RECOVERY_REQUIRED`; it MUST NOT
+unlink an unverified socket.
+
 Run IDs are UUIDv7 values. V1 has no run aliases and no current-run pointer.
 Every run-scoped command MUST receive the run ID explicitly.
 
@@ -249,17 +263,17 @@ The initial public command surface is:
 ```text
 dolgorae [--human] --help
 dolgorae [--human] --version
-dolgorae [--human] init [PATH] [--non-git] [--state-root <absolute-local-path>]
+dolgorae [--human] init [PATH] [--non-git]
 
-dolgorae [--human] profile add <name> --codex-home <absolute-path> -- <argv...>
-dolgorae [--human] profile list
-dolgorae [--human] profile show <name>
-dolgorae [--human] profile remove <name>
-dolgorae [--human] profile doctor <name>
-dolgorae [--human] profile server status <name>
-dolgorae [--human] profile server start <name>
-dolgorae [--human] profile server stop <name> [--interrupt]
-dolgorae [--human] profile server restart <name> [--interrupt]
+dolgorae [--human] profile add <name> [--workspace <path>] --codex-home <absolute-path> -- <argv...>
+dolgorae [--human] profile list [--workspace <path>]
+dolgorae [--human] profile show <name> [--workspace <path>]
+dolgorae [--human] profile remove <name> [--workspace <path>]
+dolgorae [--human] profile doctor <name> [--workspace <path>]
+dolgorae [--human] profile server status <name> [--workspace <path>]
+dolgorae [--human] profile server start <name> [--workspace <path>]
+dolgorae [--human] profile server stop <name> [--workspace <path>] [--interrupt]
+dolgorae [--human] profile server restart <name> [--workspace <path>] [--interrupt]
 
 dolgorae [--human] run start --workspace <path> --profile <name> [--access read|write] [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
 dolgorae [--human] run list [--workspace <path>]
@@ -282,7 +296,7 @@ dolgorae [--human] run fork --from <run-id> [--workspace <path>] [--fresh] [--mo
 dolgorae [--human] run close <run-id> [--workspace <path>] [--interrupt]
 dolgorae [--human] run delete <run-id> --confirm [--workspace <path>]
 dolgorae [--human] run verify <run-id> [--workspace <path>]
-dolgorae [--human] run export <run-id> --output <directory> [--workspace <path>]
+dolgorae [--human] run export <run-id> [--output <directory>] [--workspace <path>]
 ```
 
 `run start` creates an empty idle Dolgorae session and MUST NOT allocate a Codex
@@ -412,12 +426,13 @@ The checked [machine-output schema](protocol/dolgorae-machine-v1.schema.json) an
 subcommand enum and `invocation_id` is a UUIDv7. `data` is a command-tagged
 union built from these reusable objects:
 
-- `workspace`: workspace ID, lossless canonical path, mode, state-root identity,
-  default access, and `created`;
+- `workspace`: workspace ID, lossless canonical path, mode, default access, and
+  `created`;
 - `profile`: name, argv, expected/actual `codex_home`, executable/version/schema
   digests, compatibility verdict, models, diagnostics, `server_key`, and
   `server_epoch`;
-- `run`: workspace/run IDs, lifecycle/access, `run_generation`, profile, thread/active
+- `run`: workspace/run IDs, lifecycle/access, `server_epoch`, `run_generation`,
+  `control_socket_epoch`, profile, thread/active
   turn when present, model/effort, ledger cursor, pending count, writer/identity
   verdicts, and last terminal result;
 - `turn`: thread/turn IDs, status, model/effort, usage, cursor, response, and
@@ -523,8 +538,8 @@ normative:
 | --- | ---: | --- | --- |
 | `INVALID_ARGUMENT` | 2 | any command | CLI syntax, input source, duration, effort, response JSON, incompatible option combination, or pre-existing export destination is invalid |
 | `WORKSPACE_NOT_INITIALIZED` | 3 | all commands except `init` and profile-only commands | the addressed path has no valid Dolgorae workspace |
-| `CONFIG_INVALID` | 3 | workspace commands | `config.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
-| `PROFILE_CONFIG_INVALID` | 3 | profile commands and `run start` | `profiles.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
+| `CONFIG_INVALID` | 3 | workspace commands | `config.yaml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
+| `PROFILE_CONFIG_INVALID` | 3 | profile commands and `run start` | `local.yaml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
 | `PROFILE_NOT_FOUND` | 3 | profile commands and `run start` | the profile name is absent |
 | `RUN_NOT_FOUND` | 3 | every `run` command except `start/list` | the run ID is absent in the selected workspace |
 | `THREAD_NOT_FOUND` | 3 | `run resume/send/submit/wait/recover/reconcile` and history-copying `run fork` | the pinned Codex history required by the operation is absent; never emitted by `fork --fresh` |
@@ -532,7 +547,7 @@ normative:
 | `REQUEST_NOT_FOUND` | 3 | `run respond` | the request ID is absent |
 | `PROFILE_ALREADY_EXISTS` | 4 | `profile add` | the name already exists; replacement is never implicit |
 | `PROFILE_SERVER_BUSY` | 4 | `profile server start/stop/restart`, `profile doctor`, `run start/resume/recover/fork` | the canonical `CODEX_HOME` already has an incompatible singleton or active runs forbid stop/restart without `--interrupt` |
-| `WORKSPACE_INITIALIZATION_CONFLICT` | 4 | `init` | re-init, nesting, Git mode, state-root, partial-layout, or policy-file facts conflict |
+| `WORKSPACE_INITIALIZATION_CONFLICT` | 4 | `init` | re-init, nesting, Git mode, partial-layout, or policy-file facts conflict |
 | `RUN_STATE_CONFLICT` | 4 | all state-changing `run` commands | the lifecycle state forbids the requested transition |
 | `POLICY_REJECTED` | 4 | policy-sensitive commands and every managed-context command except own-run `status/events/verify` | workspace, hard-agent, or managed-run policy rejects the operation |
 | `RUN_BUSY` | 4 | `run send/submit/wait/pending/respond/interrupt/set-effort/promote/demote/pause/resume/recover/reconcile/fork/close` | another turn owns turn-start serialization, or another contender owns per-run worker startup/attachment serialization |
@@ -646,10 +661,11 @@ Observed paths are populated only when `measured` is true and describe workspace
 changes during the terminal turn interval. In Git mode
 they are the sorted unique workspace-relative paths from
 `git status --porcelain=v2 -z --untracked-files=all`; ignored paths and
-`.dolgorae/runs/`, `.dolgorae/runtime/`, and `.dolgorae/cache/` are excluded, while
+`.dolgorae/runs/`, `.dolgorae/runtime/`, `.dolgorae/evidence/`, and
+`.dolgorae/cache/` are excluded, while
 tracked policy-file changes remain visible. In non-Git mode they are the changed regular files from
 no-follow pre/post `(device,inode,size,mtime_ns)` snapshots, also excluding
-only those three internal directories. Valid UTF-8 paths are strings; other POSIX bytes use
+those four internal directories. Valid UTF-8 paths are strings; other POSIX bytes use
 `{"$dolgorae_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
 The machine schemas enforce the alphabet, four-character grouping, and exact
 terminal padding in addition to declaring `contentEncoding`. At most 4,096 paths are retained and
@@ -674,19 +690,14 @@ and is deduplicated after resolution. These exact thread and turn carriers are
 part of the required-subset manifest. Readers MAY run concurrently without a
 Dolgorae limit. A canonical workspace has at most one Dolgorae writer.
 
-The writer lease is BSD `flock(2)` with nonblocking exclusive semantics below
-the workspace-recorded lock root, keyed by the full canonical-workspace digest.
-`dolgorae init` accepts `--state-root <absolute-local-path>`. Without it, init
-resolves `${XDG_STATE_HOME:-$HOME/.local/state}/dolgorae/locks/` once. The
-canonical path and root device/inode are recorded in
-`.dolgorae/runtime/lock-root.json` and every run manifest. Later environment
-changes are ignored. A missing workspace record is reconstructed only from
-unanimous existing manifest values; conflict fails. With no existing runs it is
-resolved and created. Creation and validation use root-fd-relative no-symlink
-operations, validate `EEXIST`, ownership and mode 0700 with `fstat`, and require
-`MNT_LOCAL` plus `f_fstypename == "apfs"` with `fstatfs`; path or
-device/inode drift fails with `RUNTIME_PATH_COLLISION`. A nonlocal or non-APFS
-root is unsupported rather than overridable.
+The writer lease is BSD `flock(2)` with nonblocking exclusive semantics on
+`.dolgorae/runtime/locks/writer.lock`. Per-run startup locks are
+`.dolgorae/runtime/locks/startup/<run-id>.lock`; the handoff serializer is
+`.dolgorae/runtime/locks/handoff.lock`. Creation and validation use
+workspace-fd-relative no-symlink operations, validate `EEXIST`, ownership and
+mode 0700/0600 with `fstat`, and require the canonical workspace to report
+`MNT_LOCAL` plus `f_fstypename == "apfs"`. Path or device/inode drift fails
+with `RUNTIME_PATH_COLLISION`; nonlocal or non-APFS workspaces are unsupported.
 Only the
 worker holds it; it is close-on-exec and MUST NOT be inherited by app-server or
 descendants. A writer holds it across starting, idle, running, and all waiting
@@ -706,6 +717,10 @@ activation. If its recorded inode differs, Dolgorae first proves the recorded
 generation absent, including boot mismatch or group emptiness; only then may it
 atomically reconstruct `writer.json` from the held pathname/fd pair. Without
 absence proof the mismatch is `RUNTIME_PATH_COLLISION`.
+If any lock pathname or the locks directory is missing while a run history
+exists, Dolgorae MUST fail closed rather than create a new inode that could split
+an existing kernel lease. Recovery requires explicit operator repair after all
+recorded workers have been proved absent.
 Before starting a writer proxy generation, the lease holder proves that the foreign
 generation is absent or performs identity-verified cleanup using its recorded
 group. `Unverifiable` releases the newly acquired lease and returns
@@ -1205,7 +1220,7 @@ prefix. It creates a mode-0700 directory containing 0600 `bundle.json`,
 boundary as well as
 schema version, workspace/run identity, filenames, hashes, and source-derived
 timestamps; lexicographic filenames and source bytes make repeated exports
-content-deterministic. Runtime records, locks, logs, profile registry,
+content-deterministic. Runtime records, locks, logs, project-local profile configuration,
 `CODEX_HOME`, images, and raw torn-tail evidence are excluded. A failing audit
 does not suppress export: both bundle and verification set
 `verification_failed:true`, while other state-changing commands fail closed.
@@ -1213,6 +1228,11 @@ The bundle may contain plaintext prompts/output that key-name redaction cannot
 detect. Its output
 path MUST NOT already exist; Dolgorae never merges or overwrites an export and
 returns `INVALID_ARGUMENT` on collision.
+
+Automatically retained probe, recovery, and diagnostic evidence MUST live under
+`.dolgorae/evidence/`. An export without an explicit output path defaults to a
+create-exclusive child of that directory. A user MAY explicitly request an
+external export destination; that copy is user output, not runtime authority.
 
 There is no retention limit or automatic deletion. `run delete` is allowed
 only for closed or start-failed runs and requires `--confirm`; it is the sole
@@ -1246,9 +1266,9 @@ unchanged. The instructions MUST establish these rules:
   and blockers without imposing a rigid JSON format on the model.
 
 The `.dolgorae` reservation is prompt-enforced policy, not a sandbox deny-list or
-same-user security boundary. Changes to `.dolgorae/config.toml` and
+same-user security boundary. Changes to `.dolgorae/config.yaml` and
 `.dolgorae/.gitignore` remain observable workspace changes; only worker-owned
-run/runtime/cache paths are filtered.
+run/runtime/evidence/cache paths are filtered.
 
 The profile's own Codex configuration, AGENTS instructions, skills, plugins,
 apps, MCP servers, and native subagents remain available unless they conflict

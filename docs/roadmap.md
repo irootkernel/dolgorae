@@ -177,7 +177,7 @@ Git whitespace/scope checks.
 
 ### TASK-000-C2: Project-Local Configuration and Runtime Layout
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Move portable and machine-local configuration, run/runtime state, locks, and
 evidence beneath `.dolgorae/`, retaining only the documented singleton and short
@@ -227,17 +227,16 @@ Status: `PLANNED`
 Implement Git and explicit non-Git initialization, per-worktree canonical
 workspace identity, upward `.dolgorae` discovery, minimal policy files, generated
 local ignore policy, dirty-worktree baseline capture, and safe permission
-creation. Establish `--state-root`, `lock-root.json`, mandatory local-APFS
-workspace and state-root checks with no override,
-unanimous-manifest reconstruction, and strict config/profile schemas.
+creation. Establish project-local `.dolgorae/runtime/locks/`, mandatory
+local-APFS workspace checks with no override, and strict shared/local YAML
+config/profile schemas.
 
 Verification: tests for subdirectory discovery, symlink normalization, Git
 worktrees, dirty/untracked preservation, non-Git opt-in, repeated initialization,
 and refusal of uninitialized start; libc realpath case aliases and the
 device/inode-guarded `/System/Volumes/Data` firmlink normalization versus
-case-sensitive distinct paths; non-APFS/nonlocal refusal; state-root
-reconstruction/conflict; nested/Git-contained non-Git and mode/root-changing
-re-init refusal.
+case-sensitive distinct paths; non-APFS/nonlocal refusal; missing/replaced local
+lock refusal; nested/Git-contained non-Git and mode-changing re-init refusal.
 
 ### TASK-003-A: Manifest, JCS, and Ledger Record Schema
 
@@ -314,7 +313,8 @@ survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unli
 
 Status: `PLANNED`
 
-Implement profile CRUD, argv and absolute `CODEX_HOME` validation, inherited
+Implement project-local `local.yaml` profile CRUD, argv and absolute
+`CODEX_HOME` validation, inherited
 environment preparation, schema generation into temporary storage, required
 stable-subset comparison, app-server handshake, `codexHome` matching,
 `model/list`, tested/unverified verdicts, profile snapshotting, singleton keys,
@@ -361,7 +361,7 @@ master-controlled interaction, and conservative failure semantics.
 Status: `PLANNED`
 
 Implement the per-worktree BSD `flock(2)` lease held only by the worker,
-close-on-exec descriptor hygiene, persistent local lock-root validation,
+close-on-exec descriptor hygiene, project-local permanent lock validation,
 reader/write sandbox selection, nonqueued promotion, idle-only
 promotion/demotion, effective-write start/resume/fork and writer-recover
 acquisition, and identity-verified
@@ -372,7 +372,7 @@ layout and offsets.
 
 Verification: multiprocess tests proving multiple readers, one writer proxy
 lane per worktree, no replacement app-server before crash cleanup, deterministic
-writer conflicts, start-failure release, foreign/nonlocal lock-root refusal,
+writer conflicts, start-failure release, missing/replaced local lock refusal,
 PID/PGID reuse refusal, pause/close/unknown release, promotion races, and
 separate locks for distinct canonical workspaces, permanent writer/startup
 pathnames, held-fd/path and historical-inode splits, linked-worktree Git writable

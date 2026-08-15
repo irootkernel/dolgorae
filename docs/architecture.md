@@ -17,7 +17,7 @@ coordination, recovery, and audit around Codex threads without replacing Codex
 conversation storage.
 
 ```text
-                          user-local profile registry
+                          project-local profile configuration
                           argv + expected CODEX_HOME
                                      |
                                      v
@@ -137,13 +137,19 @@ failure. After initialize, the worker repeats the sample and fsyncs
 
 ### Profile Registry and Singleton Membership
 
-The XDG registry is user-local and independent of every workspace. It stores no
-tokens and no arbitrary environment map. A run manifest contains a private
-snapshot so registry edits cannot silently change an existing run's account.
+`.dolgorae/local.yaml` is project-local, ignored by Git, and stores the project's
+named profile map without tokens or arbitrary environment values. A run manifest
+contains a private snapshot so later edits cannot silently change an existing
+run's account.
 The singleton membership index is separate XDG state keyed by `server_key`. It
 contains only server identity/epoch and workspace/run runtime-record locators,
 so stop/restart can enumerate active members across projects. It is recoverable
 from those records and stores no prompt, audit payload, or credentials.
+The Codex-owned daemon control socket remains below the profile's `CODEX_HOME`.
+If that pathname disappears, existing proxy connections may finish but new
+attachments are rejected and the profile becomes `degraded`; Dolgorae never
+starts a duplicate until the recorded daemon identity is proved absent or an
+identity-checked interrupting restart completes.
 
 ### Persistent Run Store
 
@@ -197,35 +203,35 @@ Those operations validate workspace, run, generation, boot, and live process
 identity; all other requests reject version skew. `shutdown` is identity-bound
 and interrupts an active turn before cleanup.
 
+The live worker watches the socket pathname and containing private directory.
+On `ENOENT`, it reopens and validates `/tmp`, recreates the private hierarchy,
+binds a replacement listener at the deterministic path, records its inode,
+increments `control_socket_epoch`, and atomically replaces the runtime record.
+Accepted connections and the proxy connection are independent of that listener
+replacement. An occupied or unsafe replacement path is fail-closed: the worker
+interrupts an active turn, records bounded evidence, and requires recovery.
+
 The actual socket path and process identity are discoverable from
 `.dolgorae/runtime/runs/<run-id>.json`; discovery never recomputes a path from
 `$TMPDIR`. The record contains full worker and proxy identity tuples: PID,
 PGID, UID, start seconds/microseconds, live executable path, executable
 device/inode, and executable SHA-256, together with
 the boot-session UUID, run generation, access state, socket path, Dolgorae
-version, binary digest, IPC protocol version, `server_key`, `server_epoch`, and
-`run_generation`. A new singleton epoch never validates a stale proxy generation.
+version, binary digest, IPC protocol version, socket inode,
+`control_socket_epoch`, `server_key`, `server_epoch`, and `run_generation`. A
+new singleton epoch never validates a stale proxy generation.
 `.dolgorae/runtime/writer.json` points to the current writer run/generation and
 stores the incumbent identity plus `cleanup_in_progress`; it is replaced only
 after cleanup is confirmed. Runtime records use write-temp, `fsync`, rename,
 and directory `fsync`. They are recoverable coordination caches; the fsynced
 `run_generation_started` ledger record is process-identity authority.
 
-Writer leases and per-run startup locks live below the workspace-recorded
-persistent private local root, never a value recomputed from the current
-environment. `dolgorae init` resolves an explicit `--state-root` or the initial
-XDG/fallback value once and records its canonical path and root device/inode in
-`.dolgorae/runtime/lock-root.json` and every run manifest. If the workspace record
-is missing while runs exist, it is reconstructed only from unanimous manifest
-values; disagreement fails closed. The root is opened and created through
-descriptor-relative, no-symlink operations, must be current-uid-owned mode 0700,
-and must report `MNT_LOCAL` plus `f_fstypename == "apfs"`. Later environment changes are ignored; path or
-device/inode drift is `RUNTIME_PATH_COLLISION`.
-
-The recorded root already denotes the `locks/` directory. Writer files are
-`writer/<full-workspace-digest>` and startup files are
-`startup/<domain-separated-workspace-and-run-digest>` relative to it, using SPEC-002's
-only digest algorithms; the mechanisms never share an inode. Both files are
+Writer leases and startup locks live at fixed paths below
+`.dolgorae/runtime/locks/`. The writer and handoff files are `writer.lock` and
+`handoff.lock`; startup files are `startup/<run-id>.lock`. The directory is
+opened through descriptor-relative, no-symlink operations, must be
+current-uid-owned mode 0700, and resides on the already-required local APFS
+workspace. The mechanisms never share an inode. Lock files are
 create-exclusive and permanent. The writer lease is nonblocking BSD `flock(2)`. The startup file has two POSIX
 byte-range locks: byte 0 is the transient CLI starter claim and byte 1 is the
 worker lifetime claim. The 8192-byte file body has separate version-1,
@@ -286,7 +292,8 @@ The repository-local layout is:
 ```text
 .dolgorae/
   .gitignore                 # tracked
-  config.toml                # tracked portable policy
+  config.yaml                # tracked portable policy
+  local.yaml                 # ignored, 0600 local named profiles
   runs/                      # ignored, 0700
     <uuidv7>/
       manifest.json          # 0600, fixed run facts
@@ -296,9 +303,14 @@ The repository-local layout is:
       worker.log.1           # 0600, single rotated diagnostic log
       recovery/              # 0700, preserved crash-tail evidence
   runtime/                   # ignored, recoverable local coordination
-    lock-root.json           # 0600, workspace lock-root authority
     writer.json              # 0600, current writer/cleanup pointer
+    workspace.json           # 0600, canonical workspace/runtime facts
+    locks/                   # 0700, permanent workspace lock pathnames
+      writer.lock            # BSD flock writer lease
+      handoff.lock           # cross-profile handoff serialization
+      startup/<uuidv7>.lock  # two-range worker startup ownership
     runs/<uuidv7>.json       # 0600, per-run process/socket discovery
+  evidence/                  # ignored, generated probe/recovery/default exports
   cache/                     # ignored, replaceable compatibility data
 ```
 
@@ -645,8 +657,8 @@ in-repository safe module rather than an unspecified serializer dependency.
 
 The approved safe-Rust mechanisms are `clap` for CLI parsing, `uuid` for
 UUIDv7, `sha2` for SHA-256, `base64` plus `data-encoding` for the pinned base
-alphabets, `toml` with explicit duplicate/unknown-key fixtures for configuration,
-and `serde_json` only behind the duplicate-detecting `RawValue` ingest visitor
+alphabets, `serde_yaml_ng` 0.10 behind duplicate/unknown-key rejecting typed
+configuration adapters, and `serde_json` only behind the duplicate-detecting `RawValue` ingest visitor
 owned by SPEC-010. JCS serialization remains in-repository. Cargo.lock pins
 exact versions; adding a runtime dependency or changing one of these mechanism
 bindings requires an ADR amendment and conformance fixture.
