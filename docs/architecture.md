@@ -69,9 +69,10 @@ The worker is detached from the transient CLI before it accepts requests. It
 runs through the hidden `__worker` argv mode after a single fork and `setsid()`,
 with no controlling terminal, null stdin/stdout/stderr, and `umask(077)`. It
 ignores terminal-originated `SIGINT` and `SIGHUP` for itself and handles
-`SIGTERM` as a bounded shutdown request. Before every app-server exec, the child
-restores those dispositions and the signal mask to defaults so ignored signals
-do not leak into Codex or its descendants. Early-start and internal diagnostics
+`SIGTERM` as a bounded shutdown request. App-server `posix_spawn` attributes use
+`SETSIGDEF` for every catchable signal and `SETSIGMASK` with an empty mask so
+ignored dispositions or a worker `sigwait` mask do not leak into Codex or its
+descendants; there is no child-side callback. Early-start and internal diagnostics
 go to a 0600 log capped at 1 MiB with one rotation. The CLI holds byte 0 of the
 run's startup lock before fork. As its first post-`setsid`/re-exec operation,
 the worker opens that lock once, acquires byte 1, and never closes or reopens
@@ -81,8 +82,11 @@ and directory-fsynced; the CLI then releases byte 0. A later `ready` object
 means replay and compatibility validation completed. A structured failure may
 replace either acknowledgement. The bound wait is ten seconds; the ready wait
 is the larger operation-specific startup budget. EOF before an expected object
-is `TRANSPORT_FAILURE`; timeout never authorizes signalling the worker. The fd 3
-write end and startup-lock descriptor are `FD_CLOEXEC` before app-server launch.
+is `TRANSPORT_FAILURE`; timeout never authorizes signalling the worker. The CLI
+parent keeps byte 0; its child's inherited startup fd is `FD_CLOEXEC` before
+`__worker` re-exec. Fd 3 is explicitly preserved across that re-exec. The worker
+opens one new startup fd for byte 1 and marks both it and fd 3 `FD_CLOEXEC`
+before app-server launch.
 These rules make ownership handoff explicit and ensure
 that Ctrl-C or command substitution cannot terminate the worker or keep the
 caller's output pipe open.
@@ -109,16 +113,15 @@ Turns use `turn/start`, `turn/steer` only when explicitly exposed by a future
 specification, and `turn/interrupt` for cancellation. V1 does not enable the
 experimental app-server API capability.
 
-The app-server is created with `POSIX_SPAWN_START_SUSPENDED` and a new process
-group. While it is suspended, the worker obtains a provisional identity with
-`PROC_PIDTBSDINFO`, `proc_pidpath`, and a second BSD-info sample, then writes it
-with temp-file, file `fsync`, rename, and directory `fsync` before `SIGCONT`.
-Failure before continuation is cleaned as a start failure. After the initialize
-handshake the worker repeats this process-identity sample; only this post-exec
-identity, including executable device, inode, and SHA-256, is authoritative for
-the fsynced `generation_started` record. A provisional path mismatch is not
-dispositive before that record. Wrapper argv and the final live executable are
-distinct recorded facts.
+The app-server is created with `POSIX_SPAWN_START_SUSPENDED`, `SETPGROUP`,
+`SETSIGDEF`, and `SETSIGMASK(empty)`. While the final image is suspended, the
+worker samples `PROC_PIDTBSDINFO`, opens the `proc_pidpath` target without
+following symlinks, computes device/inode/SHA-256 from that fd, and repeats BSD
+info. It persists the complete ten-field provisional identity before `SIGCONT`;
+missing or replaced operands fail closed without a partial record. Failure
+before continuation is cleaned as a start failure. After initialize, the worker
+repeats the sample and fsyncs `generation_started`. Wrapper argv and the final
+live executable remain distinct recorded facts.
 
 ### Target Registry
 
@@ -158,8 +161,8 @@ is opened once without following symlinks and accepted only when it is owned by
 the current uid with mode 0700. No-symlink enforcement applies below the
 resolved `/tmp` root; operations beneath the directory use descriptor-relative
 `*at()` calls. Its filename is the RFC 4648 uppercase, unpadded, 32-character
-base32 encoding of the first 160 bits of SHA-256 over canonical workspace path,
-a NUL byte, and run ID.
+base32 encoding of the domain-separated workspace-digest/run-UUID preimage in
+SPEC-002.
 The composed path must fit the macOS `sun_path` limit; overflow fails with
 `RUNTIME_PATH_INVALID`. An existing path whose recorded full workspace/run
 identity differs fails with `RUNTIME_PATH_COLLISION`. A sibling identity sidecar
@@ -199,12 +202,16 @@ descriptor-relative, no-symlink operations, must be current-uid-owned mode 0700,
 and must report `MNT_LOCAL`. Later environment changes are ignored; path or
 device/inode drift is `RUNTIME_PATH_COLLISION`.
 
-Writer files are `locks/writer/<workspace-digest>` and startup files are
-`locks/startup/<workspace-and-run-digest>`; the mechanisms never share an
-inode. The writer lease is nonblocking BSD `flock(2)`. The startup file has two POSIX
+Writer files are `locks/writer/<full-workspace-digest>` and startup files are
+`locks/startup/<domain-separated-workspace-and-run-digest>` using SPEC-002's
+only digest algorithms; the mechanisms never share an inode. Both files are
+create-exclusive and permanent. The writer lease is nonblocking BSD `flock(2)`. The startup file has two POSIX
 byte-range locks: byte 0 is the transient CLI starter claim and byte 1 is the
-worker lifetime claim. The file body has separate fixed-size checksummed byte-0
-and byte-1 owner records; after acquiring its byte
+worker lifetime claim. The file body has separate version-1, zero-padded,
+4096-byte SHA-256-checksummed byte-0 and byte-1 owner records containing the
+range, workspace/run/generation, boot UUID, Gomchi process tuple and executable
+path hash. Invalid/unknown/all-zero slots do not override the kernel lock;
+locked ranges without a matching valid record are `Unverifiable`. After acquiring its byte
 a process updates its slot with `pwrite` on that same fd and fsyncs before
 proceeding, then clears and fsyncs the slot immediately before releasing.
 `F_GETLK` is
@@ -217,7 +224,8 @@ and revalidation. A byte-1 owner is a serving reader or writer worker and
 requires control `hello` plus the additional 30-second no-progress/abort guard;
 `Mismatch` or `Unverifiable` is never signalled and returns `RUN_BUSY`. After
 exact exit, contenders race to acquire byte 0 and only the winner starts or
-recovers. Each owner process opens the file once; identity revalidation uses
+recovers. A worker that loses byte 1 reports fd-3 `RUN_BUSY` and exits with no
+socket, ledger, or runtime mutation. Each owner process opens the file once; identity revalidation uses
 `fstat` on that held fd and never a second open, including through a hardlink.
 The descriptor is never reopened or closed during ownership and is marked
 close-on-exec before app-server launch.
@@ -228,23 +236,26 @@ ownership, lifecycle coupling, and a single audit interposition point.
 
 App-server stdout and stderr are drained independently of every CLI observer.
 Observers read fsynced ledger records by cursor and therefore cannot exert
-backpressure on the active protocol stream. Limits are 16 MiB per stdout line,
-1 MiB per stderr line, 1 MiB per represented ledger payload, and 8 MiB per
+backpressure on the active protocol stream. Limits are 16 MiB per unsolicited
+stdout line, 1 MiB per stderr line, 2 MiB per raw selected ledger payload with a
+3 MiB post-transform allowance, and 8 MiB per
 CLI-worker frame. CLI oversize affects only its caller; stderr oversize retains
 metadata and continues. Unsolicited stdout remains capped at 16 MiB per line;
 invalid or oversized unsolicited stdout stops the generation and quarantines
 an accepted active turn as `outcome_unknown`. A solicited `thread/read` response
-is consumed by a constant-memory streaming visitor that retains only required
-turn/status fields plus length and streaming hash. It has bounded time but no
-arbitrary total response-size cap; timeout or invalid structure fails only that
-command and does not mutate run state.
+is recognized only after its unique matching top-level `id` appears before byte
+16 MiB; outstanding request count is never a classifier. Once recognized it is
+consumed by a constant-memory streaming visitor retaining required turn/status
+fields plus raw-wire length and SHA-256. It has the 120-second deadline but no
+arbitrary total size cap. An ambiguous oversize prefix fails compatibility and
+follows SPEC-006's active-turn quarantine rule.
 
 ## Workspace Identity and Local Layout
 
-The canonical workspace ID is a digest of:
-
-- the canonical Git top-level path in Git mode; or
-- the canonical initialized directory in non-Git mode.
+The canonical workspace ID is SPEC-002's full lowercase SHA-256 over the
+domain-separated libc `realpath(3)` byte sequence. The same raw digest feeds the
+writer filename, startup filename, and socket derivations; no component performs
+case folding, Unicode normalization, or an alternate path hash.
 
 The repository-local layout is:
 
@@ -318,12 +329,15 @@ hash scheme and genesis. Closed and start-failed runs append a final seal event.
 lag is detectable during normal operation; verification still scans the ledger
 from genesis.
 
-Inbound JSON is parsed with duplicate-member rejection and arbitrary-precision
-number lexemes. Before any Gomchi marker is inserted, every inbound object key
+Inbound JSON is parsed with duplicate-member rejection and number lexemes held
+only through adaptation. The in-repo canonicalizer uses UTF-16 key order and
+ECMAScript shortest binary64 rendering and is pinned by RFC 8785 plus Gomchi
+golden vectors; a byte change requires a new hash-scheme version. Before any Gomchi marker is inserted, every inbound object key
 matching `^\$+gomchi_` is escaped by prefixing one additional `$`. Redaction is
 then applied, followed by numeric adaptation; the tokenizer never treats a
-Gomchi-owned marker key as a candidate secret key. A number that cannot
-round-trip exactly through IEEE-754 binary64 is replaced before JCS with
+Gomchi-owned marker key as a candidate secret key. A decimal whose finite
+binary64 ECMAScript rendering is not numerically equal to the original is
+replaced before JCS with
 `{"$gomchi_number":"<original-lexeme>"}`. Invalid
 JSON, duplicate members, and otherwise unrepresentable payloads never reach the
 canonicalizer. Verification requires each stored line, excluding its newline,
@@ -333,9 +347,9 @@ UTC RFC 3339 with exactly six fractional digits and `Z`.
 Each complete line is appended to an `O_APPEND` handle with `write(2)` retried
 until all bytes are written. Ordinary streaming records may be group-committed
 for at most 100 milliseconds. Using `fsync(2)`, the ledger is synchronized
-before any byte initiating an irreversible action is written to app-server
-stdin: turn intent and its idempotency reservation precede `turn/start`, and an
-approval-decision record precedes the response. It is also synchronized before
+before every externally observable effect: turn intent/idempotency precede
+`turn/start`, approval decisions precede responses, cleanup intent precedes
+signals, and preserved-tail evidence is fsynced before ledger truncation. It is also synchronized before
 Gomchi acknowledges an accepted turn ID, pending master interaction, terminal
 result, or access/lifecycle change. Manifest creation and atomic state
 replacement synchronize their containing directories. V1 claims process- and
@@ -345,11 +359,12 @@ Any malformed or invalid newline-terminated record, including the final record,
 a complete record with a broken hash, or any sequence discontinuity is an
 audit-integrity failure. Only nonempty bytes after the file's last newline are
 a recoverable torn tail, even when those bytes parse as a complete JSON object
-but lack the terminating newline. Recovery preserves them under `recovery/`,
-truncates only those bytes, and appends a `ledger_tail_repaired` record. A torn
+but lack the terminating newline. Recovery writes and fsyncs the deterministic
+sequence/hash-named evidence, truncates and fsyncs only those bytes, then appends
+and fsyncs `ledger_tail_repaired`; restart completes any prefix idempotently. A torn
 tail is never reported as ordinary tampering.
 
-Each ledger payload is at most 1 MiB after redaction and representation. A
+Each selected payload is at most 2 MiB raw and 3 MiB after representation. A
 larger or unrepresentable payload becomes a `payload_unrepresentable` record
 containing source kind, observed byte length, streaming SHA-256, JSON Pointer
 when known, and reason; no original bytes or sidecar are retained. The ledger
@@ -376,7 +391,9 @@ than an audit-integrity failure: Gomchi rebuilds it and appends
 
 ## State Machine
 
-The worker is the single state-transition authority for its run.
+The worker is the normal state-transition authority. The only bootstrap
+exception is a byte-0 owner that proves no worker reached `bound`; it may append
+and seal `start_failed`. Present `Unverifiable` generations are never rewritten.
 
 | State | Worker expected | App-server expected | New turn | Operation results |
 | --- | --- | --- | --- | --- |
@@ -402,10 +419,11 @@ JSON-RPC request ID. Thread-scoped messages must match the run's thread ID;
 turn-scoped messages must match the active or addressed turn ID. Server
 requests are wrapped in a Gomchi request ID that includes process generation.
 
-Unknown responses, mismatched IDs, duplicate terminal events, invalid state
-transitions, and unknown server requests are recorded and fail closed. Unknown
-additive notifications do not change state and are retained as raw redacted
-evidence.
+Unknown responses, mismatched IDs, duplicate terminal events, and invalid state
+transitions are recorded and fail closed. Known-but-unsupported server requests
+are recorded and receive method-not-found without stopping the generation;
+unparseable frames fail closed. Unknown additive notifications do not change
+state and are retained as raw redacted evidence.
 
 A new worker/app-server lifetime increments process generation. Pending
 requests and generation-scoped approvals never cross that boundary.
@@ -418,7 +436,8 @@ is a distinct workspace and therefore a distinct writer lane. An unresolved
 `writer.json` entry for another run is audited but does not gate acquisition:
 the kernel lease and the acquiring run's own generation safety determine who
 may attempt it. It does gate writer activation: the held inode must match the
-recorded lease inode and the foreign app-server generation must be proven absent
+recorded lease inode, or that historical pair must be reconstructed only after
+the recorded generation is proved absent. The foreign app-server generation must be proven absent
 or identity-verified and cleaned before a new writer app-server starts.
 `Unverifiable` releases the new lease with `RECOVERY_REQUIRED`.
 
@@ -431,7 +450,8 @@ control/progress guard. A successful control `hello` attaches and does not repla
 the recorded worker is alive but `hello` does not complete within ten seconds,
 the recovering CLI applies the same boot UUID, process/executable identity,
 kqueue, and revalidation rules to the worker itself, then observes an
-additional 30 seconds with no ledger, runtime-generation, bounded-log, or CPU
+additional 30 seconds with no ledger, runtime-generation, monotonic worker-log
+byte counter, or CPU
 progress. Exit, generation advance, or lock-owner change aborts takeover. Only
 then may a `Match` receive TERM, the five-second grace, and KILL; exact worker
 exit must be observed. For a writer, this is the pre-acquisition step and its
@@ -447,15 +467,18 @@ above breaks that deadlock before this sequence continues.
 After acquisition and at every destructive barrier, the worker compares the
 held descriptor's `fstat` device/inode with a root-fd-relative `fstatat` of the
 lease pathname. The pair is stored in `writer.json`; mismatch, including manual
-unlink/replacement, fails closed with `RUNTIME_PATH_COLLISION`.
-Startup lock files are permanent once created. Each claimant compares held-fd
+unlink/replacement, fails closed until recorded-generation absence authorizes
+pointer reconstruction. Writer and startup lock files are permanent once
+created. Each claimant compares held-fd
 and root-relative pathname device/inode before owner-slot writes; it never
 recreates or proceeds through an unlink/replacement mismatch.
 
 After lease acquisition, every path uses this order for the prior app-server
 generation:
 
-1. load the fsynced generation identity and current writer cleanup pointer;
+1. load the fsynced generation identity and current writer cleanup pointer; no
+   generation record yields `Absent`, while a present unreadable record is
+   `Unverifiable`;
 2. compare the recorded boot-session UUID; a difference proves the entire
    generation `Absent` without consulting leader or group IDs;
 3. read `PROC_PIDTBSDINFO`, then `proc_pidpath`, executable device/inode/hash,
@@ -463,23 +486,27 @@ generation:
    `proc_pidpath` for a live process is non-dispositive when the remaining
    tuple and group proof match; path replacement alone is not identity mismatch;
 4. classify the leader as `Absent`, `Mismatch`, `Match`, or `Unverifiable`;
-5. for `Match`, bind an `EVFILT_PROC/NOTE_EXIT` watch and revalidate;
+5. for `Match`, bind an `EVFILT_PROC/NOTE_EXIT` watch and revalidate; `ESRCH`
+   while binding proves `Absent`;
 6. prove generation absence only when the recorded group has no possible
-   surviving member by enumerating `proc_listpgrppids(recorded_pgid)`. Capacity
-   starts positive and doubles whenever returned count equals capacity; `-1`,
+   surviving member by enumerating `proc_listpgrppids(recorded_pgid)`. Entry
+   capacity starts positive, the buffer size is `capacity * sizeof(pid_t)`, and
+   capacity doubles whenever the returned PID count equals capacity; `-1`,
    truncation, or invalid `pgid <= 1` is `Unverifiable`. Zero with positive
    capacity proves empty. A same-boot survivor matches only with the recorded
    uid/pgid and start time at or after the recorded leader; an earlier process
    is dismissed. `ESRCH` and zombies are absent. This predicate proves possible
-   survival, not signal authority. If the leader was not first revalidated
-   `Match`, possible members make the group `Unverifiable` and are not signalled;
-7. while the exact leader is kqueue-bound and alive, snapshot every member's
-   PID/UID/PGID/start tuple. Persist `cleanup_in_progress` and signal only
+   survival, not signal authority. If neither the leader nor a persisted
+   snapshot member is kqueue-bound and revalidated `Match`, possible members
+   make the group `Unverifiable` and are not signalled;
+7. while continuity is kqueue-bound, snapshot every member's
+   PID/UID/PGID/start tuple. Persist `cleanup_in_progress` and the tuples, then signal only
    revalidated snapshot members with `SIGTERM`; after five seconds re-enumerate
    and signal with `SIGKILL` only full-tuple matches from that snapshot. Any new
    or recycled member, or unsnapshotted member after leader loss, is
-   `Unverifiable` and never signalled. `killpg` is never used;
-8. confirm group absence,
+   `Unverifiable` and never signalled. A later process must rebind/revalidate a
+   recorded member before inheriting continuity. `killpg` is never used;
+8. confirm group absence within ten seconds,
    then start the new app-server and replace the writer pointer.
 
 `Absent` and safe `Mismatch` observations are audited and proceed. Only
@@ -510,8 +537,9 @@ by the descriptor/path inode check and fails closed.
    never retried.
 4. Capture a best-effort pre-turn workspace observation.
 5. Send `turn/start` with the fixed model, selected reasoning effort, canonical
-   cwd, access-derived sandbox policy, approval policy, message/images, and
-   effective developer instructions.
+   cwd, access-derived sandbox policy, approval policy, and message/images.
+   Developer instructions were supplied by thread start/resume for this
+   generation because turn start has no such field.
 6. Persist the permanent thread binding and accepted Codex turn ID before
    acknowledging `submit`.
 7. Stream and audit correlated notifications.
@@ -541,8 +569,10 @@ thread with stable history APIs only after prior generation absence is proved.
   never starts a turn. It appends evidence and transition records, terminates
   the app-server group, and exits. Confirmed terminal evidence moves an unknown
   run to `paused`; later bare resume uses read access.
-- Normal fork from `outcome_unknown` uses stable `lastTurnId` through the last
-  confirmed terminal turn only after prior generation absence is proved.
+- Normal fork from `outcome_unknown` scans newest-to-oldest and uses the latest
+  status listed as forkable in the checked manifest; terminal-but-rejected
+  statuses are skipped. If none is forkable, it takes the explicit fresh-thread
+  provenance path after prior generation absence is proved.
   `fork --fresh` reads the immutable source manifest and read-only fsynced
   state/runtime projections needed for eligibility and provenance. It never
   reads the source Codex thread or mutates/repairs the source ledger or any
@@ -566,12 +596,28 @@ worker.
 
 The detached worker owns an app-server process group distinct from both the
 transient CLI and the worker session. Pause, close, recovery, and failed start
-verify every enumerated member before sending individual signals, then use a
-five-second graceful phase followed by re-enumeration, forced termination of
-remaining matches, and confirmed group exit. Cleanup
+obtain leader-or-persisted-member continuity before signalling only snapshot
+members, then use a five-second graceful phase, revalidation, and individual
+forced termination of remaining snapshot matches. New or recycled members are
+never signalled; ten-second absence failure is `RECOVERY_REQUIRED`. Cleanup
 results are audited. Close cannot finalize a run whose prior generation remains
 unverifiable. A recycled PID or PGID is never killed solely because its number
 matches a stale record.
+
+## Runtime and Dependency Boundary
+
+The implementation is Rust 2024 pinned by `rust-toolchain.toml` to 1.97.1 with
+rustfmt, clippy, and `aarch64-apple-darwin`; Cargo.lock is committed. Blocking
+durability and process work uses dedicated OS threads rather than an async
+runtime: control/protocol, stdout, stderr, ledger/state authority,
+kqueue/liveness, and `sigwait` each have an explicit owner.
+
+One `darwin` module is the only unsafe OS boundary. It wraps `libc` bindings for
+`posix_spawn` attributes, libproc sampling/enumeration, kqueue, byte-range
+fcntl/flock inspection, `fstatfs/MNT_LOCAL`, and boot-UUID sysctl. Core recovery
+receives safe typed verdicts through injectable monotonic-clock, boot, identity,
+enumeration, and fault-barrier interfaces. RFC 8785 canonicalization is an
+in-repository safe module rather than an unspecified serializer dependency.
 
 Descendants that deliberately daemonize, escape the process group, or perform
 remote side effects cannot be guaranteed to stop. The agent prompt therefore
@@ -621,11 +667,13 @@ It does not provide:
 
 ## Compatibility Boundary
 
-The protocol adapter is a strict subset client. Its checked manifest lists every
-request, response, notification, enum variant, and required field on which
-Gomchi state depends. Compatibility doctor generates the stable schema into a
-temporary directory, compares that subset, then performs a live handshake and
-model probe.
+The protocol adapter is a strict subset client. Its checked JSON manifest lists
+the source schema bundle SHA, resolved JSON Pointers, methods, responses,
+notifications, server requests, type/const/requiredness, required enum values,
+response-schema IDs, absent-thread errors, forkable statuses, and the early-ID
+behavioral observation. Compatibility doctor resolves `$ref`, performs the
+normative structural comparison, then runs handshake, paginated model,
+codexHome, history, sandbox, early-ID, and server-request probes.
 
 The tested 0.147.0 manifest is `tested`. A newer compatible version is
 `unverified` and that verdict is written to every run generation. Older or

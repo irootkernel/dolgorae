@@ -130,13 +130,17 @@ worktree is an independent canonical workspace and supported parallel writer
 lane. Allow concurrent readers and at most one Gomchi writer app-server per canonical worktree,
 coordinated by a nonblocking BSD `flock(2)` held by the worker across starting,
 idle, running, and waiting writer states and released on start failure. The
+canonical identity is domain-separated SHA-256 of libc `realpath(3)` bytes with
+no extra case/Unicode folding; sockets and both locks reuse that digest. The
 lease is close-on-exec and is never inherited by app-server. Unknown quarantine
 is lease-free. The private lock root is resolved once at workspace init (or
 explicitly selected with `--state-root`) and its canonical path/device/inode are
 workspace and manifest authority; later XDG changes do not move it. An
-unverifiable generation blocks same-thread recovery and same-run writer
-acquisition, but a stale foreign-run `writer.json` does not override the kernel
-lease. V1 provides no force override. Allow dirty workspaces and record their start baseline. Provide
+unverifiable generation blocks same-thread recovery. A stale foreign-run
+`writer.json` does not override the kernel acquisition attempt, but it gates
+workspace writer activation, including effective-write new-run start, until its
+generation is proven absent or cleaned. Writer/startup lock paths are permanent.
+V1 provides no force override. Allow dirty workspaces and record their start baseline. Provide
 no transactional rollback.
 
 ### Consequences
@@ -223,7 +227,10 @@ model-specific behavior, while app-server supports per-turn reasoning options.
 Resolve and record one model when the run starts. Do not change it within that
 run. A fork may select another model on the same target. Allow the run's default
 reasoning effort to change at runtime; a change during an active turn applies
-to the next turn only and must be supported by `model/list`.
+to the next turn only and must be supported by fully paginated `model/list`.
+Access-dependent developer instructions are generation-immutable; idle
+promotion/demotion replaces the generation and supplies a recomposed prefix
+through `thread/resume` because `turn/start` has no such field.
 
 ### Consequences
 
@@ -255,13 +262,16 @@ Use one append-only `audit.jsonl` per run containing Gomchi lifecycle and
 redacted app-server-exposed wire evidence in a total order. Derive state,
 transcript, events, and exports from that ledger. Canonicalize records with RFC
 8785 JCS and use the versioned `sha256-jcs-v1` chain for ordinary integrity
-detection. Treat the Codex thread as continuation authority and the Gomchi
+detection. Own the canonicalizer in-repo with UTF-16 key ordering, ECMAScript
+binary64 rendering, duplicate rejection, and RFC 8785 vectors; a byte change
+requires a new hash-scheme version. Treat the Codex thread as continuation authority and the Gomchi
 ledger as audit authority only for information Gomchi actually observes.
 Keep the 16 MiB cap for unsolicited stdout because it protects the active
-protocol stream from unbounded frames. Treat solicited `thread/read` specially:
-use a constant-memory, deadline-bounded streaming visitor with no arbitrary
-total response cap so long histories remain recoverable without weakening the
-unsolicited-frame fail-closed rule.
+protocol stream from unbounded frames. Treat solicited `thread/read` specially
+only after its matching top-level ID appears within that prefix; this is a live
+compatibility predicate. Then use a constant-memory, deadline-bounded visitor
+with no arbitrary total response cap. Never infer classification from one
+outstanding request.
 
 ### Consequences
 
@@ -296,7 +306,8 @@ On recovery, accept a turn outcome only when persisted Codex history proves a
 terminal state. Otherwise stop the app-server, release any writer lease, set
 `outcome_unknown`, block new turns, and allow only inspection, evidence-based
 reconciliation, fork, or close. Never replay the input automatically. Fork only
-through the last confirmed terminal turn. Successful later reconciliation
+through the newest status that the checked target manifest proves acceptable as
+`lastTurnId`; terminal-but-rejected statuses are skipped. Successful later reconciliation
 moves the run to `paused`; explicit resume selects its next access mode.
 Reconciliation uses a transient read-only app-server and `thread/read` without
 loading or resuming the thread. If prior process identity is unverifiable, v1
@@ -336,8 +347,8 @@ Target configuration must nevertheless remain useful.
 
 ### Decision
 
-Inject a strong immutable developer-instruction prefix that defines Gomchi's
-master/subagent relationship and hard safety invariants. Append immutable
+Inject a strong generation-immutable developer-instruction prefix that defines Gomchi's
+master/subagent relationship, current access, and hard safety invariants. Append immutable
 run-specific instructions as subordinate context. Continue to respect target
 AGENTS files, skills, plugins, apps, MCP servers, and native subagents unless
 they conflict with the hard invariants.
@@ -348,6 +359,8 @@ they conflict with the hard invariants.
 - Read and write authorization derives from both request intent and run access.
 - `.gomchi`, Git publication, external effects, and background processes receive
   explicit treatment.
+- Access changes replace the app-server generation so prefix and sandbox agree.
+- Native subagents are instructed not to overlap write-heavy delegation.
 - Prompt policy is defense in depth, not a hostile security boundary.
 
 ### Rejected alternatives
@@ -426,3 +439,38 @@ version/digest protocol and reject skew.
 - Exact digest for shutdown: rejected because it creates an upgrade deadlock.
 - Full cross-version compatibility: rejected because mutation semantics and
   schemas cannot safely be frozen with the control surface.
+
+## ADR-012: Own Portable Contracts and Isolate Darwin FFI
+
+Status: Accepted
+
+### Context
+
+The machine envelope, Codex stable subset, RFC 8785 bytes, and macOS process
+proofs are release contracts. Leaving their shapes to prose or whichever crate
+is selected makes compatibility and audit identity drift with implementation.
+
+### Decision
+
+Check in JSON Schemas for Gomchi machine output and the Codex required subset.
+Own JCS in an in-repository conformance module. Pin Rust 1.97.1 and Cargo.lock.
+Put `posix_spawn` attributes, libproc, kqueue, byte-range fcntl, `fstatfs`, and
+boot-UUID sysctl behind one safe Darwin module using the `libc` crate; no other
+module contains `unsafe` OS bindings. Fault barriers, monotonic time, boot UUID,
+process enumeration, and identity sampling enter core logic through injectable
+interfaces.
+
+### Consequences
+
+- Protocol and audit changes are reviewable data changes, not hidden library
+  behavior.
+- Deterministic tests can drive timeout and crash boundaries without sleeping.
+- Darwin-specific unsafety has one auditable owner.
+
+### Rejected alternatives
+
+- Rely on default `serde_json` serialization: rejected because it is not JCS.
+- Use an async runtime for blocking durability/process APIs: rejected because it
+  adds scheduling complexity without making those APIs nonblocking.
+- Allow each subsystem to call libc directly: rejected because identity and
+  errno classification would drift.

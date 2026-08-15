@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "target_version": "0.147.0",
+  "stable_schema_bundle_sha256": "f3dec1e031d99a420b137b903f02196d4325eece57620c925bb7130b25f168d2",
+  "comparison": {
+    "resolve_refs": true,
+    "required_type_const_and_requiredness_must_match": true,
+    "required_enum_values_must_remain": true,
+    "additive_fields_and_enum_values_allowed": true
+  },
+  "client_methods": {
+    "initialize": ["clientInfo"],
+    "model/list": [],
+    "thread/start": ["cwd", "model", "sandbox", "approvalPolicy", "developerInstructions"],
+    "thread/resume": ["threadId", "developerInstructions"],
+    "thread/read": ["threadId", "includeTurns"],
+    "thread/fork": ["threadId", "lastTurnId"],
+    "turn/start": ["threadId", "input", "model", "effort", "sandboxPolicy", "approvalPolicy"],
+    "turn/interrupt": ["threadId", "turnId"]
+  },
+  "required_shapes": {
+    "model_item": {
+      "identity_field": "model",
+      "required": ["model", "isDefault", "supportedReasoningEfforts"],
+      "effort_identity_field": "reasoningEffort",
+      "pagination_cursor": "nextCursor"
+    },
+    "sandbox": {
+      "thread_values": ["read-only", "workspace-write"],
+      "turn_types": ["readOnly", "workspaceWrite"],
+      "workspace_write_fields": ["writableRoots", "networkAccess", "excludeSlashTmp", "excludeTmpdirEnvVar"]
+    },
+    "approval_policy_values": ["untrusted", "on-request", "never"]
+  },
+  "server_requests": {
+    "item/commandExecution/requestApproval": {
+      "kind": "command_approval",
+      "state": "waiting_approval",
+      "response_schema": "CommandExecutionRequestApprovalResponse"
+    },
+    "item/fileChange/requestApproval": {
+      "kind": "file_approval",
+      "state": "waiting_approval",
+      "response_schema": "FileChangeRequestApprovalResponse"
+    },
+    "item/permissions/requestApproval": {
+      "kind": "permissions_approval",
+      "state": "waiting_approval",
+      "response_schema": "PermissionsRequestApprovalResponse"
+    },
+    "item/tool/requestUserInput": {
+      "kind": "user_input",
+      "state": "waiting_input",
+      "response_schema": "ToolRequestUserInputResponse"
+    },
+    "mcpServer/elicitation/request": {
+      "kind": "mcp_elicitation",
+      "state": "waiting_mcp",
+      "response_schema": "McpServerElicitationRequestResponse"
+    }
+  },
+  "command_and_file_approval_decisions": {
+    "accept_once": "accept",
+    "accept_for_generation": "acceptForSession",
+    "decline": "decline",
+    "cancel": "cancel"
+  },
+  "behavioral_observations": {
+    "thread_read_response_id_precedes_result": true,
+    "absent_thread_read_error_code": -32600,
+    "forkable_turn_statuses": ["completed"],
+    "rejected_fork_boundary_statuses": ["crash_interrupted"],
+    "pending_requests_survive_app_server_restart": false,
+    "unanswered_command_approval_status_after_restart": "interrupted"
+  }
+}
