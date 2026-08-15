@@ -15,7 +15,7 @@
         "profile.server.stop", "profile.server.restart",
         "run.start", "run.list", "run.status", "run.send",
         "run.submit", "run.wait", "run.events", "run.pending", "run.respond",
-        "run.interrupt", "run.set_effort", "run.promote", "run.demote",
+        "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write",
         "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork",
         "run.close", "run.delete", "run.verify", "run.export"
       ]
@@ -49,12 +49,11 @@
     "workspace": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace_id", "canonical_path", "mode", "default_access", "created"],
+      "required": ["workspace_id", "canonical_path", "mode", "created"],
       "properties": {
         "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "canonical_path": { "$ref": "#/$defs/path" },
         "mode": { "enum": ["git", "non_git"] },
-        "default_access": { "enum": ["read", "write"] },
         "created": { "type": "boolean" }
       }
     },
@@ -101,7 +100,7 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace_id", "run_id", "state", "access", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_lease", "identity_verdict", "last_terminal"],
+      "required": ["workspace_id", "run_id", "state", "access", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_state", "lease_epoch", "identity_verdict", "last_terminal"],
       "properties": {
         "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "run_id": { "$ref": "#/$defs/uuid" },
@@ -117,7 +116,8 @@
         "effort": { "type": "string" },
         "event_cursor": { "type": "integer", "minimum": 0 },
         "pending_count": { "type": "integer", "minimum": 0 },
-        "writer_lease": { "enum": ["held", "free", "unknown"] },
+        "writer_state": { "enum": ["reader", "held", "blocked_unknown"] },
+        "lease_epoch": { "type": "integer", "minimum": 0 },
         "identity_verdict": { "enum": ["Absent", "Mismatch", "Match", "Unverifiable"] },
         "last_terminal": { "oneOf": [{ "$ref": "#/$defs/turn" }, { "type": "null" }] }
       }
@@ -167,7 +167,7 @@
       "additionalProperties": false,
       "required": ["decision"],
       "properties": {
-        "decision": { "enum": ["accept_once", "accept_for_generation", "decline", "cancel"] }
+        "decision": { "enum": ["accept_once", "decline", "cancel"] }
       }
     },
     "meta": {
@@ -206,8 +206,10 @@
             "lifecycle_transition", "run_generation_started",
             "run_generation_stopped", "app_server_request",
             "app_server_response", "app_server_notification",
-            "approval_requested", "approval_decided", "access_changed",
-            "profile_observed", "idempotency_reserved", "reconciliation",
+            "approval_requested", "approval_decided",
+            "profile_observed", "writer_acquired", "writer_released",
+            "writer_handoff_requested", "writer_handoff_completed",
+            "idempotency_reserved", "reconciliation",
             "cleanup_intent", "cleanup_result", "ledger_tail_repaired",
             "projection_rewound", "payload_unrepresentable", "start_failed",
             "outcome_unknown"
@@ -280,7 +282,7 @@
         { "if": { "properties": { "command": { "enum": ["profile.add", "profile.show", "profile.doctor", "profile.server.status", "profile.server.start", "profile.server.stop", "profile.server.restart"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile" } } } },
         { "if": { "properties": { "command": { "const": "profile.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/profile" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["profile.remove", "run.delete"] } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } } } } },
-        { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.promote", "run.demote", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.close"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
+        { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.close"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
         { "if": { "properties": { "command": { "const": "run.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/run" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.send", "run.submit", "run.wait"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/turn" } } } },
         { "if": { "properties": { "command": { "const": "run.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/event_data" } } } },

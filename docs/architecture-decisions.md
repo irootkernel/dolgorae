@@ -131,19 +131,22 @@ simultaneous writers within that worktree conflict.
 
 Run Codex in the canonical workspace selected by the caller. A linked Git
 worktree is an independent canonical workspace and supported parallel writer
-lane. Allow concurrent readers and at most one Dolgorae writer app-server per canonical worktree,
-coordinated by a nonblocking BSD `flock(2)` held by the worker across starting,
-idle, running, and waiting writer states and released on start failure. The
+lane. Start every run as a reader. Allow concurrent readers and at most one
+Dolgorae writer across every profile in a canonical worktree, coordinated by a
+nonblocking BSD `flock(2)` acquired only by explicit write intent and retained
+across idle, running, and waiting writer states until explicit release or safe
+lifecycle cleanup. The
 canonical identity is domain-separated SHA-256 of libc `realpath(3)` bytes with
 no extra case/Unicode folding; sockets and both locks reuse that digest. The
-lease is close-on-exec and is never inherited by app-server. Unknown quarantine
-is lease-free. Permanent lock pathnames live below
+lease is close-on-exec and is never inherited by proxy or singleton. Permanent lock pathnames live below
 `.dolgorae/runtime/locks/` on the already-required local APFS workspace. An
 unverifiable generation blocks same-thread recovery. A stale foreign-run
 `writer.json` does not override the kernel acquisition attempt, but it gates
-workspace writer activation, including effective-write new-run start, until its
-generation is proven absent or cleaned. Writer/startup lock paths are permanent.
-V1 provides no force override. Allow dirty workspaces and record their start baseline. Provide
+workspace writer activation until its generation is proven absent or cleaned.
+Idle holders may cooperatively hand off only after a second user-confirmed,
+generation-bound token request. Active or uncertain holders cannot be taken.
+Writer/startup lock paths are permanent. V1 provides no force override. Allow
+dirty workspaces and record their start baseline. Provide
 no transactional rollback.
 
 ### Consequences
@@ -151,6 +154,8 @@ no transactional rollback.
 - Writer changes are immediately visible to the user and readers.
 - Interrupted work may leave partial changes.
 - Readers have no snapshot isolation and may see an intermediate state.
+- A failed confirmed handoff may intentionally leave the workspace without a
+  writer; it never rolls the prior holder back to write.
 - The lease coordinates Dolgorae workers only; editors and external tools remain
   outside its guarantee.
 - Native Codex subagents remain inside the owning reader or writer run; Dolgorae
@@ -181,6 +186,10 @@ no transactional rollback.
   complicate external tools and Git identity.
 - Multiple optimistic writers: rejected because conflict detection after side
   effects cannot reliably prevent corruption.
+- Natural-language write detection: rejected because it is nondeterministic and
+  can submit a mutating turn before Dolgorae owns the lease.
+- Force takeover of an active holder: rejected because turn progress is not
+  proof that workspace mutation has stopped.
 
 ## ADR-005: Snapshot Profile Identity and Use CODEX_HOME as Account Boundary
 
@@ -232,12 +241,12 @@ Resolve and record one model when the run starts. Do not change it within that
 run. A fork may select another model on the same profile. Allow the run's default
 reasoning effort to change at runtime; a change during an active turn applies
 to the next turn only and must be supported by fully paginated `model/list`.
-Access-dependent developer instructions are generation-immutable; idle
-promotion/demotion keeps the same worker and startup-lock ownership while
-replacing only its proxy generation, then supplies a recomposed prefix
-through `thread/resume` because `turn/start` has no such field. Promotion holds
-the writer lease before stopping the reader child; demotion releases it only
-after the writer child is gone and the reader child is active.
+Access-dependent developer instructions are generation-immutable. Explicit
+writer acquire/release keeps the same worker and startup-lock ownership while
+replacing only its proxy generation, then supplies a recomposed prefix through
+`thread/resume` because `turn/start` has no such field. Acquire holds the lease
+before stopping the reader proxy; release activates the reader proxy before
+unlocking.
 
 ### Consequences
 

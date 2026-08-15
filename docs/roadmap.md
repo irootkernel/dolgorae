@@ -185,9 +185,9 @@ Unix-socket exceptions.
 
 ### TASK-000-C3: Lazy Cross-Profile Writer Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
-Replace startup-selected access and promote/demote with explicit lazy writer
+Replace startup-selected access with explicit lazy writer
 acquisition, release, and user-confirmed idle takeover shared by all profiles in
 one canonical workspace.
 
@@ -356,37 +356,36 @@ Status: `PLANNED`
 Goal: Enforce Dolgorae's one-writer-app-server-per-worktree scope,
 master-controlled interaction, and conservative failure semantics.
 
-### TASK-007: Reader/Writer Lease and Access Transitions
+### TASK-007: Lazy Writer Lease and Cross-Profile Handoff
 
 Status: `PLANNED`
 
 Implement the per-worktree BSD `flock(2)` lease held only by the worker,
 close-on-exec descriptor hygiene, project-local permanent lock validation,
-reader/write sandbox selection, nonqueued promotion, idle-only
-promotion/demotion, effective-write start/resume/fork and writer-recover
-acquisition, and identity-verified
-stale process-group cleanup before starting a new app-server.
-Promotion/demotion retains the same worker and byte-1 owner while replacing
-only its proxy generation; startup locks use the pinned timed-record-lock
-layout and offsets.
+read-default sandbox selection, explicit `--write`/acquire/release, idle-only
+cross-profile token-confirmed handoff, and identity-verified stale process-group
+cleanup before activating a writer proxy. Acquire/release retains the same
+worker and byte-1 owner while replacing only its proxy generation; startup
+locks use the pinned timed-record-lock layout and offsets.
 
 Verification: multiprocess tests proving multiple readers, one writer proxy
 lane per worktree, no replacement app-server before crash cleanup, deterministic
 writer conflicts, start-failure release, missing/replaced local lock refusal,
-PID/PGID reuse refusal, pause/close/unknown release, promotion races, and
+PID/PGID reuse refusal, pause/close/unknown release, acquire races, idle handoff,
+active-holder refusal, stale token and requester-failure-with-no-writer, and
 separate locks for distinct canonical workspaces, permanent writer/startup
 pathnames, held-fd/path and historical-inode splits, linked-worktree Git writable
-roots, access-policy mappings, and generation replacement on promote/demote.
+roots, access-policy mappings, and generation replacement on acquire/release.
 Also cover `F_SETLKWTIMEOUT`, spawn-image versus final-image identity, and
 fail-closed byte-1 control timeout without any activity-derived signal.
 
-### TASK-008: Pending Requests and Generation Approvals
+### TASK-008: Pending Requests and Approvals
 
 Status: `PLANNED`
 
 Implement normalized command/file approval requests; generation-qualified
 request IDs; `pending` and schema-validated `respond`; reader auto-decline;
-explicit writer decisions; and generation-scoped approval expiry. Recognize the
+explicit one-shot writer decisions without public session-scoped approval. Recognize the
 three pinned unsupported request methods and reply method-not-found without
 creating pending lifecycle state.
 Reader auto-decline is the configured `approvalPolicy:"never"`, not a duplicate
@@ -410,7 +409,7 @@ start-failed bootstrap authority, terminal seals, and final-state restrictions.
 Verification: idle/running/waiting pause/close matrices, interrupt terminal
 deadline and outcome-unknown landing, control-v1 pause/close/recover under
 binary skew, stale socket ownership, start failure before/after bound, seal crash
-points, demote/promotion generation replacement, and no lease release before
+points, acquire/release generation replacement, and no lease release before
 child cleanup.
 
 ### TASK-009-B: Process Identity and Group Recovery
@@ -443,7 +442,7 @@ source identity unavailable; fresh escape without source thread/ledger mutation;
 transient early-ID timeout/malformed/oversize; proof that no unknown input is
 replayed.
 
-Epic acceptance: failures cannot create two Dolgorae writer app-servers, signal an
+Epic acceptance: failures cannot create two Dolgorae writer proxies, signal an
 unverified process, resume an ambiguously owned thread, silently replay a turn,
 cross account boundaries, or falsely claim known outcomes.
 

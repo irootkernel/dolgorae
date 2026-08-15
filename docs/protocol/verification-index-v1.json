@@ -10,7 +10,7 @@
     "SPEC-004": {"tasks": ["TASK-004", "TASK-009-B"], "catches": ["worker topology", "runtime identity", "on-demand recovery"]},
     "SPEC-005": {"tasks": ["TASK-001", "TASK-006", "TASK-008", "TASK-009-A", "TASK-009-B", "TASK-009-C", "TASK-010", "TASK-011", "TASK-012"], "catches": ["public CLI", "input and idempotency", "version acceptance"]},
     "SPEC-006": {"tasks": ["TASK-001", "TASK-003-C", "TASK-006", "TASK-012", "TASK-013"], "catches": ["machine envelopes", "errors and timeouts", "events", "turn results"]},
-    "SPEC-007": {"tasks": ["TASK-002", "TASK-004", "TASK-007", "TASK-009-B"], "catches": ["sandbox mapping", "locks", "process identity", "access transitions"]},
+    "SPEC-007": {"tasks": ["TASK-002", "TASK-004", "TASK-007", "TASK-009-B"], "catches": ["sandbox mapping", "lazy writer locks", "cross-profile handoff", "process identity"]},
     "SPEC-008": {"tasks": ["TASK-006", "TASK-009-A", "TASK-009-C"], "catches": ["lifecycle", "recovery", "fork", "effort defaults"]},
     "SPEC-009": {"tasks": ["TASK-008"], "catches": ["pending requests", "approval decision translation"]},
     "SPEC-010": {"tasks": ["TASK-003-A", "TASK-003-B", "TASK-003-C", "TASK-012"], "catches": ["JSON ingest", "audit durability", "redaction", "export and deletion"]},

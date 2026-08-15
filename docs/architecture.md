@@ -408,7 +408,7 @@ includes CLI intent accepted by the worker, lifecycle transitions,
 run generations, app-server requests/responses/notifications after
 redaction, approval decisions, state reconciliation, and cleanup results. Its
 completeness claim covers Dolgorae lifecycle, main-turn wire traffic exposed by
-app-server, approvals, access transitions, and profile/account provenance. Native
+app-server, approvals, writer lease transitions, and profile/account provenance. Native
 subagent or other content not exposed in plaintext by app-server is retained
 only as an opaque event and is not claimed as reconstructable audit. Hidden
 reasoning and unexposed communication are outside the ledger's authority.
@@ -460,26 +460,27 @@ are recorded and receive method-not-found without stopping the generation;
 unparseable frames fail closed. Unknown additive notifications do not change
 state and are retained as raw redacted evidence.
 
-A new app-server lifetime/configuration increments run generation; one
-worker may host successive generations during access changes. Pending
-requests and generation-scoped approvals never cross that boundary.
+A new proxy/access-policy lifetime increments run generation; one worker may
+host successive reader and writer generations. Pending requests never cross
+that boundary.
 
 ## Writer Lease Architecture
 
-The lease is BSD `flock(2)` with `LOCK_EX | LOCK_NB` below the workspace-recorded
-lock root. Multiple readers open no writer lease. Each canonical Git worktree
+The lease is BSD `flock(2)` with `LOCK_EX | LOCK_NB` on
+`.dolgorae/runtime/locks/writer.lock`. Multiple readers open no writer lease. Each canonical Git worktree
 is a distinct workspace and therefore a distinct writer lane. An unresolved
 `writer.json` entry for another run is audited but does not gate acquisition:
 the kernel lease and the acquiring run's own generation safety determine who
 may attempt it. It does gate writer activation: the held inode must match the
 recorded lease inode, or that historical pair must be reconstructed only after
 the recorded generation is proved absent. The foreign proxy generation must be proven absent
-or identity-verified and cleaned before a new writer app-server starts.
+or identity-verified and cleaned before a new writer proxy starts.
 `Unverifiable` releases the new lease with `RECOVERY_REQUIRED`.
 
 Only the worker holds the lease. The descriptor is `FD_CLOEXEC` and is never
-inherited by app-server or descendants. Lock lifetime covers starting, idle,
-running, and waiting states and releases on start failure.
+inherited by proxy, singleton, or descendants. Lock lifetime covers idle,
+running, and waiting writer states until explicit idle release or safe lifecycle
+cleanup.
 
 Recovery of every byte-1 serving worker, reader or writer, uses the same
 control/identity guard. A successful control `hello` attaches and does not
@@ -547,43 +548,51 @@ generation:
 `Unverifiable` returns non-retryable `RECOVERY_REQUIRED`; V1 has no force
 override and never resumes the same thread while an old generation may exist.
 
-Effective-write start (explicit or project default), promotion, write resume,
-write fork, and recovery of a
-writer run are the complete writer-acquisition set. Each acquires the lease and
-completes the same stale
-same-run generation check before the run becomes usable. `RECOVERY_REQUIRED`
-from that check takes precedence over a later `WRITER_BUSY`. Demotion changes future turn
-policy and releases the lease only after the run is idle. Pause and close
-complete child cleanup before lease release. Entry into `outcome_unknown` stops
-the app-server and immediately releases the lease. Same-user hostile mutation
-is not a security boundary, but manual lock-file unlink/replacement is detected
-by the descriptor/path inode check and fails closed.
+Every run starts and resumes as a reader. Only `acquire-write` and
+`send|submit --write` acquire the lease, before proxy policy replacement or turn
+submission. Successful `release-write` activates a reader generation before
+unlocking. Pause and close complete proxy cleanup before release; uncertain
+writer crashes record a logical `blocked_unknown` that kernel unlock alone does
+not clear. `RECOVERY_REQUIRED` from same-run safety checks takes precedence over
+`WRITER_BUSY`.
+
+On contention, `writer.json` and the holder runtime record supply nullable
+run/profile/state plus lease epoch. An idle holder permits generation-bound
+one-shot token issuance. The confirmed requester serializes with `handoff.lock`,
+cooperatively activates the holder as a reader, fsyncs its pointer, releases its
+lease, then acquires it. Requester failure leaves no writer. Starting, running, waiting, or
+unknown holders return retryable `WRITER_BUSY`; they are never signalled, killed,
+or queued. Same-user hostile mutation is not a security boundary, but manual
+lock-file unlink/replacement is detected by descriptor/path inode checks and
+fails closed.
 
 ## Turn Execution Flow
 
 1. Validate run state, input, optional idempotency key, model-fixed invariant,
    image readability, and requested effort.
-2. Reserve the idempotency key, append intent, and fsync the ledger.
-3. For a threadless run, send `thread/start`, append its provisional thread ID,
+2. If `--write` is present, acquire or confirm the workspace lease and activate
+   the writer generation; on conflict, return before recording turn intent.
+3. Reserve the idempotency key, append intent, and fsync the ledger.
+4. For a threadless run, send `thread/start`, append its provisional thread ID,
    and fsync before `turn/start`. If turn acceptance is uncertain, recover that
    exact provisional thread and retry only when stable history proves no turn
    was accepted or the thread is absent; unreadable/in-progress evidence is
    never retried.
-4. Capture a best-effort pre-turn workspace observation.
-5. Send `turn/start` with the fixed model, selected reasoning effort, canonical
+5. Capture a best-effort pre-turn workspace observation.
+6. Send `turn/start` with the fixed model, selected reasoning effort, canonical
    cwd, access-derived sandbox policy, approval policy, and message/images.
    Developer instructions were supplied by thread start/resume for this
    generation because turn start has no such field.
-6. Persist the permanent thread binding and accepted Codex turn ID before
+7. Persist the permanent thread binding and accepted Codex turn ID before
    acknowledging `submit`.
-7. Stream and audit correlated notifications.
-8. Surface server requests as generation-qualified pending requests.
-9. On terminal notification, read back persisted thread history when necessary,
+8. Stream and audit correlated notifications.
+9. Surface server requests as generation-qualified pending requests.
+10. On terminal notification, read back persisted thread history when necessary,
    capture a post-turn workspace observation, project the final response and
    usage, and transition to idle.
 
 The delivery mode is not part of idempotency identity: `send` waits, while
-`submit` returns after step 6.
+`submit` returns after step 7.
 
 ## Recovery and Reconciliation
 
@@ -595,8 +604,8 @@ thread with stable history APIs only after prior generation absence is proved.
 - A terminal turn absent from Dolgorae's projection is appended as reconciled
   evidence and the run returns to idle.
 - An active turn without authoritative terminal evidence produces
-  `outcome_unknown`; the replacement app-server is stopped and any writer lease
-  is released.
+  `outcome_unknown`; the replacement proxy is stopped and any kernel writer
+  lease is released while the workspace pointer remains `blocked_unknown`.
 - `reconcile` starts a lease-free transient worker generation, launches
   app-server with read-only sandbox policy, and calls only
   `thread/read(includeTurns: true)`. It never loads or resumes the thread and
@@ -616,7 +625,7 @@ thread with stable history APIs only after prior generation absence is proved.
   records source run, observed lifecycle state, and unresolved-turn provenance
   without asserting an outcome. It is therefore available even when a source
   in `running` or `waiting_approval` has an unreachable socket and unverifiable process
-  identity. Explicit `--access write` is rejected rather than downgraded.
+  identity.
 
 Every fork copies the source profile snapshot and immutable run instructions,
 defaults to read access, and may replace only the fixed model. It cannot change

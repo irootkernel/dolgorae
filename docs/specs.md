@@ -123,9 +123,8 @@ In Git mode, initialization creates exactly these tracked project policy files:
   config.yaml
 ```
 
-`config.yaml` is strict YAML and contains exactly `schema_version: 1`,
-`mode: git|non_git`, and `default_access: read|write`; the initial default is
-`read`. Unknown or duplicate keys, wrong types, unsupported schema versions, and
+`config.yaml` is strict YAML and contains exactly `schema_version: 1` and
+`mode: git|non_git`. Unknown or duplicate keys, wrong types, unsupported schema versions, and
 malformed YAML return `CONFIG_INVALID`. The file is hand-editable, but Dolgorae
 never rewrites it except during first initialization. `.dolgorae/.gitignore`
 contains exactly `/local.yaml`, `/runs/`, `/runtime/`, `/evidence/`, and
@@ -275,24 +274,24 @@ dolgorae [--human] profile server start <name> [--workspace <path>]
 dolgorae [--human] profile server stop <name> [--workspace <path>] [--interrupt]
 dolgorae [--human] profile server restart <name> [--workspace <path>] [--interrupt]
 
-dolgorae [--human] run start --workspace <path> --profile <name> [--access read|write] [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
+dolgorae [--human] run start --workspace <path> --profile <name> [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
 dolgorae [--human] run list [--workspace <path>]
 dolgorae [--human] run status <run-id> [--workspace <path>]
-dolgorae [--human] run send <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>] [--timeout <duration>]
-dolgorae [--human] run submit <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>]
+dolgorae [--human] run send <run-id> [--workspace <path>] [--write] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>] [--timeout <duration>]
+dolgorae [--human] run submit <run-id> [--workspace <path>] [--write] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>]
 dolgorae [--human] run wait <run-id> <turn-id> [--workspace <path>] [--timeout <duration>]
 dolgorae [--human] run events <run-id> [--workspace <path>] [--after <cursor>] [--follow] [--raw]
 dolgorae [--human] run pending <run-id> [--workspace <path>]
 dolgorae [--human] run respond <run-id> --request-id <id> [--workspace <path>] [--response <json>]
 dolgorae [--human] run interrupt <run-id> [--workspace <path>]
 dolgorae [--human] run set-effort <run-id> <effort> [--workspace <path>]
-dolgorae [--human] run promote <run-id> [--workspace <path>]
-dolgorae [--human] run demote <run-id> [--workspace <path>]
+dolgorae [--human] run acquire-write <run-id> [--workspace <path>] [--takeover-token <token>]
+dolgorae [--human] run release-write <run-id> [--workspace <path>]
 dolgorae [--human] run pause <run-id> [--workspace <path>] [--interrupt]
-dolgorae [--human] run resume <run-id> [--workspace <path>] [--access read|write] [--accept-version-change]
+dolgorae [--human] run resume <run-id> [--workspace <path>] [--accept-version-change]
 dolgorae [--human] run recover <run-id> [--workspace <path>] [--accept-version-change]
 dolgorae [--human] run reconcile <run-id> [--workspace <path>] [--accept-version-change]
-dolgorae [--human] run fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>] [--access read|write]
+dolgorae [--human] run fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>]
 dolgorae [--human] run close <run-id> [--workspace <path>] [--interrupt]
 dolgorae [--human] run delete <run-id> --confirm [--workspace <path>]
 dolgorae [--human] run verify <run-id> [--workspace <path>]
@@ -300,9 +299,10 @@ dolgorae [--human] run export <run-id> [--output <directory>] [--workspace <path
 ```
 
 `run start` creates an empty idle Dolgorae session and MUST NOT allocate a Codex
-thread or start the first turn. First `send`/`submit` allocates the thread and
+thread, acquire the writer lease, or start the first turn. It always starts as a
+reader. First `send`/`submit` allocates the thread and
 starts the turn under one fsynced intent/idempotency transaction. Its
-options include access, model, reasoning effort, and immutable run-specific
+options include model, reasoning effort, and immutable run-specific
 instructions. Instructions accept exactly one source: `--instructions`,
 `--instructions-file`, or `--instructions-stdin`. They MUST NOT weaken Dolgorae's
 hard agent invariants.
@@ -356,8 +356,7 @@ or whose prior generation is proved absent. A live worker that fails control
 non-retryable `RECOVERY_REQUIRED` without signalling or starting a replacement.
 `fork --fresh` is the only explicit immediate escape; it creates a threadless
 new run and retains source provenance without reading the source Codex thread.
-It is always read-only; combining `--fresh` with `--access write` is
-`INVALID_ARGUMENT`, never an implicit downgrade.
+It is always read-only and acquires no writer lease.
 
 When a generation-starting command finds a tested app-server version different
 from the run manifest, it returns `COMPATIBILITY_REJECTED`. Only explicit
@@ -426,15 +425,14 @@ The checked [machine-output schema](protocol/dolgorae-machine-v1.schema.json) an
 subcommand enum and `invocation_id` is a UUIDv7. `data` is a command-tagged
 union built from these reusable objects:
 
-- `workspace`: workspace ID, lossless canonical path, mode, default access, and
-  `created`;
+- `workspace`: workspace ID, lossless canonical path, mode, and `created`;
 - `profile`: name, argv, expected/actual `codex_home`, executable/version/schema
   digests, compatibility verdict, models, diagnostics, `server_key`, and
   `server_epoch`;
 - `run`: workspace/run IDs, lifecycle/access, `server_epoch`, `run_generation`,
   `control_socket_epoch`, profile, thread/active
-  turn when present, model/effort, ledger cursor, pending count, writer/identity
-  verdicts, and last terminal result;
+  turn when present, model/effort, ledger cursor, pending count, writer state,
+  lease epoch, identity verdict, and last terminal result;
 - `turn`: thread/turn IDs, status, model/effort, usage, cursor, response, and
   bounded `workspace_changes`;
 - `request`: generation-qualified ID, closed kind, redacted payload, and the
@@ -550,12 +548,12 @@ normative:
 | `WORKSPACE_INITIALIZATION_CONFLICT` | 4 | `init` | re-init, nesting, Git mode, partial-layout, or policy-file facts conflict |
 | `RUN_STATE_CONFLICT` | 4 | all state-changing `run` commands | the lifecycle state forbids the requested transition |
 | `POLICY_REJECTED` | 4 | policy-sensitive commands and every managed-context command except own-run `status/events/verify` | workspace, hard-agent, or managed-run policy rejects the operation |
-| `RUN_BUSY` | 4 | `run send/submit/wait/pending/respond/interrupt/set-effort/promote/demote/pause/resume/recover/reconcile/fork/close` | another turn owns turn-start serialization, or another contender owns per-run worker startup/attachment serialization |
-| `WRITER_BUSY` | 4 | `run start` with effective write access (explicit or project default), `run promote`, `run resume --access write`, recovery of a writer run, and `run fork --access write` | another worker holds the workspace writer lease |
+| `RUN_BUSY` | 4 | state-changing run commands | another turn owns turn-start serialization, or another contender owns per-run worker startup/attachment serialization |
+| `WRITER_BUSY` | 4 | `run send/submit --write`, `run acquire-write` | another live run holds the workspace writer lease; details identify the holder and whether idle takeover is available |
 | `IDEMPOTENCY_CONFLICT` | 4 | `run send/submit` | a run-scoped key was reused with different normalized input |
 | `STALE_REQUEST` | 4 | `run respond` | the request is known but is no longer pending |
-| `OUTCOME_UNKNOWN` | 4 | `run send/submit/wait/respond/interrupt/set-effort/promote/demote/pause/resume/close` | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
-| `RECOVERY_REQUIRED` | 4 | effective-write `run start`, `run send/submit/promote/pause/resume/recover/reconcile/close`, and ordinary or write-access `run fork` | prior same-run or workspace writer generation identity required by the operation cannot be proved safe; read-only new-run `start`, projection-only `status/events/verify`, and read-only `fork --fresh` are excluded and the code is never generically retryable |
+| `OUTCOME_UNKNOWN` | 4 | state-changing run commands | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
+| `RECOVERY_REQUIRED` | 4 | writer acquire/release and lifecycle/recovery commands | prior same-run identity or a `blocked_unknown` workspace writer generation cannot be proved safe; new reader runs and projection-only commands are excluded and the code is never generically retryable |
 | `PROFILE_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable profile identity differs from the manifest |
 | `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
 | `DOLGORAE_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Dolgorae version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
@@ -576,8 +574,8 @@ race, or another process owns the run's worker startup/attachment serialization.
 operation. Every command specification and conformance fixture MUST use this
 table rather than assign an exit class locally.
 “State-changing run command” means start, send, submit, respond, interrupt,
-set-effort, promote, demote, pause, resume, recover, reconcile, fork, close, or
-delete. Status, list, wait, events, verify, and export are observers; export
+set-effort, acquire-write, release-write, pause, resume, recover, reconcile,
+fork, close, or delete. Status, list, wait, events, verify, and export are observers; export
 embeds a failing verification result rather than refusing. Confirmed delete is
 the explicit integrity-failure escape described in SPEC-010.
 For a write recovery path, same-run identity safety is evaluated before
@@ -675,8 +673,7 @@ reported change. Full diff inspection is delegated to Git; Dolgorae has no
 
 ## SPEC-007: Access and Concurrency
 
-The default run access is the project `default_access`, initially `read`.
-Readers use thread `sandbox:"read-only"`, turn
+Every run starts and resumes as a reader. Readers use thread `sandbox:"read-only"`, turn
 `sandboxPolicy:{"type":"readOnly","networkAccess":false}`, and
 `approvalPolicy:"never"`. Writers use thread `sandbox:"workspace-write"`,
 turn `sandboxPolicy:{"type":"workspaceWrite","writableRoots":[...],
@@ -688,7 +685,19 @@ Git mode, libc `realpath(3)` of `git -C <canonical-workspace> rev-parse
 rev-parse --path-format=absolute --git-path .`. Every member MUST be absolute
 and is deduplicated after resolution. These exact thread and turn carriers are
 part of the required-subset manifest. Readers MAY run concurrently without a
-Dolgorae limit. A canonical workspace has at most one Dolgorae writer.
+Dolgorae limit and MAY observe a writer's intermediate files; there is no
+snapshot isolation or rollback. A canonical workspace has at most one Dolgorae
+writer across every run and profile.
+
+Writer acquisition is lazy and explicit. `run acquire-write`, or `run
+send|submit --write`, MUST acquire the lease before changing the run generation
+or submitting any prompt. Dolgorae MUST NOT infer write intent from natural
+language or use experimental mid-turn permission escalation. A failed
+acquisition MUST NOT start the turn. Once acquired, the worker retains the lease
+across idle, running, and all waiting states until an idle `release-write`,
+pause, close, safely confirmed terminal worker cleanup, or outcome-unknown
+quarantine. Release first activates a reader generation and durably clears
+`writer.json`, then unlocks. Acquisition never queues automatically.
 
 The writer lease is BSD `flock(2)` with nonblocking exclusive semantics on
 `.dolgorae/runtime/locks/writer.lock`. Per-run startup locks are
@@ -698,13 +707,21 @@ workspace-fd-relative no-symlink operations, validate `EEXIST`, ownership and
 mode 0700/0600 with `fstat`, and require the canonical workspace to report
 `MNT_LOCAL` plus `f_fstypename == "apfs"`. Path or device/inode drift fails
 with `RUNTIME_PATH_COLLISION`; nonlocal or non-APFS workspaces are unsupported.
-Only the
-worker holds it; it is close-on-exec and MUST NOT be inherited by app-server or
-descendants. A writer holds it across starting, idle, running, and all waiting
-states until demotion, pause, close, entry into `outcome_unknown`, start failure,
-or terminal worker cleanup. Writer acquisition never queues automatically. A
-conflict returns `WRITER_BUSY`; the holding run ID and state are best-effort
-nullable fields, and no prompt content is included.
+Only the worker holds it; it is close-on-exec and MUST NOT be inherited by the
+proxy, singleton, or descendants. A conflict returns `WRITER_BUSY` with nullable
+holder run/profile/state, lease epoch, takeover eligibility, and a one-shot
+takeover token only when the holder is idle. No prompt content is included.
+
+Takeover requires a second `run acquire-write --takeover-token` call. The token
+is bound to workspace, requester and holder runs/profiles, holder lease epoch,
+and both run generations; any state or generation change invalidates it. The
+requester holds `handoff.lock`, asks the idle holder to activate a reader
+generation and fsync its pointer, waits for lease release, then acquires and
+binds the writer generation. Requester failure leaves no writer and MUST NOT
+roll the holder back to write. A holder in starting, running, approval waiting,
+or any outcome-unknown state is not takeable; the response
+is retryable `WRITER_BUSY` instructing the user to retry later. V1 provides no
+force unlock, signal, automatic queue, or kill-based takeover.
 
 Writer and startup lock files are permanent after create-exclusive creation;
 normal operation never unlinks or recreates either pathname. After acquiring
@@ -724,9 +741,11 @@ recorded workers have been proved absent.
 Before starting a writer proxy generation, the lease holder proves that the foreign
 generation is absent or performs identity-verified cleanup using its recorded
 group. `Unverifiable` releases the newly acquired lease and returns
-`RECOVERY_REQUIRED`; it never starts the new app-server or resumes the foreign
-thread. Thus a stale pointer does not create false `WRITER_BUSY`, while it also
-cannot authorize concurrent writer app-servers.
+`RECOVERY_REQUIRED`; it never starts the new proxy or resumes the foreign
+thread. A writer crash with uncertain turn outcome records `blocked_unknown` in
+the workspace pointer. Kernel flock release alone MUST NOT clear that logical
+block; terminal history, verified interruption, or exact-generation absence and
+reconciliation is required before another writer may activate.
 
 Runtime identity is `(boot_session_uuid, pid, pgid, uid, start_tvsec,
 start_tvusec, executable_path, executable_dev, executable_ino,
@@ -870,19 +889,13 @@ bind. An occupied path with no matching record fails closed. Shutdown attempts
 this cleanup for ten seconds and otherwise leaves the path for that verified
 next owner.
 
-Any `run start` whose effective access is write (whether explicit or project
-default), promotion, `resume --access write`,
-`fork --access write`, and recovery of a writer run are the complete
-writer-acquisition set and acquire the lease before the run becomes usable.
-Promotion and demotion are allowed only while idle. Because
-`developerInstructions` is not a `turn/start` field, either transition performs
-an in-place proxy generation replacement under the same worker and
-`thread/resume` with a recomposed generation-level instruction prefix before
-another turn. Promotion acquires the writer lease before stopping the reader
-generation and keeps it through writer activation. Demotion stops the writer
-generation, activates the reader generation, then releases the lease. The
-worker's byte-1 ownership does not change during either transition.
-Resume defaults to `read`.
+Because `developerInstructions` is not a `turn/start` field, successful acquire
+or release performs an in-place proxy generation replacement under the same
+worker and `thread/resume` with the matching generation-level instruction
+prefix. Acquire holds the lease before stopping the reader generation; release
+activates the reader generation before unlocking. Worker byte-1 ownership does
+not change. Start, resume, fork, and recovery otherwise create readers and do
+not acquire the writer lease.
 
 Readers MAY run during writer turns and may observe intermediate workspace
 state. Dolgorae provides no read snapshot isolation. A consistent review SHOULD
@@ -890,7 +903,7 @@ begin only after the writer turn reaches a terminal state.
 
 Codex native subagents belong to their parent run and inherit its access
 boundary. They do not acquire separate Dolgorae writer leases. Dolgorae therefore
-serializes independent writer app-servers, not every execution lane inside one
+serializes independent writer proxies, not every execution lane inside one
 writer session; the injected instructions require Codex to avoid overlapping
 write-heavy delegation and to prefer parallel subagents for independent or
 read-heavy work.
@@ -1046,7 +1059,7 @@ The two supported approval requests are represented as structured pending reques
 generation-qualified request ID, closed kind, redacted payload, and exact
 response-schema identifier from that manifest. `run respond` accepts exactly
 one closed Dolgorae object containing only `decision`, whose value is one of the
-four tokens below. Dolgorae selects the manifest schema named by the pending
+three tokens below. Dolgorae selects the manifest schema named by the pending
 request, translates the token to the Codex value, validates the translated
 object, and only then forwards it to the owning generation. Other decision
 variants and unknown schema identifiers are `INVALID_ARGUMENT`; raw Codex
@@ -1061,27 +1074,24 @@ Requests from an older run generation return `STALE_REQUEST`; pending
 requests never survive restart and are never silently replayed. Their accepted
 turn follows ordinary persisted-history reconciliation. Waiting has
 no automatic timeout. A waiting writer continues to hold its lease while a
-response or interruption returns it through running/idle; only demotion, pause,
+response or interruption returns it through running/idle; only explicit release, pause,
 close, `outcome_unknown`, start failure, or terminal worker cleanup releases it.
 
 Command- and file-change approval decisions exposed by Dolgorae are:
 
 - `accept_once`
-- `accept_for_generation`
 - `decline`
 - `cancel`
 
 For command and file-change approvals they map respectively to the pinned wire
-values `accept`, `acceptForSession`, `decline`, and `cancel`.
+values `accept`, `decline`, and `cancel`.
 
 Reader auto-decline is implemented solely by `approvalPolicy:"never"`; Dolgorae
 does not install a second approval interception mechanism. A server request
 that nevertheless arrives is handled by the recognized-unsupported rule above.
 
-Generation approval maps to app-server's live session-scoped approval and
-expires whenever the worker/proxy generation ends. Dolgorae MUST NOT present
-it as durable run-wide approval and MUST NOT persist an approval policy that is
-silently replayed after restart.
+The pinned server's session-scoped approval value remains an observed wire
+capability but is not exposed as v1 public input.
 
 ## SPEC-010: Audit, Retention, and Deletion
 
@@ -1107,7 +1117,7 @@ The v1 audit-kind enum is closed:
 `turn_started`, `turn_terminal`, `lifecycle_transition`,
 `run_generation_started`, `run_generation_stopped`, `app_server_request`,
 `app_server_response`, `app_server_notification`, `approval_requested`,
-`approval_decided`, `access_changed`, `profile_observed`,
+`approval_decided`, `writer_acquired`, `writer_released`, `writer_handoff_requested`, `writer_handoff_completed`, `profile_observed`,
 `idempotency_reserved`, `reconciliation`, `cleanup_intent`, `cleanup_result`,
 `ledger_tail_repaired`, `projection_rewound`, `payload_unrepresentable`,
 `start_failed`, and `outcome_unknown`. Adding a kind is a machine-contract
@@ -1196,7 +1206,7 @@ guaranteed.
 limited to 1 MiB with one rotation and remains diagnostics-only.
 
 Audit completeness is limited to Dolgorae lifecycle, app-server-exposed main-turn
-wire traffic, approvals, access transitions, and profile/account provenance.
+wire traffic, approvals, writer lease transitions, and profile/account provenance.
 Encrypted or otherwise unexposed native-subagent communication is represented
 as opaque activity when observable and is not claimed as reconstructable audit.
 
@@ -1246,7 +1256,7 @@ deletes the Dolgorae run directory only. It MUST NOT delete the Codex thread fro
 Dolgorae injects developer instructions that are immutable for one process
 generation and identify the process as a master-controlled Dolgorae subagent.
 They include run ID, canonical workspace, and that generation's access mode.
-Promotion/demotion starts a new generation and recomposes the prefix through
+Writer acquire/release starts a new generation and recomposes the prefix through
 `thread/resume`; immutable user run instructions remain subordinate and
 unchanged. The instructions MUST establish these rules:
 
