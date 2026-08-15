@@ -1,7 +1,7 @@
 # Gomchi Roadmap
 
 Status: Ordered implementation roadmap. Pre-implementation `TASK-000` is
-active; no production implementation Task is active.
+complete; no production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -44,14 +44,14 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
 
 ### TASK-000: Architecture Reconciliation and Codex Probe
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Reconcile the writer lease, stale-generation cleanup, runtime discovery,
 `outcome_unknown`, audit encoding/redaction/durability, protocol bounds, public
