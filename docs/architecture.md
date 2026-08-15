@@ -322,7 +322,7 @@ Each JSONL record has this logical envelope:
 ```text
 schema_version
 sequence
-timestamp_utc
+timestamp
 run_id
 process_generation
 kind
@@ -649,12 +649,12 @@ Descendants that deliberately daemonize, escape the process group, or perform
 remote side effects cannot be guaranteed to stop. The agent prompt therefore
 forbids background processes without explicit master direction.
 
-On worker `SIGTERM`, bounded clean shutdown fsyncs
-`generation_shutdown_requested`, rejects new control mutations, and, when a
+On worker `SIGTERM`, bounded clean shutdown appends and fsyncs `cleanup_intent`
+with reason `generation_shutdown_requested`, rejects new control mutations, and, when a
 turn is active, sends `turn/interrupt` and waits up to five seconds for terminal
 history before continuing. It then completes child
-group cleanup, appends and fsyncs `generation_ended` with the last known turn
-state, releases the writer lease, and attempts bounded startup-lock acquisition
+group cleanup, appends and fsyncs `generation_stopped` with shutdown reason and
+the last known turn state, releases the writer lease, and attempts bounded startup-lock acquisition
 for socket unlink. If that lock cannot be acquired, it leaves stale
 coordination files for the next verified owner rather than blocking shutdown,
 then exits zero. Failure of any step is recorded when the ledger
