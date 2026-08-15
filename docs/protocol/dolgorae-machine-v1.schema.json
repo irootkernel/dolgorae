@@ -10,8 +10,10 @@
     "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "command": {
       "enum": [
-        "unknown", "help", "version", "init", "target.add", "target.list", "target.show", "target.remove",
-        "target.doctor", "run.start", "run.list", "run.status", "run.send",
+        "unknown", "help", "version", "init", "profile.add", "profile.list", "profile.show", "profile.remove",
+        "profile.doctor", "profile.server.status", "profile.server.start",
+        "profile.server.stop", "profile.server.restart",
+        "run.start", "run.list", "run.status", "run.send",
         "run.submit", "run.wait", "run.events", "run.pending", "run.respond",
         "run.interrupt", "run.set_effort", "run.promote", "run.demote",
         "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork",
@@ -21,12 +23,12 @@
     "error_code": {
       "enum": [
         "INVALID_ARGUMENT", "WORKSPACE_NOT_INITIALIZED", "CONFIG_INVALID",
-        "TARGET_REGISTRY_INVALID", "TARGET_NOT_FOUND", "RUN_NOT_FOUND",
+        "PROFILE_CONFIG_INVALID", "PROFILE_NOT_FOUND", "RUN_NOT_FOUND",
         "THREAD_NOT_FOUND", "TURN_NOT_FOUND", "REQUEST_NOT_FOUND",
-        "TARGET_ALREADY_EXISTS", "WORKSPACE_INITIALIZATION_CONFLICT",
+        "PROFILE_ALREADY_EXISTS", "PROFILE_SERVER_BUSY", "WORKSPACE_INITIALIZATION_CONFLICT",
         "RUN_STATE_CONFLICT", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY",
         "IDEMPOTENCY_CONFLICT", "STALE_REQUEST", "OUTCOME_UNKNOWN",
-        "RECOVERY_REQUIRED", "TARGET_MISMATCH", "COMPATIBILITY_REJECTED",
+        "RECOVERY_REQUIRED", "PROFILE_MISMATCH", "COMPATIBILITY_REJECTED",
         "DOLGORAE_PROTOCOL_MISMATCH", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
         "PROTOCOL_FRAME_TOO_LARGE", "RUNTIME_PATH_INVALID",
         "RUNTIME_PATH_COLLISION", "REDACTION_FAILURE", "INTERNAL_ERROR",
@@ -57,10 +59,10 @@
         "created": { "type": "boolean" }
       }
     },
-    "target": {
+    "profile": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "argv", "expected_codex_home", "actual_codex_home", "version", "executable_sha256", "schema_sha256", "compatibility", "models", "diagnostics"],
+      "required": ["name", "argv", "expected_codex_home", "actual_codex_home", "version", "executable_sha256", "schema_sha256", "compatibility", "models", "diagnostics", "server_key", "server_epoch", "server_state"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
@@ -71,7 +73,10 @@
         "schema_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "compatibility": { "enum": ["tested", "unverified", "rejected", "unknown"] },
         "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
-        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+        "server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "server_epoch": { "type": ["integer", "null"], "minimum": 0 },
+        "server_state": { "enum": ["stopped", "starting", "ready", "degraded", "unknown"] }
       }
     },
     "model": {
@@ -97,14 +102,15 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace_id", "run_id", "state", "access", "generation", "target", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_lease", "identity_verdict", "last_terminal"],
+      "required": ["workspace_id", "run_id", "state", "access", "server_epoch", "run_generation", "profile", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_lease", "identity_verdict", "last_terminal"],
       "properties": {
         "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "run_id": { "$ref": "#/$defs/uuid" },
         "state": { "enum": ["starting", "idle", "running", "waiting_approval", "paused", "closed", "start_failed", "outcome_unknown"] },
         "access": { "enum": ["read", "write"] },
-        "generation": { "type": "integer", "minimum": 0 },
-        "target": { "type": "string" },
+        "server_epoch": { "type": ["integer", "null"], "minimum": 0 },
+        "run_generation": { "type": "integer", "minimum": 0 },
+        "profile": { "type": "string" },
         "thread_id": { "type": ["string", "null"] },
         "active_turn_id": { "type": ["string", "null"] },
         "model": { "type": "string" },
@@ -186,22 +192,22 @@
     "audit_record": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "sequence", "timestamp", "run_id", "process_generation", "kind", "payload", "previous_hash", "hash"],
+      "required": ["schema_version", "sequence", "timestamp", "run_id", "run_generation", "kind", "payload", "previous_hash", "hash"],
       "properties": {
         "schema_version": { "const": 1 },
         "sequence": { "type": "integer", "minimum": 1 },
         "timestamp": { "type": "string", "format": "date-time" },
         "run_id": { "$ref": "#/$defs/uuid" },
-        "process_generation": { "type": "integer", "minimum": 0 },
+        "run_generation": { "type": "integer", "minimum": 0 },
         "kind": {
           "enum": [
             "workspace_initialized", "run_created", "turn_intent",
             "thread_bound", "turn_started", "turn_terminal",
-            "lifecycle_transition", "generation_started",
-            "generation_stopped", "app_server_request",
+            "lifecycle_transition", "run_generation_started",
+            "run_generation_stopped", "app_server_request",
             "app_server_response", "app_server_notification",
             "approval_requested", "approval_decided", "access_changed",
-            "target_observed", "idempotency_reserved", "reconciliation",
+            "profile_observed", "idempotency_reserved", "reconciliation",
             "cleanup_intent", "cleanup_result", "ledger_tail_repaired",
             "projection_rewound", "payload_unrepresentable", "start_failed",
             "outcome_unknown"
@@ -245,7 +251,7 @@
     },
     "data": {
       "oneOf": [
-        { "$ref": "#/$defs/workspace" }, { "$ref": "#/$defs/target" },
+        { "$ref": "#/$defs/workspace" }, { "$ref": "#/$defs/profile" },
         { "$ref": "#/$defs/run" }, { "$ref": "#/$defs/turn" },
         { "$ref": "#/$defs/request" }, { "$ref": "#/$defs/verification" },
         { "$ref": "#/$defs/event_data" }, { "$ref": "#/$defs/meta" },
@@ -271,9 +277,9 @@
         { "not": { "properties": { "command": { "const": "unknown" } }, "required": ["command"] } },
         { "if": { "properties": { "command": { "enum": ["help", "version"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/meta" } } } },
         { "if": { "properties": { "command": { "const": "init" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/workspace" } } } },
-        { "if": { "properties": { "command": { "enum": ["target.add", "target.show", "target.doctor"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/target" } } } },
-        { "if": { "properties": { "command": { "const": "target.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/target" } } } } } } },
-        { "if": { "properties": { "command": { "enum": ["target.remove", "run.delete"] } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } } } } },
+        { "if": { "properties": { "command": { "enum": ["profile.add", "profile.show", "profile.doctor", "profile.server.status", "profile.server.start", "profile.server.stop", "profile.server.restart"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile" } } } },
+        { "if": { "properties": { "command": { "const": "profile.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/profile" } } } } } } },
+        { "if": { "properties": { "command": { "enum": ["profile.remove", "run.delete"] } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.promote", "run.demote", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.close"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
         { "if": { "properties": { "command": { "const": "run.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/run" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.send", "run.submit", "run.wait"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/turn" } } } },

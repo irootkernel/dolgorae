@@ -13,34 +13,35 @@ Status: Accepted
 
 ### Context
 
-Persistent subagent sessions must outlive individual CLI invocations, but a
-global or per-project daemon adds installation, discovery, upgrade, and failure
-domains unrelated to the user's active runs.
+Persistent subagent sessions must outlive individual CLI invocations. Dolgorae
+does not need an installed supervisor daemon, while Codex can efficiently share
+one app-server daemon among compatible sessions in the same account home.
 
 ### Decision
 
 Ship one `dolgorae` executable. For every live run, re-execute that binary in a
-hidden worker mode and start one app-server child. Install no launchd unit,
-global daemon, or project daemon. Recover workers on demand after process loss
-or reboot.
+hidden worker mode and attach a private proxy connection to the profile-scoped
+Codex app-server singleton. Install no Dolgorae launchd unit, global daemon, or
+project daemon. Recover workers on demand after process loss or reboot.
 
 ### Consequences
 
-- Runtime process count grows linearly with live runs.
+- Worker/proxy process count grows linearly with live runs; app-server count
+  grows only with active profiles.
 - Each run has isolated ownership and failure scope.
 - Idle runs consume processes until explicitly paused or closed.
-- The binary still depends on external Codex targets and their `CODEX_HOME`.
+- The binary still depends on external Codex profiles and their `CODEX_HOME`.
 
 ### Rejected alternatives
 
-- One global daemon: rejected because it centralizes account and workspace
-  state and creates a mandatory long-lived service.
+- One Dolgorae global daemon: rejected because it centralizes project state and
+  creates a mandatory installed service.
 - One project daemon hosting many threads: rejected because one crash or upgrade
-  affects every run and complicates target isolation.
+  affects every run and complicates profile isolation.
 - A purely foreground CLI: rejected because turns and sessions would die with
   the invoking process.
 
-## ADR-002: Use a Worker Unix Socket and App-Server Stdio
+## ADR-002: Use a Worker Unix Socket and a Private App-Server Proxy
 
 Status: Accepted
 
@@ -53,8 +54,9 @@ socket, and experimental WebSocket transports.
 ### Decision
 
 Use a user-private Unix domain socket between transient Dolgorae CLI invocations
-and the per-run worker. Use app-server's default stdio JSONL transport between
-the worker and its child. The master never connects directly to app-server.
+and the per-run worker. Give each worker a private stdio JSONL connection through
+`app-server proxy` to the profile singleton. The master never connects directly
+to app-server.
 
 ### Consequences
 
@@ -62,16 +64,16 @@ the worker and its child. The master never connects directly to app-server.
 - Socket paths live under a fixed short user-private `/tmp/dolgorae-<uid>/` root
   and their actual location is recorded in workspace runtime state; discovery
   does not depend on the caller's `$TMPDIR`.
-- App-server cannot be independently reattached after worker loss; recovery
-  terminates a stale child and creates a new generation.
+- Worker loss ends only its proxy connection; recovery validates the singleton
+  epoch and opens a new run generation.
 - WebSocket instability and port management are avoided.
 
 ### Rejected alternatives
 
 - Direct master-to-app-server socket: rejected because it bypasses Dolgorae state,
   writer policy, idempotency, and audit.
-- Worker-to-app-server Unix socket: rejected because it permits multiple
-  clients and weakens exclusive lifecycle ownership without a v1 benefit.
+- Direct shared-socket consumption by workers: rejected because every worker
+  would need to demultiplex and authorize unrelated frames.
 - TCP/WebSocket: rejected because it is experimental, needs authentication and
   port management, and expands the attack surface.
 
@@ -92,7 +94,7 @@ and `turn/start`. A crash between those RPCs may abandon only the empty
 provisional thread and retry only after absence proof plus stable history proving
 that no turn was accepted. Once
 the first turn is accepted, the run is permanently bound to exactly one Codex
-thread. Restarting worker/app-server changes process generation, not run or
+thread. Restarting a worker/proxy connection changes run generation, not run or
 thread identity. History-copying branching creates its new thread immediately;
 a fresh branch creates a threadless run and allocates its thread when first used.
 This lazy boundary is required because pinned Codex does not persist a
@@ -158,7 +160,7 @@ no transactional rollback.
   POSIX startup lock exposes its owner through `F_GETLK`; an exact wedged owner
   may be terminated and all contenders then compete for the lock. Only the
   winner acquires the workspace lease, validates and removes the prior
-  app-server generation, and starts a new app-server after cleanup is confirmed.
+  proxy generation, and starts a new proxy generation after cleanup is confirmed.
 - Startup handoff uses two POSIX byte ranges because record locks are not
   inherited across fork: the CLI owns byte 0 until a re-exec worker owning byte
   1 has bound and persisted identity. Runtime ownership is never inferred from
@@ -179,37 +181,37 @@ no transactional rollback.
 - Multiple optimistic writers: rejected because conflict detection after side
   effects cannot reliably prevent corruption.
 
-## ADR-005: Snapshot Target Identity and Use CODEX_HOME as Account Boundary
+## ADR-005: Snapshot Profile Identity and Use CODEX_HOME as Account Boundary
 
 Status: Accepted
 
 ### Context
 
-The user has separate `codex` and `codex-hsy` accounts. Target registry edits or
+Users may have multiple independently configured profiles. Profile edits or
 wrapper changes must not silently move an existing thread between account homes.
 
 ### Decision
 
-Store target definitions in the XDG user config. Snapshot target name, argv,
+Store profile definitions in the XDG user config. Snapshot profile name, argv,
 and expected `CODEX_HOME` into each run. Set that home explicitly and reject an
-`initialize` response whose `codexHome` differs. Never retarget a run or fork
-across targets.
+`initialize` response whose `codexHome` differs. Never rebind a run or fork
+across profiles.
 
 ### Consequences
 
 - Existing runs remain bound to the account that created them.
-- Registry edits affect only future runs.
+- Profile registry edits affect only future runs.
 - Executable updates at the same path require generation-time compatibility
   validation but do not change the expected home.
 - Dolgorae does not install, update, or authenticate Codex.
 
 ### Rejected alternatives
 
-- Resolve the target name on every resume: rejected because a registry edit
+- Resolve the profile name on every resume: rejected because a registry edit
   could silently change account identity.
-- Store target credentials or arbitrary secret environment variables: rejected
+- Store profile credentials or arbitrary secret environment variables: rejected
   because authentication belongs to Codex and local wrappers.
-- Permit cross-target fork: rejected because the source thread is not
+- Permit cross-profile fork: rejected because the source thread is not
   authoritative in the destination `CODEX_HOME`.
 
 ## ADR-006: Fix Model Per Run and Change Effort Between Turns
@@ -225,12 +227,12 @@ model-specific behavior, while app-server supports per-turn reasoning options.
 ### Decision
 
 Resolve and record one model when the run starts. Do not change it within that
-run. A fork may select another model on the same target. Allow the run's default
+run. A fork may select another model on the same profile. Allow the run's default
 reasoning effort to change at runtime; a change during an active turn applies
 to the next turn only and must be supported by fully paginated `model/list`.
 Access-dependent developer instructions are generation-immutable; idle
 promotion/demotion keeps the same worker and startup-lock ownership while
-replacing only its app-server generation, then supplies a recomposed prefix
+replacing only its proxy generation, then supplies a recomposed prefix
 through `thread/resume` because `turn/start` has no such field. Promotion holds
 the writer lease before stopping the reader child; demotion releases it only
 after the writer child is gone and the reader child is active.
@@ -299,17 +301,17 @@ Status: Accepted
 
 ### Context
 
-If worker/app-server dies during a turn, filesystem mutations may have occurred
+If worker/proxy dies during a turn, filesystem mutations may have occurred
 even when Dolgorae did not receive the terminal response. Automatic replay could
 duplicate destructive or external side effects.
 
 ### Decision
 
 On recovery, accept a turn outcome only when persisted Codex history proves a
-terminal state. Otherwise stop the app-server, release any writer lease, set
+terminal state. Otherwise stop the proxy, release any writer lease, set
 `outcome_unknown`, block new turns, and allow only inspection, evidence-based
 reconciliation, fork, or close. Never replay the input automatically. Fork only
-through the newest status that the checked target manifest proves acceptable as
+through the newest status that the checked profile manifest proves acceptable as
 `lastTurnId`; terminal-but-rejected statuses are skipped. Successful later reconciliation
 moves the run to `paused`; explicit resume selects its next access mode.
 Reconciliation uses a transient read-only app-server and `thread/read` without
@@ -346,13 +348,13 @@ Status: Accepted
 
 Pure prompt passthrough does not reliably preserve Dolgorae's reserved storage,
 write authority, Git publication, background-process, and reporting boundaries.
-Target configuration must nevertheless remain useful.
+Profile configuration must nevertheless remain useful.
 
 ### Decision
 
 Inject a strong generation-immutable developer-instruction prefix that defines Dolgorae's
 master/subagent relationship, current access, and hard safety invariants. Append immutable
-run-specific instructions as subordinate context. Continue to respect target
+run-specific instructions as subordinate context. Continue to respect profile
 AGENTS files, skills, plugins, apps, MCP servers, and native subagents unless
 they conflict with the hard invariants.
 
@@ -362,7 +364,7 @@ they conflict with the hard invariants.
 - Read and write authorization derives from both request intent and run access.
 - `.dolgorae`, Git publication, external effects, and background processes receive
   explicit treatment.
-- Access changes replace the app-server generation so prefix and sandbox agree.
+- Access changes replace the proxy generation so prefix and sandbox agree.
 - Native subagents are instructed not to overlap write-heavy delegation.
 - Prompt policy is defense in depth, not a hostile security boundary.
 
@@ -370,7 +372,7 @@ they conflict with the hard invariants.
 
 - Minimal passthrough: rejected because critical product invariants would be
   implicit and easy to violate.
-- Disable target tools and native subagents: rejected because it would make
+- Disable profile tools and native subagents: rejected because it would make
   Dolgorae less compatible with the user's prepared Codex environments.
 - Mutable run instructions: rejected because they would weaken reproducibility
   and make past turn governance ambiguous.
@@ -406,7 +408,7 @@ as capability-scoped hierarchical delegation, not peer messaging.
 - Arbitrary peer messaging: rejected because it permits cycles and unclear
   authority.
 - Let agents shell out to `dolgorae`: rejected because it bypasses master intent
-  and could cross target/account boundaries.
+  and could cross profile/account boundaries.
 - Add a global broker daemon: rejected because it conflicts with ADR-001 and
   still requires a delegation security model.
 
@@ -539,3 +541,43 @@ manifest-validated declarative scenarios.
 - Duplicate rejection and number preservation occur at ingest, before JCS.
 - Fake/production parser diversity reduces self-confirming conformance tests.
 - TASK-006 consumes the TASK-004 fixture rather than creating a second core.
+
+## ADR-015: Share One App-Server Singleton Per Canonical Profile Home
+
+Status: Accepted
+
+### Context
+
+App-server can host multiple threads and workspaces, while spawning a complete
+server for every run duplicates model/account state and complicates coordinated
+profile lifecycle. Distinct account homes must still remain isolated.
+
+### Decision
+
+Key one Dolgorae-exclusive app-server singleton by canonical `CODEX_HOME` and
+the checked executable/compatibility snapshot. Connect every run through an
+exclusive worker-owned proxy connection. Track `server_epoch` globally and
+`run_generation` per worker/proxy policy lifetime. Reject an incompatible live
+snapshot with `PROFILE_SERVER_BUSY`; never fall back to a per-run server.
+
+Maintain a minimal recoverable XDG membership index so profile-wide stop and
+restart can enumerate runs across projects. An interrupting restart pauses all
+members and never resumes them automatically.
+
+### Consequences
+
+- Multiple workspaces and sessions share profile-level Codex state without
+  sharing worker control, audit ownership, or JSON-RPC frames.
+- A singleton failure affects one profile, while different canonical homes use
+  independent servers.
+- Profile names are aliases; two names resolving to the same canonical home
+  cannot create competing servers.
+
+### Rejected alternatives
+
+- Per-run app-server children: rejected because they duplicate a server that is
+  designed to multiplex threads and workspaces.
+- One singleton across all profiles: rejected because it crosses the
+  `CODEX_HOME` account boundary.
+- Direct worker access to one mixed socket: rejected because it weakens frame
+  isolation and makes every worker a global demultiplexer.

@@ -17,13 +17,14 @@ coordination, recovery, and audit around Codex threads without replacing Codex
 conversation storage.
 
 ```text
-                          user-local target registry
+                          user-local profile registry
                           argv + expected CODEX_HOME
                                      |
                                      v
-master -> dolgorae CLI -> per-run worker -> codex app-server -> Codex services
-             |              |                  |
-          JSON I/O       audit ledger      thread history
+master -> dolgorae CLI -> per-run worker -> per-run proxy connection
+             |              |                         |
+          JSON I/O       audit ledger                 v
+                                     profile app-server singleton -> Codex services
 ```
 
 The master is the only orchestrator of independent Dolgorae runs. Codex may
@@ -55,12 +56,12 @@ The worker is a hidden re-execution mode of the same `dolgorae` binary. It is th
 sole owner of:
 
 - the run control socket;
-- the app-server child and its stdio pipes;
+- the run's exclusive app-server proxy connection;
 - JSON-RPC request IDs and correlation state;
 - run lifecycle and pending interactions;
 - the audit append handle and materialized state;
 - the writer lease when the run has write access;
-- cleanup of the app-server process group.
+- cleanup of its proxy and run-scoped descendants.
 
 One worker serves one run. There is no shared supervisor or global in-memory
 registry. Concurrent start/recovery attempts for the same run are serialized by
@@ -95,11 +96,14 @@ These rules make ownership handoff explicit and ensure
 that Ctrl-C or command substitution cannot terminate the worker or keep the
 caller's output pipe open.
 
-### Codex App-Server Child
+### Profile App-Server Singleton and Run Proxy
 
-The worker starts target argv with app-server's stdio transport. Stdin and
-stdout carry newline-delimited JSON-RPC messages; stderr is captured as bounded
-diagnostic evidence and must not corrupt stdout protocol parsing.
+The first operation that needs a profile starts or attaches to one Codex
+app-server singleton keyed by canonical `CODEX_HOME` and the checked executable
+snapshot. Every run worker starts a profile-matched `app-server proxy` and owns
+one private JSONL connection through it. The proxy is an audit and ownership
+boundary, not another app-server. A singleton may therefore serve many runs and
+workspaces while each worker receives only its own connection frames.
 
 Before launch, the worker removes inherited `DOLGORAE_*` control variables and
 adds a fresh managed-run context containing its own workspace and run identity.
@@ -107,7 +111,7 @@ The public CLI recognizes this context and exposes only read-only introspection
 of that same run. This is an accidental-recursion guard, not an unforgeable
 credential.
 
-Each connection performs exactly one `initialize` request followed by the
+Each proxy connection performs exactly one `initialize` request followed by the
 `initialized` notification. A newly created run remains threadless until its
 first turn because pinned Codex does not persist a turnless thread across
 app-server restart. First `send`/`submit` uses `thread/start`; recovered runs use
@@ -117,7 +121,9 @@ Turns use `turn/start`, `turn/steer` only when explicitly exposed by a future
 specification, and `turn/interrupt` for cancellation. V1 does not enable the
 experimental app-server API capability.
 
-The app-server is created with `POSIX_SPAWN_START_SUSPENDED`, `SETPGROUP`,
+The profile singleton is started through the checked Codex daemon interface and
+has a profile-wide `server_epoch`. The worker-owned proxy is created with
+`POSIX_SPAWN_START_SUSPENDED`, `SETPGROUP`,
 `SETSIGDEF`, and `SETSIGMASK(empty)`. While the spawn image is suspended, the
 worker samples `PROC_PIDTBSDINFO`, opens the `proc_pidpath` target without
 following symlinks, computes spawn-image device/inode/SHA-256 from that fd, and
@@ -127,13 +133,17 @@ here. It persists the complete ten-field provisional identity before
 An entry-image to final-image exec with unchanged PID/PGID/UID/start time is
 continuity, not replacement. Failure before continuation is cleaned as a start
 failure. After initialize, the worker repeats the sample and fsyncs
-`generation_started`; that record alone owns final-executable identity.
+`run_generation_started`; that record alone owns final proxy-executable identity.
 
-### Target Registry
+### Profile Registry and Singleton Membership
 
 The XDG registry is user-local and independent of every workspace. It stores no
 tokens and no arbitrary environment map. A run manifest contains a private
 snapshot so registry edits cannot silently change an existing run's account.
+The singleton membership index is separate XDG state keyed by `server_key`. It
+contains only server identity/epoch and workspace/run runtime-record locators,
+so stop/restart can enumerate active members across projects. It is recoverable
+from those records and stores no prompt, audit payload, or credentials.
 
 ### Persistent Run Store
 
@@ -144,7 +154,8 @@ projections. The Codex thread remains independently stored in the pinned
 
 ## Process and Transport Topology
 
-For N live runs, the normal baseline is N workers and N app-server children.
+For N live runs across P active profiles, the normal baseline is N workers, N
+proxy processes/connections, and P app-server singletons.
 Commands or Codex native subagents may temporarily create additional descendant
 processes.
 
@@ -155,9 +166,9 @@ dolgorae CLI invocation
   v
 dolgorae worker [run R, generation G]
   |
-  | stdin/stdout: app-server JSONL
+  | private stdin/stdout: app-server proxy JSONL
   v
-target argv ... app-server --listen stdio://
+profile argv ... app-server proxy -> profile app-server singleton
   |
   +-- Codex-owned command and native-subagent descendants
 ```
@@ -188,16 +199,17 @@ and interrupts an active turn before cleanup.
 
 The actual socket path and process identity are discoverable from
 `.dolgorae/runtime/runs/<run-id>.json`; discovery never recomputes a path from
-`$TMPDIR`. The record contains full worker and app-server identity tuples: PID,
+`$TMPDIR`. The record contains full worker and proxy identity tuples: PID,
 PGID, UID, start seconds/microseconds, live executable path, executable
 device/inode, and executable SHA-256, together with
-the boot-session UUID, process generation, access state, socket path, Dolgorae
-version, binary digest, and IPC protocol version.
+the boot-session UUID, run generation, access state, socket path, Dolgorae
+version, binary digest, IPC protocol version, `server_key`, `server_epoch`, and
+`run_generation`. A new singleton epoch never validates a stale proxy generation.
 `.dolgorae/runtime/writer.json` points to the current writer run/generation and
 stores the incumbent identity plus `cleanup_in_progress`; it is replaced only
 after cleanup is confirmed. Runtime records use write-temp, `fsync`, rename,
 and directory `fsync`. They are recoverable coordination caches; the fsynced
-`generation_started` ledger record is process-identity authority.
+`run_generation_started` ledger record is process-identity authority.
 
 Writer leases and per-run startup locks live below the workspace-recorded
 persistent private local root, never a value recomputed from the current
@@ -290,7 +302,7 @@ The repository-local layout is:
   cache/                     # ignored, replaceable compatibility data
 ```
 
-No absolute target path, socket path, PID, authentication state, or run state is
+No absolute profile executable path, socket path, PID, authentication state, or run state is
 placed in tracked project policy.
 
 ## Manifest and Ledger Model
@@ -303,7 +315,7 @@ completed with facts learned during start. Its fixed semantic fields include:
 - schema version, run ID, canonical workspace and workspace ID;
 - Git/non-Git mode and start baseline;
 - created timestamp and initial access;
-- target name, argv, expected `CODEX_HOME` snapshot;
+- profile name, argv, expected `CODEX_HOME` snapshot;
 - actual app-server version, schema status, and actual `codexHome`;
 - Dolgorae version, binary SHA-256, and IPC protocol version;
 - fixed model and initial/default reasoning effort;
@@ -324,7 +336,7 @@ schema_version
 sequence
 timestamp
 run_id
-process_generation
+run_generation
 kind
 payload
 previous_hash
@@ -381,10 +393,10 @@ larger or unrepresentable payload becomes a `payload_unrepresentable` record
 containing source kind, observed byte length, streaming SHA-256, JSON Pointer
 when known, and reason; no original bytes or sidecar are retained. The ledger
 includes CLI intent accepted by the worker, lifecycle transitions,
-process generations, app-server requests/responses/notifications after
+run generations, app-server requests/responses/notifications after
 redaction, approval decisions, state reconciliation, and cleanup results. Its
 completeness claim covers Dolgorae lifecycle, main-turn wire traffic exposed by
-app-server, approvals, access transitions, and target/account provenance. Native
+app-server, approvals, access transitions, and profile/account provenance. Native
 subagent or other content not exposed in plaintext by app-server is retained
 only as an opaque event and is not claimed as reconstructable audit. Hidden
 reasoning and unexposed communication are outside the ledger's authority.
@@ -393,7 +405,7 @@ reasoning and unexposed communication are outside the ledger's authority.
 
 `state.json` is atomically replaced only to a head at or before the last fsynced
 ledger record, at durability barriers and a bounded projection interval. It
-contains the current lifecycle state, process generation, thread ID, active/latest turn,
+contains the current lifecycle state, run generation, thread ID, active/latest turn,
 pending requests, access mode, writer lease observation, default effort, last
 event cursor, and ledger head. If it is missing, stale, or invalid, the worker
 replays `audit.jsonl` before accepting ordinary mutations; the bounded control
@@ -428,7 +440,7 @@ Fork creates a distinct run and never transitions or mutates its source run.
 Every outbound app-server request is registered before write and correlated by
 JSON-RPC request ID. Thread-scoped messages must match the run's thread ID;
 turn-scoped messages must match the active or addressed turn ID. Server
-requests are wrapped in a Dolgorae request ID that includes process generation.
+requests are wrapped in a Dolgorae request ID that includes run generation.
 
 Unknown responses, mismatched IDs, duplicate terminal events, and invalid state
 transitions are recorded and fail closed. Known-but-unsupported server requests
@@ -436,7 +448,7 @@ are recorded and receive method-not-found without stopping the generation;
 unparseable frames fail closed. Unknown additive notifications do not change
 state and are retained as raw redacted evidence.
 
-A new app-server lifetime/configuration increments process generation; one
+A new app-server lifetime/configuration increments run generation; one
 worker may host successive generations during access changes. Pending
 requests and generation-scoped approvals never cross that boundary.
 
@@ -449,7 +461,7 @@ is a distinct workspace and therefore a distinct writer lane. An unresolved
 the kernel lease and the acquiring run's own generation safety determine who
 may attempt it. It does gate writer activation: the held inode must match the
 recorded lease inode, or that historical pair must be reconstructed only after
-the recorded generation is proved absent. The foreign app-server generation must be proven absent
+the recorded generation is proved absent. The foreign proxy generation must be proven absent
 or identity-verified and cleaned before a new writer app-server starts.
 `Unverifiable` releases the new lease with `RECOVERY_REQUIRED`.
 
@@ -517,7 +529,7 @@ generation:
    `Unverifiable` and never signalled. A later process must rebind/revalidate a
    recorded member before inheriting continuity. `killpg` is never used;
 8. confirm group absence within ten seconds,
-   then start the new app-server and replace the writer pointer.
+   then start the new proxy and replace the writer pointer.
 
 `Absent` and safe `Mismatch` observations are audited and proceed. Only
 `Unverifiable` returns non-retryable `RECOVERY_REQUIRED`; V1 has no force
@@ -564,7 +576,7 @@ The delivery mode is not part of idempotency identity: `send` waits, while
 ## Recovery and Reconciliation
 
 Recovery never auto-replays user input. The new worker first replays the ledger,
-validates target identity and compatibility, and inspects the pinned Codex
+validates profile identity and compatibility, and inspects the pinned Codex
 thread with stable history APIs only after prior generation absence is proved.
 
 - Confirmed idle history resumes normally.
@@ -594,9 +606,9 @@ thread with stable history APIs only after prior generation absence is proved.
   in `running` or `waiting_approval` has an unreachable socket and unverifiable process
   identity. Explicit `--access write` is rejected rather than downgraded.
 
-Every fork copies the source target snapshot and immutable run instructions,
+Every fork copies the source profile snapshot and immutable run instructions,
 defaults to read access, and may replace only the fixed model. It cannot change
-the target or account boundary.
+the profile or account boundary.
 
 The original source ledger is never rewritten during reconciliation or fork.
 Projection-only `status`, `events`, and `verify` return their data with an
@@ -606,7 +618,7 @@ worker.
 
 ## Process Cleanup
 
-The detached worker owns an app-server process group distinct from both the
+The detached worker owns an proxy process group distinct from both the
 transient CLI and the worker session. Pause, close, recovery, and failed start
 obtain leader-or-persisted-member continuity before signalling only snapshot
 members, then use a five-second graceful phase, revalidation, and individual
@@ -653,7 +665,7 @@ On worker `SIGTERM`, bounded clean shutdown appends and fsyncs `cleanup_intent`
 with reason `generation_shutdown_requested`, rejects new control mutations, and, when a
 turn is active, sends `turn/interrupt` and waits up to five seconds for terminal
 history before continuing. It then completes child
-group cleanup, appends and fsyncs `generation_stopped` with shutdown reason and
+group cleanup, appends and fsyncs `run_generation_stopped` with shutdown reason and
 the last known turn state, releases the writer lease, and attempts bounded startup-lock acquisition
 for socket unlink. If that lock cannot be acquired, it leaves stale
 coordination files for the next verified owner rather than blocking shutdown,

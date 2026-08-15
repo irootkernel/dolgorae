@@ -65,7 +65,7 @@ Status: `COMPLETE`
 Reconcile the writer lease, stale-generation cleanup, runtime discovery,
 `outcome_unknown`, audit encoding/redaction/durability, protocol bounds, public
 error mapping, worktree identity, and worker detachment contracts. Run isolated
-probes against the pinned Codex 0.147.0 target for crash-history durability,
+probes against the pinned Codex 0.147.0 profile for crash-history durability,
 stable sandbox read/write enforcement, native-subagent event visibility, and
 generated schema shape. Also measure bounded real frame sizes and exercise a
 workspace-write crash followed by live `thread/read` and
@@ -153,6 +153,48 @@ gates pass, NOTE-003 links task-scoped commits, no production source exists, and
 TASK-001 remains planned. These conditions were independently confirmed at
 `aacb1b2`; TASK-000-B and EPIC-000-B are complete.
 
+## EPIC-000-C: Singleton, Local-State, and Writer Contract Stabilization
+
+Status: `PLANNED`
+
+Goal: Replace the pre-implementation per-run server and target vocabulary with
+profile-scoped singleton, project-local state, and cross-profile lazy-writer
+contracts before production TASK-001 begins. This Epic changes documentation
+and checked protocol artifacts only.
+
+### TASK-000-C1: Named Profiles and App-Server Singleton
+
+Status: `COMPLETE`
+
+Define generic named profiles, one compatible app-server singleton per canonical
+`CODEX_HOME`, exclusive per-run proxy connections, profile-wide lifecycle and
+membership, and the corresponding public/machine terminology.
+
+Verification: profile terminology scan excluding immutable review history,
+official/installed app-server capability comparison, protocol JSON/schema
+checks, requirement ownership, Markdown links, offline regression gate, and
+Git whitespace/scope checks.
+
+### TASK-000-C2: Project-Local Configuration and Runtime Layout
+
+Status: `PLANNED`
+
+Move portable and machine-local configuration, run/runtime state, locks, and
+evidence beneath `.dolgorae/`, retaining only the documented singleton and short
+Unix-socket exceptions.
+
+### TASK-000-C3: Lazy Cross-Profile Writer Handoff
+
+Status: `PLANNED`
+
+Replace startup-selected access and promote/demote with explicit lazy writer
+acquisition, release, and user-confirmed idle takeover shared by all profiles in
+one canonical workspace.
+
+Epic acceptance: every C1-C3 contract is internally consistent, checked schemas
+match the SOT, NOTE-004 records bounded evidence and goal commits, no production
+or probe code changes, and TASK-001 remains planned.
+
 ## EPIC-001: Foundation and Durable State
 
 Status: `PLANNED`
@@ -187,7 +229,7 @@ workspace identity, upward `.dolgorae` discovery, minimal policy files, generate
 local ignore policy, dirty-worktree baseline capture, and safe permission
 creation. Establish `--state-root`, `lock-root.json`, mandatory local-APFS
 workspace and state-root checks with no override,
-unanimous-manifest reconstruction, and strict config/target schemas.
+unanimous-manifest reconstruction, and strict config/profile schemas.
 
 Verification: tests for subdirectory discovery, symlink normalization, Git
 worktrees, dirty/untracked preservation, non-Git opt-in, repeated initialization,
@@ -246,7 +288,7 @@ without starting Codex, and all persisted formats are versioned.
 Status: `PLANNED`
 
 Goal: Provide reconnectable per-run process ownership and a strict stable-subset
-adapter for the pinned Codex account and thread.
+adapter for profile-scoped Codex singleton accounts and threads.
 
 ### TASK-004: Per-Run Worker and Unix IPC
 
@@ -256,7 +298,7 @@ Implement detached hidden worker re-execution, fixed short private socket paths,
 versioned runtime discovery records, persistent local locks, fd-3
 startup handoff, per-run startup serialization, stale-socket recovery, bounded
 request/response IPC, ledger-backed event streaming, reconnection, worker
-discovery, on-demand generation startup, version-frozen control v1, and the one
+discovery, on-demand proxy generation startup, version-frozen control v1, and the one
 shared controllable fake app-server/worker fixture used by later Tasks.
 
 Verification: fake worker tests for concurrent starts, changed `$TMPDIR`, stale
@@ -268,18 +310,20 @@ Control fixtures require digest-skewed hello/status/shutdown during replay,
 mutation rejection with `DOLGORAE_PROTOCOL_MISMATCH`, active-turn shutdown, fd-3
 survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unlink.
 
-### TASK-005: Target Registry and Compatibility Doctor
+### TASK-005: Profile Registry, Singleton, and Compatibility Doctor
 
 Status: `PLANNED`
 
-Implement XDG target CRUD, argv and absolute `CODEX_HOME` validation, inherited
+Implement profile CRUD, argv and absolute `CODEX_HOME` validation, inherited
 environment preparation, schema generation into temporary storage, required
 stable-subset comparison, app-server handshake, `codexHome` matching,
-`model/list`, tested/unverified verdicts, and target snapshotting.
+`model/list`, tested/unverified verdicts, profile snapshotting, singleton keys,
+epochs, membership recovery, and server lifecycle commands.
 The required-subset manifest is checked input, not a TASK-013 invention.
 
 Verification: fake executable matrices for missing commands, wrapper argv,
-target-name collision, home mismatch, unsupported/older/newer versions, missing schema fields,
+profile-name collision, home mismatch, incompatible same-home singleton,
+unsupported/older/newer versions, missing schema fields,
 additive fields, login failure, and successful 0.147.0 compatibility.
 Also cover `$ref` resolution, requiredness/type/enum changes, pagination,
 early-ID behavioral rejection, absent-thread errors, version-drift refusal and
@@ -289,7 +333,7 @@ explicit recover acceptance.
 
 Status: `PLANNED`
 
-Implement stdio JSONL process ownership, initialize/initialized, thread
+Implement private proxy JSONL connection ownership, initialize/initialized, thread
 start/resume/fork, model fixation, effort validation, turn start/interrupt,
 one-active-turn serialization, local image input, send/submit/wait behavior,
 idempotency, usage capture, and terminal readback using TASK-004's shared fake
@@ -323,10 +367,10 @@ promotion/demotion, effective-write start/resume/fork and writer-recover
 acquisition, and identity-verified
 stale process-group cleanup before starting a new app-server.
 Promotion/demotion retains the same worker and byte-1 owner while replacing
-only its app-server generation; startup locks use the pinned timed-record-lock
+only its proxy generation; startup locks use the pinned timed-record-lock
 layout and offsets.
 
-Verification: multiprocess tests proving multiple readers, one app-server writer
+Verification: multiprocess tests proving multiple readers, one writer proxy
 lane per worktree, no replacement app-server before crash cleanup, deterministic
 writer conflicts, start-failure release, foreign/nonlocal lock-root refusal,
 PID/PGID reuse refusal, pause/close/unknown release, promotion races, and
@@ -499,18 +543,20 @@ supplemental evidence. A pass requires every barrier case and iteration to
 succeed; random seeds alone are not scheduling proof. Retain bounded failure
 evidence without secrets or unbounded logs.
 
-### TASK-015: Two-Target Live Smoke and Alpha Acceptance
+### TASK-015: Two-Profile Live Smoke and Alpha Acceptance
 
 Status: `PLANNED`
 
-Run opt-in live smoke tests against the prepared `codex` and `codex-hsy`
-targets, both at app-server 0.147.0 or a separately recorded compatible version.
-Cover target-home isolation, read session, writer conflict, multi-turn resume,
+Run opt-in live smoke tests against prepared primary and secondary profiles,
+both at app-server 0.147.0 or a separately recorded compatible version. Profile
+names and local wrapper paths are runner inputs and are not normative fixtures.
+Cover profile-home isolation, singleton sharing within a profile, separation
+between profiles, read session, writer conflict, multi-turn resume,
 effort change, approval round trip, pause/resume, fork, audit verification, and
 export, including command/file approval plus pending-request restart. Do not
 persist credentials or secret-bearing raw output in fixtures.
 
-Verification: both target reports pass on Apple Silicon macOS; required-subset
+Verification: both profile reports pass on Apple Silicon macOS; required-subset
 and early-ID gates match each executable; every SOT contract has deterministic
 evidence; all blocking independent review findings are resolved. A future
 version is accepted for an existing run only through the separately recorded

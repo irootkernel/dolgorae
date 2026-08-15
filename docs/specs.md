@@ -20,12 +20,13 @@ normative; lowercase prose is descriptive and grants no additional authority.
 - **Turn**: one identified Codex execution within a run, beginning when
   `turn/start` is accepted and ending only when Codex confirms completed,
   interrupted, or failed status.
-- **Worker**: the hidden per-run Dolgorae process that owns the app-server child,
-  the worker control socket, and the run audit writer.
-- **Process generation**: one app-server configuration and lifetime within a
-  run. A worker may host successive process generations; its own lifetime is
-  tracked independently by the startup owner record and process-identity tuple.
-- **Target**: a user-local, named Codex execution configuration consisting of
+- **Worker**: the hidden per-run Dolgorae process that owns the run's proxy
+  connection, worker control socket, lifecycle, and audit writer.
+- **Server epoch**: one lifetime of the profile-scoped Codex app-server
+  singleton.
+- **Run generation**: one worker/proxy connection and immutable access-policy
+  configuration within a run.
+- **Profile**: a user-local, named Codex execution configuration consisting of
   shell-free argv and an expected `CODEX_HOME`.
 - **Reader**: a run whose turns use Codex read-only sandbox policy.
 - **Writer**: the single run that holds the Dolgorae writer lease for a canonical
@@ -33,13 +34,15 @@ normative; lowercase prose is descriptive and grants no additional authority.
 - **Terminal turn**: a turn confirmed as completed, interrupted, or failed.
 - **Forkable turn**: a terminal turn whose exact status is listed in the
   checked Codex required-subset manifest as accepted for `lastTurnId` by the
-  pinned target. Terminal and forkable are intentionally not synonyms.
+  pinned profile. Terminal and forkable are intentionally not synonyms.
 
 ## SPEC-001: Product Boundary and Supported Environment
 
 Dolgorae MUST provide persistent Codex subagents through one distributable
-`dolgorae` executable. It MUST NOT install a global daemon, project daemon,
-launchd unit, Codex binary, authentication material, or `CODEX_HOME`.
+`dolgorae` executable. It MUST NOT install a Dolgorae global daemon, project
+daemon, launchd unit, Codex binary, authentication material, or `CODEX_HOME`.
+It MAY manage one Codex app-server singleton per canonical profile
+`CODEX_HOME`; that Codex process is not a Dolgorae daemon.
 
 The first supported release is a personal alpha for Apple Silicon macOS 26.0
 or later (`aarch64-apple-darwin`) on local APFS. Both the workspace and its
@@ -50,7 +53,7 @@ updates are not supported release targets. Empirical release evidence is
 valid only for the recorded OS build and MUST be refreshed on a new macOS
 major version.
 
-Dolgorae depends on user-prepared Codex targets. The compatibility baseline is
+Dolgorae depends on user-prepared Codex profiles. The compatibility baseline is
 Codex app-server 0.147.0.
 
 ## SPEC-002: Workspace Initialization and Discovery
@@ -140,55 +143,69 @@ existing tracked policy file. A partial layout, nested workspace, changed mode,
 changed state root, or conflicting policy returns
 `WORKSPACE_INITIALIZATION_CONFLICT`.
 
-## SPEC-003: Target and Account Binding
+## SPEC-003: Profile, Account, and Singleton Binding
 
-The user-global target registry lives at:
+The user-global profile registry lives at:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/dolgorae/targets.toml
+${XDG_CONFIG_HOME:-$HOME/.config}/dolgorae/profiles.toml
 ```
 
-A target contains:
+A profile contains:
 
 - a unique name;
 - shell-free executable argv;
 - an absolute expected `CODEX_HOME`.
 
-`targets.toml` has top-level `schema_version = 1` and a `targets` table keyed by
+`profiles.toml` has top-level `schema_version = 1` and a `profiles` table keyed by
 name. Each entry contains only nonempty `argv = [string, ...]` and absolute
 `codex_home = string`. Unknown or duplicate keys, empty argv, relative homes,
 wrong types, malformed TOML, and unsupported schema versions return
-`TARGET_REGISTRY_INVALID`. Target add/remove holds a user-registry lock and uses
+`PROFILE_CONFIG_INVALID`. Profile add/remove holds a user-registry lock and uses
 write-temp, file `fsync`, rename, and directory `fsync`; the registry is
 hand-editable and stores no environment values.
-The containing configuration directory is mode 0700 and `targets.toml` is mode
+The containing configuration directory is mode 0700 and `profiles.toml` is mode
 0600; creation and replacement reject a wrong-owner or more-permissive file.
 
-Target names are unique. `target add` MUST reject an existing name with
-`TARGET_ALREADY_EXISTS`; it MUST NOT overwrite a target implicitly. Replacement
+Profile names are unique. `profile add` MUST reject an existing name with
+`PROFILE_ALREADY_EXISTS`; it MUST NOT overwrite a profile implicitly. Replacement
 requires an explicit remove followed by add.
 
-Dolgorae MUST set the target's `CODEX_HOME`, inherit the ordinary parent process
+Dolgorae MUST set the profile's `CODEX_HOME`, inherit the ordinary parent process
 environment, and strip inherited Dolgorae-internal variables before starting
 Codex. It then injects a fresh, non-secret managed-run context marker used to
-reject recursive Dolgorae control from that process tree. A target MAY use wrapper
+reject recursive Dolgorae control from that process tree. A profile MAY use wrapper
 argv for additional environment preparation. The registry MUST NOT support an
 arbitrary secret environment map.
 
-`run start` MUST require an explicit target. Before use, Dolgorae MUST validate
+`run start` MUST require an explicit profile. Before use, Dolgorae MUST validate
 the executable, version, app-server schema, initialization handshake, login
 readiness, model listing, and actual `codexHome`. A `codexHome` mismatch is a
 hard failure.
 
-Run creation snapshots the target name, argv, and expected `CODEX_HOME` into the
+Run creation snapshots the profile name, argv, and expected `CODEX_HOME` into the
 run manifest. Later registry edits or deletion affect new runs only. Existing
-runs MUST NOT be retargeted to another account or `CODEX_HOME`. An executable
-that changes at the same path is revalidated for every new process generation.
+runs MUST NOT be rebound to another account or `CODEX_HOME`. An executable
+that changes at the same path is revalidated for every new run generation.
+
+The singleton key is the canonical `CODEX_HOME` plus the executable and checked
+compatibility snapshot, never the profile display name. A compatible profile
+MUST reuse its live singleton across workspaces and runs. A different live
+snapshot for the same canonical home MUST fail with `PROFILE_SERVER_BUSY`; it
+MUST NOT start a second singleton or silently fall back to a per-run server.
+Every singleton lifetime has a monotonically increasing `server_epoch`.
+
+The first `profile doctor`, `profile server start`, or `run start` that needs a
+profile MAY start its singleton. `profile server stop|restart` MUST reject a
+profile with active runs unless `--interrupt` is supplied. With `--interrupt`,
+Dolgorae MUST interrupt and pause every registered run across all workspaces,
+then stop the singleton; it MUST NOT auto-resume those runs.
 
 ## SPEC-004: Runtime and Session Identity
 
 A run owns no Codex thread before its first turn and exactly one thereafter.
-One live run generation owns exactly one worker and one app-server child.
+One live run generation owns exactly one worker and one exclusive proxy
+connection to its profile singleton.
 Dolgorae imposes no artificial run-count limit.
 
 The required control path is:
@@ -197,12 +214,15 @@ The required control path is:
 master
   -> dolgorae CLI (JSON on stdin/stdout)
   -> per-run worker (Unix domain socket)
-  -> codex app-server child (stdio JSONL)
+  -> codex app-server proxy (private JSONL connection)
+  -> profile-scoped codex app-server singleton
   -> zero Codex threads before first turn; exactly one thereafter
 ```
 
 The master MUST NOT connect directly to app-server. The worker is the sole
-app-server client and audit interposer. The CLI-worker socket MUST use a short
+client of its proxy connection and audit interposer. Each connection performs
+its own initialize handshake and subscription, so workers MUST NOT consume a
+shared mixed event stream or search another run's frames. The CLI-worker socket MUST use a short
 user-private runtime path derived from the canonical workspace identity and run
 ID; durable state remains under `.dolgorae/runs/`.
 
@@ -210,11 +230,11 @@ Run IDs are UUIDv7 values. V1 has no run aliases and no current-run pointer.
 Every run-scoped command MUST receive the run ID explicitly.
 
 The CLI-worker handshake includes schema version, Dolgorae semantic version,
-binary SHA-256, workspace/run identity, and expected process generation. A
+binary SHA-256, workspace/run identity, and expected run generation. A
 mismatch returns `DOLGORAE_PROTOCOL_MISMATCH`; upgrade does not silently mix CLI
 and worker versions within one run generation.
 
-During `starting`, the worker or app-server may not yet exist. Once started,
+During `starting`, the worker or proxy may not yet exist. Once started,
 both remain alive while their run is idle, running, or waiting, including idle
 periods. There is no automatic idle shutdown. Logout, reboot, pause, close,
 outcome-unknown quarantine, or failure may stop them. No launchd recovery is
@@ -231,13 +251,17 @@ dolgorae [--human] --help
 dolgorae [--human] --version
 dolgorae [--human] init [PATH] [--non-git] [--state-root <absolute-local-path>]
 
-dolgorae [--human] target add <name> --codex-home <absolute-path> -- <argv...>
-dolgorae [--human] target list
-dolgorae [--human] target show <name>
-dolgorae [--human] target remove <name>
-dolgorae [--human] target doctor <name>
+dolgorae [--human] profile add <name> --codex-home <absolute-path> -- <argv...>
+dolgorae [--human] profile list
+dolgorae [--human] profile show <name>
+dolgorae [--human] profile remove <name>
+dolgorae [--human] profile doctor <name>
+dolgorae [--human] profile server status <name>
+dolgorae [--human] profile server start <name>
+dolgorae [--human] profile server stop <name> [--interrupt]
+dolgorae [--human] profile server restart <name> [--interrupt]
 
-dolgorae [--human] run start --workspace <path> --target <name> [--access read|write] [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
+dolgorae [--human] run start --workspace <path> --profile <name> [--access read|write] [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
 dolgorae [--human] run list [--workspace <path>]
 dolgorae [--human] run status <run-id> [--workspace <path>]
 dolgorae [--human] run send <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>] [--timeout <duration>]
@@ -279,7 +303,7 @@ Dolgorae appends and fsyncs the provisional thread ID before sending `turn/start
 If the `turn/start` response is lost, recovery proves generation absence and
 queries persisted history for that provisional thread. `thread/read` is
 `Absent` only when both the pinned error code and the manifest-pinned
-independent absence discriminator match. If the pinned target exposes no stable
+independent absence discriminator match. If the pinned profile exposes no stable
 independent discriminator, this automatic-replay exception is disabled. A successful read
 with no accepted turn proves `NotAccepted`. Every other error, malformed
 response, timeout, unknown code, or unusable status is `Unreadable`. Dolgorae may
@@ -328,7 +352,7 @@ from the run manifest, it returns `COMPATIBILITY_REJECTED`. Only explicit
 compatibility gate passes. Every generation-starting command uses the same
 recorded gate. It fsyncs the prior/new version, executable and schema digests
 as a ledger event before starting the replacement generation.
-The flag on an unchanged version is `INVALID_ARGUMENT`; target-wide approval
+The flag on an unchanged version is `INVALID_ARGUMENT`; profile-wide approval
 never changes an existing run.
 
 ## SPEC-006: Machine Output and Turn Control
@@ -390,9 +414,10 @@ union built from these reusable objects:
 
 - `workspace`: workspace ID, lossless canonical path, mode, state-root identity,
   default access, and `created`;
-- `target`: name, argv, expected/actual `codex_home`, executable/version/schema
-  digests, compatibility verdict, models, and diagnostics;
-- `run`: workspace/run IDs, lifecycle/access, generation, target, thread/active
+- `profile`: name, argv, expected/actual `codex_home`, executable/version/schema
+  digests, compatibility verdict, models, diagnostics, `server_key`, and
+  `server_epoch`;
+- `run`: workspace/run IDs, lifecycle/access, `run_generation`, profile, thread/active
   turn when present, model/effort, ledger cursor, pending count, writer/identity
   verdicts, and last terminal result;
 - `turn`: thread/turn IDs, status, model/effort, usage, cursor, response, and
@@ -416,10 +441,10 @@ and carries no compatibility guarantee.
 after terminal post-turn observation; an empty unmeasured value is not proof of
 no workspace changes.
 
-`target doctor` returns `ok:true` whenever its checks ran, with the verdict in
+`profile doctor` returns `ok:true` whenever its checks ran, with the verdict in
 `data.compatibility` and every failure/warning in diagnostics. It emits a
-failure envelope only when the check itself could not execute. Target
-add/list/show do not execute a target and therefore report validation-derived
+failure envelope only when the check itself could not execute. Profile
+add/list/show do not execute a profile and therefore report validation-derived
 fields as `unknown`, null, or empty as their schema permits.
 
 `retryable` means the identical invocation may be safely issued again unchanged;
@@ -440,7 +465,7 @@ applicable bound. An oversized CLI
 frame returns `PROTOCOL_FRAME_TOO_LARGE` only to that caller and never changes
 run state. Oversized stderr records bounded metadata and continues. Oversized,
 invalid, duplicate-member, or otherwise unrepresentable unsolicited stdout records bounded
-metadata, stops the app-server generation, and moves an accepted active turn to
+metadata, stops the proxy generation, and moves an accepted active turn to
 `outcome_unknown`; it never asserts `TURN_FAILED`. Observer delivery MUST read
 fsynced ledger records by cursor; a slow or disconnected observer MUST NOT
 delay draining app-server output or block the active turn.
@@ -454,13 +479,13 @@ constant-memory streaming visitor. Before byte 16 MiB the visitor MUST yield a
 unique top-level `id` matching an outstanding `thread/read`; a top-level
 `method` without `id` proves an unsolicited notification. An ambiguous prefix that reaches
 16 MiB is never classified from the number of outstanding requests: it fails
-the compatibility/transport check and stops that app-server generation. An
+the compatibility/transport check and stops that proxy generation. An
 accepted active turn is quarantined; a transient read fails only its caller.
 After the matching ID is observed, the visitor retains only the fields required to
 classify addressed turn statuses plus byte length and streaming SHA-256; it has
 the 120-second operation deadline but no arbitrary total-response cap. Timeout, malformed
 structure, or an unusable status fails only the requesting recovery/reconcile
-command and leaves lifecycle state unchanged. Compatibility for every target
+command and leaves lifecycle state unchanged. Compatibility for every profile
 generation therefore includes the early-ID behavioral probe; JSON Schema alone
 cannot establish object-member order. For a complete invalid JSON line,
 an envelope-only scanner may extract a unique top-level response ID solely to
@@ -480,9 +505,9 @@ Exit status classes are stable:
 | ---: | --- |
 | 0 | Successful operation or expected nonterminal control state |
 | 2 | CLI syntax or input validation failure |
-| 3 | Workspace, target, run, turn, or request not found |
+| 3 | Workspace, profile, run, turn, or request not found |
 | 4 | State/serialization conflict, policy rejection, recovery precondition, or writer conflict |
-| 5 | Codex compatibility, target validation, or Dolgorae protocol-version failure |
+| 5 | Codex compatibility, profile validation, or Dolgorae protocol-version failure |
 | 6 | Worker, app-server, transport, or internal runtime failure |
 | 7 | A `send` or `wait` request observed its turn end failed or interrupted |
 | 8 | Audit integrity verification failure |
@@ -497,15 +522,16 @@ normative:
 | Code | Exit | Emitting commands | Condition |
 | --- | ---: | --- | --- |
 | `INVALID_ARGUMENT` | 2 | any command | CLI syntax, input source, duration, effort, response JSON, incompatible option combination, or pre-existing export destination is invalid |
-| `WORKSPACE_NOT_INITIALIZED` | 3 | all commands except `init` and target-only commands | the addressed path has no valid Dolgorae workspace |
+| `WORKSPACE_NOT_INITIALIZED` | 3 | all commands except `init` and profile-only commands | the addressed path has no valid Dolgorae workspace |
 | `CONFIG_INVALID` | 3 | workspace commands | `config.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
-| `TARGET_REGISTRY_INVALID` | 3 | target commands and `run start` | `targets.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
-| `TARGET_NOT_FOUND` | 3 | `target show/remove/doctor`, `run start` | the target name is absent |
+| `PROFILE_CONFIG_INVALID` | 3 | profile commands and `run start` | `profiles.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
+| `PROFILE_NOT_FOUND` | 3 | profile commands and `run start` | the profile name is absent |
 | `RUN_NOT_FOUND` | 3 | every `run` command except `start/list` | the run ID is absent in the selected workspace |
 | `THREAD_NOT_FOUND` | 3 | `run resume/send/submit/wait/recover/reconcile` and history-copying `run fork` | the pinned Codex history required by the operation is absent; never emitted by `fork --fresh` |
 | `TURN_NOT_FOUND` | 3 | `run wait` | the turn ID is absent from both ledger and Codex history |
 | `REQUEST_NOT_FOUND` | 3 | `run respond` | the request ID is absent |
-| `TARGET_ALREADY_EXISTS` | 4 | `target add` | the name already exists; replacement is never implicit |
+| `PROFILE_ALREADY_EXISTS` | 4 | `profile add` | the name already exists; replacement is never implicit |
+| `PROFILE_SERVER_BUSY` | 4 | `profile server start/stop/restart`, `profile doctor`, `run start/resume/recover/fork` | the canonical `CODEX_HOME` already has an incompatible singleton or active runs forbid stop/restart without `--interrupt` |
 | `WORKSPACE_INITIALIZATION_CONFLICT` | 4 | `init` | re-init, nesting, Git mode, state-root, partial-layout, or policy-file facts conflict |
 | `RUN_STATE_CONFLICT` | 4 | all state-changing `run` commands | the lifecycle state forbids the requested transition |
 | `POLICY_REJECTED` | 4 | policy-sensitive commands and every managed-context command except own-run `status/events/verify` | workspace, hard-agent, or managed-run policy rejects the operation |
@@ -515,11 +541,11 @@ normative:
 | `STALE_REQUEST` | 4 | `run respond` | the request is known but is no longer pending |
 | `OUTCOME_UNKNOWN` | 4 | `run send/submit/wait/respond/interrupt/set-effort/promote/demote/pause/resume/close` | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
 | `RECOVERY_REQUIRED` | 4 | effective-write `run start`, `run send/submit/promote/pause/resume/recover/reconcile/close`, and ordinary or write-access `run fork` | prior same-run or workspace writer generation identity required by the operation cannot be proved safe; read-only new-run `start`, projection-only `status/events/verify`, and read-only `fork --fresh` are excluded and the code is never generically retryable |
-| `TARGET_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable target identity differs from the manifest |
-| `COMPATIBILITY_REJECTED` | 5 | `target doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
+| `PROFILE_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable profile identity differs from the manifest |
+| `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
 | `DOLGORAE_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Dolgorae version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
-| `TRANSPORT_FAILURE` | 6 | every command that contacts a worker or app-server | connection, stdio, or protocol transport fails |
-| `OPERATION_TIMEOUT` | 6 | `target doctor` and run commands performing local replay/schema work | a bounded local operation expired without uncertain external acceptance |
+| `TRANSPORT_FAILURE` | 6 | every command that contacts a worker or proxy | connection, stdio, or protocol transport fails |
+| `OPERATION_TIMEOUT` | 6 | `profile doctor` and run commands performing local replay/schema work | a bounded local operation expired without uncertain external acceptance |
 | `PROTOCOL_FRAME_TOO_LARGE` | 6 | every command receiving a CLI-worker frame | the CLI-worker request or response frame exceeds its byte limit |
 | `RUNTIME_PATH_INVALID` | 6 | `init` and every run command that starts or attaches a worker | private lock/runtime root or socket path fails validation |
 | `RUNTIME_PATH_COLLISION` | 6 | `init` and every run command that starts or attaches a worker | a recorded root, existing short path, lease inode, or runtime socket record belongs to different identities |
@@ -571,7 +597,7 @@ Normative internal timeouts and expiry results are: socket connect 5 seconds
 (`TRANSPORT_FAILURE`); startup `bound` 10 seconds (`RUN_BUSY`); initialize and
 `model/list` 30 seconds each (`TRANSPORT_FAILURE` when non-acceptance is
 proved); full ledger replay on every worker start, with a five-minute budget
-(`OPERATION_TIMEOUT`); schema generation and `target doctor` 120 seconds
+(`OPERATION_TIMEOUT`); schema generation and `profile doctor` 120 seconds
 (`OPERATION_TIMEOUT`); solicited history and transient reconciliation 120
 seconds (`TRANSPORT_FAILURE`, lifecycle unchanged); worker control `hello` 10
 seconds (`RUN_BUSY` for a revalidated `Match`, `RECOVERY_REQUIRED` for
@@ -680,7 +706,7 @@ activation. If its recorded inode differs, Dolgorae first proves the recorded
 generation absent, including boot mismatch or group emptiness; only then may it
 atomically reconstruct `writer.json` from the held pathname/fd pair. Without
 absence proof the mismatch is `RUNTIME_PATH_COLLISION`.
-Before starting a writer app-server, the lease holder proves that the foreign
+Before starting a writer proxy generation, the lease holder proves that the foreign
 generation is absent or performs identity-verified cleanup using its recorded
 group. `Unverifiable` releases the newly acquired lease and returns
 `RECOVERY_REQUIRED`; it never starts the new app-server or resumes the foreign
@@ -744,10 +770,10 @@ including `/usr/bin/env`, rather than the final app-server executable. It writes
 the complete ten-field provisional identity with `spawn_image_*` executable
 fields using temp-file, `fsync`, rename, and directory `fsync`.
 Replacement/unavailability is `Unverifiable`, not a partial record. Before a
-`generation_started` record exists, an exec transition with identical PID,
+`run_generation_started` record exists, an exec transition with identical PID,
 PGID, UID, and BSD start time is continuity and is `Match`, not `Mismatch`.
 The post-handshake sample is the sole final-executable identity authority and
-is recorded by the fsynced `generation_started` event.
+is recorded by the fsynced `run_generation_started` event.
 
 The recorded lock root already denotes the directory ending in `locks/`.
 Writer locks use `writer/<workspace-digest>` and startup locks use
@@ -835,7 +861,7 @@ default), promotion, `resume --access write`,
 writer-acquisition set and acquire the lease before the run becomes usable.
 Promotion and demotion are allowed only while idle. Because
 `developerInstructions` is not a `turn/start` field, either transition performs
-an in-place app-server generation replacement under the same worker and
+an in-place proxy generation replacement under the same worker and
 `thread/resume` with a recomposed generation-level instruction prefix before
 another turn. Promotion acquires the writer lease before stopping the reader
 generation and keeps it through writer activation. Demotion stops the writer
@@ -856,7 +882,7 @@ read-heavy work.
 
 Reader requests for write or additional filesystem permission are
 automatically declined. Writer approvals are never automatically accepted.
-Target MCP servers, apps, and plugins remain available; side effects performed
+Profile MCP servers, apps, and plugins remain available; side effects performed
 outside Codex's sandbox are outside the one-Dolgorae-writer-per-worktree
 guarantee.
 
@@ -935,12 +961,12 @@ runs after required absence proof, but not from running or waiting runs. The
 read-only `fork --fresh` escape is additionally allowed when a `running` or
 `waiting_approval` source socket is unreachable and its process identity is
 `Unverifiable`. The source is immutable. A fork uses the same
-target snapshot, defaults to read access, and inherits the source model unless
+profile snapshot, defaults to read access, and inherits the source model unless
 another model is explicitly selected. It inherits the source's immutable
-run-specific instructions. A cross-target fork is forbidden.
+run-specific instructions. A cross-profile fork is forbidden.
 
 Every history-copying fork scans confirmed history newest first and
-selects the latest status listed as forkable in the checked target manifest.
+selects the latest status listed as forkable in the checked profile manifest.
 Rejected interrupted/failed statuses are skipped rather than treated as generic
 terminal boundaries. If confirmed history exists but no forkable boundary is
 accepted, the command returns `COMPATIBILITY_REJECTED`; only the separately
@@ -998,7 +1024,7 @@ maps stable server requests as follows:
   records their bounded shape, replies JSON-RPC method-not-found, and lets Codex
   determine the turn result. They never create a pending request or lifecycle
   state. Permissions/granular approval is live-proven to require
-  `experimentalApi` on the pinned target, while SPEC-012 deliberately forbids
+  `experimentalApi` on the pinned profile, while SPEC-012 deliberately forbids
   that API. User-input and MCP elicitation are excluded by the v1 product scope.
 
 The two supported approval requests are represented as structured pending requests. `run pending` returns the
@@ -1016,7 +1042,7 @@ a terminal turn event. If Codex instead leaves the turn nonterminal, the Master
 sees the run as `running` with no Dolgorae pending request and uses `run interrupt`
 as the bounded escape.
 
-Requests from an older process generation return `STALE_REQUEST`; pending
+Requests from an older run generation return `STALE_REQUEST`; pending
 requests never survive restart and are never silently replayed. Their accepted
 turn follows ordinary persisted-history reconciliation. Waiting has
 no automatic timeout. A waiting writer continues to hold its lease while a
@@ -1038,7 +1064,7 @@ does not install a second approval interception mechanism. A server request
 that nevertheless arrives is handled by the recognized-unsupported rule above.
 
 Generation approval maps to app-server's live session-scoped approval and
-expires whenever the worker/app-server generation ends. Dolgorae MUST NOT present
+expires whenever the worker/proxy generation ends. Dolgorae MUST NOT present
 it as durable run-wide approval and MUST NOT persist an approval policy that is
 silently replayed after restart.
 
@@ -1054,7 +1080,7 @@ Every allocated run has a private directory at `.dolgorae/runs/<run-id>/` with:
 
 The audit contains Dolgorae lifecycle records and redacted app-server wire
 records in one total order. Each record contains schema version, sequence/event
-cursor, UTC timestamp, run ID, process generation, kind, payload,
+cursor, UTC timestamp, run ID, run generation, kind, payload,
 `previous_hash`, and `hash`. Lines use RFC 8785 JCS. `sha256-jcs-v1` hashes the
 JCS record with `hash` omitted and `previous_hash` retained; the genesis
 `previous_hash` is 64 zeroes. SHA-256 chaining detects accidental corruption or
@@ -1064,9 +1090,9 @@ same-user attacker.
 The v1 audit-kind enum is closed:
 `workspace_initialized`, `run_created`, `turn_intent`, `thread_bound`,
 `turn_started`, `turn_terminal`, `lifecycle_transition`,
-`generation_started`, `generation_stopped`, `app_server_request`,
+`run_generation_started`, `run_generation_stopped`, `app_server_request`,
 `app_server_response`, `app_server_notification`, `approval_requested`,
-`approval_decided`, `access_changed`, `target_observed`,
+`approval_decided`, `access_changed`, `profile_observed`,
 `idempotency_reserved`, `reconciliation`, `cleanup_intent`, `cleanup_result`,
 `ledger_tail_repaired`, `projection_rewound`, `payload_unrepresentable`,
 `start_failed`, and `outcome_unknown`. Adding a kind is a machine-contract
@@ -1155,7 +1181,7 @@ guaranteed.
 limited to 1 MiB with one rotation and remains diagnostics-only.
 
 Audit completeness is limited to Dolgorae lifecycle, app-server-exposed main-turn
-wire traffic, approvals, access transitions, and target/account provenance.
+wire traffic, approvals, access transitions, and profile/account provenance.
 Encrypted or otherwise unexposed native-subagent communication is represented
 as opaque activity when observable and is not claimed as reconstructable audit.
 
@@ -1179,7 +1205,7 @@ prefix. It creates a mode-0700 directory containing 0600 `bundle.json`,
 boundary as well as
 schema version, workspace/run identity, filenames, hashes, and source-derived
 timestamps; lexicographic filenames and source bytes make repeated exports
-content-deterministic. Runtime records, locks, logs, target registry,
+content-deterministic. Runtime records, locks, logs, profile registry,
 `CODEX_HOME`, images, and raw torn-tail evidence are excluded. A failing audit
 does not suppress export: both bundle and verification set
 `verification_failed:true`, while other state-changing commands fail closed.
@@ -1224,7 +1250,7 @@ same-user security boundary. Changes to `.dolgorae/config.toml` and
 `.dolgorae/.gitignore` remain observable workspace changes; only worker-owned
 run/runtime/cache paths are filtered.
 
-The target's own Codex configuration, AGENTS instructions, skills, plugins,
+The profile's own Codex configuration, AGENTS instructions, skills, plugins,
 apps, MCP servers, and native subagents remain available unless they conflict
 with Dolgorae's hard invariants.
 
@@ -1237,14 +1263,14 @@ run's worker socket. V1 has no peer messaging or run-to-run delegation.
 
 An app-server descendant carries `DOLGORAE_MANAGED_CONTEXT`, the unpadded base64url
 encoding of a UTF-8 JCS object containing schema version 1, workspace ID, run ID,
-process generation, boot UUID, and worker PID. A present malformed marker,
+run generation, boot UUID, and worker PID. A present malformed marker,
 unknown schema, nonexistent run, or foreign workspace/run is treated as managed
 and rejected, never as absent. The marker is inherited only by exec descendants;
 an MCP server reached through another transport may not carry it. A `dolgorae`
 process invoked from a valid context permits only read-only status, events, and
 verification of its own run; it rejects run creation, cross-run inspection,
 turn input, pending-response submission, access changes, lifecycle control,
-target commands, initialization, export, and deletion with `POLICY_REJECTED`.
+profile commands, initialization, export, and deletion with `POLICY_REJECTED`.
 This guard prevents ordinary recursive use but is not a security boundary
 against a hostile same-user process that deliberately removes its environment.
 
@@ -1274,7 +1300,7 @@ causes fail-closed rejection. Unknown additive fields and notifications are
 recorded and tolerated. Unknown server requests are recorded, receive JSON-RPC
 method-not-found, and do not stop the generation; unparseable frames fail
 closed. All app-server messages are correlated with request ID, thread
-ID, turn ID, and process generation before affecting state.
+ID, turn ID, and run generation before affecting state.
 
 ## External Protocol References
 
