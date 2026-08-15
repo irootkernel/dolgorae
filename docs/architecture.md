@@ -1,9 +1,9 @@
-# Gomchi Architecture
+# Dolgorae Architecture
 
 Status: Normative target architecture for the first supported release.
 
 This document owns technical structure and invariants. It describes the system
-Gomchi is required to implement; it does not claim that the currently empty
+Dolgorae is required to implement; it does not claim that the currently empty
 repository already implements it. Product behavior is owned by
 [specs.md](specs.md), rationale by
 [architecture-decisions.md](architecture-decisions.md), and implementation
@@ -11,7 +11,7 @@ progress by [roadmap.md](roadmap.md).
 
 ## System Context
 
-Gomchi is a local process supervisor and protocol adapter between a master and
+Dolgorae is a local process supervisor and protocol adapter between a master and
 Codex app-server. It adds durable run identity, account binding, access
 coordination, recovery, and audit around Codex threads without replacing Codex
 conversation storage.
@@ -21,20 +21,20 @@ conversation storage.
                           argv + expected CODEX_HOME
                                      |
                                      v
-master -> gomchi CLI -> per-run worker -> codex app-server -> Codex services
+master -> dolgorae CLI -> per-run worker -> codex app-server -> Codex services
              |              |                  |
           JSON I/O       audit ledger      thread history
 ```
 
-The master is the only orchestrator of independent Gomchi runs. Codex may
+The master is the only orchestrator of independent Dolgorae runs. Codex may
 manage native subagents inside a run; those children remain within Codex's
-session tree and are not Gomchi peers.
+session tree and are not Dolgorae peers.
 
 ## Component Model
 
 ### CLI Front End
 
-The visible `gomchi` invocation is short-lived. It:
+The visible `dolgorae` invocation is short-lived. It:
 
 1. resolves the canonical workspace;
 2. parses and validates machine-oriented input;
@@ -51,7 +51,7 @@ ownership transfers.
 
 ### Per-Run Worker
 
-The worker is a hidden re-execution mode of the same `gomchi` binary. It is the
+The worker is a hidden re-execution mode of the same `dolgorae` binary. It is the
 sole owner of:
 
 - the run control socket;
@@ -101,7 +101,7 @@ The worker starts target argv with app-server's stdio transport. Stdin and
 stdout carry newline-delimited JSON-RPC messages; stderr is captured as bounded
 diagnostic evidence and must not corrupt stdout protocol parsing.
 
-Before launch, the worker removes inherited `GOMCHI_*` control variables and
+Before launch, the worker removes inherited `DOLGORAE_*` control variables and
 adds a fresh managed-run context containing its own workspace and run identity.
 The public CLI recognizes this context and exposes only read-only introspection
 of that same run. This is an accidental-recursion guard, not an unforgeable
@@ -112,7 +112,7 @@ Each connection performs exactly one `initialize` request followed by the
 first turn because pinned Codex does not persist a turnless thread across
 app-server restart. First `send`/`submit` uses `thread/start`; recovered runs use
 `thread/resume`, and history forks use `thread/fork`. After first-turn
-acceptance the worker maintains exactly one loaded Gomchi-owned thread.
+acceptance the worker maintains exactly one loaded Dolgorae-owned thread.
 Turns use `turn/start`, `turn/steer` only when explicitly exposed by a future
 specification, and `turn/interrupt` for cancellation. V1 does not enable the
 experimental app-server API capability.
@@ -149,11 +149,11 @@ Commands or Codex native subagents may temporarily create additional descendant
 processes.
 
 ```text
-gomchi CLI invocation
+dolgorae CLI invocation
   |
   | Unix domain socket: framed JSONL request/response/notifications
   v
-gomchi worker [run R, generation G]
+dolgorae worker [run R, generation G]
   |
   | stdin/stdout: app-server JSONL
   v
@@ -162,7 +162,7 @@ target argv ... app-server --listen stdio://
   +-- Codex-owned command and native-subagent descendants
 ```
 
-The worker control socket resides below `/tmp/gomchi-<uid>/s/`. Gomchi opens
+The worker control socket resides below `/tmp/dolgorae-<uid>/s/`. Dolgorae opens
 `/tmp` without following symlinks, creates each missing component with
 `mkdirat`, validates `EEXIST` with `fstatat`, and accepts the root only when each
 private component is owned by the current uid with mode 0700. The root is
@@ -173,12 +173,12 @@ base32 encoding of the domain-separated workspace-digest/run-UUID preimage in
 SPEC-002.
 The composed path must fit the macOS `sun_path` limit; overflow fails with
 `RUNTIME_PATH_INVALID`. There is no sibling identity sidecar. The durable
-`.gomchi/runtime/runs/<run-id>.json` record is the sole identity authority for
+`.dolgorae/runtime/runs/<run-id>.json` record is the sole identity authority for
 the volatile socket: an existing path without an exact matching record fails
 with `RUNTIME_PATH_COLLISION`, and only the byte-0 winner may unlink it after
 the recorded generation is proved absent. Every request also contains the
 full workspace identity, run ID, expected worker generation, and boot UUID.
-Ordinary requests additionally carry Gomchi version, CLI binary digest, and the
+Ordinary requests additionally carry Dolgorae version, CLI binary digest, and the
 current mutation protocol version so cross-run and unsafe version-skewed
 connections fail closed. A separate version-frozen control protocol v1 accepts
 only `hello`, bounded `status`, and `shutdown` across binary-digest changes.
@@ -187,13 +187,13 @@ identity; all other requests reject version skew. `shutdown` is identity-bound
 and interrupts an active turn before cleanup.
 
 The actual socket path and process identity are discoverable from
-`.gomchi/runtime/runs/<run-id>.json`; discovery never recomputes a path from
+`.dolgorae/runtime/runs/<run-id>.json`; discovery never recomputes a path from
 `$TMPDIR`. The record contains full worker and app-server identity tuples: PID,
 PGID, UID, start seconds/microseconds, live executable path, executable
 device/inode, and executable SHA-256, together with
-the boot-session UUID, process generation, access state, socket path, Gomchi
+the boot-session UUID, process generation, access state, socket path, Dolgorae
 version, binary digest, and IPC protocol version.
-`.gomchi/runtime/writer.json` points to the current writer run/generation and
+`.dolgorae/runtime/writer.json` points to the current writer run/generation and
 stores the incumbent identity plus `cleanup_in_progress`; it is replaced only
 after cleanup is confirmed. Runtime records use write-temp, `fsync`, rename,
 and directory `fsync`. They are recoverable coordination caches; the fsynced
@@ -201,9 +201,9 @@ and directory `fsync`. They are recoverable coordination caches; the fsynced
 
 Writer leases and per-run startup locks live below the workspace-recorded
 persistent private local root, never a value recomputed from the current
-environment. `gomchi init` resolves an explicit `--state-root` or the initial
+environment. `dolgorae init` resolves an explicit `--state-root` or the initial
 XDG/fallback value once and records its canonical path and root device/inode in
-`.gomchi/runtime/lock-root.json` and every run manifest. If the workspace record
+`.dolgorae/runtime/lock-root.json` and every run manifest. If the workspace record
 is missing while runs exist, it is reconstructed only from unanimous manifest
 values; disagreement fails closed. The root is opened and created through
 descriptor-relative, no-symlink operations, must be current-uid-owned mode 0700,
@@ -219,7 +219,7 @@ byte-range locks: byte 0 is the transient CLI starter claim and byte 1 is the
 worker lifetime claim. The 8192-byte file body has separate version-1,
 zero-padded, SHA-256-checksummed owner records at `[0,4096)` for byte 0 and
 `[4096,8192)` for byte 1; a short file is `Unverifiable`. Each record contains the
-range, workspace/run/generation, boot UUID, Gomchi process tuple and executable
+range, workspace/run/generation, boot UUID, Dolgorae process tuple and executable
 path hash. Invalid/unknown/all-zero slots do not override the kernel lock;
 locked ranges without a matching valid record are `Unverifiable`. After acquiring its byte
 a process updates its slot with `pwrite` on that same fd and fsyncs before
@@ -272,7 +272,7 @@ case folding, Unicode normalization, or an alternate path hash.
 The repository-local layout is:
 
 ```text
-.gomchi/
+.dolgorae/
   .gitignore                 # tracked
   config.toml                # tracked portable policy
   runs/                      # ignored, 0700
@@ -305,7 +305,7 @@ completed with facts learned during start. Its fixed semantic fields include:
 - created timestamp and initial access;
 - target name, argv, expected `CODEX_HOME` snapshot;
 - actual app-server version, schema status, and actual `codexHome`;
-- Gomchi version, binary SHA-256, and IPC protocol version;
+- Dolgorae version, binary SHA-256, and IPC protocol version;
 - fixed model and initial/default reasoning effort;
 - immutable run instructions;
 - Codex thread ID when allocated;
@@ -343,14 +343,14 @@ from genesis.
 
 Inbound JSON is parsed with duplicate-member rejection and number lexemes held
 only through adaptation. The in-repo canonicalizer uses UTF-16 key order and
-ECMAScript shortest binary64 rendering and is pinned by RFC 8785 plus Gomchi
-golden vectors; a byte change requires a new hash-scheme version. Before any Gomchi marker is inserted, every inbound object key
-matching `^\$+gomchi_` is escaped by prefixing one additional `$`. Redaction is
+ECMAScript shortest binary64 rendering and is pinned by RFC 8785 plus Dolgorae
+golden vectors; a byte change requires a new hash-scheme version. Before any Dolgorae marker is inserted, every inbound object key
+matching `^\$+dolgorae_` is escaped by prefixing one additional `$`. Redaction is
 then applied, followed by numeric adaptation; the tokenizer never treats a
-Gomchi-owned marker key as a candidate secret key. A decimal whose finite
+Dolgorae-owned marker key as a candidate secret key. A decimal whose finite
 binary64 ECMAScript rendering is not numerically equal to the original is
 replaced before JCS with
-`{"$gomchi_number":"<original-lexeme>"}`. Invalid
+`{"$dolgorae_number":"<original-lexeme>"}`. Invalid
 JSON, duplicate members, and otherwise unrepresentable payloads never reach the
 canonicalizer. Verification requires each stored line, excluding its newline,
 to be byte-identical to the JCS serialization of its own parse. Timestamps use
@@ -362,7 +362,7 @@ for at most 100 milliseconds. Using `fsync(2)`, the ledger is synchronized
 before every externally observable effect: turn intent/idempotency precede
 `turn/start`, approval decisions precede responses, cleanup intent precedes
 signals, and preserved-tail evidence is fsynced before ledger truncation. It is also synchronized before
-Gomchi acknowledges an accepted turn ID, pending master interaction, terminal
+Dolgorae acknowledges an accepted turn ID, pending master interaction, terminal
 result, or access/lifecycle change. Manifest creation and atomic state
 replacement synchronize their containing directories. V1 claims process- and
 OS-crash durability after these barriers, not power-loss durability.
@@ -383,7 +383,7 @@ when known, and reason; no original bytes or sidecar are retained. The ledger
 includes CLI intent accepted by the worker, lifecycle transitions,
 process generations, app-server requests/responses/notifications after
 redaction, approval decisions, state reconciliation, and cleanup results. Its
-completeness claim covers Gomchi lifecycle, main-turn wire traffic exposed by
+completeness claim covers Dolgorae lifecycle, main-turn wire traffic exposed by
 app-server, approvals, access transitions, and target/account provenance. Native
 subagent or other content not exposed in plaintext by app-server is retained
 only as an opaque event and is not claimed as reconstructable audit. Hidden
@@ -399,7 +399,7 @@ event cursor, and ledger head. If it is missing, stale, or invalid, the worker
 replays `audit.jsonl` before accepting ordinary mutations; the bounded control
 channel remains available from `bound` throughout replay.
 If its head is ahead of the durable ledger, it is a stale projection rather
-than an audit-integrity failure: Gomchi rebuilds it and appends
+than an audit-integrity failure: Dolgorae rebuilds it and appends
 `projection_rewound`.
 
 ## State Machine
@@ -428,7 +428,7 @@ Fork creates a distinct run and never transitions or mutates its source run.
 Every outbound app-server request is registered before write and correlated by
 JSON-RPC request ID. Thread-scoped messages must match the run's thread ID;
 turn-scoped messages must match the active or addressed turn ID. Server
-requests are wrapped in a Gomchi request ID that includes process generation.
+requests are wrapped in a Dolgorae request ID that includes process generation.
 
 Unknown responses, mismatched IDs, duplicate terminal events, and invalid state
 transitions are recorded and fail closed. Known-but-unsupported server requests
@@ -568,7 +568,7 @@ validates target identity and compatibility, and inspects the pinned Codex
 thread with stable history APIs only after prior generation absence is proved.
 
 - Confirmed idle history resumes normally.
-- A terminal turn absent from Gomchi's projection is appended as reconciled
+- A terminal turn absent from Dolgorae's projection is appended as reconciled
   evidence and the run returns to idle.
 - An active turn without authoritative terminal evidence produces
   `outcome_unknown`; the replacement app-server is stopped and any writer lease
@@ -643,7 +643,7 @@ The shared fake app-server is a test-only Python subprocess under
 `tools/fake_app_server/` that speaks the real stdio JSONL boundary. TASK-004 is
 its sole owner; later tasks consume or extend it. Declarative scenarios are
 validated against the checked Codex manifest, and the fake shares no production
-parser or state-machine code with Gomchi.
+parser or state-machine code with Dolgorae.
 
 Descendants that deliberately daemonize, escape the process group, or perform
 remote side effects cannot be guaranteed to stop. The agent prompt therefore
@@ -662,7 +662,7 @@ remains writable and produces a nonzero exit.
 
 ## Security and Trust Boundaries
 
-Gomchi is a coordination and audit tool, not a hardened multi-user security
+Dolgorae is a coordination and audit tool, not a hardened multi-user security
 boundary.
 
 It does provide:
@@ -670,15 +670,15 @@ It does provide:
 - user-private local sockets and run files;
 - fail-closed account, request, thread, turn, and generation correlation;
 - Codex sandbox selection for reader/writer turns;
-- a Gomchi-only writer lease per canonical worktree;
+- a Dolgorae-only writer lease per canonical worktree;
 - normative recursive redaction and tamper-evident hash chaining;
 - explicit approval and destructive-action boundaries;
-- a managed-run context guard against ordinary recursive Gomchi control.
+- a managed-run context guard against ordinary recursive Dolgorae control.
 
 It does not provide:
 
 - protection from a hostile process running as the same OS user;
-- filesystem isolation from editors or non-Gomchi tools;
+- filesystem isolation from editors or non-Dolgorae tools;
 - rollback of partial writes;
 - attribution of observed changes to Codex;
 - control of external MCP/app/plugin side effects;
@@ -687,7 +687,7 @@ It does not provide:
 - control of descendants that deliberately leave the recorded app-server
   process group;
 - cryptographic signatures or remote audit attestation;
-- direct communication or trust delegation between independent Gomchi runs;
+- direct communication or trust delegation between independent Dolgorae runs;
 - protection when a hostile same-user child deliberately removes or forges the
   managed-run context marker.
 

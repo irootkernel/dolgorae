@@ -1,4 +1,4 @@
-# Gomchi Pre-Implementation Technical Review — Round 5
+# Dolgorae Pre-Implementation Technical Review — Round 5
 
 Date: 2026-08-16
 Snapshot note: this is the immutable round-5 input review. Owner dispositions
@@ -17,8 +17,8 @@ Scope: the full SOT at HEAD `a7ef311` (`docs/specs.md` 1130 lines,
 `docs/deferred-feedback.md` 31), the checked protocol artifacts reviewed here
 as first-class surfaces for the first time
 (`docs/protocol/codex-0.147.0-required-subset.json` 147,
-`docs/protocol/gomchi-error-contract-v1.json` 169,
-`docs/protocol/gomchi-machine-v1.schema.json` 247), the toolchain pin
+`docs/protocol/dolgorae-error-contract-v1.json` 169,
+`docs/protocol/dolgorae-machine-v1.schema.json` 247), the toolchain pin
 (`rust-toolchain.toml` 5), the probe evidence (`docs/probes/task-000.md` 340)
 and probe suite (`tools/probes/`, 13 Python files + 1 C file, including the
 round-4-added `task000a_*` probes), and the round-2/3/4 review record
@@ -126,12 +126,12 @@ Tags: `patch-surface` (text TASK-000-A introduced or reshaped), `pre-existing`
 | H-10 | High | The takeover no-progress predicate is unevaluable as written and is satisfied by a healthy worker in a quiet turn | specs.md | patch-surface |
 | H-11 | High | `--accept-version-change` exists only on `recover`, which for paused runs starts no generation: upgrades strand paused and outcome-unknown runs | specs.md | patch-surface |
 | H-12 | High | `pause`/`close --interrupt` have no defined behavior on expiry of the 5-second wait, and no transition edge exists for any landing | specs.md | pre-existing |
-| H-13 | High | Control-protocol v1 `shutdown` — the ADR-011 escape hatch — is wired to no CLI command; a gomchi upgrade strands live runs | specs.md | pre-existing |
-| H-14 | High | An `Unreadable` lost-first-turn run must emit `OUTCOME_UNKNOWN` whose required non-nullable `turn_id` does not exist | gomchi-error-contract-v1.json | patch-surface |
-| H-15 | High | Failures before a command is identified have no conforming envelope; the closed 28-command enum has no `unknown` member | gomchi-machine-v1.schema.json | pre-existing |
+| H-13 | High | Control-protocol v1 `shutdown` — the ADR-011 escape hatch — is wired to no CLI command; a dolgorae upgrade strands live runs | specs.md | pre-existing |
+| H-14 | High | An `Unreadable` lost-first-turn run must emit `OUTCOME_UNKNOWN` whose required non-nullable `turn_id` does not exist | dolgorae-error-contract-v1.json | patch-surface |
+| H-15 | High | Failures before a command is identified have no conforming envelope; the closed 28-command enum has no `unknown` member | dolgorae-machine-v1.schema.json | pre-existing |
 | H-16 | High | Non-`--follow` `run events` has no implementable output contract: one-object cap plus a schema that forbids the batch shape | specs.md | patch-surface |
 | H-17 | High | `run respond` has two mutually exclusive input vocabularies, and unpinned decision variants pass validation unmapped | specs.md | patch-surface |
-| H-18 | High | `workspace_changes` is scoped to terminal results by the SOT but required on every turn payload by the checked schema | gomchi-machine-v1.schema.json | patch-surface |
+| H-18 | High | `workspace_changes` is scoped to terminal results by the SOT but required on every turn payload by the checked schema | dolgorae-machine-v1.schema.json | patch-surface |
 | H-19 | High | Omitted `--effort` has no default-derivation rule while omitted `--model` explicitly does; the chosen default feeds the idempotency digest | specs.md | patch-surface |
 | H-20 | High | Zero mechanizable traceability: a fresh 19-MUST sample finds 7 uncaught (37%), statistically unchanged from round 4's 33% | roadmap.md | planning |
 | H-21 | High | Two roadmap tasks each claim to build the shared fake app-server, and no architecture decision governs the fixture | roadmap.md | planning |
@@ -154,11 +154,11 @@ second — within tolerance).
 | Verdict | Items |
 | --- | --- |
 | Verified (54) | H-1, H-2, H-4, H-5, H-8, H-10*, H-12..H-17, H-19, H-21, H-22, H-24..H-31, H-32..H-40, M-1..M-9, M-12, M-14..M-23, L-1, L-2. (*H-10 was initially audited Partial and overturned to Verified on re-verification: the zero-continuity clearing conditions are stated at specs.md:810-811 and SPEC-005's no-force disclosure at specs.md:292-296 names process groups.) |
-| Partial (12) | **C-1** — the digest/canonicalization fix landed, but the demanded "state the exact root-relative lock paths once" did not: specs.md:579 resolves the lock root to `…/gomchi/locks/` while specs.md:671 and architecture.md:205 name files `locks/writer/<digest>`, composing to a doubled `…/locks/locks/writer/…` reading (re-raised as M-22). **C-2** — the five server-request methods and restart non-survival are pinned and live-probed, but the mandated method-not-found behavioral claim was never observed for any class, while SPEC-012 makes "required server-request probes" a version-acceptance gate (re-raised as M-3); the demanded stdio-MCP elicitation probe is dissolved — MCP elicitation is now out of v1 scope (specs.md:891-897). **H-3** — the forkable-status concept landed, but the scan/fallback ladder at specs.md:843 is scoped to "an outcome-unknown source" while specs.md:834 permits history-copying fork from idle/paused/closed (re-raised, merged into H-9). **H-6** — the never-persisted case is probed via the right RPC; the deleted-thread half of the demanded probe pair was never exercised (closed with evidence — see below). **H-7** — the manifest and "contains" algorithm are rigorous, but zero notification names exist anywhere in the SOT and architecture.md:668-671 falsely claims the manifest lists notifications (re-raised, merged into H-5). **H-9** — caps resolved; architecture.md:377 still lacks specs.md:1019's "when observable" hedge (re-raised as L-5). **H-11** — the scope contradiction is resolved; the demanded amendment to round-3-disposition.md:29 was never made (re-raised as L-6). **H-18** — units/ESRCH text fixes landed; `F_GETLK` was never exercised against a `flock()`-origin lock (closed with evidence). **H-20** — spawn attributes landed; the demanded `std::process::Command` inadequacy note is absent (closed with evidence). **H-23** — the `--follow` stream contract landed, but `$defs.event_data.record` is a bare unconstrained `{"type":"object"}`, "normalized record" remains undefined, and the closed record-kind enum is deferred to TASK-003-C — colliding with the closed-schema rule at specs.md:342-345 (re-raised as M-24). **M-10** — the takeover wording fix landed at specs.md:713-714, but architecture.md:386-387 still reads "replays `audit.jsonl` before accepting commands" — the exact sentence the finding demanded be replaced — and the progress-observed abort branch maps to no outcome code (re-raised as M-21). **M-13** — ADR-012's Darwin/libc boundary landed; the demanded safe-Rust mechanism→binding table and the "no new dependency without an ADR" rule exist nowhere (re-raised, merged into H-22). |
+| Partial (12) | **C-1** — the digest/canonicalization fix landed, but the demanded "state the exact root-relative lock paths once" did not: specs.md:579 resolves the lock root to `…/dolgorae/locks/` while specs.md:671 and architecture.md:205 name files `locks/writer/<digest>`, composing to a doubled `…/locks/locks/writer/…` reading (re-raised as M-22). **C-2** — the five server-request methods and restart non-survival are pinned and live-probed, but the mandated method-not-found behavioral claim was never observed for any class, while SPEC-012 makes "required server-request probes" a version-acceptance gate (re-raised as M-3); the demanded stdio-MCP elicitation probe is dissolved — MCP elicitation is now out of v1 scope (specs.md:891-897). **H-3** — the forkable-status concept landed, but the scan/fallback ladder at specs.md:843 is scoped to "an outcome-unknown source" while specs.md:834 permits history-copying fork from idle/paused/closed (re-raised, merged into H-9). **H-6** — the never-persisted case is probed via the right RPC; the deleted-thread half of the demanded probe pair was never exercised (closed with evidence — see below). **H-7** — the manifest and "contains" algorithm are rigorous, but zero notification names exist anywhere in the SOT and architecture.md:668-671 falsely claims the manifest lists notifications (re-raised, merged into H-5). **H-9** — caps resolved; architecture.md:377 still lacks specs.md:1019's "when observable" hedge (re-raised as L-5). **H-11** — the scope contradiction is resolved; the demanded amendment to round-3-disposition.md:29 was never made (re-raised as L-6). **H-18** — units/ESRCH text fixes landed; `F_GETLK` was never exercised against a `flock()`-origin lock (closed with evidence). **H-20** — spawn attributes landed; the demanded `std::process::Command` inadequacy note is absent (closed with evidence). **H-23** — the `--follow` stream contract landed, but `$defs.event_data.record` is a bare unconstrained `{"type":"object"}`, "normalized record" remains undefined, and the closed record-kind enum is deferred to TASK-003-C — colliding with the closed-schema rule at specs.md:342-345 (re-raised as M-24). **M-10** — the takeover wording fix landed at specs.md:713-714, but architecture.md:386-387 still reads "replays `audit.jsonl` before accepting commands" — the exact sentence the finding demanded be replaced — and the progress-observed abort branch maps to no outcome code (re-raised as M-21). **M-13** — ADR-012's Darwin/libc boundary landed; the demanded safe-Rust mechanism→binding table and the "no new dependency without an ADR" rule exist nowhere (re-raised, merged into H-22). |
 | Absent (1) | **M-11** — the demanded one-sentence normative constraint ("CLI creates no thread before fork; the child performs only async-signal-safe operations before exec") appears nowhere in specs.md, architecture.md, or the ADRs. The disposition row (round-4-disposition.md:39) asserts it as settled fact — the sole repo-wide occurrence of "async-signal" is that row. architecture.md:607-611 mandates a multi-threaded worker while architecture.md:68-70 mandates the fork; the constraint that reconciles them is stated only in a file implementers are not required to read (re-raised as M-23). |
 
 Three Partials are **closed with evidence rather than re-raised**: round-4
-H-6's deleted-thread probe (Gomchi is forbidden to delete Codex threads,
+H-6's deleted-thread probe (Dolgorae is forbidden to delete Codex threads,
 specs.md:1049-1051, and task-000.md:231-233 records the stated cache reason
 for substituting `thread/list`); H-18's `flock`-origin `F_GETLK` case (every
 `F_GETLK` in the SOT is scoped to the startup lock's byte ranges — the two
@@ -236,7 +236,7 @@ this — make specs.md agree). Add the TASK-000-B wrapper probe (§5, P-1).
 SPEC-002 makes `realpath(3)` the sole canonicalizer and asserts that
 "filesystem alias resolution, including symlink and case-insensitive lookup,
 belongs to `realpath(3)`" (specs.md:65-66) — empirically false for firmlinks.
-Measured: `/Users/…/gomchi` and `/System/Volumes/Data/Users/…/gomchi` return
+Measured: `/Users/…/dolgorae` and `/System/Volumes/Data/Users/…/dolgorae` return
 two distinct canonical strings for the same `(dev, ino)`; `/usr/share/firmlinks`
 lists 19 such roots including `/Users`, `/private`, `/opt`, `/Applications`,
 `/Volumes`, `/usr/local`. Computing the SPEC-002 preimage over both paths
@@ -253,7 +253,7 @@ workspace `(st_dev, st_ino)` to the digest preimage and recorded identity and
 reject a canonical-path change whose inode matches; TASK-000-B probe P-2.
 
 **H-2. The macOS tmp reaper deletes the socket identity sidecar and eventually the socket root itself, and no document says who creates that root.** [pre-existing]
-architecture.md:159-162 only *validates* `/tmp/gomchi-<uid>/s/` ("opened once
+architecture.md:159-162 only *validates* `/tmp/dolgorae-<uid>/s/` ("opened once
 without following symlinks and accepted only when it is owned by the current
 uid with mode 0700"), while the lock root receives full creation treatment
 (specs.md:584-586: create-exclusive, `EEXIST`, `fstat` 0700, `fstatfs`
@@ -265,12 +265,12 @@ workers live indefinitely, so a 3-day-idle **live** run reliably reaches
 socket-present/sidecar-absent — a state the sidecar-based collision rule
 (architecture.md:168-171) does not classify and specs.md:744's "Any other
 occupied path fails closed" wedges; and once the sockets are gone the empty
-`s/` and `gomchi-<uid>/` are reaped, after which worker start has no specified
+`s/` and `dolgorae-<uid>/` are reaped, after which worker start has no specified
 creation path on a measured mode-1777 `/private/tmp` where the name can be
 squatted. Counter-search: `socket root` creation rule → 0 hits.
 *Fix:* add a socket-root creation rule mirroring specs.md:584-586; classify
 socket-present/sidecar-absent as cleanable by the byte-0 election winner (or
-move the sidecar under `.gomchi/runtime/`, already the discovery authority);
+move the sidecar under `.dolgorae/runtime/`, already the discovery authority);
 state that the root is volatile by OS policy. TASK-000-B probe P-3.
 
 **H-3. `writableRoots` — the Codex sandbox boundary — is derived from two `git rev-parse` results the spec calls absolute and which are measured relative.** [pre-existing]
@@ -327,9 +327,9 @@ anywhere normative — `turn/completed` appears 7 times in the repo, all in
 lists "resolved JSON Pointers, methods, responses, **notifications**" — the
 manifest contains **zero** notification entries (0 hits for "notification" in
 the file), exactly one app-server response schema (`ModelListResponse`; the
-other five `*Response` pins are gomchi's outbound replies), and 11 pointers
+other five `*Response` pins are dolgorae's outbound replies), and 11 pointers
 that terminate at a `$ref` key rather than a resolved node. There is also no
-Codex-status → Gomchi-status mapping: the Gomchi-side vocabulary *is* closed
+Codex-status → Dolgorae-status mapping: the Dolgorae-side vocabulary *is* closed
 in both checked schemas, but `crash_interrupted` (manifest:143) sits outside
 it with no stated mapping, and "unusable status" (specs.md:261, 410) is used
 twice and defined nowhere. SPEC-012's version gate covers this only
@@ -339,7 +339,7 @@ probes happen to hard-code `turn/completed` internally, which is probe
 plumbing, not a contract. An implementer cannot write the turn engine without
 inventing the central wire event's name.
 *Fix:* add a `notifications` object (terminal notification method, turn-status
-JSON Pointer) and a Codex→Gomchi status mapping with three closed lists
+JSON Pointer) and a Codex→Dolgorae status mapping with three closed lists
 (terminal / nonterminal / unlisted ⇒ `Unreadable`) to the manifest; one
 SPEC-008 sentence mapping the lists to the idle/`outcome_unknown` branch;
 correct architecture.md:668-671 to describe what the manifest actually
@@ -358,7 +358,7 @@ method (`thread/resume`), matched it by message substring ("no rollout
 found"), and never recorded the code. Both unmeasured directions are harmful:
 if the real input returns anything ≠ `-32600` it routes to `Unreadable` and
 the ADR-003 retry path is dead in every real crash; if any *other*
-`thread/read` failure also returns `-32600`, gomchi promotes it to `Absent`
+`thread/read` failure also returns `-32600`, dolgorae promotes it to `Absent`
 and performs exactly the automatic replay of a side-effecting intent that
 ADR-008 forbids. Round-4 H-6's own fix demanded probes against "a
 never-persisted **and a deleted** thread ID"; only the first was delivered.
@@ -455,7 +455,7 @@ kills; and specs.md:206-208 applies the procedure to *every* attaching
 command, so a read-only `run pending` can drive a live writer's turn to
 `outcome_unknown`.
 *Fix:* replace the derived counter with a durable beacon — a monotonic
-progress counter plus coarse timestamp updated in `.gomchi/runtime/runs/
+progress counter plus coarse timestamp updated in `.dolgorae/runtime/runs/
 <run-id>.json` at a fixed interval below 30 s (round-4 M-19 offered exactly
 this alternative) — and define whose CPU is measured and how it is sampled;
 TASK-000-B probe P-8.
@@ -480,7 +480,7 @@ generation-starting command may carry it under the same recorded-ledger-event
 conditions.
 
 **H-12. `pause --interrupt` and `close --interrupt` have no defined behavior when the 5-second interrupt terminal wait expires, and the state machine has no legal edge for any landing.** [pre-existing]
-specs.md:813-815 says only "Gomchi requests interruption, waits for a
+specs.md:813-815 says only "Dolgorae requests interruption, waits for a
 terminal result, then stops or closes the run"; specs.md:512 caps the wait at
 five seconds. Every landing is blocked: recording `idle` without evidence is
 forbidden by ADR-008; the transition chain (specs.md:790-801) contains no
@@ -499,9 +499,9 @@ decision before `turn/interrupt` or is left unanswered.
 half), state the cancel-decision ordering, and add TASK-000-B probe P-9
 (interrupt with a pending approval, answered and unanswered).
 
-**H-13. Control-protocol v1's `shutdown` is wired to no CLI command, so the upgrade deadlock ADR-011 exists to prevent is unreachable and a routine gomchi upgrade strands every live run.** [pre-existing]
+**H-13. Control-protocol v1's `shutdown` is wired to no CLI command, so the upgrade deadlock ADR-011 exists to prevent is unreachable and a routine dolgorae upgrade strands every live run.** [pre-existing]
 ADR-011 freezes `hello`/`status`/`shutdown` precisely because "Requiring an
-exact Gomchi binary digest for every worker request prevents a new binary
+exact Dolgorae binary digest for every worker request prevents a new binary
 from identifying or cleanly stopping a live worker created by the old binary"
 (architecture-decisions.md:416-419), and specs.md:717-718 keeps ordinary
 mutations digest-locked. But across all 19 `shutdown` occurrences in the SOT,
@@ -509,7 +509,7 @@ no command in the SPEC-005 grammar (specs.md:215-244) is mapped to control-v1
 `shutdown`: `run recover`'s enumerated actions (specs.md:285-286) do not
 include it, and the takeover path uses `hello` then signals. After a binary
 upgrade, every ordinary command against a live old worker returns
-`GOMCHI_PROTOCOL_MISMATCH` (specs.md:464) — including `pause` and `close`,
+`DOLGORAE_PROTOCOL_MISMATCH` (specs.md:464) — including `pause` and `close`,
 which are mutations — while the error's own remediation text ("retry `hello`,
 bounded `status`, or `shutdown` through control protocol v1") names
 operations no documented command performs. The plausible intent — the CLI
@@ -527,7 +527,7 @@ while the permanent binding "begins when accepted history or the response
 supplies a turn ID" — by construction neither did. Every subsequent
 `send/submit/respond/interrupt/set-effort/promote/demote/pause/resume` must
 then emit `OUTCOME_UNKNOWN` (specs.md:460), whose details schema
-`d_run_id_turn_id` (gomchi-error-contract-v1.json:149) requires a
+`d_run_id_turn_id` (dolgorae-error-contract-v1.json:149) requires a
 non-nullable `turn_id` — and none of those commands takes one as an argument.
 The contract has the vocabulary (`nullable_string`/`nullable_uuid` are used
 five times; `run.active_turn_id` is nullable in the machine schema) but the
@@ -542,10 +542,10 @@ no bound turn reports a null turn id. (Blocked by M-9's missing version
 procedure — sequence that first.)
 
 **H-15. Failures that occur before a command is identified have no conforming envelope, and the "stable" exit-class set is not exhaustive.** [pre-existing]
-The machine schema requires `command` (gomchi-machine-v1.schema.json:215)
+The machine schema requires `command` (dolgorae-machine-v1.schema.json:215)
 drawn from a closed 28-value enum with no member for "unidentified", while
 `INVALID_ARGUMENT` is chartered for "CLI syntax" from "any command"
-(specs.md:443). Bare `gomchi`, a typo'd subcommand, and an unknown top-level
+(specs.md:443). Bare `dolgorae`, a typo'd subcommand, and an unknown top-level
 flag therefore have no legal envelope; `--help`/`--version` appear zero times
 in the SOT; exit 1 is never reserved; and the exit table declared "stable"
 (specs.md:425-436) already omits exit 130, which specs.md:504 documents — so
@@ -561,7 +561,7 @@ specs.md:308 caps a finite command at "exactly one newline-terminated JSON
 object"; specs.md:493 reserves multi-object output to `--follow` (the two are
 consistent — `--follow` is not finite — which is exactly the problem); and
 the checked schema binds `run.events` data to `$defs/event_data`
-(gomchi-machine-v1.schema.json:234), all three variants single records with
+(dolgorae-machine-v1.schema.json:234), all three variants single records with
 `additionalProperties: false`, so the `{"items":[…]}` batch shape available
 to every other collection command is structurally forbidden here. A plain
 `run events <id> --after 5` on a 100-record ledger therefore cannot return
@@ -574,22 +574,22 @@ useless. Round-4 H-23 addressed `--follow` only.
 modes; non-follow emits records to the current head, then one `end` frame,
 exit 0; `--after` defaults to 0; except the events stream from :308.
 
-**H-17. `run respond` has two mutually exclusive input vocabularies, and under the literal reading it forwards approval decisions gomchi never enumerated.** [patch-surface]
+**H-17. `run respond` has two mutually exclusive input vocabularies, and under the literal reading it forwards approval decisions dolgorae never enumerated.** [patch-surface]
 specs.md:900-903 has `run respond` validate the master's JSON "against that
 schema" — the manifest's Codex response schema, whose decision enum is
 `accept`/`acceptForSession`/`decline`/`cancel` — while specs.md:913-921
 exposes `accept_once`/`accept_for_generation`/`decline`/`cancel` and maps
 them to those wire values. `{"decision":"accept_once"}` fails the mandated
-validation (the Gomchi tokens are unreachable through the only input path),
+validation (the Dolgorae tokens are unreachable through the only input path),
 or the raw wire vocabulary is the real input and the mapping table is dead.
 Worse: the manifest pins `CommandExecutionApprovalDecision` at `oneOf`
 indices 0, 1, 4, 5 — indices 2 and 3 provably exist (all 69 constraints
 matched live 0.147.0) and are unconstrained, so under the literal reading a
 master-supplied index-2/3 decision passes validation and is forwarded
-verbatim to app-server: an approval decision gomchi never enumerated, mapped,
+verbatim to app-server: an approval decision dolgorae never enumerated, mapped,
 or audited as one of its four. `request.response_schema` is also a bare
 string identifier dereferenceable nowhere.
-*Fix:* make the input a closed gomchi-decision object; gomchi translates and
+*Fix:* make the input a closed dolgorae-decision object; dolgorae translates and
 validates the **translated** object; constrain `response_schema` to the
 manifest identifiers; add a decision `$def` to the machine schema.
 
@@ -598,7 +598,7 @@ specs.md:534-546 introduces the member with "**A terminal result** includes …
 `workspace_changes`", and the derivation (specs.md:548-553) is a
 turn-interval measurement (git status, or pre/post inode snapshots — a
 *post* snapshot that does not exist mid-turn). The checked schema makes it a
-required member of the shared `turn` object (gomchi-machine-v1.schema.json:
+required member of the shared `turn` object (dolgorae-machine-v1.schema.json:
 132), which `run.submit` (returns an *accepted* turn, specs.md:371-372) and
 timed-out `run.send`/`run.wait` (return nonterminal turns, specs.md:516-518)
 also use. The implementer must emit `observed_paths: []` on a turn that has
@@ -678,7 +678,7 @@ manifest); clarify the stabilization rule's application to test fixtures.
 specs.md:947-948 requires inbound JSON to "reject duplicate object members
 and preserve number lexemes until numeric adaptation," and specs.md:422 makes
 duplicate members "protocol violations rather than last-wins input" — the
-control that keeps round-3 H-10's `^\$+gomchi_` marker-escape rule
+control that keeps round-3 H-10's `^\$+dolgorae_` marker-escape rule
 (specs.md:953-955) unwalkable. `serde_json`'s default violates both
 (last-wins duplicates; lexemes lost). The only crate named anywhere in the
 SOT is `libc` (ADR-012:458); ADR-012:472 rejects `serde_json` for
@@ -712,11 +712,11 @@ claim, the narrowed form appears here.
 | M-2 | SPEC-006's frame classifier (specs.md:401-403) is stated in two-way terms ("a top-level `method` proves an unsolicited notification") over a three-way wire in which both supported server requests carry `id` **and** `method`; no precedence rule orders the id-match predicate against the method predicate, and nothing requires the two JSON-RPC id namespaces to be disjoint. The one probe that measured the server-request `id` type emits it (`task000a_approval_probe.py:67`) but task-000.md and the manifest drop it. | State method-evaluated-first; a frame with both `id` and `method` is a server request, never the solicited response; record `server_request_id_type` in evidence + manifest [patch-surface] |
 | M-3 | The method-not-found behavioral claims — "lets Codex determine the turn result" (specs.md:892-894, recognized-unsupported) and "do not stop the generation" (specs.md:1119-1120, unknown requests) — have zero live evidence: `-32601` has 0 hits repo-wide, the probe harness can only send `result` replies (`_probe_support.py:293`), and roadmap TASK-008 verification is fake-only, while SPEC-012:1113-1115 makes "required server-request probes" a version-acceptance gate. A refused blocking `requestUserInput` leaves the run `running` with an empty pending list, no timeout, and no documented escape but `run interrupt`. (This is round-4 C-2's surviving residue.) | Downgrade to a stated assumption or measure (P-10); one SPEC-009 sentence naming the operator-visible consequence and the escape [patch-surface] |
 | M-4 | "Zero or multiple defaults is `COMPATIBILITY_REJECTED`" (specs.md:875-876) is grammatically unscoped, and the reference probe applies it globally (`default_count == 1` in the PASS tuple, `task000a_contract_probe.py:147`) while the emitter list (specs.md:463) includes `recover`/`reconcile`/`fork`/`resume`, whose runs have pinned models that never consult the default — a benign upstream deprecation window with two defaults bricks recovery of runs that structurally cannot use one. | Scope the sentence to omitted `--model`; make the probe record an observation, not a PASS condition [patch-surface] |
-| M-5 | The stored default effort is never revalidated at the one moment it can go stale: later generations append a new capability snapshot (specs.md:876-877) and `recover --accept-version-change` makes drift real, but the enumerated checkpoints are only `set-effort`-while-no-generation-live and turn-time `--effort` — and the probe proves app-server silently accepts unadvertised efforts, so gomchi's check is the only guard and it is not applied there. Secondarily, `task000_effort_probe.py:107` puts `not rejected` in the PASS tuple, so the suite would fail a future Codex that *tightened* validation. | One generation-start revalidation sentence in SPEC-008; probe assertion becomes an observation [patch-surface] |
+| M-5 | The stored default effort is never revalidated at the one moment it can go stale: later generations append a new capability snapshot (specs.md:876-877) and `recover --accept-version-change` makes drift real, but the enumerated checkpoints are only `set-effort`-while-no-generation-live and turn-time `--effort` — and the probe proves app-server silently accepts unadvertised efforts, so dolgorae's check is the only guard and it is not applied there. Secondarily, `task000_effort_probe.py:107` puts `not rejected` in the PASS tuple, so the suite would fail a future Codex that *tightened* validation. | One generation-start revalidation sentence in SPEC-008; probe assertion becomes an observation [patch-surface] |
 | M-6 | `target doctor` has two both-legal result encodings — `ok:false` + `COMPATIBILITY_REJECTED` (discarding the diagnostics array that is doctor's entire product) vs `ok:true` + `compatibility:"rejected"` + fail diagnostics — with no selection rule anywhere (`doctor` has 5 SOT hits, none descriptive); machines branch on `ok` first, so two conforming implementations invert each other. `target add/list/show` share the `target` shape whose validation-derived fields have no defined source for commands that never execute the target (every field is nullable/emptyable, so this is a determinism gap, not an impossibility). | Doctor always `ok:true` with the verdict in `compatibility`, `COMPATIBILITY_REJECTED` reserved for a check that could not run; non-executing commands emit `unknown`/null/empty [pre-existing] |
 | M-7 | No entry in the timeout table (specs.md:507-514) has a defined expiry error code, and one case has no reachable code at all: `close --interrupt` on a non-terminating turn cannot emit `OUTCOME_UNKNOWN` (`close` is absent from the emitter list at specs.md:460 while `pause` is present), cannot emit `RUN_STATE_CONFLICT` (`--interrupt` legalizes close-from-running), and `RECOVERY_REQUIRED`'s charter is unproved identity. Expiry of the 30-second `initialize`/`model/list` waits is ambiguous between `COMPATIBILITY_REJECTED` (exit 5, `retryable:false`) and `TRANSPORT_FAILURE` (exit 6, `retryable:true`) — maximally divergent master instructions. Group absence (specs.md:657-658 → `RECOVERY_REQUIRED`) proves the pattern was expressible. | Per-budget expiry codes; validation-wait expiry = `TRANSPORT_FAILURE`/`not_accepted`; add `close` to the `OUTCOME_UNKNOWN` emitters (pairs with H-12) [patch-surface] |
-| M-8 | `d_idempotency` (gomchi-error-contract-v1.json:156) is the only comparison error omitting both compared values — a single `key_digest` whose referent is undefined (specs.md:530 fsyncs *two* digests: the opaque key and the normalized-bytes SHA-256) while `d_target_comparison`/`d_compatibility`/`d_stale_request`/`d_path_collision` all require expected **and** actual. Secondarily, "ordered `(detail,lossless-canonical-path)` image tuples" (specs.md:527-528) is bistable between as-supplied and sorted order, though house style (explicit "sorted" at :549/:571) favors as-supplied. | Require `recorded_input_digest` + `observed_input_digest`; state the image-array ordering [pre-existing] |
-| M-9 | Machine-output v1 is closed in both directions (specs.md:342-345) with zero mechanics for introducing a successor: no v2 introduction procedure, no dual-emission rule, no consumer unsupported-version rule, no `--schema-version` (`evolution`/`deprecat`/`negotiat`/`migrat` → 0 hits across the SOT and both protocol JSONs). The archival case is decisive — `run export` bundles carry `bundle_schema_version: const 1`, are permanent (specs.md:1046) and content-deterministic, with no rule for a later gomchi reading an earlier bundle — and **this round's own fixes (H-14, H-15, H-18) are v1 additions the missing procedure blocks**; the canonicalizer has an evolution handle (`sha256-jcs-vN`), machine-output and bundle have none. The accepted iteration cost is recorded nowhere (deferred ledger reads "None"). | One SPEC-006 paragraph: new `$id` per version, consumers read `schema_version` first, define the unsupported-version condition, bundles of any prior version remain readable; add the DF-NNN entry. Sequence this fix **before** H-14/H-15/H-18 [planning] |
+| M-8 | `d_idempotency` (dolgorae-error-contract-v1.json:156) is the only comparison error omitting both compared values — a single `key_digest` whose referent is undefined (specs.md:530 fsyncs *two* digests: the opaque key and the normalized-bytes SHA-256) while `d_target_comparison`/`d_compatibility`/`d_stale_request`/`d_path_collision` all require expected **and** actual. Secondarily, "ordered `(detail,lossless-canonical-path)` image tuples" (specs.md:527-528) is bistable between as-supplied and sorted order, though house style (explicit "sorted" at :549/:571) favors as-supplied. | Require `recorded_input_digest` + `observed_input_digest`; state the image-array ordering [pre-existing] |
+| M-9 | Machine-output v1 is closed in both directions (specs.md:342-345) with zero mechanics for introducing a successor: no v2 introduction procedure, no dual-emission rule, no consumer unsupported-version rule, no `--schema-version` (`evolution`/`deprecat`/`negotiat`/`migrat` → 0 hits across the SOT and both protocol JSONs). The archival case is decisive — `run export` bundles carry `bundle_schema_version: const 1`, are permanent (specs.md:1046) and content-deterministic, with no rule for a later dolgorae reading an earlier bundle — and **this round's own fixes (H-14, H-15, H-18) are v1 additions the missing procedure blocks**; the canonicalizer has an evolution handle (`sha256-jcs-vN`), machine-output and bundle have none. The accepted iteration cost is recorded nowhere (deferred ledger reads "None"). | One SPEC-006 paragraph: new `$id` per version, consumers read `schema_version` first, define the unsupported-version condition, bundles of any prior version remain readable; add the DF-NNN entry. Sequence this fix **before** H-14/H-15/H-18 [planning] |
 | M-10 | The two 4096-byte startup-lock owner records have no stated file offsets (`4096` occurs exactly twice, `offset` zero times), yet ADR-011's cross-version tolerance makes the lock body a frozen on-disk format a *different binary* must parse, and specs.md:680's "unknown-layout slots" presupposes a layout never defined. (Byte-range/record overlap was analyzed and is harmless once offsets are stated.) | Pin `[0,4096)` / `[4096,8192)`, create the file as 8192 zero bytes, short file = `Unverifiable`, add a golden vector [pre-existing] |
 | M-11 | No minimum macOS version or SDK floor exists anywhere normative (`minimum`/`deployment`/`macOS <version>` → 0 hits) while the SOT normatively names eight version-sensitive Darwin surfaces (kqueue ×13, `proc_pidpath` ×5, `proc_listpgrppids` ×4, `MNT_LOCAL` ×4, `fstatfs` ×3, `EVFILT_PROC` ×2, `START_SUSPENDED` ×2, boot-UUID sysctl) plus non-POSIX `F_SETLKWTIMEOUT` (H-4); the only version records live in probe evidence that self-disclaims authority (task-000.md:15-17), and no task promotes a floor. Probe conclusions therefore have an unstated validity range that cannot be re-audited after an OS upgrade. | One sentence in SPEC-001 (e.g. "macOS 26.x or later; earlier releases unverified") + a validity-range line in task-000.md + name it in TASK-015 [planning] |
 | M-12 | The replay `ready` budget "30 s + 1 ms per ledger record capped at 5 min" (specs.md:508-509) names no source for N — readable only from `state.json`, whose invalidity is the very case that triggers full replay — and no outcome for exhaustion (no timeout code exists in the 31-code contract; architecture.md:83-85 maps only EOF); and the SOT does not settle whether every worker start replays fully (specs.md:686, architecture.md:554) or only an invalid-projection start (architecture.md:386-387). (The candidate "self-defeating at 270k records" claim was refuted: at realistic per-record cost the cap binds around ~6M records.) | State scope + input source; map exhaustion to a code; measure the constant (P-11) [pre-existing] |
@@ -725,11 +725,11 @@ claim, the narrowed form appears here.
 | M-15 | The 100 ms projection publication sits inside "Normative internal timeouts are:" (specs.md:507-513), where every other entry has a hard expiry consequence, but its own miss has none — implementers may fail runs on slow disks or never measure it — and `events --follow` is a projection reader with no stated wake-up mechanism (`poll`/`notify`/`wake` → 0 hits), leaving end-to-end observer latency formally unbounded. (The fsync-treadmill cost sub-claim was refuted: publication is event-driven.) | Move to SPEC-010 as a target ("diagnostic, never an error"); specify the consumer wake-up rule [pre-existing] |
 | M-16 | The redaction digit rule "digits attach to the token on their left" (specs.md:984-987) defeats key matching for digit-suffixed secrets — independently reimplemented twice from the spec text: `password2`, `apiKey2`, `oauth2_token`, `accessToken2`, `clientSecret2` all leak while `password_hash` redacts — and the rule is **ambiguous at separator boundaries**: `password_2`/`api_key_2` flip between REDACT and LEAK depending on whether the digit attaches across `_`, and because redaction precedes JCS hashing (specs.md:955), the choice changes the `sha256-jcs-v1` chain invisibly to verification. specs.md:1006 documents over-redaction only; 6 of the 27 canonical sequences are dead (subsumed by shorter listed sequences). roadmap.md:167 has empty-token and plural vectors but no digit vector. | Disambiguate the separator-digit case; additionally match with trailing digit runs stripped per token; state the residual; add digit vectors [pre-existing] |
 | M-17 | Promote/demote is unimplementable under the definitions as written: "clean generation shutdown" then "Promotion acquires the writer lease before replacement activation" (specs.md:751-755), where a generation is worker **plus** app-server (specs.md:24), only a worker may hold the lease (specs.md:588-589), and byte 1 is held for the worker's entire serving lifetime (specs.md:675) — every assignment of the acquirer breaks a rule. ADR-009:362 states the evident intent ("Access changes replace the **app-server** generation") but "app-server generation" is not a defined term. | State in-place semantics (same worker, same byte 1, new app-server child, incremented generation) and amend the specs.md:24 definition to match ADR-009:362 [pre-existing] |
-| M-18 | SPEC-011's `.gomchi` reservation (specs.md:1062) is neither enforceable — `writableRoots` includes the workspace and the pinned `SandboxPolicy` has no deny-list field (manifest `workspace_write_fields`) — nor observable: specs.md:551 excludes `.gomchi/` wholesale from observed paths *including the tracked `config.toml`*, so an agent flipping `default_access` silently converts every future `run start` into a writer (specs.md:457, :563) and the turn report says nothing. SPEC-011 never says its rules are advisory; that statement lives only in ADR-009:364. | State prompt-enforced-only in SPEC-011; narrow the exclusion to `runs/`/`runtime/`/`cache/` so `config.toml` changes are reported; optionally digest `config.toml` in the manifest [pre-existing] |
+| M-18 | SPEC-011's `.dolgorae` reservation (specs.md:1062) is neither enforceable — `writableRoots` includes the workspace and the pinned `SandboxPolicy` has no deny-list field (manifest `workspace_write_fields`) — nor observable: specs.md:551 excludes `.dolgorae/` wholesale from observed paths *including the tracked `config.toml`*, so an agent flipping `default_access` silently converts every future `run start` into a writer (specs.md:457, :563) and the turn report says nothing. SPEC-011 never says its rules are advisory; that statement lives only in ADR-009:364. | State prompt-enforced-only in SPEC-011; narrow the exclusion to `runs/`/`runtime/`/`cache/` so `config.toml` changes are reported; optionally digest `config.toml` in the manifest [pre-existing] |
 | M-19 | No repeatable check entry point exists for a 15-task serial gate demanding "designated deterministic verification passes" and clippy "with warnings denied" — no `.github`, no runner, no script (`CI`/`nextest`/`test-runner` → 0 relevant hits); the per-probe command blocks in task-000.md are a real manual runbook, so the gap is a single entry point and a recorded commit-or-decline decision, not repeatability itself. | One local script/`just` recipe covering schema validation + probe suite + fmt/clippy; a one-paragraph CI decision in the roadmap [planning] |
 | M-20 | The two throughput-shaped constants — 1 ms/record replay allowance and 100 ms projection publication — are verified only against the injectable clock through TASK-015 (`performance`/`latency`/`benchmark` → 0 hits repo-wide), and the allowance is below the real cost of its own worst case: one ledger record may carry a 2 MiB payload (specs.md:387) whose parse+JCS+SHA-256 replay cost is tens of milliseconds, so a payload-heavy ledger can exhaust the `ready` budget with no distinguishing diagnostic. | One real-hardware measurement line in TASK-014/015 for replay rate and publication latency; re-derive the constants from it [planning] |
 | M-21 | architecture.md:386-387 still reads "the worker replays `audit.jsonl` **before accepting commands**" — the exact sentence round-4 M-10 demanded be replaced — while specs.md:713-714 now says the control channel is serviced from `bound` *during* replay: a live SOT-vs-SOT contradiction of the kind specs.md:8-9 declares invalid. The progress-observed takeover-abort branch (specs.md:728-730) still maps to no outcome code. | Replace with "before accepting ordinary mutations"; map the progress-observed abort to `RUN_BUSY` [patch-surface] |
-| M-22 | The default lock root resolves to `…/gomchi/locks/` (specs.md:579) while the lock files are named `locks/writer/<digest>` and `locks/startup/<digest>` "below the workspace-recorded lock root" (specs.md:671, architecture.md:205) — composing to a doubled `…/locks/locks/writer/…` under the default and a single `…/locks/…` under `--state-root`, mutually exclusive readings of the same rule. This is the surviving half of round-4 C-1, whose fix demanded "state the exact root-relative lock paths once." | State once whether the recorded root already terminates in `locks/`; align specs.md:579/:671 and architecture.md:205 [pre-existing] |
+| M-22 | The default lock root resolves to `…/dolgorae/locks/` (specs.md:579) while the lock files are named `locks/writer/<digest>` and `locks/startup/<digest>` "below the workspace-recorded lock root" (specs.md:671, architecture.md:205) — composing to a doubled `…/locks/locks/writer/…` under the default and a single `…/locks/…` under `--state-root`, mutually exclusive readings of the same rule. This is the surviving half of round-4 C-1, whose fix demanded "state the exact root-relative lock paths once." | State once whether the recorded root already terminates in `locks/`; align specs.md:579/:671 and architecture.md:205 [pre-existing] |
 | M-23 | The async-signal-safety constraint on the fork→re-exec path exists only as a disposition-row assertion (round-4-disposition.md:39 — the sole repo-wide occurrence of "async-signal"): architecture.md:607-611 mandates a multi-threaded worker and architecture.md:68-70 mandates the single fork + `setsid()` + re-exec, and no SOT sentence states the discipline that reconciles them, so a future implementer adding a pre-fork thread (logging, async runtime) violates an unwritten rule. This is round-4 M-11, still Absent. | Add the one demanded sentence to architecture.md's Per-Run Worker section: "The CLI creates no thread before fork; between fork and re-exec the child performs only async-signal-safe operations." [pre-existing] |
 | M-24 | The `events` stream's `record` member is a bare unconstrained `{"type":"object"}` in the checked schema, "normalized record" is never defined, and the closed record-kind enum is deferred to TASK-003-C (roadmap.md:186) — colliding with specs.md:342-345's "consumers MUST reject unknown fields," which is unenforceable for `data.record`. This is round-4 H-23's surviving residue (the `--follow` transport half landed; the payload half did not). | Define the record envelope (kind enum + per-kind required members) in the machine schema or a referenced ledger-record schema when TASK-003-C lands; until then, scope the closed-schema rule to exclude `record` explicitly [patch-surface] |
 
@@ -737,17 +737,17 @@ Lows.
 
 | ID | Finding |
 | --- | --- |
-| L-1 | "Reader auto-decline" is a roadmap deliverable twice (roadmap.md:294, :302) but no SOT text assigns the mechanism to gomchi code — specs.md:770's rule is realized by `approvalPolicy:"never"` (evidence: the never-policy probe turn emitted no approval request), so the deliverable is either vacuous or an undocumented second mechanism; no probe ever ran an approval scenario under `never`. One SPEC-009 sentence resolves it. |
+| L-1 | "Reader auto-decline" is a roadmap deliverable twice (roadmap.md:294, :302) but no SOT text assigns the mechanism to dolgorae code — specs.md:770's rule is realized by `approvalPolicy:"never"` (evidence: the never-policy probe turn emitted no approval request), so the deliverable is either vacuous or an undocumented second mechanism; no probe ever ran an approval scenario under `never`. One SPEC-009 sentence resolves it. |
 | L-2 | A `send`/`wait` whose turn ends `failed`/`interrupted` returns exit 7 with a closed `failure` envelope carrying only `d_turn_status` — the master loses response, usage, cursor, and `workspace_changes` on exactly the outcomes it most needs them for; recoverable via `run status.last_terminal`, which one sentence should direct masters to. |
 | L-3 | `targets.toml` — contents executed as argv — has no specified file/directory mode while every comparable artifact does; measured umask 022 yields 0644 (group-readable disclosure of argv and `CODEX_HOME` paths; not writable, so no injection surface). Specify 0700/0600 in SPEC-003. |
 | L-4 | Idempotency normalization hashes image `(detail, path)` but not image bytes (specs.md:527-529): replacing the file at a recorded path and reusing the key returns the original turn instead of `IDEMPOTENCY_CONFLICT`; specs.md:274-276 acknowledges the hazard only for replay. Hash the bytes or state the exclusion. |
 | L-5 | architecture.md:377 asserts subagent-activity opacity unconditionally while specs.md:1019 hedges "when observable" — and the probe record (task-000.md:179) falsifies the unhedged form. Add the hedge (round-4 H-9's surviving half). |
 | L-6 | round-3-disposition.md:29's H-7 row was never amended to record the same-run→workspace-wide substitution, as round-4 H-11's fix demanded. One disclosure sentence. |
-| L-7 | No stated policy for a newer binary opening an older `.gomchi` tree: formats are versioned and the manifest records the hash scheme (the hook exists, architecture.md:327), but nothing obliges honoring an older `sha256-jcs-vN` and no version-mismatch behavior is defined for `manifest.json`/`state.json`/`audit.jsonl` — while specs.md:1046 guarantees indefinite persistence. One policy sentence, even "fails closed; stay on the matching binary." |
+| L-7 | No stated policy for a newer binary opening an older `.dolgorae` tree: formats are versioned and the manifest records the hash scheme (the hook exists, architecture.md:327), but nothing obliges honoring an older `sha256-jcs-vN` and no version-mismatch behavior is defined for `manifest.json`/`state.json`/`audit.jsonl` — while specs.md:1046 guarantees indefinite persistence. One policy sentence, even "fails closed; stay on the matching binary." |
 | L-8 | `implementation-notes.md` and `docs/reviews/README.md` have zero inbound links — the entire review record is unreachable from any linked document — and gate item 6 hyperlinks `deferred-feedback.md` while parallel item 7 links nothing. Two links. |
 | L-9 | deferred-feedback.md:29 names only Round-2 and Round-3 as closing clean; Round 4 closed clean on 2026-08-16 and is missing. One sentence. |
 | L-10 | Mixed RFC-2119 register: lowercase `must` states binding rules (specs.md:656, 809) and lowercase `may` grants authorizations (specs.md:414, 733, 742, 807, 1083, 1107); the clearest exhibit is specs.md:758, which uses `MAY` and `may` in one sentence; roadmap.md:17 uses `MUST NOT` with no declared convention. (specs.md:11 does not say *only* uppercase is normative, so this is register consistency, not a normativity gap.) Capitalize ~8 instances or add a one-line note. |
-| L-11 | The four SOT documents have essentially no ID-level cross-reference fabric — 0 `ADR-` refs in specs.md/architecture.md, 0 `SPEC-` refs in the ADRs, architecture.md cites 2 of 12 SPEC IDs — which is how M-21's live contradiction and L-13's transport residue survived a clean closure; the duplicated 4096-byte owner-record definition even names its fourth field differently ("full Gomchi process identity" vs "Gomchi process tuple"). Standardize and cite the owning ID at each duplication point. |
+| L-11 | The four SOT documents have essentially no ID-level cross-reference fabric — 0 `ADR-` refs in specs.md/architecture.md, 0 `SPEC-` refs in the ADRs, architecture.md cites 2 of 12 SPEC IDs — which is how M-21's live contradiction and L-13's transport residue survived a clean closure; the duplicated 4096-byte owner-record definition even names its fourth field differently ("full Dolgorae process identity" vs "Dolgorae process tuple"). Standardize and cite the owning ID at each duplication point. |
 | L-12 | "operator" is used three times (specs.md:810, architecture-decisions.md:314, todo.md:71) for the actor Definitions names **Master**, and is never defined. Replace or define. |
 | L-13 | architecture.md:44 still says the CLI "exchanges one request/response or one event stream **with the worker**," contradicting specs.md:866-869 and architecture.md:588-591, which make `events` projection-only (round-4 M-9's surviving residue). Qualify step 5. |
 
@@ -880,7 +880,7 @@ forced-recovery removal with TODO-005 parked (no `--force` anywhere in the
 grammar); the transient read-only reconcile generation; the four-verdict
 identity model with boot-session UUID; the oversized-stdout quarantine
 posture (round-3 M-11 remains rejected-by-design; do not re-raise tolerance
-counters); the `$gomchi_*` marker and escaping design (injectivity
+counters); the `$dolgorae_*` marker and escaping design (injectivity
 re-verified); the error-table format; the CLI grammar; the XDG state root and
 `MNT_LOCAL` lock-root choice; the fd-3 `bound`/`ready` handshake; the SIGTERM
 evidence-first shutdown design; the probe anti-gaming discipline; the

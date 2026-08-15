@@ -1,4 +1,4 @@
-# Gomchi Roadmap
+# Dolgorae Roadmap
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and Round-4
 stabilization `TASK-000-A` remain complete. Round-5 stabilization
@@ -183,7 +183,7 @@ fault barrier are addressable without sleeping.
 Status: `PLANNED`
 
 Implement Git and explicit non-Git initialization, per-worktree canonical
-workspace identity, upward `.gomchi` discovery, minimal policy files, generated
+workspace identity, upward `.dolgorae` discovery, minimal policy files, generated
 local ignore policy, dirty-worktree baseline capture, and safe permission
 creation. Establish `--state-root`, `lock-root.json`, mandatory local-APFS
 workspace and state-root checks with no override,
@@ -265,7 +265,7 @@ caller Ctrl-C and command substitution, inherited-signal reset, oversized or
 malformed frames, cross-run identity rejection, slow-observer backpressure, and
 worker restart.
 Control fixtures require digest-skewed hello/status/shutdown during replay,
-mutation rejection with `GOMCHI_PROTOCOL_MISMATCH`, active-turn shutdown, fd-3
+mutation rejection with `DOLGORAE_PROTOCOL_MISMATCH`, active-turn shutdown, fd-3
 survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unlink.
 
 ### TASK-005: Target Registry and Compatibility Doctor
@@ -309,7 +309,7 @@ callers.
 
 Status: `PLANNED`
 
-Goal: Enforce Gomchi's one-writer-app-server-per-worktree scope,
+Goal: Enforce Dolgorae's one-writer-app-server-per-worktree scope,
 master-controlled interaction, and conservative failure semantics.
 
 ### TASK-007: Reader/Writer Lease and Access Transitions
@@ -399,7 +399,7 @@ source identity unavailable; fresh escape without source thread/ledger mutation;
 transient early-ID timeout/malformed/oversize; proof that no unknown input is
 replayed.
 
-Epic acceptance: failures cannot create two Gomchi writer app-servers, signal an
+Epic acceptance: failures cannot create two Dolgorae writer app-servers, signal an
 unverified process, resume an ambiguously owned thread, silently replay a turn,
 cross account boundaries, or falsely claim known outcomes.
 
@@ -446,8 +446,8 @@ prefix, and regenerate bundled projections from it.
 
 Status: `PLANNED`
 
-Implement the generation-immutable Gomchi developer-instruction prefix, subordinate run
-instructions, `.gomchi` reservation, access-aware mutation policy, explicit Git
+Implement the generation-immutable Dolgorae developer-instruction prefix, subordinate run
+instructions, `.dolgorae` reservation, access-aware mutation policy, explicit Git
 and background-process rules, managed-run context fencing, master-only
 independent-run control, bounded app-server process-group shutdown, and cleanup
 audit records.

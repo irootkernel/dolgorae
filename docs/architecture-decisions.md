@@ -1,4 +1,4 @@
-# Gomchi Architecture Decisions
+# Dolgorae Architecture Decisions
 
 Status: Current accepted decisions for the first supported release.
 
@@ -19,7 +19,7 @@ domains unrelated to the user's active runs.
 
 ### Decision
 
-Ship one `gomchi` executable. For every live run, re-execute that binary in a
+Ship one `dolgorae` executable. For every live run, re-execute that binary in a
 hidden worker mode and start one app-server child. Install no launchd unit,
 global daemon, or project daemon. Recover workers on demand after process loss
 or reboot.
@@ -52,14 +52,14 @@ socket, and experimental WebSocket transports.
 
 ### Decision
 
-Use a user-private Unix domain socket between transient Gomchi CLI invocations
+Use a user-private Unix domain socket between transient Dolgorae CLI invocations
 and the per-run worker. Use app-server's default stdio JSONL transport between
 the worker and its child. The master never connects directly to app-server.
 
 ### Consequences
 
 - The worker is the only protocol client and audit interposer.
-- Socket paths live under a fixed short user-private `/tmp/gomchi-<uid>/` root
+- Socket paths live under a fixed short user-private `/tmp/dolgorae-<uid>/` root
   and their actual location is recorded in workspace runtime state; discovery
   does not depend on the caller's `$TMPDIR`.
 - App-server cannot be independently reattached after worker loss; recovery
@@ -68,7 +68,7 @@ the worker and its child. The master never connects directly to app-server.
 
 ### Rejected alternatives
 
-- Direct master-to-app-server socket: rejected because it bypasses Gomchi state,
+- Direct master-to-app-server socket: rejected because it bypasses Dolgorae state,
   writer policy, idempotency, and audit.
 - Worker-to-app-server Unix socket: rejected because it permits multiple
   clients and weakens exclusive lifecycle ownership without a v1 benefit.
@@ -112,7 +112,7 @@ turnless `thread/start` across app-server restart.
 - Rebinding a run to a new thread after loss: rejected because it would falsely
   claim same-session continuity.
 
-## ADR-004: Operate in the Canonical Workspace With One Gomchi Writer Lane
+## ADR-004: Operate in the Canonical Workspace With One Dolgorae Writer Lane
 
 Status: Accepted
 
@@ -127,7 +127,7 @@ simultaneous writers within that worktree conflict.
 
 Run Codex in the canonical workspace selected by the caller. A linked Git
 worktree is an independent canonical workspace and supported parallel writer
-lane. Allow concurrent readers and at most one Gomchi writer app-server per canonical worktree,
+lane. Allow concurrent readers and at most one Dolgorae writer app-server per canonical worktree,
 coordinated by a nonblocking BSD `flock(2)` held by the worker across starting,
 idle, running, and waiting writer states and released on start failure. The
 canonical identity is domain-separated SHA-256 of libc `realpath(3)` bytes with
@@ -148,9 +148,9 @@ no transactional rollback.
 - Writer changes are immediately visible to the user and readers.
 - Interrupted work may leave partial changes.
 - Readers have no snapshot isolation and may see an intermediate state.
-- The lease coordinates Gomchi workers only; editors and external tools remain
+- The lease coordinates Dolgorae workers only; editors and external tools remain
   outside its guarantee.
-- Native Codex subagents remain inside the owning reader or writer run; Gomchi
+- Native Codex subagents remain inside the owning reader or writer run; Dolgorae
   does not serialize their internal execution lanes.
 - For a verified but wedged current writer, same-run recovery first serializes
   through a run-keyed election, revalidates and terminates the worker outside a
@@ -201,7 +201,7 @@ across targets.
 - Registry edits affect only future runs.
 - Executable updates at the same path require generation-time compatibility
   validation but do not change the expected home.
-- Gomchi does not install, update, or authenticate Codex.
+- Dolgorae does not install, update, or authenticate Codex.
 
 ### Rejected alternatives
 
@@ -257,18 +257,18 @@ Status: Accepted
 ### Context
 
 Separate normalized, wire, and transcript authorities can disagree. Conversely,
-Gomchi cannot replace the Codex thread as model-visible conversation storage.
+Dolgorae cannot replace the Codex thread as model-visible conversation storage.
 
 ### Decision
 
-Use one append-only `audit.jsonl` per run containing Gomchi lifecycle and
+Use one append-only `audit.jsonl` per run containing Dolgorae lifecycle and
 redacted app-server-exposed wire evidence in a total order. Derive state,
 transcript, events, and exports from that ledger. Canonicalize records with RFC
 8785 JCS and use the versioned `sha256-jcs-v1` chain for ordinary integrity
 detection. Own the canonicalizer in-repo with UTF-16 key ordering, ECMAScript
 binary64 rendering, duplicate rejection, and RFC 8785 vectors; a byte change
-requires a new hash-scheme version. Treat the Codex thread as continuation authority and the Gomchi
-ledger as audit authority only for information Gomchi actually observes.
+requires a new hash-scheme version. Treat the Codex thread as continuation authority and the Dolgorae
+ledger as audit authority only for information Dolgorae actually observes.
 Keep the 16 MiB cap for unsolicited stdout because it protects the active
 protocol stream from unbounded frames. Treat solicited `thread/read` specially
 only after its matching top-level ID appears within that prefix; this is a live
@@ -289,7 +289,7 @@ outstanding request.
 
 - Separate authoritative normalized and wire logs: rejected because ordering
   and reconciliation become multi-source problems.
-- Gomchi transcript as conversation backup: rejected because it cannot recreate
+- Dolgorae transcript as conversation backup: rejected because it cannot recreate
   Codex's exact model-visible session state.
 - Signed audit in v1: rejected because there is no external key or trust anchor.
 
@@ -300,7 +300,7 @@ Status: Accepted
 ### Context
 
 If worker/app-server dies during a turn, filesystem mutations may have occurred
-even when Gomchi did not receive the terminal response. Automatic replay could
+even when Dolgorae did not receive the terminal response. Automatic replay could
 duplicate destructive or external side effects.
 
 ### Decision
@@ -338,19 +338,19 @@ manifest, never reads its ledger or Codex thread, and never grants write access.
 - Forced same-thread recovery: rejected for v1 because an unverifiable old
   app-server may still own the Codex thread and workspace process group.
 
-## ADR-009: Inject Strong Gomchi Agent Invariants
+## ADR-009: Inject Strong Dolgorae Agent Invariants
 
 Status: Accepted
 
 ### Context
 
-Pure prompt passthrough does not reliably preserve Gomchi's reserved storage,
+Pure prompt passthrough does not reliably preserve Dolgorae's reserved storage,
 write authority, Git publication, background-process, and reporting boundaries.
 Target configuration must nevertheless remain useful.
 
 ### Decision
 
-Inject a strong generation-immutable developer-instruction prefix that defines Gomchi's
+Inject a strong generation-immutable developer-instruction prefix that defines Dolgorae's
 master/subagent relationship, current access, and hard safety invariants. Append immutable
 run-specific instructions as subordinate context. Continue to respect target
 AGENTS files, skills, plugins, apps, MCP servers, and native subagents unless
@@ -360,7 +360,7 @@ they conflict with the hard invariants.
 
 - Every turn receives consistent governance.
 - Read and write authorization derives from both request intent and run access.
-- `.gomchi`, Git publication, external effects, and background processes receive
+- `.dolgorae`, Git publication, external effects, and background processes receive
   explicit treatment.
 - Access changes replace the app-server generation so prefix and sandbox agree.
 - Native subagents are instructed not to overlap write-heavy delegation.
@@ -371,7 +371,7 @@ they conflict with the hard invariants.
 - Minimal passthrough: rejected because critical product invariants would be
   implicit and easy to violate.
 - Disable target tools and native subagents: rejected because it would make
-  Gomchi less compatible with the user's prepared Codex environments.
+  Dolgorae less compatible with the user's prepared Codex environments.
 - Mutable run instructions: rejected because they would weaken reproducibility
   and make past turn governance ambiguous.
 
@@ -388,9 +388,9 @@ supports native subagents within a session.
 
 ### Decision
 
-Use a hub-and-spoke model in v1. Only the master controls independent Gomchi
-runs. Gomchi-managed agents may use Codex native subagents but must not control
-another Gomchi run or connect to its socket. Defer any future inter-run feature
+Use a hub-and-spoke model in v1. Only the master controls independent Dolgorae
+runs. Dolgorae-managed agents may use Codex native subagents but must not control
+another Dolgorae run or connect to its socket. Defer any future inter-run feature
 as capability-scoped hierarchical delegation, not peer messaging.
 
 ### Consequences
@@ -405,7 +405,7 @@ as capability-scoped hierarchical delegation, not peer messaging.
 
 - Arbitrary peer messaging: rejected because it permits cycles and unclear
   authority.
-- Let agents shell out to `gomchi`: rejected because it bypasses master intent
+- Let agents shell out to `dolgorae`: rejected because it bypasses master intent
   and could cross target/account boundaries.
 - Add a global broker daemon: rejected because it conflicts with ADR-001 and
   still requires a delegation security model.
@@ -416,7 +416,7 @@ Status: Accepted
 
 ### Context
 
-Requiring an exact Gomchi binary digest for every worker request prevents a new
+Requiring an exact Dolgorae binary digest for every worker request prevents a new
 binary from identifying or cleanly stopping a live worker created by the old
 binary. Treating all old workers as stale would make upgrades unsafe.
 
@@ -424,7 +424,7 @@ binary. Treating all old workers as stale would make upgrades unsafe.
 
 Freeze control protocol v1 with only `hello`, bounded `status`, and `shutdown`.
 It validates workspace, run, generation, boot UUID, and live process identity
-but deliberately tolerates Gomchi version and binary-digest differences.
+but deliberately tolerates Dolgorae version and binary-digest differences.
 `shutdown` is identity verified and interrupts an active turn before cleanup.
 All mutation, history, and app-server operations remain on the current exact
 version/digest protocol and reject skew.
@@ -455,7 +455,7 @@ is selected makes compatibility and audit identity drift with implementation.
 
 ### Decision
 
-Check in JSON Schemas for Gomchi machine output and the Codex required subset.
+Check in JSON Schemas for Dolgorae machine output and the Codex required subset.
 Own JCS in an in-repository conformance module. Pin Rust 1.97.1 and Cargo.lock.
 Put `posix_spawn` attributes, libproc, kqueue, byte-range fcntl, `fstatfs`, and
 boot-UUID sysctl behind one safe Darwin module using the `libc` crate; no other

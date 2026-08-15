@@ -1,8 +1,8 @@
-# Gomchi Product Specification
+# Dolgorae Product Specification
 
 Status: Normative target specification for the first supported release.
 
-This document owns Gomchi's externally observable behavior. Technical structure
+This document owns Dolgorae's externally observable behavior. Technical structure
 is owned by [architecture.md](architecture.md), decision rationale by
 [architecture-decisions.md](architecture-decisions.md), and delivery state by
 [roadmap.md](roadmap.md). A contradiction between SOT documents is an invalid
@@ -13,14 +13,14 @@ normative; lowercase prose is descriptive and grants no additional authority.
 
 ## Definitions
 
-- **Master**: the user or AI agent that invokes the `gomchi` CLI and owns
+- **Master**: the user or AI agent that invokes the `dolgorae` CLI and owns
   orchestration decisions.
-- **Run**: one durable Gomchi session, identified by a UUIDv7 and bound to one
+- **Run**: one durable Dolgorae session, identified by a UUIDv7 and bound to one
   Codex thread.
 - **Turn**: one identified Codex execution within a run, beginning when
   `turn/start` is accepted and ending only when Codex confirms completed,
   interrupted, or failed status.
-- **Worker**: the hidden per-run Gomchi process that owns the app-server child,
+- **Worker**: the hidden per-run Dolgorae process that owns the app-server child,
   the worker control socket, and the run audit writer.
 - **Process generation**: one app-server configuration and lifetime within a
   run. A worker may host successive process generations; its own lifetime is
@@ -28,7 +28,7 @@ normative; lowercase prose is descriptive and grants no additional authority.
 - **Target**: a user-local, named Codex execution configuration consisting of
   shell-free argv and an expected `CODEX_HOME`.
 - **Reader**: a run whose turns use Codex read-only sandbox policy.
-- **Writer**: the single run that holds the Gomchi writer lease for a canonical
+- **Writer**: the single run that holds the Dolgorae writer lease for a canonical
   workspace and whose turns may use workspace-write sandbox policy.
 - **Terminal turn**: a turn confirmed as completed, interrupted, or failed.
 - **Forkable turn**: a terminal turn whose exact status is listed in the
@@ -37,8 +37,8 @@ normative; lowercase prose is descriptive and grants no additional authority.
 
 ## SPEC-001: Product Boundary and Supported Environment
 
-Gomchi MUST provide persistent Codex subagents through one distributable
-`gomchi` executable. It MUST NOT install a global daemon, project daemon,
+Dolgorae MUST provide persistent Codex subagents through one distributable
+`dolgorae` executable. It MUST NOT install a global daemon, project daemon,
 launchd unit, Codex binary, authentication material, or `CODEX_HOME`.
 
 The first supported release is a personal alpha for Apple Silicon macOS 26.0
@@ -50,16 +50,16 @@ updates are not supported release targets. Empirical release evidence is
 valid only for the recorded OS build and MUST be refreshed on a new macOS
 major version.
 
-Gomchi depends on user-prepared Codex targets. The compatibility baseline is
+Dolgorae depends on user-prepared Codex targets. The compatibility baseline is
 Codex app-server 0.147.0.
 
 ## SPEC-002: Workspace Initialization and Discovery
 
-`gomchi init [PATH]` MUST initialize a Git workspace. `gomchi init --non-git
-[PATH]` MUST explicitly opt a general directory into Gomchi. A run MUST NOT
+`dolgorae init [PATH]` MUST initialize a Git workspace. `dolgorae init --non-git
+[PATH]` MUST explicitly opt a general directory into Dolgorae. A run MUST NOT
 start in an uninitialized workspace.
 
-In Git mode, Gomchi runs
+In Git mode, Dolgorae runs
 `git -c core.quotePath=true -C <supplied-existing-directory> rev-parse --show-toplevel`
 without a shell and requires exit 0 and exactly one LF-terminated stdout
 result; bounded stderr is diagnostic only when exit is zero. A double-quoted result is decoded with Git's documented
@@ -70,22 +70,22 @@ that decoded existing directory, even when the supplied path is a subdirectory.
 In non-Git mode it is `realpath(3)` applied to the existing initialized
 directory. The canonical path is the returned absolute POSIX byte sequence
 with no trailing slash except for root, followed by the macOS Data-volume
-alias rule below. Gomchi performs no Unicode normalization or case folding.
+alias rule below. Dolgorae performs no Unicode normalization or case folding.
 Symlink and case-insensitive lookup belong to `realpath(3)`, but APFS
 firmlinks do not: when the result is exactly `/System/Volumes/Data` or begins
-with `/System/Volumes/Data/`, Gomchi derives the candidate `/` or the path with
+with `/System/Volumes/Data/`, Dolgorae derives the candidate `/` or the path with
 that prefix removed and substitutes it only when no-follow `stat` of both
 paths yields the same `(st_dev, st_ino)`. The same rule is applied in Git and
 non-Git mode before any digest is computed.
 
 The workspace digest is lowercase hexadecimal SHA-256 over
-`"gomchi-workspace-v1\0"` followed by those canonical path bytes. The full
+`"dolgorae-workspace-v1\0"` followed by those canonical path bytes. The full
 64-character digest is the workspace ID and writer-lock filename. The startup
 filename is lowercase hexadecimal SHA-256 over
-`"gomchi-startup-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The short
+`"dolgorae-startup-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The short
 socket name is RFC 4648 uppercase unpadded base32 of the first 160 bits of
 SHA-256 over
-`"gomchi-socket-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The manifest
+`"dolgorae-socket-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The manifest
 records both the canonical path bytes in the lossless path representation and
 the full workspace digest. Here `workspace_digest_bytes` is the raw 32-byte
 SHA-256 result, not its hex text, and `run_uuid_bytes` is the UUID's 16 bytes in
@@ -93,20 +93,20 @@ RFC 4122/network order, not its hyphenated text. Every component MUST use these
 same preimages.
 
 Each linked Git worktree has its own canonical top-level path and is therefore
-a separate Gomchi workspace, run store, and writer lease. Gomchi supports one
+a separate Dolgorae workspace, run store, and writer lease. Dolgorae supports one
 writer lane per worktree; it does not serialize writers across worktrees that
 share a common Git directory.
 
 Dirty Git workspaces are allowed. Run creation MUST record a read-only baseline
-containing HEAD, branch, tracked changes, and untracked paths. Gomchi MUST NOT
+containing HEAD, branch, tracked changes, and untracked paths. Dolgorae MUST NOT
 discard, reset, stash, or otherwise rewrite pre-existing changes.
 
-Later commands discover the nearest ancestor containing `.gomchi`; an explicit
+Later commands discover the nearest ancestor containing `.dolgorae`; an explicit
 `--workspace PATH` overrides discovery. Discovery selects a workspace only. It
 MUST NOT implicitly select a run.
 
-Git-mode `.gomchi` MUST be at the canonical Git top level. `--non-git` is
-rejected for a path inside any Git worktree, and a nested `.gomchi` below an
+Git-mode `.dolgorae` MUST be at the canonical Git top level. `--non-git` is
+rejected for a path inside any Git worktree, and a nested `.dolgorae` below an
 already initialized workspace is rejected. Non-Git mode records an empty Git
 baseline. Absence of the `git` executable, a Git version older than 2.39, or a
 Git discovery failure returns `WORKSPACE_INITIALIZATION_CONFLICT` rather than
@@ -115,7 +115,7 @@ silently falling back to non-Git mode.
 In Git mode, initialization creates exactly these tracked project policy files:
 
 ```text
-.gomchi/
+.dolgorae/
   .gitignore
   config.toml
 ```
@@ -123,9 +123,9 @@ In Git mode, initialization creates exactly these tracked project policy files:
 `config.toml` contains exactly `schema_version = 1`, `mode = "git"|"non_git"`,
 and `default_access = "read"|"write"`. The initial default access is `read`.
 Unknown or duplicate keys, wrong types, unsupported schema versions, and
-malformed TOML return `CONFIG_INVALID`. The file is hand-editable, but Gomchi
-never rewrites it except during first initialization. `.gomchi/.gitignore`
-ignores `runs/`, `runtime/`, and `cache/`, but MUST NOT ignore `.gomchi` as a
+malformed TOML return `CONFIG_INVALID`. The file is hand-editable, but Dolgorae
+never rewrites it except during first initialization. `.dolgorae/.gitignore`
+ignores `runs/`, `runtime/`, and `cache/`, but MUST NOT ignore `.dolgorae` as a
 whole.
 
 Non-Git initialization creates the same two files and the same ignore contents,
@@ -145,7 +145,7 @@ changed state root, or conflicting policy returns
 The user-global target registry lives at:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/gomchi/targets.toml
+${XDG_CONFIG_HOME:-$HOME/.config}/dolgorae/targets.toml
 ```
 
 A target contains:
@@ -168,14 +168,14 @@ Target names are unique. `target add` MUST reject an existing name with
 `TARGET_ALREADY_EXISTS`; it MUST NOT overwrite a target implicitly. Replacement
 requires an explicit remove followed by add.
 
-Gomchi MUST set the target's `CODEX_HOME`, inherit the ordinary parent process
-environment, and strip inherited Gomchi-internal variables before starting
+Dolgorae MUST set the target's `CODEX_HOME`, inherit the ordinary parent process
+environment, and strip inherited Dolgorae-internal variables before starting
 Codex. It then injects a fresh, non-secret managed-run context marker used to
-reject recursive Gomchi control from that process tree. A target MAY use wrapper
+reject recursive Dolgorae control from that process tree. A target MAY use wrapper
 argv for additional environment preparation. The registry MUST NOT support an
 arbitrary secret environment map.
 
-`run start` MUST require an explicit target. Before use, Gomchi MUST validate
+`run start` MUST require an explicit target. Before use, Dolgorae MUST validate
 the executable, version, app-server schema, initialization handshake, login
 readiness, model listing, and actual `codexHome`. A `codexHome` mismatch is a
 hard failure.
@@ -189,13 +189,13 @@ that changes at the same path is revalidated for every new process generation.
 
 A run owns no Codex thread before its first turn and exactly one thereafter.
 One live run generation owns exactly one worker and one app-server child.
-Gomchi imposes no artificial run-count limit.
+Dolgorae imposes no artificial run-count limit.
 
 The required control path is:
 
 ```text
 master
-  -> gomchi CLI (JSON on stdin/stdout)
+  -> dolgorae CLI (JSON on stdin/stdout)
   -> per-run worker (Unix domain socket)
   -> codex app-server child (stdio JSONL)
   -> zero Codex threads before first turn; exactly one thereafter
@@ -204,14 +204,14 @@ master
 The master MUST NOT connect directly to app-server. The worker is the sole
 app-server client and audit interposer. The CLI-worker socket MUST use a short
 user-private runtime path derived from the canonical workspace identity and run
-ID; durable state remains under `.gomchi/runs/`.
+ID; durable state remains under `.dolgorae/runs/`.
 
 Run IDs are UUIDv7 values. V1 has no run aliases and no current-run pointer.
 Every run-scoped command MUST receive the run ID explicitly.
 
-The CLI-worker handshake includes schema version, Gomchi semantic version,
+The CLI-worker handshake includes schema version, Dolgorae semantic version,
 binary SHA-256, workspace/run identity, and expected process generation. A
-mismatch returns `GOMCHI_PROTOCOL_MISMATCH`; upgrade does not silently mix CLI
+mismatch returns `DOLGORAE_PROTOCOL_MISMATCH`; upgrade does not silently mix CLI
 and worker versions within one run generation.
 
 During `starting`, the worker or app-server may not yet exist. Once started,
@@ -227,46 +227,46 @@ on-demand discovery/recovery procedure before its ordinary operation.
 The initial public command surface is:
 
 ```text
-gomchi [--human] --help
-gomchi [--human] --version
-gomchi [--human] init [PATH] [--non-git] [--state-root <absolute-local-path>]
+dolgorae [--human] --help
+dolgorae [--human] --version
+dolgorae [--human] init [PATH] [--non-git] [--state-root <absolute-local-path>]
 
-gomchi [--human] target add <name> --codex-home <absolute-path> -- <argv...>
-gomchi [--human] target list
-gomchi [--human] target show <name>
-gomchi [--human] target remove <name>
-gomchi [--human] target doctor <name>
+dolgorae [--human] target add <name> --codex-home <absolute-path> -- <argv...>
+dolgorae [--human] target list
+dolgorae [--human] target show <name>
+dolgorae [--human] target remove <name>
+dolgorae [--human] target doctor <name>
 
-gomchi [--human] run start --workspace <path> --target <name> [--access read|write] [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
-gomchi [--human] run list [--workspace <path>]
-gomchi [--human] run status <run-id> [--workspace <path>]
-gomchi [--human] run send <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>] [--timeout <duration>]
-gomchi [--human] run submit <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>]
-gomchi [--human] run wait <run-id> <turn-id> [--workspace <path>] [--timeout <duration>]
-gomchi [--human] run events <run-id> [--workspace <path>] [--after <cursor>] [--follow] [--raw]
-gomchi [--human] run pending <run-id> [--workspace <path>]
-gomchi [--human] run respond <run-id> --request-id <id> [--workspace <path>] [--response <json>]
-gomchi [--human] run interrupt <run-id> [--workspace <path>]
-gomchi [--human] run set-effort <run-id> <effort> [--workspace <path>]
-gomchi [--human] run promote <run-id> [--workspace <path>]
-gomchi [--human] run demote <run-id> [--workspace <path>]
-gomchi [--human] run pause <run-id> [--workspace <path>] [--interrupt]
-gomchi [--human] run resume <run-id> [--workspace <path>] [--access read|write] [--accept-version-change]
-gomchi [--human] run recover <run-id> [--workspace <path>] [--accept-version-change]
-gomchi [--human] run reconcile <run-id> [--workspace <path>] [--accept-version-change]
-gomchi [--human] run fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>] [--access read|write]
-gomchi [--human] run close <run-id> [--workspace <path>] [--interrupt]
-gomchi [--human] run delete <run-id> --confirm [--workspace <path>]
-gomchi [--human] run verify <run-id> [--workspace <path>]
-gomchi [--human] run export <run-id> --output <directory> [--workspace <path>]
+dolgorae [--human] run start --workspace <path> --target <name> [--access read|write] [--model <model>] [--effort <effort>] [--instructions <text> | --instructions-file <path> | --instructions-stdin]
+dolgorae [--human] run list [--workspace <path>]
+dolgorae [--human] run status <run-id> [--workspace <path>]
+dolgorae [--human] run send <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>] [--timeout <duration>]
+dolgorae [--human] run submit <run-id> [--workspace <path>] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] [--idempotency-key <key>]
+dolgorae [--human] run wait <run-id> <turn-id> [--workspace <path>] [--timeout <duration>]
+dolgorae [--human] run events <run-id> [--workspace <path>] [--after <cursor>] [--follow] [--raw]
+dolgorae [--human] run pending <run-id> [--workspace <path>]
+dolgorae [--human] run respond <run-id> --request-id <id> [--workspace <path>] [--response <json>]
+dolgorae [--human] run interrupt <run-id> [--workspace <path>]
+dolgorae [--human] run set-effort <run-id> <effort> [--workspace <path>]
+dolgorae [--human] run promote <run-id> [--workspace <path>]
+dolgorae [--human] run demote <run-id> [--workspace <path>]
+dolgorae [--human] run pause <run-id> [--workspace <path>] [--interrupt]
+dolgorae [--human] run resume <run-id> [--workspace <path>] [--access read|write] [--accept-version-change]
+dolgorae [--human] run recover <run-id> [--workspace <path>] [--accept-version-change]
+dolgorae [--human] run reconcile <run-id> [--workspace <path>] [--accept-version-change]
+dolgorae [--human] run fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>] [--access read|write]
+dolgorae [--human] run close <run-id> [--workspace <path>] [--interrupt]
+dolgorae [--human] run delete <run-id> --confirm [--workspace <path>]
+dolgorae [--human] run verify <run-id> [--workspace <path>]
+dolgorae [--human] run export <run-id> --output <directory> [--workspace <path>]
 ```
 
-`run start` creates an empty idle Gomchi session and MUST NOT allocate a Codex
+`run start` creates an empty idle Dolgorae session and MUST NOT allocate a Codex
 thread or start the first turn. First `send`/`submit` allocates the thread and
 starts the turn under one fsynced intent/idempotency transaction. Its
 options include access, model, reasoning effort, and immutable run-specific
 instructions. Instructions accept exactly one source: `--instructions`,
-`--instructions-file`, or `--instructions-stdin`. They MUST NOT weaken Gomchi's
+`--instructions-file`, or `--instructions-stdin`. They MUST NOT weaken Dolgorae's
 hard agent invariants.
 
 In JSON mode `--help` and `--version` emit ordinary success envelopes with
@@ -275,14 +275,14 @@ syntax failure before command identification emits the ordinary failure
 envelope with command `unknown`.
 
 The two app-server requests are not claimed to be atomic. After `thread/start`,
-Gomchi appends and fsyncs the provisional thread ID before sending `turn/start`.
+Dolgorae appends and fsyncs the provisional thread ID before sending `turn/start`.
 If the `turn/start` response is lost, recovery proves generation absence and
 queries persisted history for that provisional thread. `thread/read` is
 `Absent` only when both the pinned error code and the manifest-pinned
 independent absence discriminator match. If the pinned target exposes no stable
 independent discriminator, this automatic-replay exception is disabled. A successful read
 with no accepted turn proves `NotAccepted`. Every other error, malformed
-response, timeout, unknown code, or unusable status is `Unreadable`. Gomchi may
+response, timeout, unknown code, or unusable status is `Unreadable`. Dolgorae may
 replace the thread and retry the reserved first-turn intent only for `Absent` or
 `NotAccepted`. Any accepted/in-progress or `Unreadable` result follows ordinary reconciliation and may become
 `outcome_unknown`; it is never retried. The permanent one-thread binding begins
@@ -295,7 +295,7 @@ text is rejected. If `--message` is absent, stdin is required and MUST NOT be a
 TTY. `respond` applies the same rule to `--response` and JSON stdin. Each
 repeatable `--image` value starts with the required detail token `auto=`,
 `low=`, or `high=`; everything after the first `=` is the literal readable
-local path, so colons and detail-like filename suffixes are unambiguous. Gomchi
+local path, so colons and detail-like filename suffixes are unambiguous. Dolgorae
 stores the canonical path, detail, byte length, and streaming SHA-256 and MUST
 NOT copy image bytes. The digest is part of idempotency normalization. Later
 replay is permitted only while the file still matches those recorded facts;
@@ -370,7 +370,7 @@ Failure envelope:
 JSON field names use `snake_case`. Machine-output schema version 1 is closed:
 producers MUST NOT add fields and consumers MUST reject unknown fields. Any
 additive, removed, or meaning-changing producer field requires a new schema
-version. This is distinct from the Codex-input compatibility rule, where Gomchi
+version. This is distinct from the Codex-input compatibility rule, where Dolgorae
 records and tolerates unknown additive app-server data.
 
 Before TASK-001 begins, the unreleased v1 artifacts may be corrected together
@@ -382,8 +382,8 @@ verification retains readers for every released bundle version. A newer binary
 opening an unsupported on-disk run, audit, or hash version fails closed and
 requires the matching binary; v1 defines no in-place migration.
 
-The checked [machine-output schema](protocol/gomchi-machine-v1.schema.json) and
-[error contract](protocol/gomchi-error-contract-v1.json) are normative.
+The checked [machine-output schema](protocol/dolgorae-machine-v1.schema.json) and
+[error contract](protocol/dolgorae-error-contract-v1.json) are normative.
 `command` is a closed dotted
 subcommand enum and `invocation_id` is a UUIDv7. `data` is a command-tagged
 union built from these reusable objects:
@@ -447,7 +447,7 @@ delay draining app-server output or block the active turn.
 
 A JSON-RPC object containing both `method` and `id` is classified first as a
 server request; it is never a solicited response. App-server request IDs and
-Gomchi-originated request IDs occupy independent correlator maps, so a numeric
+Dolgorae-originated request IDs occupy independent correlator maps, so a numeric
 collision cannot change that precedence. A solicited
 `thread/read(includeTurns: true)` response is parsed by a
 constant-memory streaming visitor. Before byte 16 MiB the visitor MUST yield a
@@ -482,13 +482,13 @@ Exit status classes are stable:
 | 2 | CLI syntax or input validation failure |
 | 3 | Workspace, target, run, turn, or request not found |
 | 4 | State/serialization conflict, policy rejection, recovery precondition, or writer conflict |
-| 5 | Codex compatibility, target validation, or Gomchi protocol-version failure |
+| 5 | Codex compatibility, target validation, or Dolgorae protocol-version failure |
 | 6 | Worker, app-server, transport, or internal runtime failure |
 | 7 | A `send` or `wait` request observed its turn end failed or interrupted |
 | 8 | Audit integrity verification failure |
 
 Exit statuses outside `{0,2,3,4,5,6,7,8,130}` carry no machine envelope and
-MUST NOT be interpreted as semantic Gomchi error codes. Exit 130 is reserved
+MUST NOT be interpreted as semantic Dolgorae error codes. Exit 130 is reserved
 for caller SIGINT and likewise carries no final envelope.
 
 Stable semantic error codes, exit classes, emitters, and conditions are
@@ -497,7 +497,7 @@ normative:
 | Code | Exit | Emitting commands | Condition |
 | --- | ---: | --- | --- |
 | `INVALID_ARGUMENT` | 2 | any command | CLI syntax, input source, duration, effort, response JSON, incompatible option combination, or pre-existing export destination is invalid |
-| `WORKSPACE_NOT_INITIALIZED` | 3 | all commands except `init` and target-only commands | the addressed path has no valid Gomchi workspace |
+| `WORKSPACE_NOT_INITIALIZED` | 3 | all commands except `init` and target-only commands | the addressed path has no valid Dolgorae workspace |
 | `CONFIG_INVALID` | 3 | workspace commands | `config.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
 | `TARGET_REGISTRY_INVALID` | 3 | target commands and `run start` | `targets.toml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
 | `TARGET_NOT_FOUND` | 3 | `target show/remove/doctor`, `run start` | the target name is absent |
@@ -517,7 +517,7 @@ normative:
 | `RECOVERY_REQUIRED` | 4 | effective-write `run start`, `run send/submit/promote/pause/resume/recover/reconcile/close`, and ordinary or write-access `run fork` | prior same-run or workspace writer generation identity required by the operation cannot be proved safe; read-only new-run `start`, projection-only `status/events/verify`, and read-only `fork --fresh` are excluded and the code is never generically retryable |
 | `TARGET_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable target identity differs from the manifest |
 | `COMPATIBILITY_REJECTED` | 5 | `target doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
-| `GOMCHI_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Gomchi version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
+| `DOLGORAE_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Dolgorae version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
 | `TRANSPORT_FAILURE` | 6 | every command that contacts a worker or app-server | connection, stdio, or protocol transport fails |
 | `OPERATION_TIMEOUT` | 6 | `target doctor` and run commands performing local replay/schema work | a bounded local operation expired without uncertain external acceptance |
 | `PROTOCOL_FRAME_TOO_LARGE` | 6 | every command receiving a CLI-worker frame | the CLI-worker request or response frame exceeds its byte limit |
@@ -554,7 +554,7 @@ through torn-tail repair; `projection_rewound` never renumbers committed
 records. Each success envelope has `data.kind = event|heartbeat|end`. `event`
 contains cursor plus the normalized record; with `--raw` it additionally
 contains the exact redacted ledger-line string rather than changing framing.
-Without `--follow`, Gomchi emits records through the head captured at command
+Without `--follow`, Dolgorae emits records through the head captured at command
 start, then one `end` frame and exits 0, including when there are no records.
 With `--follow`, while caught up, a nonfinal run emits a heartbeat every 30 seconds containing
 the current cursor and state. After `closed` or `start_failed` is caught up it
@@ -585,7 +585,7 @@ timeout limits only its caller and never weakens cleanup proof.
 `send` waits without a default timeout until the turn is terminal or requires
 master interaction. A caller-supplied timeout returns the current nonterminal
 state without interrupting the worker. `submit` returns only after app-server
-accepts `turn/start` and Gomchi fsyncs the permanent thread binding and turn ID.
+accepts `turn/start` and Dolgorae fsyncs the permanent thread binding and turn ID.
 `wait` requires both run and turn
 IDs. Waiting and caller-timeout returns use exit 0.
 
@@ -620,15 +620,15 @@ Observed paths are populated only when `measured` is true and describe workspace
 changes during the terminal turn interval. In Git mode
 they are the sorted unique workspace-relative paths from
 `git status --porcelain=v2 -z --untracked-files=all`; ignored paths and
-`.gomchi/runs/`, `.gomchi/runtime/`, and `.gomchi/cache/` are excluded, while
+`.dolgorae/runs/`, `.dolgorae/runtime/`, and `.dolgorae/cache/` are excluded, while
 tracked policy-file changes remain visible. In non-Git mode they are the changed regular files from
 no-follow pre/post `(device,inode,size,mtime_ns)` snapshots, also excluding
 only those three internal directories. Valid UTF-8 paths are strings; other POSIX bytes use
-`{"$gomchi_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
+`{"$dolgorae_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
 The machine schemas enforce the alphabet, four-character grouping, and exact
 terminal padding in addition to declaring `contentEncoding`. At most 4,096 paths are retained and
-`truncated` reports omission. Gomchi MUST NOT claim that Codex caused every
-reported change. Full diff inspection is delegated to Git; Gomchi has no
+`truncated` reports omission. Dolgorae MUST NOT claim that Codex caused every
+reported change. Full diff inspection is delegated to Git; Dolgorae has no
 `run diff` command.
 
 ## SPEC-007: Access and Concurrency
@@ -646,14 +646,14 @@ Git mode, libc `realpath(3)` of `git -C <canonical-workspace> rev-parse
 rev-parse --path-format=absolute --git-path .`. Every member MUST be absolute
 and is deduplicated after resolution. These exact thread and turn carriers are
 part of the required-subset manifest. Readers MAY run concurrently without a
-Gomchi limit. A canonical workspace has at most one Gomchi writer.
+Dolgorae limit. A canonical workspace has at most one Dolgorae writer.
 
 The writer lease is BSD `flock(2)` with nonblocking exclusive semantics below
 the workspace-recorded lock root, keyed by the full canonical-workspace digest.
-`gomchi init` accepts `--state-root <absolute-local-path>`. Without it, init
-resolves `${XDG_STATE_HOME:-$HOME/.local/state}/gomchi/locks/` once. The
+`dolgorae init` accepts `--state-root <absolute-local-path>`. Without it, init
+resolves `${XDG_STATE_HOME:-$HOME/.local/state}/dolgorae/locks/` once. The
 canonical path and root device/inode are recorded in
-`.gomchi/runtime/lock-root.json` and every run manifest. Later environment
+`.dolgorae/runtime/lock-root.json` and every run manifest. Later environment
 changes are ignored. A missing workspace record is reconstructed only from
 unanimous existing manifest values; conflict fails. With no existing runs it is
 resolved and created. Creation and validation use root-fd-relative no-symlink
@@ -676,7 +676,7 @@ compares the held fd's `(st_dev, st_ino)` with a root-fd-relative `fstatat` of
 the pathname and persists that pair in `writer.json`. Any mismatch fails closed
 with `RUNTIME_PATH_COLLISION`. An unresolved `writer.json` for a different run
 does not block the kernel acquisition attempt, but it does gate writer
-activation. If its recorded inode differs, Gomchi first proves the recorded
+activation. If its recorded inode differs, Dolgorae first proves the recorded
 generation absent, including boot mismatch or group emptiness; only then may it
 atomically reconstruct `writer.json` from the held pathname/fd pair. Without
 absence proof the mismatch is `RUNTIME_PATH_COLLISION`.
@@ -689,7 +689,7 @@ cannot authorize concurrent writer app-servers.
 
 Runtime identity is `(boot_session_uuid, pid, pgid, uid, start_tvsec,
 start_tvusec, executable_path, executable_dev, executable_ino,
-executable_sha256)`. Gomchi samples BSD info, `proc_pidpath` and executable
+executable_sha256)`. Dolgorae samples BSD info, `proc_pidpath` and executable
 identity, then BSD info again and rejects a changed start time. A live process
 whose path is unavailable is not mismatched when the remaining tuple and group
 proof match; replacement at the same path is not identity continuity. Recovery
@@ -719,7 +719,7 @@ zombies are absent. This is a possible-survivor predicate, not by itself signal
 authority. Individual member signalling is permitted only after the recorded
 leader or at least one already recorded cleanup-snapshot member was kqueue-bound
 and revalidated `Match`, which establishes continuity of the still-live process
-group. While continuity exists, Gomchi snapshots every member's
+group. While continuity exists, Dolgorae snapshots every member's
 `(pid, uid, pgid, start_tvsec, start_tvusec)` and
 signals only members from that snapshot whose full tuple revalidates. A newly
 appearing/recycled member, or any nonempty group after leader loss that was not
@@ -758,7 +758,7 @@ first post-`setsid`/re-exec action and held for its entire serving lifetime.
 The 8192-byte lock body contains separate version-1, zero-padded owner records
 at `[0,4096)` for byte 0 and `[4096,8192)` for byte 1. A short file is
 `Unverifiable`. Each contains range, workspace/run/generation,
-boot UUID, full Gomchi process identity, executable-path SHA-256, and a SHA-256
+boot UUID, full Dolgorae process identity, executable-path SHA-256, and a SHA-256
 checksum over the preceding bytes. All-zero, stale, checksum-invalid, or
 unknown-layout slots never establish identity and do not block a kernel-lock
 winner; a locked range with no valid matching record is `Unverifiable`. Each
@@ -774,7 +774,7 @@ contender uses Darwin `F_SETLKWTIMEOUT` with a ten-second relative budget and
 `struct flocktimeout { struct flock fl; struct timespec timeout; }` field order.
 A timed-out byte-0
 transient starter may be terminated outside the lock only after the run-keyed
-file, exact Gomchi executable identity, the defined
+file, exact Dolgorae executable identity, the defined
 BSD/path/executable/BSD process-identity sample, and kqueue binding all match.
 A byte-1 owner is a serving worker and never follows the ten-second-only path;
 reader and writer workers both require the control `hello` plus 30-second
@@ -821,7 +821,7 @@ If worker `SIGTERM` arrives during an active turn, it sends `turn/interrupt`,
 waits up to five seconds for a terminal event, fsyncs terminal evidence when
 observed, and records `outcome_unknown` on expiry before generation cleanup.
 The worker holding byte 1 normally unlinks its own socket. There is no volatile
-sibling sidecar: `.gomchi/runtime/runs/<run-id>.json` is the sole socket
+sibling sidecar: `.dolgorae/runtime/runs/<run-id>.json` is the sole socket
 identity authority. On recovery, only the byte-0 election winner may authorize
 unlink after an exact matching runtime record and prior-generation absence are
 proved; the replacement worker performs it after acquiring byte 1 and before
@@ -844,11 +844,11 @@ worker's byte-1 ownership does not change during either transition.
 Resume defaults to `read`.
 
 Readers MAY run during writer turns and may observe intermediate workspace
-state. Gomchi provides no read snapshot isolation. A consistent review SHOULD
+state. Dolgorae provides no read snapshot isolation. A consistent review SHOULD
 begin only after the writer turn reaches a terminal state.
 
 Codex native subagents belong to their parent run and inherit its access
-boundary. They do not acquire separate Gomchi writer leases. Gomchi therefore
+boundary. They do not acquire separate Dolgorae writer leases. Dolgorae therefore
 serializes independent writer app-servers, not every execution lane inside one
 writer session; the injected instructions require Codex to avoid overlapping
 write-heavy delegation and to prefer parallel subagents for independent or
@@ -857,7 +857,7 @@ read-heavy work.
 Reader requests for write or additional filesystem permission are
 automatically declined. Writer approvals are never automatically accepted.
 Target MCP servers, apps, and plugins remain available; side effects performed
-outside Codex's sandbox are outside the one-Gomchi-writer-per-worktree
+outside Codex's sandbox are outside the one-Dolgorae-writer-per-worktree
 guarantee.
 
 ## SPEC-008: Run Lifecycle, Recovery, and Forking
@@ -875,7 +875,7 @@ The lifecycle states are:
 
 The checked Codex manifest names the terminal notification method, status JSON
 Pointer, and closed terminal and nonterminal status sets. A listed terminal
-status drives the corresponding Gomchi terminal result; a listed nonterminal
+status drives the corresponding Dolgorae terminal result; a listed nonterminal
 status preserves running/waiting state. A missing, malformed, or unlisted
 status is `Unreadable` and can never authorize idle or replay.
 
@@ -907,7 +907,7 @@ seal. It must hold startup serialization and fsync both records. A present but
 wait for group emptiness or a boot-session change.
 
 Pause and close reject running or waiting runs unless `--interrupt` is present.
-With `--interrupt`, Gomchi first answers an outstanding supported approval with
+With `--interrupt`, Dolgorae first answers an outstanding supported approval with
 `cancel`, requests turn interruption, and waits five seconds. Confirmed terminal
 evidence permits the direct paused/closed transition; expiry records and emits
 `OUTCOME_UNKNOWN` and uses the corresponding `outcome_unknown` edge before
@@ -917,7 +917,7 @@ workspace changes.
 After worker loss, an idle run may be recovered by starting a new process
 generation and using `thread/resume`. Recovery of `paused` performs only
 coordination cleanup and record repair; `resume` starts its next generation. If
-failure occurred during an active turn, Gomchi reconciles only terminal status
+failure occurred during an active turn, Dolgorae reconciles only terminal status
 confirmed by persisted Codex history. It MUST NOT replay the input automatically.
 
 If no terminal evidence exists, the run becomes `outcome_unknown`. Its worker
@@ -947,7 +947,7 @@ accepted, the command returns `COMPATIBILITY_REJECTED`; only the separately
 defined outcome-unknown/no-confirmed-turn fallback creates a fresh thread.
 
 Any fork that must copy confirmed history requires the source Codex thread to
-exist in the pinned `CODEX_HOME`; the Gomchi transcript is not a substitute.
+exist in the pinned `CODEX_HOME`; the Dolgorae transcript is not a substitute.
 `fork --fresh` reads the immutable source manifest plus read-only fsynced
 state/runtime projections needed to establish current lifecycle, socket reachability,
 identity verdict, and unresolved-turn provenance. It never reads the source
@@ -994,7 +994,7 @@ maps stable server requests as follows:
   `item/fileChange/requestApproval` are supported and become
   `waiting_approval`;
 - `item/permissions/requestApproval`, `item/tool/requestUserInput`, and
-  `mcpServer/elicitation/request` are recognized but unsupported in v1. Gomchi
+  `mcpServer/elicitation/request` are recognized but unsupported in v1. Dolgorae
   records their bounded shape, replies JSON-RPC method-not-found, and lets Codex
   determine the turn result. They never create a pending request or lifecycle
   state. Permissions/granular approval is live-proven to require
@@ -1004,16 +1004,16 @@ maps stable server requests as follows:
 The two supported approval requests are represented as structured pending requests. `run pending` returns the
 generation-qualified request ID, closed kind, redacted payload, and exact
 response-schema identifier from that manifest. `run respond` accepts exactly
-one closed Gomchi object containing only `decision`, whose value is one of the
-four tokens below. Gomchi selects the manifest schema named by the pending
+one closed Dolgorae object containing only `decision`, whose value is one of the
+four tokens below. Dolgorae selects the manifest schema named by the pending
 request, translates the token to the Codex value, validates the translated
 object, and only then forwards it to the owning generation. Other decision
 variants and unknown schema identifiers are `INVALID_ARGUMENT`; raw Codex
 decision tokens are not public input. Other known-but-unsupported stable requests receive
 JSON-RPC method-not-found and are recorded; malformed frames stop the generation.
-After method-not-found, Gomchi keeps draining the generation until Codex emits
+After method-not-found, Dolgorae keeps draining the generation until Codex emits
 a terminal turn event. If Codex instead leaves the turn nonterminal, the Master
-sees the run as `running` with no Gomchi pending request and uses `run interrupt`
+sees the run as `running` with no Dolgorae pending request and uses `run interrupt`
 as the bounded escape.
 
 Requests from an older process generation return `STALE_REQUEST`; pending
@@ -1023,7 +1023,7 @@ no automatic timeout. A waiting writer continues to hold its lease while a
 response or interruption returns it through running/idle; only demotion, pause,
 close, `outcome_unknown`, start failure, or terminal worker cleanup releases it.
 
-Command- and file-change approval decisions exposed by Gomchi are:
+Command- and file-change approval decisions exposed by Dolgorae are:
 
 - `accept_once`
 - `accept_for_generation`
@@ -1033,18 +1033,18 @@ Command- and file-change approval decisions exposed by Gomchi are:
 For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `acceptForSession`, `decline`, and `cancel`.
 
-Reader auto-decline is implemented solely by `approvalPolicy:"never"`; Gomchi
+Reader auto-decline is implemented solely by `approvalPolicy:"never"`; Dolgorae
 does not install a second approval interception mechanism. A server request
 that nevertheless arrives is handled by the recognized-unsupported rule above.
 
 Generation approval maps to app-server's live session-scoped approval and
-expires whenever the worker/app-server generation ends. Gomchi MUST NOT present
+expires whenever the worker/app-server generation ends. Dolgorae MUST NOT present
 it as durable run-wide approval and MUST NOT persist an approval policy that is
 silently replayed after restart.
 
 ## SPEC-010: Audit, Retention, and Deletion
 
-Every allocated run has a private directory at `.gomchi/runs/<run-id>/` with:
+Every allocated run has a private directory at `.dolgorae/runs/<run-id>/` with:
 
 - `manifest.json`: fixed run configuration and provenance;
 - `audit.jsonl`: the sole append-only audit authority;
@@ -1052,7 +1052,7 @@ Every allocated run has a private directory at `.gomchi/runs/<run-id>/` with:
 - `worker.log` and `worker.log.1`: bounded diagnostics, never audit authority;
 - `recovery/`: preserved torn-tail and repair evidence.
 
-The audit contains Gomchi lifecycle records and redacted app-server wire
+The audit contains Dolgorae lifecycle records and redacted app-server wire
 records in one total order. Each record contains schema version, sequence/event
 cursor, UTC timestamp, run ID, process generation, kind, payload,
 `previous_hash`, and `hash`. Lines use RFC 8785 JCS. `sha256-jcs-v1` hashes the
@@ -1082,15 +1082,15 @@ until adaptation. The in-repo `sha256-jcs-v1` canonicalizer orders object keys
 by UTF-16 code units and formats binary64 values with ECMAScript's shortest
 number representation. Verification uses that formatter rather than echoing a
 preserved lexeme. Any canonicalizer byte change requires a new
-`sha256-jcs-vN`; RFC 8785 published vectors and Gomchi numeric vectors are
-normative fixtures. Before inserting any Gomchi marker, each inbound object key
-matching `^\$+gomchi_` is escaped by prefixing one additional `$`. Processing
+`sha256-jcs-vN`; RFC 8785 published vectors and Dolgorae numeric vectors are
+normative fixtures. Before inserting any Dolgorae marker, each inbound object key
+matching `^\$+dolgorae_` is escaped by prefixing one additional `$`. Processing
 order is escape, recursive redaction, numeric adaptation, then JCS; the
-redaction tokenizer never examines Gomchi-owned marker keys. Before JCS, a
+redaction tokenizer never examines Dolgorae-owned marker keys. Before JCS, a
 decimal lexeme is parsed to finite binary64, rendered with the ECMAScript
 shortest form, and compared by exact decimal numeric value with the original.
 A nonfinite/overflowing value or unequal value becomes
-`{"$gomchi_number":"<original-lexeme>"}`. Verification also requires every
+`{"$dolgorae_number":"<original-lexeme>"}`. Verification also requires every
 stored line to be byte-identical to its own JCS serialization. Timestamps are
 UTC RFC 3339 with exactly six fractional digits and `Z`.
 
@@ -1142,27 +1142,27 @@ Bare `token`, `key`, `auth`, `id`, `session id`, `client id`, `thread id`,
 `turn id`, `signature`, `nonce`, and `pwd` are explicit non-secret exclusions.
 
 A match preserves the key and replaces its entire value with
-`{"$gomchi_redacted":{"reason":"secret_key","original_type":"<type>"}}`,
+`{"$dolgorae_redacted":{"reason":"secret_key","original_type":"<type>"}}`,
 where type is `string`, `number`, `boolean`, `null`, `object`, or `array`.
 Over-redaction such as `password_hash` and `api_key_id` is intentional. JSON
 encoded inside a string is not reparsed in v1 and remains within the documented
-value-secret limitation. If safe classification or serialization fails, Gomchi
+value-secret limitation. If safe classification or serialization fails, Dolgorae
 records only `payload_unrepresentable` metadata and never raw bytes.
 Run directories use mode 0700 and sensitive files mode 0600. Prompts and command
 or tool output may still contain secrets; same-OS-user confidentiality is not
 guaranteed.
-`.gomchi/runtime/` is mode 0700 and its records are mode 0600. `worker.log` is
+`.dolgorae/runtime/` is mode 0700 and its records are mode 0600. `worker.log` is
 limited to 1 MiB with one rotation and remains diagnostics-only.
 
-Audit completeness is limited to Gomchi lifecycle, app-server-exposed main-turn
+Audit completeness is limited to Dolgorae lifecycle, app-server-exposed main-turn
 wire traffic, approvals, access transitions, and target/account provenance.
 Encrypted or otherwise unexposed native-subagent communication is represented
 as opaque activity when observable and is not claimed as reconstructable audit.
 
 The Codex thread in the pinned `CODEX_HOME` is conversation-continuation
-authority. Gomchi's ledger is audit authority. Missing Codex history cannot be
-reconstructed as the same session from the Gomchi transcript, and missing
-Gomchi audit cannot be reconstructed as equivalent audit from Codex history.
+authority. Dolgorae's ledger is audit authority. Missing Codex history cannot be
+reconstructed as the same session from the Dolgorae transcript, and missing
+Dolgorae audit cannot be reconstructed as equivalent audit from Codex history.
 
 Every represented ledger payload obeys the 2 MiB raw and 3 MiB post-transform
 limits in SPEC-006. Larger payloads retain only
@@ -1185,26 +1185,26 @@ does not suppress export: both bundle and verification set
 `verification_failed:true`, while other state-changing commands fail closed.
 The bundle may contain plaintext prompts/output that key-name redaction cannot
 detect. Its output
-path MUST NOT already exist; Gomchi never merges or overwrites an export and
+path MUST NOT already exist; Dolgorae never merges or overwrites an export and
 returns `INVALID_ARGUMENT` on collision.
 
 There is no retention limit or automatic deletion. `run delete` is allowed
 only for closed or start-failed runs and requires `--confirm`; it is the sole
 state-changing command allowed after audit integrity failure and appends no
 record to a ledger it cannot trust. It permanently
-deletes the Gomchi run directory only. It MUST NOT delete the Codex thread from
-`CODEX_HOME`, and Gomchi MUST NOT later auto-import that orphaned thread.
+deletes the Dolgorae run directory only. It MUST NOT delete the Codex thread from
+`CODEX_HOME`, and Dolgorae MUST NOT later auto-import that orphaned thread.
 
 ## SPEC-011: Agent Instruction and Side-Effect Policy
 
-Gomchi injects developer instructions that are immutable for one process
-generation and identify the process as a master-controlled Gomchi subagent.
+Dolgorae injects developer instructions that are immutable for one process
+generation and identify the process as a master-controlled Dolgorae subagent.
 They include run ID, canonical workspace, and that generation's access mode.
 Promotion/demotion starts a new generation and recomposes the prefix through
 `thread/resume`; immutable user run instructions remain subordinate and
 unchanged. The instructions MUST establish these rules:
 
-- `.gomchi` is reserved; the agent must not read or modify it unless the master
+- `.dolgorae` is reserved; the agent must not read or modify it unless the master
   explicitly requests audit or review access.
 - Answer, explain, review, and diagnose requests do not authorize mutation.
 - Build and fix requests may mutate only in a writer run.
@@ -1219,28 +1219,28 @@ unchanged. The instructions MUST establish these rules:
 - The response reports outcome, material changes or findings, verification,
   and blockers without imposing a rigid JSON format on the model.
 
-The `.gomchi` reservation is prompt-enforced policy, not a sandbox deny-list or
-same-user security boundary. Changes to `.gomchi/config.toml` and
-`.gomchi/.gitignore` remain observable workspace changes; only worker-owned
+The `.dolgorae` reservation is prompt-enforced policy, not a sandbox deny-list or
+same-user security boundary. Changes to `.dolgorae/config.toml` and
+`.dolgorae/.gitignore` remain observable workspace changes; only worker-owned
 run/runtime/cache paths are filtered.
 
 The target's own Codex configuration, AGENTS instructions, skills, plugins,
 apps, MCP servers, and native subagents remain available unless they conflict
-with Gomchi's hard invariants.
+with Dolgorae's hard invariants.
 
 ## SPEC-012: Orchestration Boundary and Compatibility
 
-Independent Gomchi runs use hub-and-spoke orchestration: only the master may
-create, address, interrupt, fork, pause, close, or delete them. A Gomchi-managed
-agent MUST NOT invoke `gomchi` to control another run or connect to another
+Independent Dolgorae runs use hub-and-spoke orchestration: only the master may
+create, address, interrupt, fork, pause, close, or delete them. A Dolgorae-managed
+agent MUST NOT invoke `dolgorae` to control another run or connect to another
 run's worker socket. V1 has no peer messaging or run-to-run delegation.
 
-An app-server descendant carries `GOMCHI_MANAGED_CONTEXT`, the unpadded base64url
+An app-server descendant carries `DOLGORAE_MANAGED_CONTEXT`, the unpadded base64url
 encoding of a UTF-8 JCS object containing schema version 1, workspace ID, run ID,
 process generation, boot UUID, and worker PID. A present malformed marker,
 unknown schema, nonexistent run, or foreign workspace/run is treated as managed
 and rejected, never as absent. The marker is inherited only by exec descendants;
-an MCP server reached through another transport may not carry it. A `gomchi`
+an MCP server reached through another transport may not carry it. A `dolgorae`
 process invoked from a valid context permits only read-only status, events, and
 verification of its own run; it rejects run creation, cross-run inspection,
 turn input, pending-response submission, access changes, lifecycle control,
@@ -1250,11 +1250,11 @@ against a hostile same-user process that deliberately removes its environment.
 
 Codex native subagents inside one run remain allowed and are part of that
 app-server-managed session tree. Their existence does not create independent
-Gomchi runs or additional Gomchi writer leases.
+Dolgorae runs or additional Dolgorae writer leases.
 
-Gomchi uses the stable app-server API surface and does not enable
+Dolgorae uses the stable app-server API surface and does not enable
 `experimentalApi` for runtime operation. It validates 0.147.0 as tested. For an
-unlisted newer version, Gomchi may run the version as `unverified` only when:
+unlisted newer version, Dolgorae may run the version as `unverified` only when:
 
 1. `codex app-server generate-json-schema` is available;
 2. the manifest comparison engine resolves `$ref` before comparison, addresses
@@ -1281,5 +1281,5 @@ ID, turn ID, and process generation before affecting state.
 - [Official Codex app-server documentation](https://learn.chatgpt.com/docs/app-server)
 - [Official Codex subagents documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 
-These references describe Codex behavior. Gomchi-specific policy in this SOT
-remains authoritative for Gomchi.
+These references describe Codex behavior. Dolgorae-specific policy in this SOT
+remains authoritative for Dolgorae.

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://gomchi.local/schema/machine-output/v1",
-  "title": "Gomchi machine output v1",
+  "$id": "https://dolgorae.local/schema/machine-output/v1",
+  "title": "Dolgorae machine output v1",
   "oneOf": [
     { "$ref": "#/$defs/success" },
     { "$ref": "#/$defs/failure" }
@@ -27,7 +27,7 @@
         "RUN_STATE_CONFLICT", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY",
         "IDEMPOTENCY_CONFLICT", "STALE_REQUEST", "OUTCOME_UNKNOWN",
         "RECOVERY_REQUIRED", "TARGET_MISMATCH", "COMPATIBILITY_REJECTED",
-        "GOMCHI_PROTOCOL_MISMATCH", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
+        "DOLGORAE_PROTOCOL_MISMATCH", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
         "PROTOCOL_FRAME_TOO_LARGE", "RUNTIME_PATH_INVALID",
         "RUNTIME_PATH_COLLISION", "REDACTION_FAILURE", "INTERNAL_ERROR",
         "TURN_FAILED", "TURN_INTERRUPTED", "AUDIT_INTEGRITY_FAILURE"
@@ -39,8 +39,8 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["$gomchi_path_bytes"],
-          "properties": { "$gomchi_path_bytes": { "type": "string", "contentEncoding": "base64", "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$" } }
+          "required": ["$dolgorae_path_bytes"],
+          "properties": { "$dolgorae_path_bytes": { "type": "string", "contentEncoding": "base64", "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$" } }
         }
       ]
     },
@@ -286,7 +286,7 @@
     "failure": {
       "allOf": [
         { "$ref": "#/$defs/base" },
-        { "type": "object", "additionalProperties": false, "required": ["schema_version", "ok", "command", "invocation_id", "error"], "properties": { "schema_version": { "const": 1 }, "ok": { "const": false }, "command": { "$ref": "#/$defs/command" }, "invocation_id": { "$ref": "#/$defs/uuid" }, "error": { "$ref": "https://gomchi.local/schema/error-contract/v1" } } }
+        { "type": "object", "additionalProperties": false, "required": ["schema_version", "ok", "command", "invocation_id", "error"], "properties": { "schema_version": { "const": 1 }, "ok": { "const": false }, "command": { "$ref": "#/$defs/command" }, "invocation_id": { "$ref": "#/$defs/uuid" }, "error": { "$ref": "https://dolgorae.local/schema/error-contract/v1" } } }
       ]
     }
   }
