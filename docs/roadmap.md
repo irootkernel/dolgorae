@@ -1,8 +1,8 @@
 # Gomchi Roadmap
 
-Status: Ordered implementation roadmap. Historical `TASK-000` is complete;
-Round-4 stabilization `TASK-000-A` is active and no production implementation
-Task is active.
+Status: Ordered implementation roadmap. Historical `TASK-000` and Round-4
+stabilization `TASK-000-A` are complete; no production implementation Task is
+active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -86,7 +86,7 @@ production source has been introduced. Only then may `TASK-001` become active.
 
 ## EPIC-000-A: Round-4 Contract Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Close the Codex wire, machine-output, workspace-identity, durability,
 process-recovery, and verification-plan gaps found after TASK-000 without
@@ -94,7 +94,7 @@ starting production implementation.
 
 ### TASK-000-A: Round-4 Contract and Probe Closure
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Preserve the immutable Round-4 input; resolve every C/H/M/L finding in a checked
 owner disposition; add machine-output and Codex required-subset schemas; pin the
