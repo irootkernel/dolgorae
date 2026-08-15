@@ -229,8 +229,11 @@ run. A fork may select another model on the same target. Allow the run's default
 reasoning effort to change at runtime; a change during an active turn applies
 to the next turn only and must be supported by fully paginated `model/list`.
 Access-dependent developer instructions are generation-immutable; idle
-promotion/demotion replaces the generation and supplies a recomposed prefix
-through `thread/resume` because `turn/start` has no such field.
+promotion/demotion keeps the same worker and startup-lock ownership while
+replacing only its app-server generation, then supplies a recomposed prefix
+through `thread/resume` because `turn/start` has no such field. Promotion holds
+the writer lease before stopping the reader child; demotion releases it only
+after the writer child is gone and the reader child is active.
 
 ### Consequences
 
@@ -311,7 +314,7 @@ through the newest status that the checked target manifest proves acceptable as
 moves the run to `paused`; explicit resume selects its next access mode.
 Reconciliation uses a transient read-only app-server and `thread/read` without
 loading or resuming the thread. If prior process identity is unverifiable, v1
-does not resume the same thread; the operator may wait for absence proof or
+does not resume the same thread; the Master may wait for absence proof or
 create a provenance-linked fresh read-only run. That fresh escape may also be
 created from an unreachable running/waiting source, reads only its immutable
 manifest, never reads its ledger or Codex thread, and never grants write access.
@@ -474,3 +477,65 @@ interfaces.
   adds scheduling complexity without making those APIs nonblocking.
 - Allow each subsystem to call libc directly: rejected because identity and
   errno classification would drift.
+
+## ADR-013: Fail Closed on Live Worker Ambiguity and Unsupported Filesystems
+
+Status: Accepted
+
+### Context
+
+A worker may be alive and healthy while quiet inside a Codex turn. Ledger,
+logging, runtime-generation, and CPU inactivity are therefore not proof that it
+is safe to terminate. Separately, `MNT_LOCAL` includes filesystems whose append,
+fsync, and crash-tail behavior has not been established, while network mounts
+also split the per-user writer lease across hosts.
+
+### Decision
+
+V1 never signals a live byte-1 worker solely because control `hello` or an
+activity signal timed out. A revalidated `Match` returns `RUN_BUSY`; an
+`Unverifiable` identity returns `RECOVERY_REQUIRED`. Only control-v1 shutdown,
+an already-authorized cleanup snapshot, or independently proven worker exit can
+lead to replacement. V1 supports only local APFS workspaces and state/lock
+roots and provides no filesystem override.
+
+### Consequences
+
+- A wedged but live worker can require external termination or `fork --fresh`;
+  v1 prefers a stranded run to a false live-worker kill.
+- Audit and writer guarantees have one empirically testable filesystem basis.
+- Broader filesystem support and emergency recovery remain future explicit
+  decisions rather than implicit weakening.
+
+### Rejected alternatives
+
+- Heartbeat/CPU takeover: rejected because absence of progress is not proof of
+  safe termination.
+- Network-filesystem opt-in: rejected because it cannot preserve the stated
+  cross-process writer guarantee across hosts.
+
+## ADR-014: Own JSON Ingest and the Independent Fake Boundary
+
+Status: Accepted
+
+### Context
+
+Default JSON deserialization is last-wins for duplicate members and may discard
+number lexemes, contradicting the audit anti-forgery contract. A fake that
+shares the production parser can certify the same mistake twice.
+
+### Decision
+
+Use `serde_json::RawValue` only behind an in-repository duplicate-detecting
+visitor that preserves numeric source lexemes through adaptation; never parse
+untrusted protocol input directly into `serde_json::Value` or typed structs.
+The safe dependency/mechanism table in architecture.md is normative, and every
+new runtime dependency requires an ADR amendment. The shared fake app-server is
+an independent Python stdio subprocess owned by TASK-004 and driven by
+manifest-validated declarative scenarios.
+
+### Consequences
+
+- Duplicate rejection and number preservation occur at ingest, before JCS.
+- Fake/production parser diversity reduces self-confirming conformance tests.
+- TASK-006 consumes the TASK-004 fixture rather than creating a second core.

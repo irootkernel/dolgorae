@@ -10,7 +10,7 @@
     "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "command": {
       "enum": [
-        "init", "target.add", "target.list", "target.show", "target.remove",
+        "unknown", "help", "version", "init", "target.add", "target.list", "target.show", "target.remove",
         "target.doctor", "run.start", "run.list", "run.status", "run.send",
         "run.submit", "run.wait", "run.events", "run.pending", "run.respond",
         "run.interrupt", "run.set_effort", "run.promote", "run.demote",
@@ -27,7 +27,7 @@
         "RUN_STATE_CONFLICT", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY",
         "IDEMPOTENCY_CONFLICT", "STALE_REQUEST", "OUTCOME_UNKNOWN",
         "RECOVERY_REQUIRED", "TARGET_MISMATCH", "COMPATIBILITY_REJECTED",
-        "GOMCHI_PROTOCOL_MISMATCH", "TRANSPORT_FAILURE",
+        "GOMCHI_PROTOCOL_MISMATCH", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
         "PROTOCOL_FRAME_TOO_LARGE", "RUNTIME_PATH_INVALID",
         "RUNTIME_PATH_COLLISION", "REDACTION_FAILURE", "INTERNAL_ERROR",
         "TURN_FAILED", "TURN_INTERRUPTED", "AUDIT_INTEGRITY_FAILURE"
@@ -119,8 +119,9 @@
     "workspace_changes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observed_paths", "truncated", "attribution"],
+      "required": ["measured", "observed_paths", "truncated", "attribution"],
       "properties": {
+        "measured": { "type": "boolean" },
         "observed_paths": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/path" } },
         "truncated": { "type": "boolean" },
         "attribution": { "const": "unverified" }
@@ -152,8 +153,22 @@
         "generation": { "type": "integer", "minimum": 1 },
         "kind": { "enum": ["command_approval", "file_approval"] },
         "payload": { "type": "object" },
-        "response_schema": { "type": "string" }
+        "response_schema": { "enum": ["CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse"] }
       }
+    },
+    "approval_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision"],
+      "properties": {
+        "decision": { "enum": ["accept_once", "accept_for_generation", "decline", "cancel"] }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": { "text": { "type": "string" } }
     },
     "verification": {
       "type": "object",
@@ -168,6 +183,35 @@
         "verification_failed": { "type": "boolean" }
       }
     },
+    "audit_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "sequence", "timestamp", "run_id", "process_generation", "kind", "payload", "previous_hash", "hash"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "process_generation": { "type": "integer", "minimum": 0 },
+        "kind": {
+          "enum": [
+            "workspace_initialized", "run_created", "turn_intent",
+            "thread_bound", "turn_started", "turn_terminal",
+            "lifecycle_transition", "generation_started",
+            "generation_stopped", "app_server_request",
+            "app_server_response", "app_server_notification",
+            "approval_requested", "approval_decided", "access_changed",
+            "target_observed", "idempotency_reserved", "reconciliation",
+            "cleanup_intent", "cleanup_result", "ledger_tail_repaired",
+            "projection_rewound", "payload_unrepresentable", "start_failed",
+            "outcome_unknown"
+          ]
+        },
+        "payload": { "$ref": "#/$defs/json_value" },
+        "previous_hash": { "$ref": "#/$defs/sha256" },
+        "hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
     "event_data": {
       "oneOf": [
         {
@@ -176,7 +220,7 @@
           "properties": {
             "kind": { "const": "event" },
             "cursor": { "type": "integer", "minimum": 0 },
-            "record": { "type": "object" },
+            "record": { "$ref": "#/$defs/audit_record" },
             "raw_record": { "type": "string" }
           }
         },
@@ -204,7 +248,7 @@
         { "$ref": "#/$defs/workspace" }, { "$ref": "#/$defs/target" },
         { "$ref": "#/$defs/run" }, { "$ref": "#/$defs/turn" },
         { "$ref": "#/$defs/request" }, { "$ref": "#/$defs/verification" },
-        { "$ref": "#/$defs/event_data" },
+        { "$ref": "#/$defs/event_data" }, { "$ref": "#/$defs/meta" },
         { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array" } } },
         { "type": "object", "additionalProperties": false, "required": ["output_path", "bundle_schema_version", "files", "verification"], "properties": { "output_path": { "$ref": "#/$defs/path" }, "bundle_schema_version": { "const": 1 }, "files": { "type": "array", "items": { "type": "string" } }, "verification": { "$ref": "#/$defs/verification" } } },
         { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } }
@@ -224,6 +268,8 @@
       "allOf": [
         { "$ref": "#/$defs/base" },
         { "type": "object", "additionalProperties": false, "required": ["schema_version", "ok", "command", "invocation_id", "data"], "properties": { "schema_version": { "const": 1 }, "ok": { "const": true }, "command": { "$ref": "#/$defs/command" }, "invocation_id": { "$ref": "#/$defs/uuid" }, "data": { "$ref": "#/$defs/data" } } },
+        { "not": { "properties": { "command": { "const": "unknown" } }, "required": ["command"] } },
+        { "if": { "properties": { "command": { "enum": ["help", "version"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/meta" } } } },
         { "if": { "properties": { "command": { "const": "init" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/workspace" } } } },
         { "if": { "properties": { "command": { "enum": ["target.add", "target.show", "target.doctor"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/target" } } } },
         { "if": { "properties": { "command": { "const": "target.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/target" } } } } } } },

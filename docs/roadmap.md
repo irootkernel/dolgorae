@@ -1,8 +1,8 @@
 # Gomchi Roadmap
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and Round-4
-stabilization `TASK-000-A` are complete; no production implementation Task is
-active.
+stabilization `TASK-000-A` remain complete. Round-5 stabilization
+`TASK-000-B` is active; no production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -21,7 +21,7 @@ Allowed Epic and Task states are `PLANNED`, `ACTIVE`, `BLOCKED`, and `COMPLETE`.
   SOT contradictions affecting it are resolved.
 - A hyphen-suffixed stabilization Task such as `TASK-000-A` may be inserted
   between production Tasks to resolve later review findings. It may create only
-  SOT, checked schemas, toolchain policy, probe fixtures, evidence, dispositions,
+  SOT, checked schemas, toolchain policy, test/fake/probe fixtures, evidence, dispositions,
   and review artifacts, never production code. It uses the ordinary completion
   gate and does not rewrite the historical status of an earlier completed Task.
 - An Epic becomes complete only when all of its Tasks and Epic-level acceptance
@@ -38,11 +38,14 @@ A Task is `COMPLETE` only when all of the following are true:
    recovery, process identity, locking, audit bytes, or external protocol
    semantics additionally requires a stated adversarial attack budget and
    empirical verification of every normative OS/external behavior it introduces.
-5. Every blocking finding is fixed or rejected with evidence and independently
-   confirmed as resolved.
+5. Every blocking finding is fixed in SOT text or a checked artifact, or
+   rejected with evidence, and independently confirmed as resolved. A statement
+   present only in disposition prose is not implemented.
 6. Non-blocking findings are recorded in
    [deferred-feedback.md](deferred-feedback.md).
-7. An implementation note records the evidence.
+7. An [implementation note](implementation-notes.md) records the evidence, and
+   [review history](reviews/README.md) indexes the preserved input,
+   disposition, and closure artifacts.
 8. One or more task-scoped Git commits are linked from that note.
 
 This gate does not prescribe how an implementer divides commits or stages files.
@@ -113,6 +116,42 @@ Epic acceptance: NOTE-002 links the immutable-input and implementation commits,
 every Round-4 row has a disposition and evidence, no production source exists,
 and TASK-001 remains planned until this Task is complete.
 
+## EPIC-000-B: Round-5 End-to-End Stabilization
+
+Status: `ACTIVE`
+
+Goal: Reconcile Round 5's end-to-end lifecycle, OS-substrate, checked-artifact,
+machine-contract, and closure-integrity findings without production code.
+
+### TASK-000-B: Round-5 Contract, Traceability, and Probe Closure
+
+Status: `ACTIVE`
+
+Preserve the immutable Round-5 input and create one owner-disposition row per
+finding. Reconcile spawn-image identity, APFS/firmlink workspace identity,
+volatile sockets, absolute Git writable roots, timed locks, fail-closed worker
+attachment, version-skew shutdown, interrupt expiry, fork boundaries, manifest
+comparison/notifications, machine-output evolution, JSON ingest, export
+snapshots, redaction digits, and access-generation semantics. Add the checked
+requirement reverse index and one offline/live probe entry point. Test fixtures
+and the fake app-server are lawful stabilization outputs; production Rust is
+not.
+
+Verification: the Round-5 P-1 through P-12 campaign (with byte-1 takeover
+replaced by a no-signal fail-closed case and unsupported filesystems rejected),
+all checked-schema/error/manifest cross-validation, requirement-index coverage,
+Markdown/static checks, and an independent refutation-first review by a lane
+that did not author the disposition. The review must include crash-recover-
+resume, contested attachment, SIGTERM/approval-expiry, artifact-level schema
+inspection, at least 40 recorded counter-searches, and target-platform empirical
+checks. Live Codex observations and local performance measurements are recorded
+as bounded secret-free evidence.
+
+Epic acceptance: every Round-5 row is individually verified or rejected with
+evidence, no fix exists only in disposition prose, all required live/offline
+gates pass, NOTE-003 links task-scoped commits, no production source exists, and
+TASK-001 remains planned. Until then TASK-000-B and EPIC-000-B remain ACTIVE.
+
 ## EPIC-001: Foundation and Durable State
 
 Status: `PLANNED`
@@ -126,10 +165,12 @@ Status: `PLANNED`
 
 Implement the Rust 2024 binary skeleton, command parser, UUIDv7 identities,
 stable JSON success/error envelopes, exit-status mapping, typed lifecycle and
-access enums, `--human` rendering boundary, pinned Rust 1.97.1 toolchain,
+access enums, help/version/unknown-command output, `--human` rendering boundary,
+pinned Rust 1.97.1 toolchain,
 machine-output schema validation, injectable monotonic clock, identity/boot/
 enumeration providers, and named fault barriers. Establish the single safe
-Darwin `libc` wrapper and in-repo JCS ownership; commit Cargo.lock.
+Darwin `libc` wrapper, duplicate-detecting `RawValue` ingest, and in-repo JCS
+ownership; commit Cargo.lock without adding a dependency absent an ADR.
 
 Verification: unit tests for serialization compatibility, unknown-field
 tolerance, every exit class, and CLI argument conflicts; formatting and clippy
@@ -143,13 +184,15 @@ Status: `PLANNED`
 Implement Git and explicit non-Git initialization, per-worktree canonical
 workspace identity, upward `.gomchi` discovery, minimal policy files, generated
 local ignore policy, dirty-worktree baseline capture, and safe permission
-creation. Establish `--state-root`, `lock-root.json`, local-filesystem checks,
+creation. Establish `--state-root`, `lock-root.json`, mandatory local-APFS
+workspace and state-root checks with no override,
 unanimous-manifest reconstruction, and strict config/target schemas.
 
 Verification: tests for subdirectory discovery, symlink normalization, Git
 worktrees, dirty/untracked preservation, non-Git opt-in, repeated initialization,
-and refusal of uninitialized start; libc realpath case aliases versus
-case-sensitive distinct paths; nonlocal-default refusal; state-root
+and refusal of uninitialized start; libc realpath case aliases and the
+device/inode-guarded `/System/Volumes/Data` firmlink normalization versus
+case-sensitive distinct paths; non-APFS/nonlocal refusal; state-root
 reconstruction/conflict; nested/Git-contained non-Git and mode/root-changing
 re-init refusal.
 
@@ -164,7 +207,8 @@ and file/directory permissions.
 
 Verification: RFC 8785 vectors; UTF-16 key order; `1.0`, `1e2`, `-0`, `0.1`,
 `2^53+1`, `1e400`, and `1e21`; duplicate keys; marker/redaction transform order;
-empty-token and plural vectors; payload caps; permissions; arrays, non-ASCII,
+empty-token, plural, separator-digit, and trailing-digit vectors; payload caps;
+permissions; arrays, non-ASCII,
 and string-encoded JSON boundaries.
 
 ### TASK-003-B: Ledger Durability, Repair, and Projection
@@ -208,7 +252,7 @@ adapter for the pinned Codex account and thread.
 Status: `PLANNED`
 
 Implement detached hidden worker re-execution, fixed short private socket paths,
-versioned runtime discovery/identity sidecars, persistent local locks, fd-3
+versioned runtime discovery records, persistent local locks, fd-3
 startup handoff, per-run startup serialization, stale-socket recovery, bounded
 request/response IPC, ledger-backed event streaming, reconnection, worker
 discovery, on-demand generation startup, version-frozen control v1, and the one
@@ -247,8 +291,8 @@ Status: `PLANNED`
 Implement stdio JSONL process ownership, initialize/initialized, thread
 start/resume/fork, model fixation, effort validation, turn start/interrupt,
 one-active-turn serialization, local image input, send/submit/wait behavior,
-idempotency, usage capture, terminal readback, and the minimal controllable fake
-app-server core required for deterministic verification.
+idempotency, usage capture, and terminal readback using TASK-004's shared fake
+app-server fixture; TASK-006 does not create another fake core.
 
 Verification: deterministic fake app-server scenarios for every request and
 notification ordering, request/thread/turn/generation mismatch, duplicate
@@ -277,6 +321,9 @@ reader/write sandbox selection, nonqueued promotion, idle-only
 promotion/demotion, effective-write start/resume/fork and writer-recover
 acquisition, and identity-verified
 stale process-group cleanup before starting a new app-server.
+Promotion/demotion retains the same worker and byte-1 owner while replacing
+only its app-server generation; startup locks use the pinned timed-record-lock
+layout and offsets.
 
 Verification: multiprocess tests proving multiple readers, one app-server writer
 lane per worktree, no replacement app-server before crash cleanup, deterministic
@@ -285,6 +332,8 @@ PID/PGID reuse refusal, pause/close/unknown release, promotion races, and
 separate locks for distinct canonical workspaces, permanent writer/startup
 pathnames, held-fd/path and historical-inode splits, linked-worktree Git writable
 roots, access-policy mappings, and generation replacement on promote/demote.
+Also cover `F_SETLKWTIMEOUT`, spawn-image versus final-image identity, and
+fail-closed byte-1 control timeout without any activity-derived signal.
 
 ### TASK-008: Pending Requests and Generation Approvals
 
@@ -295,6 +344,8 @@ request IDs; `pending` and schema-validated `respond`; reader auto-decline;
 explicit writer decisions; and generation-scoped approval expiry. Recognize the
 three pinned unsupported request methods and reply method-not-found without
 creating pending lifecycle state.
+Reader auto-decline is the configured `approvalPolicy:"never"`, not a duplicate
+interceptor.
 
 Verification: fake server-request coverage for both supported kinds and every decision, stale
 generation responses, unknown request kinds, malformed responses, indefinite
@@ -312,7 +363,8 @@ generation-level access instruction replacement, verified socket cleanup,
 start-failed bootstrap authority, terminal seals, and final-state restrictions.
 
 Verification: idle/running/waiting pause/close matrices, interrupt terminal
-deadline, stale socket ownership, start failure before/after bound, seal crash
+deadline and outcome-unknown landing, control-v1 pause/close/recover under
+binary skew, stale socket ownership, start failure before/after bound, seal crash
 points, demote/promotion generation replacement, and no lease release before
 child cleanup.
 
@@ -322,13 +374,14 @@ Status: `PLANNED`
 
 Implement four-verdict worker/app-server identity, boot-session proof, complete
 provisional identity, kqueue continuity, persisted member snapshots,
-`proc_listpgrppids` enumeration, worker takeover progress, permanent lock-inode
-rules, and no-force fail-closed cleanup continuation.
+`proc_listpgrppids` enumeration, fail-closed worker attachment, permanent
+lock-inode rules, and no-force cleanup continuation.
 
 Verification: every identity read failure; ESRCH/live/zombie/reaped/recycled PID;
 leader-first and leaderless persisted-member cleanup; new group members; ten-
-second absence deadline; inode unlink/recreate; reboot proof; worker log/CPU/
-generation progress aborts; no unrelated signal under injected PID/PGID reuse.
+second absence deadline; inode unlink/recreate; reboot proof; revalidated live
+worker control timeout returning `RUN_BUSY` with no signal; no unrelated signal
+under injected PID/PGID reuse.
 
 ### TASK-009-C: History Reconciliation, Outcome Unknown, and Fork
 
@@ -365,7 +418,8 @@ redacted event queries/following, stable cursors, final result envelopes, effort
 updates, and best-effort pre/post workspace observations with explicitly
 unverified attribution. Implement the checked command-tagged machine-output
 schema, retryability/details matrix, 30-second stream heartbeat, exclusive
-cursor, 4,096-path bound, and invalid-UTF8 path representation.
+cursor, closed audit-record envelope/kind enum, measured workspace changes,
+4,096-path bound, and invalid-UTF8 path representation.
 
 Verification: cursor replay/follow tests, observer disconnect, concurrent reader
 and writer observations, external-edit contamination, missing usage, and every
@@ -384,7 +438,8 @@ delete escape, and the rule that Codex threads are never deleted or auto-importe
 Verification: clean/corrupt ledger cases, active-run delete refusal, missing
 Codex history export, output collision, deterministic hashes, excluded runtime/
 recovery artifacts, plaintext residual warning, deletion scope, and orphan
-thread non-import behavior.
+Export cases capture one fsynced ledger-head watermark, copy only that complete
+prefix, and regenerate bundled projections from it.
 
 ### TASK-012: Agent Governance and Process Cleanup
 

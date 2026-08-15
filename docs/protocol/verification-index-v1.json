@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "source": "docs/specs.md",
+  "requirement_id": "REQ-<SPEC>-<first-12-lowercase-hex-of-sha256(normalized-normative-paragraph-utf8)>",
+  "normalization": "collapse ASCII whitespace and retain exact punctuation and RFC-2119 words",
+  "sections": {
+    "SPEC-001": {"tasks": ["TASK-001", "TASK-015"], "catches": ["product boundary", "platform and filesystem floor"]},
+    "SPEC-002": {"tasks": ["TASK-002", "TASK-007"], "catches": ["workspace discovery", "firmlink identity", "initialization and policy files"]},
+    "SPEC-003": {"tasks": ["TASK-005"], "catches": ["target registry", "argv and CODEX_HOME binding"]},
+    "SPEC-004": {"tasks": ["TASK-004", "TASK-009-B"], "catches": ["worker topology", "runtime identity", "on-demand recovery"]},
+    "SPEC-005": {"tasks": ["TASK-001", "TASK-006", "TASK-008", "TASK-009-A", "TASK-009-B", "TASK-009-C", "TASK-010", "TASK-011", "TASK-012"], "catches": ["public CLI", "input and idempotency", "version acceptance"]},
+    "SPEC-006": {"tasks": ["TASK-001", "TASK-003-C", "TASK-006", "TASK-012", "TASK-013"], "catches": ["machine envelopes", "errors and timeouts", "events", "turn results"]},
+    "SPEC-007": {"tasks": ["TASK-002", "TASK-004", "TASK-007", "TASK-009-B"], "catches": ["sandbox mapping", "locks", "process identity", "access transitions"]},
+    "SPEC-008": {"tasks": ["TASK-006", "TASK-009-A", "TASK-009-C"], "catches": ["lifecycle", "recovery", "fork", "effort defaults"]},
+    "SPEC-009": {"tasks": ["TASK-008"], "catches": ["pending requests", "approval decision translation"]},
+    "SPEC-010": {"tasks": ["TASK-003-A", "TASK-003-B", "TASK-003-C", "TASK-012"], "catches": ["JSON ingest", "audit durability", "redaction", "export and deletion"]},
+    "SPEC-011": {"tasks": ["TASK-011"], "catches": ["agent policy", "managed side effects"]},
+    "SPEC-012": {"tasks": ["TASK-005", "TASK-010", "TASK-011", "TASK-013", "TASK-015"], "catches": ["orchestration boundary", "Codex compatibility and observations"]}
+  }
+}

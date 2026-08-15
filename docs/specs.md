@@ -8,7 +8,8 @@ is owned by [architecture.md](architecture.md), decision rationale by
 [roadmap.md](roadmap.md). A contradiction between SOT documents is an invalid
 state and must be reconciled before an implementation task becomes active.
 
-The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
+Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
+normative; lowercase prose is descriptive and grants no additional authority.
 
 ## Definitions
 
@@ -21,7 +22,9 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
   interrupted, or failed status.
 - **Worker**: the hidden per-run Gomchi process that owns the app-server child,
   the worker control socket, and the run audit writer.
-- **Process generation**: one worker plus app-server lifetime within a run.
+- **Process generation**: one app-server configuration and lifetime within a
+  run. A worker may host successive process generations; its own lifetime is
+  tracked independently by the startup owner record and process-identity tuple.
 - **Target**: a user-local, named Codex execution configuration consisting of
   shell-free argv and an expected `CODEX_HOME`.
 - **Reader**: a run whose turns use Codex read-only sandbox policy.
@@ -38,9 +41,14 @@ Gomchi MUST provide persistent Codex subagents through one distributable
 `gomchi` executable. It MUST NOT install a global daemon, project daemon,
 launchd unit, Codex binary, authentication material, or `CODEX_HOME`.
 
-The first supported release is a personal alpha for Apple Silicon macOS
-(`aarch64-apple-darwin`). Intel macOS, Linux, Windows, public installers, and
-automatic updates are not supported release targets.
+The first supported release is a personal alpha for Apple Silicon macOS 26.0
+or later (`aarch64-apple-darwin`) on local APFS. Both the workspace and its
+configured state/lock root MUST report `MNT_LOCAL` and `f_fstypename ==
+"apfs"`; there is no v1 override. Intel macOS, Linux, Windows, network
+filesystems, non-APFS local filesystems, public installers, and automatic
+updates are not supported release targets. Empirical release evidence is
+valid only for the recorded OS build and MUST be refreshed on a new macOS
+major version.
 
 Gomchi depends on user-prepared Codex targets. The compatibility baseline is
 Codex app-server 0.147.0.
@@ -60,10 +68,15 @@ bytes before the sole final LF. Invalid quoting, trailing output, or NUL is a
 Git discovery failure. The canonical workspace is libc `realpath(3)` applied to
 that decoded existing directory, even when the supplied path is a subdirectory.
 In non-Git mode it is `realpath(3)` applied to the existing initialized
-directory. The canonical path is the returned absolute
-POSIX byte sequence with no trailing slash except for root. Gomchi performs no
-additional Unicode normalization or case folding: filesystem alias resolution,
-including symlink and case-insensitive lookup, belongs to `realpath(3)`.
+directory. The canonical path is the returned absolute POSIX byte sequence
+with no trailing slash except for root, followed by the macOS Data-volume
+alias rule below. Gomchi performs no Unicode normalization or case folding.
+Symlink and case-insensitive lookup belong to `realpath(3)`, but APFS
+firmlinks do not: when the result is exactly `/System/Volumes/Data` or begins
+with `/System/Volumes/Data/`, Gomchi derives the candidate `/` or the path with
+that prefix removed and substitutes it only when no-follow `stat` of both
+paths yields the same `(st_dev, st_ino)`. The same rule is applied in Git and
+non-Git mode before any digest is computed.
 
 The workspace digest is lowercase hexadecimal SHA-256 over
 `"gomchi-workspace-v1\0"` followed by those canonical path bytes. The full
@@ -148,6 +161,8 @@ wrong types, malformed TOML, and unsupported schema versions return
 `TARGET_REGISTRY_INVALID`. Target add/remove holds a user-registry lock and uses
 write-temp, file `fsync`, rename, and directory `fsync`; the registry is
 hand-editable and stores no environment values.
+The containing configuration directory is mode 0700 and `targets.toml` is mode
+0600; creation and replacement reject a wrong-owner or more-permissive file.
 
 Target names are unique. `target add` MUST reject an existing name with
 `TARGET_ALREADY_EXISTS`; it MUST NOT overwrite a target implicitly. Replacement
@@ -212,6 +227,8 @@ on-demand discovery/recovery procedure before its ordinary operation.
 The initial public command surface is:
 
 ```text
+gomchi [--human] --help
+gomchi [--human] --version
 gomchi [--human] init [PATH] [--non-git] [--state-root <absolute-local-path>]
 
 gomchi [--human] target add <name> --codex-home <absolute-path> -- <argv...>
@@ -234,9 +251,9 @@ gomchi [--human] run set-effort <run-id> <effort> [--workspace <path>]
 gomchi [--human] run promote <run-id> [--workspace <path>]
 gomchi [--human] run demote <run-id> [--workspace <path>]
 gomchi [--human] run pause <run-id> [--workspace <path>] [--interrupt]
-gomchi [--human] run resume <run-id> [--workspace <path>] [--access read|write]
+gomchi [--human] run resume <run-id> [--workspace <path>] [--access read|write] [--accept-version-change]
 gomchi [--human] run recover <run-id> [--workspace <path>] [--accept-version-change]
-gomchi [--human] run reconcile <run-id> [--workspace <path>]
+gomchi [--human] run reconcile <run-id> [--workspace <path>] [--accept-version-change]
 gomchi [--human] run fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>] [--access read|write]
 gomchi [--human] run close <run-id> [--workspace <path>] [--interrupt]
 gomchi [--human] run delete <run-id> --confirm [--workspace <path>]
@@ -252,11 +269,18 @@ instructions. Instructions accept exactly one source: `--instructions`,
 `--instructions-file`, or `--instructions-stdin`. They MUST NOT weaken Gomchi's
 hard agent invariants.
 
+In JSON mode `--help` and `--version` emit ordinary success envelopes with
+commands `help` and `version`; `--human` selects presentation-only text. A
+syntax failure before command identification emits the ordinary failure
+envelope with command `unknown`.
+
 The two app-server requests are not claimed to be atomic. After `thread/start`,
 Gomchi appends and fsyncs the provisional thread ID before sending `turn/start`.
 If the `turn/start` response is lost, recovery proves generation absence and
-queries persisted history for that provisional thread. `thread/read` returning
-the pinned manifest's exact absent-thread error is `Absent`; a successful read
+queries persisted history for that provisional thread. `thread/read` is
+`Absent` only when both the pinned error code and the manifest-pinned
+independent absence discriminator match. If the pinned target exposes no stable
+independent discriminator, this automatic-replay exception is disabled. A successful read
 with no accepted turn proves `NotAccepted`. Every other error, malformed
 response, timeout, unknown code, or unusable status is `Unreadable`. Gomchi may
 replace the thread and retry the reserved first-turn intent only for `Absent` or
@@ -272,8 +296,10 @@ TTY. `respond` applies the same rule to `--response` and JSON stdin. Each
 repeatable `--image` value starts with the required detail token `auto=`,
 `low=`, or `high=`; everything after the first `=` is the literal readable
 local path, so colons and detail-like filename suffixes are unambiguous. Gomchi
-stores only the canonical path and detail and MUST NOT copy image bytes. Later
-replay cannot be guaranteed if the source file changes or disappears.
+stores the canonical path, detail, byte length, and streaming SHA-256 and MUST
+NOT copy image bytes. The digest is part of idempotency normalization. Later
+replay is permitted only while the file still matches those recorded facts;
+change or disappearance makes acceptance uncertain and forbids replay.
 `--idempotency-key` is an opaque, nonempty UTF-8 string scoped to
 the run; the same key with byte-identical normalized input returns the original
 accepted turn, while reuse with different input returns
@@ -286,9 +312,9 @@ greater than 24 hours are rejected with `INVALID_ARGUMENT`.
 `run recover` explicitly performs generation discovery, identity validation,
 verified process-group cleanup, and reconciliation that other commands may
 perform on demand. It is allowed for a nonfinal run whose worker is unreachable
-or whose verified worker fails control `hello` for ten seconds and then shows
-no defined progress for the additional takeover interval. V1 has no force
-override: an unverifiable prior worker, app-server, or process group returns
+or whose prior generation is proved absent. A live worker that fails control
+`hello` is not automatically taken over. V1 has no force override: a live
+`Match` returns `RUN_BUSY`, while an unverifiable prior worker, app-server, or process group returns
 non-retryable `RECOVERY_REQUIRED` without signalling or starting a replacement.
 `fork --fresh` is the only explicit immediate escape; it creates a threadless
 new run and retains source provenance without reading the source Codex thread.
@@ -297,9 +323,11 @@ It is always read-only; combining `--fresh` with `--access write` is
 
 When a generation-starting command finds a tested app-server version different
 from the run manifest, it returns `COMPATIBILITY_REJECTED`. Only explicit
-`run recover --accept-version-change` may accept a different version after the
-full compatibility gate passes. It fsyncs the prior/new version, executable and
-schema digests as a ledger event before starting the replacement generation.
+`run recover`, `run resume`, or `run reconcile` with
+`--accept-version-change` may accept a different version after the full
+compatibility gate passes. Every generation-starting command uses the same
+recorded gate. It fsyncs the prior/new version, executable and schema digests
+as a ledger event before starting the replacement generation.
 The flag on an unchanged version is `INVALID_ARGUMENT`; target-wide approval
 never changes an existing run.
 
@@ -345,6 +373,15 @@ additive, removed, or meaning-changing producer field requires a new schema
 version. This is distinct from the Codex-input compatibility rule, where Gomchi
 records and tolerates unknown additive app-server data.
 
+Before TASK-001 begins, the unreleased v1 artifacts may be corrected together
+as part of a stabilization Task. After the first production implementation,
+each successor uses a new `$id` and integer `schema_version`; producers emit
+one version, consumers inspect `schema_version` before any other field and
+reject unsupported versions, and there is no implicit dual emission. Export
+verification retains readers for every released bundle version. A newer binary
+opening an unsupported on-disk run, audit, or hash version fails closed and
+requires the matching binary; v1 defines no in-place migration.
+
 The checked [machine-output schema](protocol/gomchi-machine-v1.schema.json) and
 [error contract](protocol/gomchi-error-contract-v1.json) are normative.
 `command` is a closed dotted
@@ -374,6 +411,17 @@ terminal or still waiting. Every error code has a required `details` schema;
 irrelevant details are forbidden. `--human` is explicitly not machine-parseable
 and carries no compatibility guarantee.
 
+`workspace_changes` is present on every turn and includes `measured`. It is
+`false` with empty paths on accepted, running, or waiting turns and `true` only
+after terminal post-turn observation; an empty unmeasured value is not proof of
+no workspace changes.
+
+`target doctor` returns `ok:true` whenever its checks ran, with the verdict in
+`data.compatibility` and every failure/warning in diagnostics. It emits a
+failure envelope only when the check itself could not execute. Target
+add/list/show do not execute a target and therefore report validation-derived
+fields as `unknown`, null, or empty as their schema permits.
+
 `retryable` means the identical invocation may be safely issued again unchanged;
 it does not promise progress or absence of prior side effects. A request rejected
 before intent reservation or external write with `RUN_BUSY` or `WRITER_BUSY` is
@@ -397,10 +445,14 @@ metadata, stops the app-server generation, and moves an accepted active turn to
 fsynced ledger records by cursor; a slow or disconnected observer MUST NOT
 delay draining app-server output or block the active turn.
 
-A solicited `thread/read(includeTurns: true)` response is parsed by a
+A JSON-RPC object containing both `method` and `id` is classified first as a
+server request; it is never a solicited response. App-server request IDs and
+Gomchi-originated request IDs occupy independent correlator maps, so a numeric
+collision cannot change that precedence. A solicited
+`thread/read(includeTurns: true)` response is parsed by a
 constant-memory streaming visitor. Before byte 16 MiB the visitor MUST yield a
 unique top-level `id` matching an outstanding `thread/read`; a top-level
-`method` proves an unsolicited notification. An ambiguous prefix that reaches
+`method` without `id` proves an unsolicited notification. An ambiguous prefix that reaches
 16 MiB is never classified from the number of outstanding requests: it fails
 the compatibility/transport check and stops that app-server generation. An
 accepted active turn is quarantined; a transient read fails only its caller.
@@ -435,6 +487,10 @@ Exit status classes are stable:
 | 7 | A `send` or `wait` request observed its turn end failed or interrupted |
 | 8 | Audit integrity verification failure |
 
+Exit statuses outside `{0,2,3,4,5,6,7,8,130}` carry no machine envelope and
+MUST NOT be interpreted as semantic Gomchi error codes. Exit 130 is reserved
+for caller SIGINT and likewise carries no final envelope.
+
 Stable semantic error codes, exit classes, emitters, and conditions are
 normative:
 
@@ -457,15 +513,16 @@ normative:
 | `WRITER_BUSY` | 4 | `run start` with effective write access (explicit or project default), `run promote`, `run resume --access write`, recovery of a writer run, and `run fork --access write` | another worker holds the workspace writer lease |
 | `IDEMPOTENCY_CONFLICT` | 4 | `run send/submit` | a run-scoped key was reused with different normalized input |
 | `STALE_REQUEST` | 4 | `run respond` | the request is known but is no longer pending |
-| `OUTCOME_UNKNOWN` | 4 | `run send/submit/wait/respond/interrupt/set-effort/promote/demote/pause/resume` | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
+| `OUTCOME_UNKNOWN` | 4 | `run send/submit/wait/respond/interrupt/set-effort/promote/demote/pause/resume/close` | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
 | `RECOVERY_REQUIRED` | 4 | effective-write `run start`, `run send/submit/promote/pause/resume/recover/reconcile/close`, and ordinary or write-access `run fork` | prior same-run or workspace writer generation identity required by the operation cannot be proved safe; read-only new-run `start`, projection-only `status/events/verify`, and read-only `fork --fresh` are excluded and the code is never generically retryable |
 | `TARGET_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable target identity differs from the manifest |
 | `COMPATIBILITY_REJECTED` | 5 | `target doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
 | `GOMCHI_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Gomchi version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
 | `TRANSPORT_FAILURE` | 6 | every command that contacts a worker or app-server | connection, stdio, or protocol transport fails |
+| `OPERATION_TIMEOUT` | 6 | `target doctor` and run commands performing local replay/schema work | a bounded local operation expired without uncertain external acceptance |
 | `PROTOCOL_FRAME_TOO_LARGE` | 6 | every command receiving a CLI-worker frame | the CLI-worker request or response frame exceeds its byte limit |
-| `RUNTIME_PATH_INVALID` | 6 | `init` and every run command that starts or attaches a worker | private lock/runtime root, sidecar, or socket path fails validation |
-| `RUNTIME_PATH_COLLISION` | 6 | `init` and every run command that starts or attaches a worker | a recorded root, existing short path, lease inode, or sidecar belongs to different identities |
+| `RUNTIME_PATH_INVALID` | 6 | `init` and every run command that starts or attaches a worker | private lock/runtime root or socket path fails validation |
+| `RUNTIME_PATH_COLLISION` | 6 | `init` and every run command that starts or attaches a worker | a recorded root, existing short path, lease inode, or runtime socket record belongs to different identities |
 | `REDACTION_FAILURE` | 6 | any command that would append an unclassifiable wire payload | safe redaction or serialization cannot be proved |
 | `INTERNAL_ERROR` | 6 | any command | an otherwise unmapped invariant or runtime failure occurs |
 | `TURN_FAILED` | 7 | `run send/wait` | the addressed turn reaches failed terminal state |
@@ -490,28 +547,40 @@ observation. Otherwise prior-generation identity is evaluated before startup
 serialization: `RECOVERY_REQUIRED` precedes `RUN_BUSY`; when identity is safe
 but another byte owner wins, `RUN_BUSY` is emitted.
 
-`run events --follow` is the only command that emits multiple JSON objects.
-`--after` is an exclusive decimal ledger sequence cursor and remains stable
+`run events` is the only command family that emits multiple JSON objects.
+`--after` defaults to zero, is an exclusive decimal ledger sequence cursor,
+and remains stable
 through torn-tail repair; `projection_rewound` never renumbers committed
 records. Each success envelope has `data.kind = event|heartbeat|end`. `event`
 contains cursor plus the normalized record; with `--raw` it additionally
 contains the exact redacted ledger-line string rather than changing framing.
-While caught up, a nonfinal run emits a heartbeat every 30 seconds containing
+Without `--follow`, Gomchi emits records through the head captured at command
+start, then one `end` frame and exits 0, including when there are no records.
+With `--follow`, while caught up, a nonfinal run emits a heartbeat every 30 seconds containing
 the current cursor and state. After `closed` or `start_failed` is caught up it
 emits `end` and exits 0. A midstream failure emits one ordinary error envelope
 and exits with its mapped status. Caller disconnect or SIGINT exits 130 without
 altering the run. A successfully accepted `run interrupt` command itself
 returns exit 0; exit 7 describes a caller that requested the interrupted turn's
 result.
+Because an exit-7 failure envelope is intentionally minimal, a Master needing
+response, usage, cursor, or measured workspace changes reads
+`run status.data.last_terminal` after the failed or interrupted turn.
 
-Normative internal timeouts are: socket connect 5 seconds; startup `bound` 10
-seconds; initialize and `model/list` 30 seconds each; replay `ready` 30 seconds
-plus 1 millisecond per ledger record capped at 5 minutes; schema generation and
-`target doctor` 120 seconds; solicited history and transient reconciliation 120
-seconds; worker control hello 10 seconds followed by 30 seconds of no progress;
-TERM grace 5 seconds; interrupt terminal wait 5 seconds; handoff and group
-absence 10 seconds; projection publication 100 milliseconds. A user-provided
-shorter command timeout limits only its caller and never weakens cleanup proof.
+Normative internal timeouts and expiry results are: socket connect 5 seconds
+(`TRANSPORT_FAILURE`); startup `bound` 10 seconds (`RUN_BUSY`); initialize and
+`model/list` 30 seconds each (`TRANSPORT_FAILURE` when non-acceptance is
+proved); full ledger replay on every worker start, with a five-minute budget
+(`OPERATION_TIMEOUT`); schema generation and `target doctor` 120 seconds
+(`OPERATION_TIMEOUT`); solicited history and transient reconciliation 120
+seconds (`TRANSPORT_FAILURE`, lifecycle unchanged); worker control `hello` 10
+seconds (`RUN_BUSY` for a revalidated `Match`, `RECOVERY_REQUIRED` for
+`Unverifiable`); TERM grace 5 seconds and handoff/group absence 10 seconds
+(`RECOVERY_REQUIRED` unless interruption uncertainty requires
+`OUTCOME_UNKNOWN`); and interrupt terminal wait 5 seconds
+(`OUTCOME_UNKNOWN`). Projection publication within 100 milliseconds is a
+diagnostic target, never an error deadline. A user-provided shorter command
+timeout limits only its caller and never weakens cleanup proof.
 
 `send` waits without a default timeout until the turn is terminal or requires
 master interaction. A caller-supplied timeout returns the current nonterminal
@@ -521,11 +590,12 @@ accepts `turn/start` and Gomchi fsyncs the permanent thread binding and turn ID.
 IDs. Waiting and caller-timeout returns use exit 0.
 
 An optional idempotency key is unique for the run's lifetime. Reusing a key with
-the same normalized message, image paths/details, and turn options resolves to
+the same normalized message, image paths/details/byte digests, and turn options resolves to
 the original turn. Reusing it with different input returns
 `IDEMPOTENCY_CONFLICT`. `send` and `submit` share the same key space.
-Normalization is UTF-8 message bytes, ordered `(detail,lossless-canonical-path)`
-image tuples, fixed model, requested/default effort, and access-derived turn
+Normalization is UTF-8 message bytes, image tuples in caller-supplied order as
+`(detail,lossless-canonical-path,byte-length,sha256)`, fixed model,
+requested/default effort, and access-derived turn
 options serialized with JCS. Before any app-server request, the intent record
 fsyncs the opaque key and SHA-256 of those normalized bytes. A reservation with
 no accepted turn is released only after stable history proves non-acceptance;
@@ -538,6 +608,7 @@ when supplied by Codex, event cursor, and:
 ```json
 {
   "workspace_changes": {
+    "measured": true,
     "observed_paths": [],
     "truncated": false,
     "attribution": "unverified"
@@ -545,12 +616,14 @@ when supplied by Codex, event cursor, and:
 }
 ```
 
-Observed paths describe workspace changes during the turn interval. In Git mode
+Observed paths are populated only when `measured` is true and describe workspace
+changes during the terminal turn interval. In Git mode
 they are the sorted unique workspace-relative paths from
 `git status --porcelain=v2 -z --untracked-files=all`; ignored paths and
-`.gomchi/` are excluded. In non-Git mode they are the changed regular files from
+`.gomchi/runs/`, `.gomchi/runtime/`, and `.gomchi/cache/` are excluded, while
+tracked policy-file changes remain visible. In non-Git mode they are the changed regular files from
 no-follow pre/post `(device,inode,size,mtime_ns)` snapshots, also excluding
-`.gomchi/`. Valid UTF-8 paths are strings; other POSIX bytes use
+only those three internal directories. Valid UTF-8 paths are strings; other POSIX bytes use
 `{"$gomchi_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
 The machine schemas enforce the alphabet, four-character grouping, and exact
 terminal padding in addition to declaring `contentEncoding`. At most 4,096 paths are retained and
@@ -568,8 +641,10 @@ turn `sandboxPolicy:{"type":"workspaceWrite","writableRoots":[...],
 "networkAccess":false,"excludeSlashTmp":false,
 "excludeTmpdirEnvVar":false}`, and `approvalPolicy:"on-request"`.
 `writableRoots` is the sorted unique set of the canonical workspace plus, in
-Git mode, absolute `git rev-parse --git-common-dir` and
-`git rev-parse --git-path .` results. These exact thread and turn carriers are
+Git mode, libc `realpath(3)` of `git -C <canonical-workspace> rev-parse
+--path-format=absolute --git-common-dir` and `git -C <canonical-workspace>
+rev-parse --path-format=absolute --git-path .`. Every member MUST be absolute
+and is deduplicated after resolution. These exact thread and turn carriers are
 part of the required-subset manifest. Readers MAY run concurrently without a
 Gomchi limit. A canonical workspace has at most one Gomchi writer.
 
@@ -583,8 +658,9 @@ changes are ignored. A missing workspace record is reconstructed only from
 unanimous existing manifest values; conflict fails. With no existing runs it is
 resolved and created. Creation and validation use root-fd-relative no-symlink
 operations, validate `EEXIST`, ownership and mode 0700 with `fstat`, and require
-`MNT_LOCAL` with `fstatfs`; path or device/inode drift fails with
-`RUNTIME_PATH_COLLISION`. A nonlocal default requires explicit `--state-root`.
+`MNT_LOCAL` plus `f_fstypename == "apfs"` with `fstatfs`; path or
+device/inode drift fails with `RUNTIME_PATH_COLLISION`. A nonlocal or non-APFS
+root is unsupported rather than overridable.
 Only the
 worker holds it; it is close-on-exec and MUST NOT be inherited by app-server or
 descendants. A writer holds it across starting, idle, running, and all waiting
@@ -661,20 +737,27 @@ App-server launch uses spawn attributes
 `POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_SETPGROUP |
 POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK`; the default set covers every
 catchable signal and the child mask is empty. Before `SIGCONT`, the worker opens
-the suspended final executable path without following symlinks and derives
-device, inode, and SHA-256 from that same fd between two unchanged BSD-info
-samples. It writes the complete ten-field provisional identity with temp-file,
-`fsync`, rename, and directory `fsync`. Replacement/unavailability is
-`Unverifiable`, not a partial record. The post-handshake sample is recorded by
-the fsynced `generation_started` event.
+the suspended spawn-image path reported by `proc_pidpath` without following
+symlinks and derives device, inode, and SHA-256 from that same fd between two
+unchanged BSD-info samples. For wrapper argv this image may be an interpreter,
+including `/usr/bin/env`, rather than the final app-server executable. It writes
+the complete ten-field provisional identity with `spawn_image_*` executable
+fields using temp-file, `fsync`, rename, and directory `fsync`.
+Replacement/unavailability is `Unverifiable`, not a partial record. Before a
+`generation_started` record exists, an exec transition with identical PID,
+PGID, UID, and BSD start time is continuity and is `Match`, not `Mismatch`.
+The post-handshake sample is the sole final-executable identity authority and
+is recorded by the fsynced `generation_started` event.
 
-Writer locks use `locks/writer/<workspace-digest>` and startup locks use
-`locks/startup/<workspace-and-run-digest>` and MUST never share an inode. The
+The recorded lock root already denotes the directory ending in `locks/`.
+Writer locks use `writer/<workspace-digest>` and startup locks use
+`startup/<workspace-and-run-digest>` relative to that root and MUST never share an inode. The
 per-run startup file contains two POSIX byte-range locks: byte 0 is held by
 the CLI before fork until worker `bound`; byte 1 is acquired as the worker's
 first post-`setsid`/re-exec action and held for its entire serving lifetime.
-The lock body contains separate version-1, 4096-byte, zero-padded owner records
-for byte 0 and byte 1. Each contains range, workspace/run/generation,
+The 8192-byte lock body contains separate version-1, zero-padded owner records
+at `[0,4096)` for byte 0 and `[4096,8192)` for byte 1. A short file is
+`Unverifiable`. Each contains range, workspace/run/generation,
 boot UUID, full Gomchi process identity, executable-path SHA-256, and a SHA-256
 checksum over the preceding bytes. All-zero, stale, checksum-invalid, or
 unknown-layout slots never establish identity and do not block a kernel-lock
@@ -687,7 +770,9 @@ identity; `ready` follows full replay/validation. Contenders query both ranges
 with `F_GETLK`; `l_pid <= 0` is `Unverifiable`, while a positive `l_pid` is only
 a hint checked against the matching owner record.
 Normal attachment to an answering socket does not acquire the startup lock. A
-contender waits at most ten seconds for ownership handoff. A timed-out byte-0
+contender uses Darwin `F_SETLKWTIMEOUT` with a ten-second relative budget and
+`struct flocktimeout { struct flock fl; struct timespec timeout; }` field order.
+A timed-out byte-0
 transient starter may be terminated outside the lock only after the run-keyed
 file, exact Gomchi executable identity, the defined
 BSD/path/executable/BSD process-identity sample, and kqueue binding all match.
@@ -718,31 +803,31 @@ and process identity. Ordinary mutations still require matching current
 protocol, version, and digest. Identity-verified `shutdown` first interrupts an
 active turn and waits up to five seconds for terminal history.
 
+When ordinary attachment detects binary or mutation-protocol skew, `run pause`,
+`run close`, and `run recover` perform control-v1 `status` followed by
+identity-bound `shutdown`. After exact worker exit, the current binary starts a
+control/replay worker and finishes the requested lifecycle operation. Failure
+to obtain an identity-confirmed response never authorizes a signal.
+
 When any same-run byte-1 worker's control `hello` exceeds ten seconds, recovery
-applies the full identity and kqueue
-rules to the worker itself without requiring the possibly-held startup lock,
-then requires an additional 30 seconds with no progress in ledger head, runtime
-generation, the monotonic `worker_log_bytes_written` counter, or process CPU
-before takeover. `worker.log` contains generation start, bound, ready, control,
-shutdown and rotation records; rotation uses rename and never resets that
-counter. It aborts when
-the exit watch fires, generation advances, or lock-body identity changes. Only
-then does it signal a revalidated `Match` and confirm worker exit. For a writer,
-it additionally confirms lease release. `Unverifiable` returns
-`RECOVERY_REQUIRED`. Contenders then compete for the
-startup lock, recheck socket/runtime state, and only the winner may acquire the
-writer lease and clean the recorded app-server group under it. This path also
-recovers an exact worker or transient starter wedged while holding the startup
-lock and never permits one run to evict another run's healthy writer.
+applies the full identity and kqueue rules to the worker itself without
+requiring the possibly-held startup lock. A live revalidated `Match` returns
+retryable `RUN_BUSY` and is never signalled merely because control, ledger,
+runtime generation, logging, or CPU appears inactive. `Unverifiable` returns
+non-retryable `RECOVERY_REQUIRED`. Automatic byte-1 takeover and
+activity-derived kill authority do not exist in v1.
 
 If worker `SIGTERM` arrives during an active turn, it sends `turn/interrupt`,
-waits up to five seconds for a terminal event, fsyncs the observed state, and
-only then performs generation cleanup. The worker holding byte 1 normally
-unlinks its own socket and sidecar. On recovery, only the byte-0 election winner
-may authorize unlink after prior-generation absence is proved; the replacement
-worker performs it after acquiring byte 1 and before bind. Any other occupied
-path fails closed. Shutdown attempts this cleanup for ten seconds and otherwise
-leaves the path for that verified next owner.
+waits up to five seconds for a terminal event, fsyncs terminal evidence when
+observed, and records `outcome_unknown` on expiry before generation cleanup.
+The worker holding byte 1 normally unlinks its own socket. There is no volatile
+sibling sidecar: `.gomchi/runtime/runs/<run-id>.json` is the sole socket
+identity authority. On recovery, only the byte-0 election winner may authorize
+unlink after an exact matching runtime record and prior-generation absence are
+proved; the replacement worker performs it after acquiring byte 1 and before
+bind. An occupied path with no matching record fails closed. Shutdown attempts
+this cleanup for ten seconds and otherwise leaves the path for that verified
+next owner.
 
 Any `run start` whose effective access is write (whether explicit or project
 default), promotion, `resume --access write`,
@@ -750,9 +835,12 @@ default), promotion, `resume --access write`,
 writer-acquisition set and acquire the lease before the run becomes usable.
 Promotion and demotion are allowed only while idle. Because
 `developerInstructions` is not a `turn/start` field, either transition performs
-clean generation shutdown and `thread/resume` with a recomposed generation-level
-instruction prefix before another turn. Promotion acquires the writer lease
-before replacement activation; demotion completes cleanup before releasing it.
+an in-place app-server generation replacement under the same worker and
+`thread/resume` with a recomposed generation-level instruction prefix before
+another turn. Promotion acquires the writer lease before stopping the reader
+generation and keeps it through writer activation. Demotion stops the writer
+generation, activates the reader generation, then releases the lease. The
+worker's byte-1 ownership does not change during either transition.
 Resume defaults to `read`.
 
 Readers MAY run during writer turns and may observe intermediate workspace
@@ -785,6 +873,12 @@ The lifecycle states are:
 - `start_failed`
 - `outcome_unknown`
 
+The checked Codex manifest names the terminal notification method, status JSON
+Pointer, and closed terminal and nonterminal status sets. A listed terminal
+status drives the corresponding Gomchi terminal result; a listed nonterminal
+status preserves running/waiting state. A missing, malformed, or unlisted
+status is `Unreadable` and can never authorize idle or replay.
+
 Normal transitions are:
 
 ```text
@@ -796,6 +890,8 @@ idle -> closed
 paused -> closed
 starting -> start_failed
 running|waiting_approval -> outcome_unknown
+running|waiting_approval -> paused (only after confirmed interrupt terminal evidence)
+running|waiting_approval -> closed (only after confirmed interrupt terminal evidence)
 outcome_unknown -> paused
 outcome_unknown -> closed
 ```
@@ -807,13 +903,16 @@ events, verify, export, and confirmed deletion.
 A byte-0 election owner that proves no worker reached `bound` may use the sole
 bootstrap-writer exception to append `starting -> start_failed` and its final
 seal. It must hold startup serialization and fsync both records. A present but
-`Unverifiable` generation is never rewritten as start failure; the operator may
+`Unverifiable` generation is never rewritten as start failure; the Master may
 wait for group emptiness or a boot-session change.
 
 Pause and close reject running or waiting runs unless `--interrupt` is present.
-With `--interrupt`, Gomchi requests interruption, waits for a terminal result,
-then stops or closes the run. Pause is resumable; close is not. Neither action
-reverts workspace changes.
+With `--interrupt`, Gomchi first answers an outstanding supported approval with
+`cancel`, requests turn interruption, and waits five seconds. Confirmed terminal
+evidence permits the direct paused/closed transition; expiry records and emits
+`OUTCOME_UNKNOWN` and uses the corresponding `outcome_unknown` edge before
+stopping or closing. Pause is resumable; close is not. Neither action reverts
+workspace changes.
 
 After worker loss, an idle run may be recovered by starting a new process
 generation and using `thread/resume`. Recovery of `paused` performs only
@@ -840,11 +939,12 @@ target snapshot, defaults to read access, and inherits the source model unless
 another model is explicitly selected. It inherits the source's immutable
 run-specific instructions. A cross-target fork is forbidden.
 
-For an outcome-unknown source, the fork scans confirmed history newest first and
+Every history-copying fork scans confirmed history newest first and
 selects the latest status listed as forkable in the checked target manifest.
 Rejected interrupted/failed statuses are skipped rather than treated as generic
-terminal boundaries. If no forkable turn exists, Gomchi creates a fresh Codex
-thread and records source-run and unknown-turn provenance in the new manifest.
+terminal boundaries. If confirmed history exists but no forkable boundary is
+accepted, the command returns `COMPATIBILITY_REJECTED`; only the separately
+defined outcome-unknown/no-confirmed-turn fallback creates a fresh thread.
 
 Any fork that must copy confirmed history requires the source Codex thread to
 exist in the pinned `CODEX_HOME`; the Gomchi transcript is not a substitute.
@@ -873,9 +973,14 @@ turn. An effort value is syntactically valid when it is a nonempty app-server
 string. Model resolution exhausts every `model/list.nextCursor`; `model` is the
 identity field, omitted `--model` selects exactly one `isDefault`, and effort is
 read from each `supportedReasoningEfforts[].reasoningEffort`. Zero or multiple
-defaults is `COMPATIBILITY_REJECTED`. The manifest stores the initial model
-capability snapshot; later successful generations append a new snapshot, and
+model defaults is `COMPATIBILITY_REJECTED` only when a command needs the
+omitted-model default. Omitted `--effort` at run creation selects the first
+advertised effort for the resolved model and records it as the run default.
+Omitted effort on later turns uses that recorded default; `send`/`submit
+--effort` is one-turn-only, while `set-effort` changes future defaults. The
+manifest stores the initial model capability snapshot; later successful generations append a new snapshot, and
 `set-effort` while no generation is live validates against the latest fsynced
+snapshot. Every generation start revalidates the stored default against its new
 snapshot. The effort is accepted only when that snapshot advertises the exact value. An empty
 value returns `INVALID_ARGUMENT`; an unadvertised value returns
 `COMPATIBILITY_REJECTED`.
@@ -899,9 +1004,17 @@ maps stable server requests as follows:
 The two supported approval requests are represented as structured pending requests. `run pending` returns the
 generation-qualified request ID, closed kind, redacted payload, and exact
 response-schema identifier from that manifest. `run respond` accepts exactly
-one JSON response source, validates it against that schema, and forwards it to
-the owning generation. Other known-but-unsupported stable requests receive
+one closed Gomchi object containing only `decision`, whose value is one of the
+four tokens below. Gomchi selects the manifest schema named by the pending
+request, translates the token to the Codex value, validates the translated
+object, and only then forwards it to the owning generation. Other decision
+variants and unknown schema identifiers are `INVALID_ARGUMENT`; raw Codex
+decision tokens are not public input. Other known-but-unsupported stable requests receive
 JSON-RPC method-not-found and are recorded; malformed frames stop the generation.
+After method-not-found, Gomchi keeps draining the generation until Codex emits
+a terminal turn event. If Codex instead leaves the turn nonterminal, the Master
+sees the run as `running` with no Gomchi pending request and uses `run interrupt`
+as the bounded escape.
 
 Requests from an older process generation return `STALE_REQUEST`; pending
 requests never survive restart and are never silently replayed. Their accepted
@@ -919,6 +1032,10 @@ Command- and file-change approval decisions exposed by Gomchi are:
 
 For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `acceptForSession`, `decline`, and `cancel`.
+
+Reader auto-decline is implemented solely by `approvalPolicy:"never"`; Gomchi
+does not install a second approval interception mechanism. A server request
+that nevertheless arrives is handled by the recognized-unsupported rule above.
 
 Generation approval maps to app-server's live session-scoped approval and
 expires whenever the worker/app-server generation ends. Gomchi MUST NOT present
@@ -944,8 +1061,24 @@ JCS record with `hash` omitted and `previous_hash` retained; the genesis
 ordinary tampering; it is not a signature and does not defend against a hostile
 same-user attacker.
 
+The v1 audit-kind enum is closed:
+`workspace_initialized`, `run_created`, `turn_intent`, `thread_bound`,
+`turn_started`, `turn_terminal`, `lifecycle_transition`,
+`generation_started`, `generation_stopped`, `app_server_request`,
+`app_server_response`, `app_server_notification`, `approval_requested`,
+`approval_decided`, `access_changed`, `target_observed`,
+`idempotency_reserved`, `reconciliation`, `cleanup_intent`, `cleanup_result`,
+`ledger_tail_repaired`, `projection_rewound`, `payload_unrepresentable`,
+`start_failed`, and `outcome_unknown`. Adding a kind is a machine-contract
+schema change; an unknown kind fails ledger verification rather than flowing
+through `events` as an open object.
+
 Inbound JSON rejects duplicate object members and preserves number lexemes until
-numeric adaptation. The in-repo `sha256-jcs-v1` canonicalizer orders object keys
+numeric adaptation. Direct deserialization into `serde_json::Value` or a typed
+struct is forbidden. The approved ingest path is a duplicate-detecting custom
+visitor over `serde_json::value::RawValue`; it observes every map entry,
+rejects a repeated decoded key, and retains each numeric leaf's source lexeme
+until adaptation. The in-repo `sha256-jcs-v1` canonicalizer orders object keys
 by UTF-16 code units and formats binary64 values with ECMAScript's shortest
 number representation. Verification uses that formatter rather than echoing a
 preserved lexeme. Any canonicalizer byte change requires a new
@@ -980,12 +1113,20 @@ head beyond the last fsynced record; an ahead projection is rebuilt and audited
 as `projection_rewound`, not treated as integrity failure. V1 does not claim
 power-loss durability.
 
+The 100-millisecond publication interval is diagnostic and never fails a run.
+`events --follow` waits with `EVFILT_VNODE` on the ledger parent and active
+file, reopens after rename, and rechecks the fsynced watermark on every wake;
+its 30-second stream heartbeat is the bounded lost-wakeup fallback.
+
 Redaction recursively visits objects within objects and arrays. For ASCII keys,
 it splits on `-` and `_`, before an uppercase letter following a lowercase
 letter or digit, and before the final uppercase letter of an uppercase run when
-followed by lowercase; digits attach to the token on their left. Tokens are
-ASCII-case-folded, empty tokens are dropped, and compact form is their
-concatenation. Non-ASCII keys never
+followed by lowercase. Tokens are ASCII-case-folded and empty tokens are
+dropped. For secret matching only, a trailing ASCII digit run is stripped from
+each non-digit token and a digit-only token is discarded; therefore
+`password2`, `password_2`, `oauth2_token`, and `api_key_2` match their
+digit-free secret sequences. Compact form is the concatenation of this matching
+view. Non-ASCII keys never
 match but their subtrees are still traversed.
 
 The canonical secret token sequences are `authorization`, `proxy
@@ -1029,9 +1170,13 @@ source kind, byte length, streaming SHA-256, JSON Pointer when known, and reason
 in `payload_unrepresentable`; v1 creates no raw or redacted sidecar. `events`
 projects normalized records. `events --raw` projects redacted wire
 payloads. `verify` validates structure, sequence, and hashes but not the truth
-of model or command claims. `export` creates a mode-0700 directory containing
-0600 `bundle.json`, `manifest.json`, verbatim `audit.jsonl`, `state.json`,
-redacted `transcript.jsonl`, and `verification.json`. `bundle.json` records
+of model or command claims. `export` first captures a fsynced
+`state.json.ledger_head`, copies `audit.jsonl` only through that complete
+record, and regenerates bundled state and transcript projections from that
+prefix. It creates a mode-0700 directory containing 0600 `bundle.json`,
+`manifest.json`, bounded `audit.jsonl`, `state.json`, redacted
+`transcript.jsonl`, and `verification.json`. `bundle.json` records the ledger
+boundary as well as
 schema version, workspace/run identity, filenames, hashes, and source-derived
 timestamps; lexicographic filenames and source bytes make repeated exports
 content-deterministic. Runtime records, locks, logs, target registry,
@@ -1074,6 +1219,11 @@ unchanged. The instructions MUST establish these rules:
 - The response reports outcome, material changes or findings, verification,
   and blockers without imposing a rigid JSON format on the model.
 
+The `.gomchi` reservation is prompt-enforced policy, not a sandbox deny-list or
+same-user security boundary. Changes to `.gomchi/config.toml` and
+`.gomchi/.gitignore` remain observable workspace changes; only worker-owned
+run/runtime/cache paths are filtered.
+
 The target's own Codex configuration, AGENTS instructions, skills, plugins,
 apps, MCP servers, and native subagents remain available unless they conflict
 with Gomchi's hard invariants.
@@ -1107,12 +1257,17 @@ Gomchi uses the stable app-server API surface and does not enable
 unlisted newer version, Gomchi may run the version as `unverified` only when:
 
 1. `codex app-server generate-json-schema` is available;
-2. after resolving `$ref`, every JSON Pointer in the checked required-subset
-   manifest has the same type/const/requiredness and every required enum value
-   remains present; additive fields and enum values are allowed;
+2. the manifest comparison engine resolves `$ref` before comparison, addresses
+   named definitions rather than `$ref` keys or positional `oneOf` indices,
+   preserves type/const/requiredness, and verifies required enum values by set
+   containment; the engine reads and obeys the manifest's own additive-change
+   flags;
 3. live initialize, `initialized`, paginated `model/list`, actual `codexHome`,
    absent-thread `thread/read`, persisted resume/read, early response-ID,
-   sandbox, and required server-request probes pass.
+   sandbox, terminal notification/status, fork-boundary, pending-restart,
+   effort, and required server-request probes pass. Every
+   `behavioral_observations` entry MUST be re-measured or the version is
+   rejected, and each probe reads its expected value from the checked manifest.
 
 Missing generation support, required schema, lifecycle behavior, or identity
 causes fail-closed rejection. Unknown additive fields and notifications are
