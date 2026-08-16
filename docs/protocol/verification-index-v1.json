@@ -6,15 +6,17 @@
   "sections": {
     "SPEC-001": {"tasks": ["TASK-001", "TASK-015"], "catches": ["product boundary", "platform and filesystem floor"]},
     "SPEC-002": {"tasks": ["TASK-002", "TASK-007"], "catches": ["workspace discovery", "firmlink identity", "initialization and policy files"]},
-    "SPEC-003": {"tasks": ["TASK-005"], "catches": ["project-local profiles", "argv and CODEX_HOME binding"]},
-    "SPEC-004": {"tasks": ["TASK-004", "TASK-009-B"], "catches": ["worker topology", "runtime identity", "on-demand recovery"]},
-    "SPEC-005": {"tasks": ["TASK-001", "TASK-006", "TASK-008", "TASK-009-A", "TASK-009-B", "TASK-009-C", "TASK-010", "TASK-011", "TASK-012"], "catches": ["public CLI", "input and idempotency", "version acceptance"]},
-    "SPEC-006": {"tasks": ["TASK-001", "TASK-003-C", "TASK-006", "TASK-012", "TASK-013"], "catches": ["machine envelopes", "errors and timeouts", "events", "turn results"]},
-    "SPEC-007": {"tasks": ["TASK-002", "TASK-004", "TASK-007", "TASK-009-B"], "catches": ["sandbox mapping", "lazy writer locks", "cross-profile handoff", "process identity"]},
-    "SPEC-008": {"tasks": ["TASK-006", "TASK-009-A", "TASK-009-C"], "catches": ["lifecycle", "recovery", "fork", "effort defaults"]},
-    "SPEC-009": {"tasks": ["TASK-008"], "catches": ["pending requests", "approval decision translation"]},
-    "SPEC-010": {"tasks": ["TASK-003-A", "TASK-003-B", "TASK-003-C", "TASK-012"], "catches": ["JSON ingest", "audit durability", "redaction", "export and deletion"]},
+    "SPEC-003": {"tasks": ["TASK-005", "TASK-006-A"], "catches": ["project-local profiles", "restorable launch snapshots", "process-static configuration", "operator-authorized server migration", "membership repair", "staged singleton shutdown", "profile log draining", "symbolic launch cwd and deterministic environment", "profile diagnostic cursor", "pre-ready failure without Run identity"]},
+    "SPEC-004": {"tasks": ["TASK-004", "TASK-006-A", "TASK-009-B"], "catches": ["worker topology", "controller manifest identity", "runtime identity", "on-demand recovery"]},
+    "SPEC-005": {"tasks": ["TASK-001", "TASK-005", "TASK-006", "TASK-006-A", "TASK-007", "TASK-008", "TASK-009-A", "TASK-009-B", "TASK-009-C", "TASK-010", "TASK-011", "TASK-012"], "catches": ["public CLI", "controller carrier", "required idempotency", "version acceptance"]},
+    "SPEC-006": {"tasks": ["TASK-001", "TASK-003-B", "TASK-003-C", "TASK-006", "TASK-010", "TASK-012", "TASK-013"], "catches": ["machine envelopes", "typed errors and timeouts", "exact projection membership", "deterministic final-response extraction", "multi-client routing", "turn results", "bounded artifacts and final-response union", "conditional event identity"]},
+    "SPEC-007": {"tasks": ["TASK-002", "TASK-004", "TASK-007", "TASK-009-B"], "catches": ["sandbox mapping", "durable writer authority", "global lock hierarchy", "independent effective policy and writer authority", "same-controller handoff"]},
+    "SPEC-008": {"tasks": ["TASK-006", "TASK-006-A", "TASK-009-A", "TASK-009-C"], "catches": ["lifecycle", "controller reset", "recovery", "fork", "effort defaults"]},
+    "SPEC-009": {"tasks": ["TASK-008"], "catches": ["normalized interactions", "file snapshot and artifact correlation", "secret receipt non-binding", "idempotent resolution", "generation staleness"]},
+    "SPEC-010": {"tasks": ["TASK-003-A", "TASK-003-B", "TASK-003-C", "TASK-010", "TASK-012"], "catches": ["JSON ingest", "audit durability", "reasoning non-retention", "safe projection", "export and deletion"]},
     "SPEC-011": {"tasks": ["TASK-011"], "catches": ["agent policy", "managed side effects"]},
-    "SPEC-012": {"tasks": ["TASK-005", "TASK-010", "TASK-011", "TASK-013", "TASK-015"], "catches": ["orchestration boundary", "Codex compatibility and observations"]}
+    "SPEC-012": {"tasks": ["TASK-005", "TASK-006-A", "TASK-010", "TASK-011", "TASK-013", "TASK-015"], "catches": ["orchestration boundary", "capability authorization", "Codex compatibility and observations"]},
+    "SPEC-013": {"tasks": ["TASK-000-D", "TASK-001", "TASK-005", "TASK-006-A", "TASK-007", "TASK-008", "TASK-010", "TASK-013", "TASK-014", "TASK-015"], "catches": ["external master transport", "runtime capabilities", "controller and observer", "operator reset and migration", "purpose and parent metadata", "event replay", "cross-epoch reconciliation", "profile diagnostics and artifact retrieval"]},
+    "SPEC-014": {"tasks": ["TASK-000-D", "TASK-001", "TASK-004", "TASK-005", "TASK-006-A", "TASK-007", "TASK-008", "TASK-009-B", "TASK-011", "TASK-015"], "catches": ["control-mode compatibility", "immutable execution lane", "fixed thread residency", "sticky dedicated process generations", "per-workspace writer cardinality", "server-workload separation", "assurance negotiation", "profile lane lifecycle"]}
   }
 }

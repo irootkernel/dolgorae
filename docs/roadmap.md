@@ -1,8 +1,9 @@
 # Dolgorae Roadmap
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
-Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete; no production
-implementation Task is active.
+Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete. External-runtime
+contract stabilization `TASK-000-D` is active; no production implementation
+Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -10,10 +11,17 @@ them.
 
 ## Status Model
 
-Allowed Epic and Task states are `PLANNED`, `ACTIVE`, `BLOCKED`, and `COMPLETE`.
+Allowed Epic and Task states are `PLANNED`, `ACTIVE`, `IN_REVIEW`, `BLOCKED`,
+`COMPLETE`, and `SUPERSEDED`.
 
 - At most one Epic may be `ACTIVE`.
 - Across the entire roadmap, at most one Task may be `ACTIVE`.
+- `IN_REVIEW` means implementation work is finished but the completion gate is
+  still collecting independent review or empirical evidence. It occupies the
+  sequential Task slot like `ACTIVE`.
+- `SUPERSEDED` preserves historical work whose governing contract has been
+  replaced before release. It is not evidence that the replaced contract is
+  currently accepted; the replacing Task owns closure.
 - A `BLOCKED` Task continues to occupy the sequential Task slot. Work MUST NOT
   bypass it by activating a later Task.
 - Zero active items is valid during a future quiescent SOT-only state.
@@ -62,7 +70,7 @@ and roadmap deterministic before production implementation begins.
 
 Status: `COMPLETE`
 
-Reconcile the writer lease, stale-generation cleanup, runtime discovery,
+Reconcile the then-current writer-lock contract, stale-generation cleanup, runtime discovery,
 `outcome_unknown`, audit encoding/redaction/durability, protocol bounds, public
 error mapping, worktree identity, and worker detachment contracts. Run isolated
 probes against the pinned Codex 0.147.0 profile for crash-history durability,
@@ -155,7 +163,7 @@ TASK-001 remains planned. These conditions were independently confirmed at
 
 ## EPIC-000-C: Singleton, Local-State, and Writer Contract Stabilization
 
-Status: `COMPLETE`
+Status: `SUPERSEDED` by EPIC-000-D
 
 Goal: Replace the pre-implementation per-run server and target vocabulary with
 profile-scoped singleton, project-local state, and cross-profile lazy-writer
@@ -167,7 +175,7 @@ and checked protocol artifacts only.
 Status: `COMPLETE`
 
 Define generic named profiles, one compatible app-server singleton per canonical
-`CODEX_HOME`, exclusive per-run proxy connections, profile-wide lifecycle and
+`CODEX_HOME`, exclusive per-run connections, profile-wide lifecycle and
 membership, and the corresponding public/machine terminology.
 
 Verification: profile terminology scan excluding immutable review history,
@@ -187,13 +195,90 @@ Unix-socket exceptions.
 
 Status: `COMPLETE`
 
-Replace startup-selected access with explicit lazy writer
-acquisition, release, and user-confirmed idle takeover shared by all profiles in
-one canonical workspace.
+Replace startup-selected access with explicit lazy writer acquisition, release,
+and user-confirmed idle takeover shared by all profiles in one canonical
+workspace. EPIC-000-D supersedes its process-held lease mechanism with durable
+writer authority while preserving the product goal.
 
 Epic acceptance: every C1-C3 contract is internally consistent, checked schemas
 match the SOT, NOTE-004 records bounded evidence and goal commits, no production
 or probe code changes, and TASK-001 remains planned.
+
+## EPIC-000-D: External Runtime Contract Stabilization
+
+Status: `ACTIVE`
+
+Goal: Rebaseline the unreleased v1 contract so interactive clients and workflow
+orchestrators share launch-contract coordination while selecting either the
+shared-read-only server or a Run-owned dedicated lane generation, with common
+controller authorization, workspace writer authority, normalized interactions,
+and client-safe replay.
+
+### TASK-000-D: Controller, Projection, and Integration Contract
+
+Status: `ACTIVE`
+
+Preserve `prompt.md` as non-normative input and record its
+[requirement disposition](external-runtime-disposition.md) plus the
+[singleton-correction disposition](singleton-correction-disposition.md) and
+[follow-up disposition](reviews/task-000-d-follow-up-disposition.md), plus the
+[second follow-up disposition](reviews/task-000-d-second-follow-up-disposition.md).
+Reconcile it with named profiles, the profile-scoped singleton, lazy writer
+access, and existing recovery rules. Add controller capability and operator
+reset, open same-user observation, explicit same-controller handoff, runtime and
+profile capability discovery, purpose/parent metadata, normalized interactions,
+and append-time minimal/operational event projections. Rebaseline every checked
+v1 schema and error shape before production implementation. This includes a
+Dolgorae-owned direct-executable launch contract, direct WebSocket-over-Unix
+transport, manager-owned shared/dedicated lane-server epochs, complete profile membership, durable
+writer authority, worker-side controller revalidation, a separate operator
+capability, discriminated interactions, and separate durable event-record and
+delivery schemas. The follow-up additionally owns one global lock hierarchy,
+threadless first-write staging, fail-closed background-execution policy,
+restorable profile snapshots and operator server-key migration, membership
+repair, identity-complete shutdown, deterministic launch cwd/config drift,
+projection enforcement, final-response selection, meaningful file-change
+approval, secret receipts, and multi-client routing evidence.
+The second follow-up originally proposed exclusive Writer Capsules. ADR-019
+supersedes that transient topology while retaining complete process-census
+cleanup authority, PREPARE/APPLY/COMMIT operation tokens, symbolic
+launch cwd and deterministic locale/PATH, independent effective-policy/writer
+state, bounded artifacts, profile diagnostics, conditional event identity, and
+publication of Runs only after a ready server epoch.
+
+The pinned topology campaign supersedes the transient Writer Capsule portion
+with ADR-019. TASK-000-D now owns immutable `control_mode` and `execution_lane`,
+sticky Dedicated Execution Lanes, per-workspace concurrent writers, separated
+server/workload/writer state, requested/achieved assurance, fixed thread
+residency, profile-wide lane enumeration, and a fresh lineage-linked dedicated
+successor when a shared Run needs write. Exact 0.147.0 gates A/C/E and the
+closed-generation history barrier passed; cross-server migration and
+background-terminal authority failed, but Dolgorae's exact process-census
+cleanup campaign passed. The retained native-subagent conclusion is invalid:
+its parser reported no collaboration item while bounded wire evidence contains
+`subAgentActivity` and `collabAgentToolCall`. Codex-native child threads are
+distinct from independent Dolgorae Runs and workers. Native execution is
+permitted by the selected product policy, but quiescence-requiring transitions
+fail closed until a corrected exact-version lifecycle campaign completes.
+
+Verification: parse and meta-validate all protocol JSON; resolve every cross-file
+reference; prove command/data/error enum equality and typed positive/negative
+instances; validate credential carrier bounds and secret exclusions; exercise
+controller mismatch/reset, observer visibility, handoff expiry/races,
+interaction reconnect/staleness, cursor replay/profile filtering, direct
+WebSocket fragmentation/ping/close/multi-client behavior, singleton crash and
+restart reconciliation, writer crash boundaries, policy transitions, and
+reasoning non-retention through deterministic and pinned live fixtures. Run the full offline gate,
+requirement reverse index, Markdown links, obsolete-contract scans, and Git
+whitespace checks. TASK-000-D does not enter `IN_REVIEW` until the third
+follow-up live campaigns, reproducible evidence package, and independent review
+are complete.
+
+Epic acceptance: the input disposition, SOT, architecture, ADRs, checked
+schemas, roadmap ownership, and verification fixtures agree; an independent
+read-only review has no unresolved blocking finding; an implementation note
+links task-scoped commits; no production source exists; TASK-001 remains
+planned until this gate is complete.
 
 ## EPIC-001: Foundation and Durable State
 
@@ -207,8 +292,10 @@ and audit-first run storage on which every process operation depends.
 Status: `PLANNED`
 
 Implement the Rust 2024 binary skeleton, command parser, UUIDv7 identities,
-stable JSON success/error envelopes, exit-status mapping, typed lifecycle and
-access enums, help/version/unknown-command output, `--human` rendering boundary,
+stable JSON success/error envelopes, exit-status mapping, typed lifecycle,
+control-mode, purpose, execution-lane, assurance, and access enums,
+external-runtime commands and controller/capability types,
+help/version/unknown-command output, `--human` rendering boundary,
 pinned Rust 1.97.1 toolchain,
 machine-output schema validation, injectable monotonic clock, identity/boot/
 enumeration providers, and named fault barriers. Establish the single safe
@@ -242,7 +329,9 @@ lock refusal; nested/Git-contained non-Git and mode-changing re-init refusal.
 
 Status: `PLANNED`
 
-Implement run directory creation, fixed manifest semantics, the in-repo RFC 8785
+Implement run directory creation, fixed manifest semantics including controller
+digest/generation, immutable control mode/lane, requested/achieved assurance,
+purpose/parent metadata and capability snapshot, the in-repo RFC 8785
 `sha256-jcs-v1` canonicalizer, duplicate rejection, lossless-number adaptation,
 record-kind schema, normative redaction, marker escaping, payload representation,
 and file/directory permissions.
@@ -259,7 +348,8 @@ Status: `PLANNED`
 
 Implement O_APPEND writing, bounded group commit, every write-ahead barrier,
 deterministic torn-tail evidence and idempotent repair, full replay, atomic
-`state.json` with its fsynced watermark, and observer publication.
+`state.json` with its fsynced watermark, append-time client-event normalization,
+reasoning-content suppression/non-retention, and observer publication.
 
 Verification: crash injection before/after every fsync/effect barrier; middle
 corruption versus torn tail; repeated repair; ahead/stale/missing projection;
@@ -297,7 +387,7 @@ Implement detached hidden worker re-execution, fixed short private socket paths,
 versioned runtime discovery records, persistent local locks, fd-3
 startup handoff, per-run startup serialization, stale-socket recovery, bounded
 request/response IPC, ledger-backed event streaming, reconnection, worker
-discovery, on-demand proxy generation startup, version-frozen control v1, and the one
+discovery, direct WebSocket connection recovery, version-frozen control v1, and the one
 shared controllable fake app-server/worker fixture used by later Tasks.
 
 Verification: fake worker tests for concurrent starts, changed `$TMPDIR`, stale
@@ -313,30 +403,52 @@ survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unli
 
 Status: `PLANNED`
 
-Implement project-local `local.yaml` profile CRUD, argv and absolute
-`CODEX_HOME` validation, inherited
-environment preparation, schema generation into temporary storage, required
+Implement project-local `local.yaml` profile CRUD, direct executable, normalized
+global argv, absolute `CODEX_HOME`, and explicit environment-map validation;
+deterministic environment preparation; schema generation into temporary storage; required
 stable-subset comparison, app-server handshake, `codexHome` matching,
-`model/list`, tested/unverified verdicts, profile snapshotting, singleton keys,
-epochs, membership recovery, and server lifecycle commands.
+`model/list`, tested/unverified verdicts, restorable immutable profile snapshots,
+closed configuration classification, symbolic launch-cwd policy and derived cwd, singleton keys,
+epochs, operator server-key migration, append-only membership repair,
+identity-complete shutdown, profile log drainer, profile diagnostic journal,
+symbolic launch-cwd policy, explicit PATH/LANG/LC_ALL, PREPARE/APPLY/COMMIT
+server operations, full-key short-socket collision checks, and server lifecycle commands.
 The required-subset manifest is checked input, not a TASK-013 invention.
 
-Verification: fake executable matrices for missing commands, wrapper argv,
+Verification: fake executable matrices for missing commands, rejected wrapper argv,
 profile-name collision, home mismatch, incompatible same-home singleton,
 unsupported/older/newer versions, missing schema fields,
 additive fields, login failure, and successful 0.147.0 compatibility.
 Also cover `$ref` resolution, requiredness/type/enum changes, pagination,
 early-ID behavioral rejection, absent-thread errors, version-drift refusal and
-explicit recover acceptance.
+operator migration/rollback. Probe configuration mutations and classify each
+input as static, migratable, runtime-mutable, or ignored. Implement binary-level runtime capabilities,
+profile-specific interaction/capability snapshots, and pre-allocation rejection
+of missing required capabilities. Bare doctor remains offline; launch behavior
+is tested only by explicit `--launch-probe`. TASK-005 owns the selected 0.147.0
+native feature policy: reject raw global `multi_agent` arguments, inject exactly
+one profile-owned `--enable multi_agent` or `--disable multi_agent` pair, default
+to enabled, advertise enabled-but-incomplete observation as `unverified`, and
+make active or unverified native state block every quiescence-dependent
+transition. A policy change requires a new server key and operator-authorized
+profile migration with no silent hot reload. Dedicated-lane campaigns prove
+identical-contract same-home shared/dedicated coexistence, globally unique server
+epochs, fixed logical-lane residency, same-lane resume only after exact prior-
+generation absence, and exact cleanup without unrelated signals. Cross-server
+same-thread resume is a negative test and MUST remain rejected. A future native
+terminal API is optional hybrid evidence.
 
 ### TASK-006: Thread and Turn Lifecycle
 
 Status: `PLANNED`
 
-Implement private proxy JSONL connection ownership, initialize/initialized, thread
+Implement private direct WebSocket-over-Unix connection ownership, HTTP Upgrade,
+masking, fragmentation, ping/pong, close, frame/message bounds,
+initialize/initialized, thread
 start/resume/fork, model fixation, effort validation, turn start/interrupt,
 one-active-turn serialization, local image input, send/submit/wait behavior,
-idempotency, usage capture, and terminal readback using TASK-004's shared fake
+required caller idempotency, generic waiting-interaction states, usage capture,
+and bounded inline/artifact root-turn final-response extraction during terminal readback using TASK-004's shared fake
 app-server fixture; TASK-006 does not create another fake core.
 
 Verification: deterministic fake app-server scenarios for every request and
@@ -344,56 +456,105 @@ notification ordering, request/thread/turn/generation mismatch, duplicate
 terminal messages, malformed output, send timeout, caller death, same/different
 idempotency payloads, fixed-model enforcement, advertised and unadvertised
 effort, forkable-status matrix, and provisional-thread absence/unreadability.
+Also test PREPARE-before-effect idempotency, phase-marked/phase-null/commentary-only messages, foreign thread
+events, two simultaneous connections/turns, disconnect isolation, approvals,
+user input, native descendants, and profile-global notifications.
 
 Epic acceptance: an initialized workspace can run a multi-turn read-only session
 through a fake app-server while preserving one thread and reconnecting CLI
 callers.
 
+### TASK-006-A: External Controller and Observer Boundary
+
+Status: `PLANNED`
+
+Implement strict controller credential creation and fd/file ingestion,
+domain-separated digest storage, constant-time mutation authorization before
+effects, controller/purpose/parent run metadata, open same-uid client-safe
+observation, worker-side `SCM_RIGHTS` credential revalidation under the mutation
+lock, fd/stdin-only interaction responses, and explicit operator controller reset. Profile-wide interrupting server
+control, server-key migration, and membership repair require the distinct
+operator capability and complete membership.
+
+Verification: valid fd/file credentials; create-exclusive mode 0600 output;
+wrong owner/mode, symlink, oversize, malformed base64url, argv/environment leak,
+zeroization and mismatch cases; every mutating command versus every observer;
+same credential across runs; reset for idle reader/writer, paused and
+outcome-unknown runs; rejection for active, pending, handoff and unverifiable
+states; failure before binding change; controller generation and audit proof.
+
 ## EPIC-003: Access, Interaction, and Recovery Safety
 
 Status: `PLANNED`
 
-Goal: Enforce Dolgorae's one-writer-app-server-per-worktree scope,
+Goal: Enforce Dolgorae's one-durable-writer-authority-per-worktree scope,
 master-controlled interaction, and conservative failure semantics.
 
-### TASK-007: Lazy Writer Lease and Cross-Profile Handoff
+### TASK-007: Durable Writer Authority and Cross-Profile Handoff
 
 Status: `PLANNED`
 
-Implement the per-worktree BSD `flock(2)` lease held only by the worker,
-close-on-exec descriptor hygiene, project-local permanent lock validation,
+Implement the per-worktree durable writer authority state machine, with BSD
+`flock(2)` used only as a short transaction serializer, close-on-exec descriptor
+hygiene, project-local permanent lock validation,
 read-default sandbox selection, explicit `--write`/acquire/release, idle-only
-cross-profile token-confirmed handoff, and identity-verified stale process-group
-cleanup before activating a writer proxy. Acquire/release retains the same
-worker and byte-1 owner while replacing only its proxy generation; startup
-locks use the pinned timed-record-lock layout and offsets.
+cross-profile same-controller prepare/commit/cancel handoff, and fail-closed
+background-execution uncertainty before activating or releasing authority.
+Persist `effective_policy` and `writer_authority` independently and implement
+revision-bound PREPARE/APPLY/COMMIT/cancel transitions without external waits
+under file locks.
+Acquire/release retains the same worker, byte-1 owner, logical lane, and thread.
+Policy changes occur within the current dedicated generation or, after exact
+absence and a durable-history barrier, within its same-lane successor
+generation. A shared-readonly Run is never promoted: it creates a lineage-linked
+dedicated successor Run. Startup locks use the pinned timed-record-lock layout
+and offsets.
 
-Verification: multiprocess tests proving multiple readers, one writer proxy
-lane per worktree, no replacement app-server before crash cleanup, deterministic
-writer conflicts, start-failure release, missing/replaced local lock refusal,
-PID/PGID reuse refusal, pause/close/unknown release, acquire races, idle handoff,
-active-holder refusal, stale token and requester-failure-with-no-writer, and
+Verification: multiprocess tests proving multiple readers, one writer authority
+per worktree, no shared-singleton restart on policy change, deterministic writer
+conflicts, crash boundaries for `none→reserved→active` and
+`active→releasing→none` including every proof/failure landing, missing/replaced
+local lock refusal, PID reuse refusal, safe pause/close release and unknown-state
+blocking, fixed thread residency, dedicated-successor creation, source-lane
+retirement during handoff, destination failure leaving `none`, acquire races,
+idle handoff,
+active/waiting/cross-controller refusal, expiry, stale writer/run generations,
+cancel/commit races and requester-failure-with-no-writer, and
 separate locks for distinct canonical workspaces, permanent writer/startup
 pathnames, held-fd/path and historical-inode splits, linked-worktree Git writable
-roots, access-policy mappings, and generation replacement on acquire/release.
+roots, access-policy mappings, explicit unsupported-transition refusal, a fresh
+lineage-linked dedicated successor Run for shared-readonly to writer, and verified incumbent retirement
+before write-to-read authority release.
 Also cover `F_SETLKWTIMEOUT`, spawn-image versus final-image identity, and
 fail-closed byte-1 control timeout without any activity-derived signal.
+Add deterministic interleavings for the normative lock matrix and every
+threadless first-write crash boundary; `acquire-write` on a threadless run is a
+state conflict. No task claims OS ownership of shared App Server descendants.
 
 ### TASK-008: Pending Requests and Approvals
 
 Status: `PLANNED`
 
-Implement normalized command/file approval requests; generation-qualified
-request IDs; `pending` and schema-validated `respond`; reader auto-decline;
+Implement discriminated normalized command/file approval and pinned experimental
+user-input interactions; generation- and server-epoch-qualified
+request IDs; fsync-before-delivery `pending`, schema-validated and idempotent
+`respond`, first-valid-response wins, observer reconnect, reader auto-decline;
 explicit one-shot writer decisions without public session-scoped approval. Recognize the
-three pinned unsupported request methods and reply method-not-found without
+permission and MCP elicitation methods and reply method-not-found without
 creating pending lifecycle state.
 Reader auto-decline is the configured `approvalPolicy:"never"`, not a duplicate
 interceptor.
 
-Verification: fake server-request coverage for both supported kinds and every decision, stale
-generation responses, unknown request kinds, malformed responses, indefinite
-waiting, interrupt during waiting, writer lease retention, no replay after
+Correlate file approvals from the initial revision-0 file-change item and every
+patch update with exact add/delete/update snapshots, using 64-KiB aggregate inline diffs
+or digest-bound 0600 artifacts up to 8 MiB. Secret-bearing user-input resolution
+uses first-success plus an opaque receipt and stores no content digest/HMAC.
+
+Verification: fake server-request coverage for all supported kinds and every
+decision, duplicate/same-key/different-key responses, controller mismatch,
+stale generation responses, inline/artifact/stale change snapshots,
+secret/non-secret retry semantics, unknown request kinds, malformed responses, indefinite
+waiting, interrupt during waiting, writer-authority retention, no replay after
 restart, exact response schemas, reader auto-decline, live-observed command/file
 request mappings, and method-not-found behavior for all recognized unsupported
 methods.
@@ -405,34 +566,42 @@ Status: `PLANNED`
 Implement idle pause/resume, interrupting pause/close, immutable close,
 generation-level access instruction replacement, verified socket cleanup,
 start-failed bootstrap authority, terminal seals, and final-state restrictions.
+Worker cleanup covers its worker, connection, and an owned Dedicated Run Server's
+recorded command descendants; the shared singleton is excluded.
 
 Verification: idle/running/waiting pause/close matrices, interrupt terminal
 deadline and outcome-unknown landing, control-v1 pause/close/recover under
 binary skew, stale socket ownership, start failure before/after bound, seal crash
-points, acquire/release generation replacement, and no lease release before
-child cleanup.
+points, acquire/release authority transitions, and no authority release before
+protocol-supported background absence; unverified execution remains blocked.
 
 ### TASK-009-B: Process Identity and Group Recovery
 
 Status: `PLANNED`
 
-Implement four-verdict worker/app-server identity, boot-session proof, complete
+Implement four-verdict worker and Dedicated Run Server process identity,
+boot-session proof, complete
 provisional identity, kqueue continuity, persisted member snapshots,
-`proc_listpgrppids` enumeration, fail-closed worker attachment, permanent
-lock-inode rules, and no-force cleanup continuation.
+`proc_listpgrppids` plus all-PID BSD parent/session census, observation across
+reparent/group/session changes, fail-closed worker attachment, permanent
+lock-inode rules, and no-force cleanup continuation. Treat
+`CommandExecution.processId` as an opaque correlation hint.
 
 Verification: every identity read failure; ESRCH/live/zombie/reaped/recycled PID;
-leader-first and leaderless persisted-member cleanup; new group members; ten-
-second absence deadline; inode unlink/recreate; reboot proof; revalidated live
-worker control timeout returning `RUN_BUSY` with no signal; no unrelated signal
-under injected PID/PGID reuse.
+leader-first and leaderless persisted-member cleanup; new group members;
+immediate command-notification census; 100-millisecond polling; TERM/5-second/
+KILL and ten-second total deadlines; five complete empty samples; deliberate
+setsid/reparent detection; incomplete census; inode unlink/recreate; reboot
+proof; revalidated live worker control timeout returning `RUN_BUSY` with no
+signal; no unrelated signal under injected PID/PGID reuse.
 
 ### TASK-009-C: History Reconciliation, Outcome Unknown, and Fork
 
 Status: `PLANNED`
 
-Implement persisted thread-history reconciliation, `outcome_unknown`, lease-free
-transient read-only reconcile-to-paused, no-replay enforcement, manifest-defined
+Implement persisted thread-history reconciliation across a proved-absent old
+epoch and compatible new epoch, `outcome_unknown`,
+non-authoritative read-only reconcile-to-paused, no-replay enforcement, manifest-defined
 forkable boundaries, explicit `fork --fresh`, and provenance-preserving inherited
 run instructions.
 
@@ -457,18 +626,25 @@ independently inspectable.
 
 Status: `PLANNED`
 
-Implement workspace-scoped run listing, status projections, normalized and raw
-redacted event queries/following, stable cursors, final result envelopes, effort
+Implement workspace-scoped run listing, full same-uid observer status,
+minimal/operational client-safe event queries/following, a separate profile
+diagnostic query/event cursor, stable cursors, bounded artifact show/read/export,
+final-response inline/artifact/unavailable envelopes, effort
 updates, and best-effort pre/post workspace observations with explicitly
 unverified attribution. Implement the checked command-tagged machine-output
 schema, retryability/details matrix, 30-second stream heartbeat, exclusive
 cursor, closed audit-record envelope/kind enum, measured workspace changes,
-4,096-path bound, and invalid-UTF8 path representation.
+4,096-path bound, invalid-UTF8 path representation, and a hard prohibition on
+reasoning/raw-wire projection.
 
 Verification: cursor replay/follow tests, observer disconnect, concurrent reader
 and writer observations, external-edit contamination, missing usage, and every
-lifecycle projection; midstream error/end envelopes, raw-in-envelope behavior,
-path truncation, Git/non-Git algorithms, and every command `data` variant.
+lifecycle projection; midstream error/end envelopes, filtered cursor gaps,
+replay/live deduplication,
+minimal-versus-operational fields, reasoning suppression/non-retention, path
+truncation, Git/non-Git algorithms, and every command `data` variant. Test
+1-MiB chunks, 8/32/256-MiB quotas, digest/range failures, conditional thread/turn
+identity, profile redaction/authorization, and pre-ready failures that create no Run.
 
 ### TASK-011: Verify, Export, and Confirmed Delete
 
@@ -489,13 +665,14 @@ prefix, and regenerate bundled projections from it.
 
 Status: `PLANNED`
 
-Implement the generation-immutable Dolgorae developer-instruction prefix, subordinate run
-instructions, `.dolgorae` reservation, access-aware mutation policy, explicit Git
-and background-process rules, managed-run context fencing, master-only
-independent-run control, bounded app-server process-group shutdown, and cleanup
+Implement bounded versioned direct-interactive and managed-agent instruction
+prefixes, subordinate run instructions, `.dolgorae` reservation, access-aware mutation policy, explicit Git
+and background-process rules, advisory managed-run context, capability-checked
+independent-run control, manager-owned bounded singleton shutdown, and cleanup
 audit records.
 
-Verification: prompt-composition snapshots and conflicting run-instruction tests
+Verification: mode-specific prompt-composition snapshots, controller-kind
+compatibility, observer interaction denial, capability non-disclosure, and conflicting run-instruction tests
 are separate from sandbox-policy enforcement tests; also cover self-read-only
 and attempted cross-run CLI control, marker-removal limitation reporting,
 malformed/foreign/nonexistent managed markers, non-exec MCP marker absence,
@@ -520,7 +697,11 @@ Status: `PLANNED`
 Extend TASK-004's shared fake app-server core into a controllable conformance executable
 and fixtures covering the full required method/field manifest, schema
 compatibility, unknown additive data, server requests, terminal history,
-native-subagent opaque/event passthrough, and every documented error mapping.
+native-subagent opaque/event passthrough, controller/observer matrices,
+capability discovery, interaction idempotency, safe event profiles, and every
+documented error mapping, including artifact, independent run-state, and
+profile-event schemas, canonical upstream file-change kinds, and semantic
+multi-diff aggregate bounds.
 
 Verification: the complete unit/integration suite passes without network,
 credentials, timing-sensitive sleeps, or real Codex quota. Injectable time
@@ -534,7 +715,10 @@ Status: `PLANNED`
 Run native macOS process tests for simultaneous workers, close-on-exec lock
 ownership and crash handoff, socket permissions, stale process cleanup, caller
 termination, ledger crash recovery, dirty workspace preservation, and
-fail-closed correlation.
+fail-closed correlation. Include operation-token crash points around every
+PREPARE/APPLY/COMMIT boundary and concurrent same/different-controller handoff,
+operator reset, observer disconnect, and proof that failures never expose a
+capability or create two writers.
 
 Verification: drive each named fault barrier and injected identity/boot/
 enumeration schedule deterministically, then run 100 stress iterations as
@@ -546,20 +730,30 @@ evidence without secrets or unbounded logs.
 
 Status: `PLANNED`
 
-Run opt-in live smoke tests against prepared primary and secondary profiles,
-both at app-server 0.147.0 or a separately recorded compatible version. Profile
+Run opt-in live smoke tests against prepared primary and secondary profiles
+using the checked 0.147.0 compatibility baseline (or a separately migrated
+compatible version). Profile
 names and local wrapper paths are runner inputs and are not normative fixtures.
 Cover profile-home isolation, singleton sharing within a profile, separation
 between profiles, read session, writer conflict, multi-turn resume,
-effort change, approval round trip, pause/resume, fork, audit verification, and
-export, including command/file approval plus pending-request restart. Do not
+effort change, two-controller isolation, same-controller handoff, observer
+replay, approval round trip, pause/resume, fork, audit verification, and
+export, including command/file approval plus pending-interaction restart. Do not
 persist credentials or secret-bearing raw output in fixtures.
+The campaign must prove same-home shared Profile Server plus multiple Dedicated
+Run Server coexistence, globally unique epochs, fixed thread residency,
+dedicated-lane process census and exact cleanup, no unrelated signalling, policy
+transitions, profile diagnostic minimal/operational views, and artifact
+integrity/range behavior. If any required dedicated-lane behavior fails, TASK-015 and
+release remain blocked; absence of a future native terminal API is not itself a
+blocker.
 
 Verification: both profile reports pass on Apple Silicon macOS; required-subset
 and early-ID gates match each executable; every SOT contract has deterministic
 evidence; all blocking independent review findings are resolved. A future
-version is accepted for an existing run only through the separately recorded
-`recover --accept-version-change` path.
+version is accepted for an existing profile only through the operator-authorized
+`profile server migrate` transaction; run-local resume/recover/reconcile
+commands cannot approve process-static drift.
 
 Epic acceptance: mark the personal alpha ready only after TASK-015 and the full
 Task completion gate are satisfied.

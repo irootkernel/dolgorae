@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/interaction/v1",
+  "title": "Dolgorae normalized interaction v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "run_id", "controller_id", "control_mode", "thread_id", "turn_id", "item_id", "run_generation", "server_epoch", "kind", "status", "payload", "available_decisions", "response_schema", "opened_at", "resolved_at", "resolution"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "request_id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "run_id": { "$ref": "#/$defs/uuid7" },
+    "controller_id": { "$ref": "#/$defs/uuid7" },
+    "control_mode": { "enum": ["direct_interactive", "managed_agent"] },
+    "thread_id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "turn_id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "item_id": { "type": ["string", "null"], "x-maxUtf8Bytes": 256 },
+    "run_generation": { "type": "integer", "minimum": 1 },
+    "server_epoch": { "type": "integer", "minimum": 1 },
+    "kind": { "enum": ["command_execution_approval", "file_change_approval", "user_input", "unsupported_request"] },
+    "status": { "enum": ["pending", "resolved", "stale"] },
+    "payload": { "oneOf": [{ "$ref": "#/$defs/command_payload" }, { "$ref": "#/$defs/file_payload" }, { "$ref": "#/$defs/user_input_payload" }, { "$ref": "#/$defs/unsupported_payload" }] },
+    "available_decisions": { "type": "array", "uniqueItems": true, "items": { "enum": ["accept_once", "decline", "cancel"] } },
+    "response_schema": { "enum": ["dolgorae.interaction.command-approval/v1", "dolgorae.interaction.file-change-approval/v1", "dolgorae.interaction.user-input/v1", "dolgorae.interaction.unsupported/v1"] },
+    "opened_at": { "type": "string", "format": "date-time" },
+    "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+    "resolution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/approval_resolution" }, { "$ref": "#/$defs/user_input_resolution" }, { "$ref": "#/$defs/stale_resolution" }, { "$ref": "#/$defs/unsupported_resolution" }] }
+  },
+  "allOf": [
+    { "oneOf": [{ "$ref": "#/$defs/v_command" }, { "$ref": "#/$defs/v_file" }, { "$ref": "#/$defs/v_user_input" }, { "$ref": "#/$defs/v_unsupported" }] },
+    { "oneOf": [{ "$ref": "#/$defs/s_pending" }, { "$ref": "#/$defs/s_resolved" }, { "$ref": "#/$defs/s_stale" }] }
+  ],
+  "$defs": {
+    "uuid7": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": { "oneOf": [{ "type": "string", "x-maxUtf8Bytes": 4096 }, { "type": "object", "additionalProperties": false, "required": ["$dolgorae_path_bytes"], "properties": { "$dolgorae_path_bytes": { "type": "string", "contentEncoding": "base64", "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$" } } }] },
+    "command_payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["title", "message", "command", "cwd", "reason"],
+      "properties": {
+        "title": { "type": "string", "x-maxUtf8Bytes": 512 }, "message": { "type": "string", "x-maxUtf8Bytes": 4096 },
+        "command": { "type": "array", "maxItems": 256, "items": { "type": "string", "x-maxUtf8Bytes": 4096 } },
+        "cwd": { "$ref": "#/$defs/path" }, "reason": { "type": ["string", "null"], "x-maxUtf8Bytes": 4096 }
+      }
+    },
+    "file_payload": {
+      "type": "object", "additionalProperties": false,
+      "x-maxInlineDiffUtf8Bytes": 65536,
+      "required": ["title", "message", "reason", "snapshot_sha256", "snapshot_revision", "truncated", "changes", "change_artifact"],
+      "properties": {
+        "title": { "type": "string", "x-maxUtf8Bytes": 512 }, "message": { "type": "string", "x-maxUtf8Bytes": 4096 },
+        "reason": { "type": ["string", "null"], "x-maxUtf8Bytes": 4096 },
+        "snapshot_sha256": { "$ref": "#/$defs/sha256" },
+        "snapshot_revision": { "type": "integer", "minimum": 0 },
+        "truncated": { "const": false },
+        "changes": { "type": ["array", "null"], "minItems": 1, "maxItems": 4096, "items": { "$ref": "#/$defs/file_change" } },
+        "change_artifact": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/change_artifact" }] }
+      },
+      "oneOf": [
+        { "properties": { "changes": { "type": "array" }, "change_artifact": { "type": "null" } } },
+        { "properties": { "changes": { "type": "null" }, "change_artifact": { "$ref": "#/$defs/change_artifact" } } }
+      ]
+    },
+    "file_change": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "kind", "diff", "move_path"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "kind": { "enum": ["add", "update", "delete"] },
+        "diff": { "type": "string", "x-maxUtf8Bytes": 65536 },
+        "move_path": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "enum": ["add", "delete"] } }, "required": ["kind"] }, "then": { "properties": { "move_path": { "type": "null" } } } }
+      ]
+    },
+    "change_artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_id", "sha256", "media_type", "byte_length", "truncated"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/uuid7" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "media_type": { "const": "text/x-diff" },
+        "byte_length": { "type": "integer", "minimum": 65537, "maximum": 8388608 },
+        "truncated": { "const": false }
+      }
+    },
+    "option": { "type": "object", "additionalProperties": false, "required": ["label", "description"], "properties": { "label": { "type": "string", "x-maxUtf8Bytes": 512 }, "description": { "type": "string", "x-maxUtf8Bytes": 4096 } } },
+    "question": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "header", "question", "is_other", "is_secret", "options"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 }, "header": { "type": "string", "x-maxUtf8Bytes": 512 },
+        "question": { "type": "string", "x-maxUtf8Bytes": 4096 }, "is_other": { "type": "boolean" }, "is_secret": { "type": "boolean" },
+        "options": { "type": ["array", "null"], "maxItems": 32, "items": { "$ref": "#/$defs/option" } }
+      }
+    },
+    "user_input_payload": { "type": "object", "additionalProperties": false, "required": ["is_blocking", "questions"], "properties": { "is_blocking": { "type": "boolean" }, "questions": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/$defs/question" } } } },
+    "unsupported_payload": { "type": "object", "additionalProperties": false, "required": ["method", "reason"], "properties": { "method": { "enum": ["item/permissions/requestApproval", "mcpServer/elicitation/request"] }, "reason": { "const": "recognized_unsupported" } } },
+    "approval_resolution": { "type": "object", "additionalProperties": false, "required": ["outcome", "decision"], "properties": { "outcome": { "const": "approval" }, "decision": { "enum": ["accept_once", "decline", "cancel"] } } },
+    "user_input_resolution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outcome", "contained_secret", "answer_digest", "answer_count", "resolution_receipt_id"],
+      "properties": {
+        "outcome": { "const": "answered" },
+        "contained_secret": { "type": "boolean" },
+        "answer_digest": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "answer_count": { "type": "integer", "minimum": 1 },
+        "resolution_receipt_id": { "oneOf": [{ "$ref": "#/$defs/uuid7" }, { "type": "null" }] }
+      },
+      "oneOf": [
+        { "properties": { "contained_secret": { "const": true }, "answer_digest": { "type": "null" }, "resolution_receipt_id": { "$ref": "#/$defs/uuid7" } } },
+        { "properties": { "contained_secret": { "const": false }, "answer_digest": { "$ref": "#/$defs/sha256" }, "resolution_receipt_id": { "type": "null" } } }
+      ]
+    },
+    "stale_resolution": { "type": "object", "additionalProperties": false, "required": ["outcome", "reason"], "properties": { "outcome": { "const": "stale" }, "reason": { "enum": ["upstream_cleared", "run_generation_changed", "server_epoch_changed", "turn_terminal", "file_change_snapshot_changed", "file_change_artifact_unavailable"] } } },
+    "unsupported_resolution": { "type": "object", "additionalProperties": false, "required": ["outcome", "reply_code"], "properties": { "outcome": { "const": "method_not_found" }, "reply_code": { "const": -32601 } } },
+    "v_command": { "properties": { "kind": { "const": "command_execution_approval" }, "payload": { "$ref": "#/$defs/command_payload" }, "available_decisions": { "const": ["accept_once", "decline", "cancel"] }, "response_schema": { "const": "dolgorae.interaction.command-approval/v1" }, "resolution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/approval_resolution" }, { "$ref": "#/$defs/stale_resolution" }] } } },
+    "v_file": { "properties": { "kind": { "const": "file_change_approval" }, "payload": { "$ref": "#/$defs/file_payload" }, "available_decisions": { "const": ["accept_once", "decline", "cancel"] }, "response_schema": { "const": "dolgorae.interaction.file-change-approval/v1" }, "resolution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/approval_resolution" }, { "$ref": "#/$defs/stale_resolution" }] } } },
+    "v_user_input": { "properties": { "kind": { "const": "user_input" }, "payload": { "$ref": "#/$defs/user_input_payload" }, "available_decisions": { "const": [] }, "response_schema": { "const": "dolgorae.interaction.user-input/v1" }, "resolution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/user_input_resolution" }, { "$ref": "#/$defs/stale_resolution" }] } } },
+    "v_unsupported": { "properties": { "kind": { "const": "unsupported_request" }, "status": { "const": "resolved" }, "payload": { "$ref": "#/$defs/unsupported_payload" }, "available_decisions": { "const": [] }, "response_schema": { "const": "dolgorae.interaction.unsupported/v1" }, "resolution": { "$ref": "#/$defs/unsupported_resolution" } } },
+    "s_pending": { "properties": { "status": { "const": "pending" }, "resolved_at": { "type": "null" }, "resolution": { "type": "null" } } },
+    "s_resolved": { "properties": { "status": { "const": "resolved" }, "resolved_at": { "type": "string", "format": "date-time" }, "resolution": { "not": { "type": "null" } } } },
+    "s_stale": { "properties": { "status": { "const": "stale" }, "resolved_at": { "type": "string", "format": "date-time" }, "resolution": { "$ref": "#/$defs/stale_resolution" } } }
+  }
+}

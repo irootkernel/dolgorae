@@ -8,28 +8,48 @@
   ],
   "$defs": {
     "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "cursor_zero": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "json_value": {},
     "command": {
       "enum": [
-        "unknown", "help", "version", "init", "profile.add", "profile.list", "profile.show", "profile.remove",
+        "unknown", "help", "version", "init", "runtime.capabilities", "controller.credential.create",
+        "operator.credential.initialize", "operator.credential.rotate",
+        "workspace.inspect", "workspace.writer.status", "workspace.writer.handoff_prepare",
+        "workspace.writer.handoff_commit", "workspace.writer.handoff_cancel",
+        "profile.add", "profile.list", "profile.show", "profile.remove",
         "profile.doctor", "profile.server.status", "profile.server.start",
-        "profile.server.stop", "profile.server.restart",
+        "profile.server.stop", "profile.server.restart", "profile.server.migrate",
+        "profile.membership.verify", "profile.membership.tombstone_orphan", "profile.state.reset",
+        "profile.diagnostics.list", "profile.events",
         "run.start", "run.list", "run.status", "run.send",
         "run.submit", "run.wait", "run.events", "run.pending", "run.respond",
         "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write",
-        "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork",
-        "run.close", "run.delete", "run.verify", "run.export"
+        "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_successor",
+        "run.close", "run.delete", "run.verify", "run.export", "run.controller.reset",
+        "run.artifact.show", "run.artifact.read", "run.artifact.export"
       ]
     },
     "error_code": {
       "enum": [
         "INVALID_ARGUMENT", "WORKSPACE_NOT_INITIALIZED", "CONFIG_INVALID",
         "PROFILE_CONFIG_INVALID", "PROFILE_NOT_FOUND", "RUN_NOT_FOUND",
-        "THREAD_NOT_FOUND", "TURN_NOT_FOUND", "REQUEST_NOT_FOUND",
-        "PROFILE_ALREADY_EXISTS", "PROFILE_SERVER_BUSY", "WORKSPACE_INITIALIZATION_CONFLICT",
-        "RUN_STATE_CONFLICT", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY",
-        "IDEMPOTENCY_CONFLICT", "STALE_REQUEST", "OUTCOME_UNKNOWN",
+        "THREAD_NOT_FOUND", "TURN_NOT_FOUND", "INTERACTION_NOT_FOUND",
+        "PROFILE_ALREADY_EXISTS", "PROFILE_SERVER_BUSY", "PROFILE_LAUNCH_CONFLICT",
+        "PROFILE_MIGRATION_REQUIRED", "PROFILE_MEMBERSHIP_INCOMPLETE", "PROFILE_SERVER_EPOCH_MISMATCH", "WORKSPACE_INITIALIZATION_CONFLICT",
+        "RUN_STATE_CONFLICT", "RUN_STATE_INVARIANT_VIOLATION", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY",
+        "WRITER_HANDOFF_NOT_ALLOWED", "CROSS_CONTROLLER_RELEASE_REQUIRED", "STALE_WRITER_GENERATION",
+        "CONTROLLER_MISMATCH", "CONTROLLER_RESET_NOT_ALLOWED", "OPERATOR_MISMATCH",
+        "CONTROL_MODE_REQUIRED", "CONTROL_MODE_CONTROLLER_MISMATCH", "PURPOSE_REQUIRED", "EXECUTION_LANE_REQUIRED",
+        "CAPABILITY_UNSUPPORTED", "ACCESS_TRANSITION_UNSUPPORTED", "BACKGROUND_EXECUTION_UNVERIFIED",
+        "EXECUTION_LANE_UNSUPPORTED", "EXECUTION_LANE_IMMUTABLE", "SHARED_RUN_WRITE_FORBIDDEN",
+        "SUCCESSOR_SOURCE_NOT_TERMINAL", "SUCCESSOR_LINEAGE_INVALID", "SUCCESSOR_CONTROLLER_INVALID",
+        "THREAD_RESIDENCY_CONFLICT", "SAME_HOME_MULTI_SERVER_UNSAFE", "ASSURANCE_LEVEL_UNAVAILABLE",
+        "DEDICATED_HISTORY_BARRIER_FAILED", "PROFILE_LANE_MIGRATION_REQUIRED", "DEDICATED_SERVER_START_FAILED",
+        "IDEMPOTENCY_CONFLICT", "INTERACTION_ALREADY_RESOLVED", "INTERACTION_STALE",
+        "INTERACTION_RESPONSE_INVALID", "FILE_CHANGE_ARTIFACT_UNAVAILABLE", "ARTIFACT_NOT_FOUND", "ARTIFACT_RANGE_INVALID", "ARTIFACT_INTEGRITY_FAILURE", "PROJECTION_PROFILE_UNSUPPORTED", "OUTCOME_UNKNOWN",
         "RECOVERY_REQUIRED", "PROFILE_MISMATCH", "COMPATIBILITY_REJECTED",
-        "DOLGORAE_PROTOCOL_MISMATCH", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
+        "DOLGORAE_PROTOCOL_MISMATCH", "PROTOCOL_VERSION_UNSUPPORTED", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
         "PROTOCOL_FRAME_TOO_LARGE", "RUNTIME_PATH_INVALID",
         "RUNTIME_PATH_COLLISION", "REDACTION_FAILURE", "INTERNAL_ERROR",
         "TURN_FAILED", "TURN_INTERRUPTED", "AUDIT_INTEGRITY_FAILURE"
@@ -57,15 +77,69 @@
         "created": { "type": "boolean" }
       }
     },
+    "controller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["controller_id", "kind", "instance_id", "subject_id", "generation"],
+      "properties": {
+        "controller_id": { "$ref": "#/$defs/uuid" },
+        "kind": { "enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation", "other"] },
+        "instance_id": { "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 128 },
+        "subject_id": { "type": ["string", "null"], "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 256 },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "purpose": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "external_label"],
+      "properties": {
+        "kind": { "enum": ["interactive", "planning", "implementation", "review", "research", "discussion", "workflow_stage", "other"] },
+        "external_label": { "type": ["string", "null"], "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 128 }
+      }
+    },
+    "parent_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["namespace", "kind", "id"],
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 128 },
+        "kind": { "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 64 },
+        "id": { "type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 256 }
+      }
+    },
+    "controller_credential_created": {
+      "type": "object", "additionalProperties": false,
+      "required": ["controller", "output_path", "fingerprint"],
+      "properties": {
+        "controller": { "$ref": "#/$defs/controller" }, "output_path": { "$ref": "#/$defs/path" },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+      }
+    },
+    "operator_credential_created": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operator_id", "operator_generation", "output_path", "fingerprint"],
+      "properties": {
+        "operator_id": { "$ref": "#/$defs/uuid" },
+        "operator_generation": { "type": "integer", "minimum": 1 },
+        "output_path": { "$ref": "#/$defs/path" },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+      }
+    },
     "profile": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "argv", "expected_codex_home", "actual_codex_home", "version", "executable_sha256", "schema_sha256", "compatibility", "models", "diagnostics", "server_key", "server_epoch", "server_state"],
+      "required": ["name", "argv", "expected_codex_home", "actual_codex_home", "launch_cwd_policy", "launch_cwd", "environment", "launch_contract_sha256", "version", "executable_sha256", "schema_sha256", "compatibility", "models", "diagnostics", "server_key", "server_epoch", "server_state", "socket_path", "membership_revision", "membership_complete", "accepted_generation_contracts", "capabilities"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
         "expected_codex_home": { "$ref": "#/$defs/path" },
         "actual_codex_home": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] },
+        "launch_cwd_policy": { "const": "profile_state_directory_v1" },
+        "launch_cwd": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] },
+        "environment": {
+          "type": "object", "additionalProperties": { "type": "string" },
+          "required": ["PATH", "LANG", "LC_ALL"],
+          "properties": { "PATH": { "type": "string", "minLength": 1 }, "LANG": { "type": "string", "minLength": 1 }, "LC_ALL": { "type": "string", "minLength": 1 } }
+        },
+        "launch_contract_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "version": { "type": ["string", "null"] },
         "executable_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "schema_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
@@ -74,7 +148,61 @@
         "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
         "server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "server_epoch": { "type": ["integer", "null"], "minimum": 0 },
-        "server_state": { "enum": ["stopped", "starting", "ready", "degraded", "unknown"] }
+        "server_state": { "enum": ["stopped", "starting", "ready", "degraded", "stopping", "restarting", "migrating", "migration_blocked", "unknown"] },
+        "socket_path": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] },
+        "membership_revision": { "type": "integer", "minimum": 0 },
+        "membership_complete": { "type": "boolean" },
+        "accepted_generation_contracts": { "type": "array", "items": { "$ref": "#/$defs/accepted_generation_contract" } },
+        "capabilities": { "$ref": "https://dolgorae.local/schema/capabilities/v1" }
+      }
+    },
+    "accepted_generation_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["migration_id", "previous_server_key", "new_server_key", "previous_server_epoch", "new_server_epoch", "previous_codex_version", "new_codex_version", "previous_executable_sha256", "new_executable_sha256", "previous_schema_sha256", "new_schema_sha256", "previous_compatibility_manifest_sha256", "new_compatibility_manifest_sha256", "operator_id", "operator_generation", "accepted_by_invocation_id", "accepted_at"],
+      "properties": {
+        "migration_id": { "$ref": "#/$defs/uuid" },
+        "previous_server_key": { "$ref": "#/$defs/sha256" },
+        "new_server_key": { "$ref": "#/$defs/sha256" },
+        "previous_server_epoch": { "type": "integer", "minimum": 1 },
+        "new_server_epoch": { "type": "integer", "minimum": 1 },
+        "previous_codex_version": { "type": "string", "minLength": 1 },
+        "new_codex_version": { "type": "string", "minLength": 1 },
+        "previous_executable_sha256": { "$ref": "#/$defs/sha256" },
+        "new_executable_sha256": { "$ref": "#/$defs/sha256" },
+        "previous_schema_sha256": { "$ref": "#/$defs/sha256" },
+        "new_schema_sha256": { "$ref": "#/$defs/sha256" },
+        "previous_compatibility_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "new_compatibility_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "operator_id": { "$ref": "#/$defs/uuid" },
+        "operator_generation": { "type": "integer", "minimum": 1 },
+        "accepted_by_invocation_id": { "$ref": "#/$defs/uuid" },
+        "accepted_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "membership_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "server_key", "membership_revision", "valid_prefix_revision", "complete", "orphans"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "membership_revision": { "type": "integer", "minimum": 0 },
+        "valid_prefix_revision": { "type": "integer", "minimum": 0 },
+        "complete": { "type": "boolean" },
+        "orphans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["workspace_id", "run_id", "reason"],
+            "properties": {
+              "workspace_id": { "$ref": "#/$defs/sha256" },
+              "run_id": { "$ref": "#/$defs/uuid" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
       }
     },
     "model": {
@@ -100,27 +228,89 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace_id", "run_id", "state", "access", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "model", "effort", "event_cursor", "pending_count", "writer_state", "lease_epoch", "identity_verdict", "last_terminal"],
+      "required": ["workspace_id", "run_id", "state", "state_variant", "control_mode", "purpose", "execution_lane", "effective_policy", "writer_authority", "server_lane", "workload_background_state", "requested_assurance", "achieved_assurance", "instruction_contract", "lineage", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "controller", "parent_ref", "required_capabilities", "model", "effort", "event_cursor", "pending_count", "identity_verdict", "recovery", "last_terminal"],
       "properties": {
         "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "run_id": { "$ref": "#/$defs/uuid" },
-        "state": { "enum": ["starting", "idle", "running", "waiting_approval", "paused", "closed", "start_failed", "outcome_unknown"] },
-        "access": { "enum": ["read", "write"] },
-        "server_epoch": { "type": ["integer", "null"], "minimum": 0 },
+        "state": { "enum": ["starting", "idle", "running", "waiting_interaction", "reconciliation_required", "paused", "closed", "start_failed", "outcome_unknown"] },
+        "state_variant": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/state_variant" },
+        "control_mode": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/control_mode" },
+        "execution_lane": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane" },
+        "effective_policy": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/effective_policy" },
+        "writer_authority": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/writer_authority" },
+        "server_lane": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/server_lane" },
+        "workload_background_state": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/workload_background_state" },
+        "requested_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+        "achieved_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+        "instruction_contract": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/instruction_contract" },
+        "lineage": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/lineage" }, { "type": "null" }] },
+        "server_epoch": { "type": ["integer", "null"], "minimum": 1 },
         "run_generation": { "type": "integer", "minimum": 0 },
         "control_socket_epoch": { "type": "integer", "minimum": 0 },
         "profile": { "type": "string" },
         "thread_id": { "type": ["string", "null"] },
         "active_turn_id": { "type": ["string", "null"] },
+        "controller": { "$ref": "#/$defs/controller" },
+        "purpose": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose" },
+        "parent_ref": { "oneOf": [{ "$ref": "#/$defs/parent_ref" }, { "type": "null" }] },
+        "required_capabilities": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 } },
         "model": { "type": "string" },
         "effort": { "type": "string" },
-        "event_cursor": { "type": "integer", "minimum": 0 },
+        "event_cursor": { "$ref": "#/$defs/cursor_zero" },
         "pending_count": { "type": "integer", "minimum": 0 },
-        "writer_state": { "enum": ["reader", "held", "blocked_unknown"] },
-        "lease_epoch": { "type": "integer", "minimum": 0 },
         "identity_verdict": { "enum": ["Absent", "Mismatch", "Match", "Unverifiable"] },
+        "recovery": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "reason", "safe_actions", "unsafe_actions", "recorded_server_key", "recorded_server_epoch", "recorded_epoch_absence", "observed_server_key", "observed_server_epoch", "thread_history_result"],
+          "properties": {
+            "status": { "enum": ["ready", "recoverable", "recovery_required", "reconciliation_required", "outcome_unknown", "unverifiable", "closed"] },
+            "reason": { "type": ["string", "null"] },
+            "safe_actions": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+            "unsafe_actions": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+            "recorded_server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "recorded_server_epoch": { "type": ["integer", "null"], "minimum": 1 },
+            "recorded_epoch_absence": { "enum": ["not_required", "proved", "unverifiable"] },
+            "observed_server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "observed_server_epoch": { "type": ["integer", "null"], "minimum": 1 },
+            "thread_history_result": { "enum": ["not_read", "terminal", "active", "absent", "unreadable", "unknown"] }
+          }
+        },
         "last_terminal": { "oneOf": [{ "$ref": "#/$defs/turn" }, { "type": "null" }] }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "writer_authority": { "properties": { "state": { "const": "active" } } } } },
+          "then": { "properties": { "execution_lane": { "const": "dedicated" }, "effective_policy": { "properties": { "access": { "const": "write" }, "verification": { "const": "verified" } } }, "server_lane": { "properties": { "kind": { "const": "dedicated" }, "state": { "const": "ready" } } } } }
+        },
+        {
+          "if": { "properties": { "execution_lane": { "const": "shared_readonly" } } },
+          "then": { "properties": { "effective_policy": { "properties": { "access": { "const": "read" }, "verification": { "const": "verified" } } }, "writer_authority": { "properties": { "state": { "const": "none" } } }, "server_lane": { "properties": { "kind": { "const": "shared_readonly" }, "lane_id": { "type": "null" } } } } }
+        },
+        {
+          "if": { "properties": { "control_mode": { "const": "direct_interactive" } } },
+          "then": {
+            "properties": {
+              "controller": {
+                "properties": {
+                  "kind": { "enum": ["human_cli", "interactive_client"] }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "control_mode": { "const": "managed_agent" } } },
+          "then": {
+            "properties": {
+              "controller": {
+                "properties": {
+                  "kind": { "enum": ["workflow_orchestrator", "automation"] }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "workspace_changes": {
       "type": "object",
@@ -136,30 +326,57 @@
     "turn": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_id", "thread_id", "turn_id", "status", "model", "effort", "event_cursor", "workspace_changes"],
+      "required": ["run_id", "thread_id", "turn_id", "server_epoch", "status", "model", "effort", "final_response", "event_cursor", "workspace_changes"],
       "properties": {
         "run_id": { "$ref": "#/$defs/uuid" },
         "thread_id": { "type": "string" },
         "turn_id": { "type": "string" },
-        "status": { "enum": ["accepted", "running", "waiting_approval", "completed", "failed", "interrupted"] },
+        "server_epoch": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["reserved", "accepted", "running", "waiting_interaction", "interrupting", "completed", "failed", "interrupted", "outcome_unknown"] },
         "model": { "type": "string" },
         "effort": { "type": "string" },
         "usage": { "type": ["object", "null"] },
-        "response": { "type": ["string", "null"] },
-        "event_cursor": { "type": "integer", "minimum": 0 },
+        "final_response": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/final_response" },
+        "event_cursor": { "$ref": "#/$defs/cursor_zero" },
         "workspace_changes": { "$ref": "#/$defs/workspace_changes" }
       }
     },
-    "request": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["request_id", "generation", "kind", "payload", "response_schema"],
+    "interaction": { "$ref": "https://dolgorae.local/schema/interaction/v1" },
+    "writer_status": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "authority_state", "writer_run_id", "controller_id", "controller_generation", "writer_generation", "worker_generation", "profile_server_key", "profile_server_epoch", "thread_id", "active_turn_id", "lifecycle_state", "pending_interaction_count", "last_event_cursor", "recovery_state", "execution_lane", "dedicated_lane", "workload_background_state", "handoff"],
       "properties": {
-        "request_id": { "type": "string" },
-        "generation": { "type": "integer", "minimum": 1 },
-        "kind": { "enum": ["command_approval", "file_approval"] },
-        "payload": { "type": "object" },
-        "response_schema": { "enum": ["CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse"] }
+        "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "authority_state": { "enum": ["none", "reserved", "active", "handoff_prepared", "releasing", "blocked_unknown"] },
+        "writer_run_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "controller_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "controller_generation": { "type": ["integer", "null"], "minimum": 1 },
+        "writer_generation": { "type": "integer", "minimum": 0 },
+        "worker_generation": { "type": ["integer", "null"], "minimum": 1 },
+        "profile_server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "profile_server_epoch": { "type": ["integer", "null"], "minimum": 1 },
+        "thread_id": { "type": ["string", "null"] },
+        "active_turn_id": { "type": ["string", "null"] },
+        "lifecycle_state": { "type": ["string", "null"] },
+        "pending_interaction_count": { "type": "integer", "minimum": 0 },
+        "last_event_cursor": { "$ref": "#/$defs/cursor_zero" },
+        "recovery_state": { "enum": ["ready", "reconciliation_required", "outcome_unknown", "unverifiable"] },
+        "execution_lane": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane" },
+        "dedicated_lane": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/server_lane" }, { "type": "null" }] },
+        "workload_background_state": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/workload_background_state" },
+        "handoff": { "oneOf": [{ "$ref": "#/$defs/handoff" }, { "type": "null" }] }
+      }
+    },
+    "handoff": {
+      "type": "object", "additionalProperties": false,
+      "required": ["handoff_id", "status", "source_run_id", "destination_run_id", "expected_writer_generation", "expires_at", "blockers"],
+      "properties": {
+        "handoff_id": { "$ref": "#/$defs/uuid" },
+        "status": { "enum": ["prepared", "committed", "cancelled", "expired"] },
+        "source_run_id": { "$ref": "#/$defs/uuid" }, "destination_run_id": { "$ref": "#/$defs/uuid" },
+        "expected_writer_generation": { "type": "integer", "minimum": 0 },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "blockers": { "type": "array", "items": { "type": "string" } }
       }
     },
     "approval_response": {
@@ -168,6 +385,18 @@
       "required": ["decision"],
       "properties": {
         "decision": { "enum": ["accept_once", "decline", "cancel"] }
+      }
+    },
+    "user_input_response": {
+      "type": "object", "additionalProperties": false, "required": ["answers"],
+      "properties": {
+        "answers": {
+          "type": "object", "minProperties": 1,
+          "additionalProperties": {
+            "type": "object", "additionalProperties": false, "required": ["answers"],
+            "properties": { "answers": { "type": "array", "minItems": 1, "items": { "type": "string", "x-maxUtf8Bytes": 4096 } } }
+          }
+        }
       }
     },
     "meta": {
@@ -207,8 +436,10 @@
             "run_generation_stopped", "app_server_request",
             "app_server_response", "app_server_notification",
             "approval_requested", "approval_decided",
+            "interaction_opened", "interaction_resolved", "client_event",
+            "controller_reset", "reasoning_content_suppressed",
             "profile_observed", "writer_acquired", "writer_released",
-            "writer_handoff_requested", "writer_handoff_completed",
+            "writer_handoff_requested", "writer_handoff_cancelled", "writer_handoff_completed",
             "idempotency_reserved", "reconciliation",
             "cleanup_intent", "cleanup_result", "ledger_tail_repaired",
             "projection_rewound", "payload_unrepresentable", "start_failed",
@@ -222,23 +453,14 @@
     },
     "event_data": {
       "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["kind", "cursor", "record"],
-          "properties": {
-            "kind": { "const": "event" },
-            "cursor": { "type": "integer", "minimum": 0 },
-            "record": { "$ref": "#/$defs/audit_record" },
-            "raw_record": { "type": "string" }
-          }
-        },
+        { "$ref": "https://dolgorae.local/schema/event-delivery/v1" },
         {
           "type": "object", "additionalProperties": false,
           "required": ["kind", "cursor", "state"],
           "properties": {
             "kind": { "const": "heartbeat" },
-            "cursor": { "type": "integer", "minimum": 0 },
-            "state": { "enum": ["starting", "idle", "running", "waiting_approval", "paused", "closed", "start_failed", "outcome_unknown"] }
+            "cursor": { "$ref": "#/$defs/cursor_zero" },
+            "state": { "enum": ["starting", "idle", "running", "waiting_interaction", "reconciliation_required", "paused", "closed", "start_failed", "outcome_unknown"] }
           }
         },
         {
@@ -246,16 +468,30 @@
           "required": ["kind", "cursor"],
           "properties": {
             "kind": { "const": "end" },
-            "cursor": { "type": "integer", "minimum": 0 }
+            "cursor": { "$ref": "#/$defs/cursor_zero" }
           }
         }
+      ]
+    },
+    "profile_event_data": {
+      "oneOf": [
+        { "$ref": "https://dolgorae.local/schema/profile-event/v1" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "cursor"], "properties": { "kind": { "const": "end" }, "cursor": { "$ref": "#/$defs/cursor_zero" } } }
       ]
     },
     "data": {
       "oneOf": [
         { "$ref": "#/$defs/workspace" }, { "$ref": "#/$defs/profile" },
         { "$ref": "#/$defs/run" }, { "$ref": "#/$defs/turn" },
-        { "$ref": "#/$defs/request" }, { "$ref": "#/$defs/verification" },
+        { "$ref": "#/$defs/interaction" }, { "$ref": "#/$defs/verification" },
+        { "$ref": "#/$defs/membership_verification" },
+        { "$ref": "#/$defs/writer_status" }, { "$ref": "#/$defs/handoff" },
+        { "$ref": "#/$defs/controller_credential_created" }, { "$ref": "#/$defs/operator_credential_created" },
+        { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata" },
+        { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/read" },
+        { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/export" },
+        { "$ref": "#/$defs/profile_event_data" },
+        { "$ref": "https://dolgorae.local/schema/capabilities/v1" },
         { "$ref": "#/$defs/event_data" }, { "$ref": "#/$defs/meta" },
         { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array" } } },
         { "type": "object", "additionalProperties": false, "required": ["output_path", "bundle_schema_version", "files", "verification"], "properties": { "output_path": { "$ref": "#/$defs/path" }, "bundle_schema_version": { "const": 1 }, "files": { "type": "array", "items": { "type": "string" } }, "verification": { "$ref": "#/$defs/verification" } } },
@@ -278,17 +514,29 @@
         { "type": "object", "additionalProperties": false, "required": ["schema_version", "ok", "command", "invocation_id", "data"], "properties": { "schema_version": { "const": 1 }, "ok": { "const": true }, "command": { "$ref": "#/$defs/command" }, "invocation_id": { "$ref": "#/$defs/uuid" }, "data": { "$ref": "#/$defs/data" } } },
         { "not": { "properties": { "command": { "const": "unknown" } }, "required": ["command"] } },
         { "if": { "properties": { "command": { "enum": ["help", "version"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/meta" } } } },
+        { "if": { "properties": { "command": { "const": "runtime.capabilities" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/capabilities/v1" } } } },
+        { "if": { "properties": { "command": { "const": "controller.credential.create" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/controller_credential_created" } } } },
+        { "if": { "properties": { "command": { "enum": ["operator.credential.initialize", "operator.credential.rotate"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/operator_credential_created" } } } },
         { "if": { "properties": { "command": { "const": "init" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/workspace" } } } },
-        { "if": { "properties": { "command": { "enum": ["profile.add", "profile.show", "profile.doctor", "profile.server.status", "profile.server.start", "profile.server.stop", "profile.server.restart"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile" } } } },
+        { "if": { "properties": { "command": { "const": "workspace.inspect" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/workspace" } } } },
+        { "if": { "properties": { "command": { "const": "workspace.writer.status" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/writer_status" } } } },
+        { "if": { "properties": { "command": { "enum": ["workspace.writer.handoff_prepare", "workspace.writer.handoff_commit", "workspace.writer.handoff_cancel"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/handoff" } } } },
+        { "if": { "properties": { "command": { "enum": ["profile.add", "profile.show", "profile.doctor", "profile.server.status", "profile.server.start", "profile.server.stop", "profile.server.restart", "profile.server.migrate", "profile.state.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile" } } } },
+        { "if": { "properties": { "command": { "enum": ["profile.membership.verify", "profile.membership.tombstone_orphan"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/membership_verification" } } } },
         { "if": { "properties": { "command": { "const": "profile.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/profile" } } } } } } },
+        { "if": { "properties": { "command": { "const": "profile.diagnostics.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": { "items": { "type": "array", "items": { "$ref": "https://dolgorae.local/schema/profile-event/v1" } }, "next_cursor": { "$ref": "#/$defs/cursor_zero" } } } } } },
+        { "if": { "properties": { "command": { "const": "profile.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile_event_data" } } } },
         { "if": { "properties": { "command": { "enum": ["profile.remove", "run.delete"] } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } } } } },
-        { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.close"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
+        { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_successor", "run.close", "run.controller.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
         { "if": { "properties": { "command": { "const": "run.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/run" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.send", "run.submit", "run.wait"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/turn" } } } },
         { "if": { "properties": { "command": { "const": "run.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/event_data" } } } },
-        { "if": { "properties": { "command": { "const": "run.pending" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/request" } } } } } } },
+        { "if": { "properties": { "command": { "const": "run.pending" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/interaction" } } } } } } },
         { "if": { "properties": { "command": { "const": "run.verify" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/verification" } } } },
-        { "if": { "properties": { "command": { "const": "run.export" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["output_path", "bundle_schema_version", "files", "verification"], "properties": { "output_path": { "$ref": "#/$defs/path" }, "bundle_schema_version": { "const": 1 }, "files": { "type": "array", "items": { "type": "string" } }, "verification": { "$ref": "#/$defs/verification" } } } } } }
+        { "if": { "properties": { "command": { "const": "run.export" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["output_path", "bundle_schema_version", "files", "verification"], "properties": { "output_path": { "$ref": "#/$defs/path" }, "bundle_schema_version": { "const": 1 }, "files": { "type": "array", "items": { "type": "string" } }, "verification": { "$ref": "#/$defs/verification" } } } } } },
+        { "if": { "properties": { "command": { "const": "run.artifact.show" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata" } } } },
+        { "if": { "properties": { "command": { "const": "run.artifact.export" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/export" } } } },
+        { "if": { "properties": { "command": { "const": "run.artifact.read" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/read" } } } }
       ]
     },
     "failure": {

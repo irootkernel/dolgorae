@@ -1,7 +1,33 @@
 {
   "schema_version": 1,
   "target_version": "0.147.0",
+  "release_eligible": false,
+  "release_requirements": {
+    "runtime_baseline": "0.147.0",
+    "topology": "shared_readonly_plus_sticky_dedicated_lanes",
+    "background_authority": "dolgorae_dedicated_lane_process_census",
+    "required_live_evidence": ["same_home_shared_and_multiple_dedicated_servers", "globally_unique_server_epochs", "fixed_thread_residency", "closed_generation_history_barrier", "complete_dedicated_lane_census", "exact_cleanup", "unrelated_process_not_signalled"],
+    "failure": "TASK-000-D_THIRD_FOLLOW_UP_EVIDENCE_PENDING"
+  },
   "stable_schema_bundle_sha256": "f3dec1e031d99a420b137b903f02196d4325eece57620c925bb7130b25f168d2",
+  "experimental_schema_bundle_sha256": "ff10829cd75b67297019b39ab508ac699198574663579aa18336b7dc55ea178f",
+  "experimental_thread_surfaces": {
+    "required_schema_files": [
+      "v2/ThreadUnsubscribeParams.json",
+      "v2/ThreadUnsubscribeResponse.json",
+      "v2/ThreadLoadedListResponse.json",
+      "v2/ThreadBackgroundTerminalsListResponse.json",
+      "v2/ThreadBackgroundTerminalsCleanParams.json",
+      "v2/ThreadBackgroundTerminalsTerminateParams.json",
+      "v2/ThreadGoalSetParams.json",
+      "v2/ThreadGoalGetResponse.json",
+      "v2/ThreadGoalClearParams.json"
+    ],
+    "unsubscribe_statuses": ["notLoaded", "notSubscribed", "unsubscribed"],
+    "background_terminal_required_fields": ["command", "cwd", "itemId", "processId"],
+    "background_terminal_os_pid_nullable": true,
+    "classification": "experimental_schema_present_live_semantics_partially_failed"
+  },
   "comparison": {
     "resolve_refs": true,
     "pointer_semantics": "resolve_pointer_node_then_apply_named_constraint",
@@ -9,6 +35,38 @@
     "required_type_const_and_requiredness_must_match": true,
     "required_enum_values_must_remain": true,
     "additive_fields_and_enum_values_allowed": true
+  },
+  "profile_launch": {
+    "mode": "dolgorae_owned_direct_executable",
+    "global_arguments": {
+      "value_flags": ["--profile", "--enable", "--disable"],
+      "flag_only": ["--strict-config"],
+      "aliases_allowed": false,
+      "equals_form_allowed": false,
+      "preserve_occurrence_order": true
+    },
+    "configuration_inputs": ["$CODEX_HOME/config.toml", "$CODEX_HOME/<selected-profile>.config.toml"],
+    "configuration_policy": {
+      "raw_file_digest_in_server_key": false,
+      "closed_classification": ["process_static", "operator_migratable", "runtime_mutable", "ignored"],
+      "unknown_field": "compatibility_rejected",
+      "active_server_key": "frozen_for_lifetime",
+      "classification_status": "pending_pinned_live_probe"
+    },
+    "feature_policy": {
+      "multi_agent": {
+        "owner": "dolgorae_profile_native_subagents_policy",
+        "default": "enabled",
+        "enabled_launch_argument": ["--enable", "multi_agent"],
+        "disabled_launch_argument": ["--disable", "multi_agent"],
+        "raw_global_argument": "profile_config_invalid",
+        "enabled_capability_before_complete_probe": "unverified",
+        "disabled_capability_requires_no_child_evidence": "unavailable",
+        "quiescence_rule": "active_or_unverified_native_state_blocks_transition",
+        "reason": "Codex-native subagents are permitted but distinct from independent Dolgorae Runs; the retained parser contradicted its wire evidence"
+      }
+    },
+    "other_include_mechanisms": "rejected"
   },
   "schema_constraints": [
     {"file":"v1/InitializeParams.json","pointer":"/required","contains":["clientInfo"]},
@@ -44,6 +102,18 @@
     {"file":"v2/ThreadReadParams.json","pointer":"/required","contains":["threadId"]},
     {"file":"v2/ThreadReadParams.json","pointer":"/properties/threadId/type","equals":"string"},
     {"file":"v2/ThreadReadParams.json","pointer":"/properties/includeTurns/type","equals":"boolean"},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/required","contains":["thread"]},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/Thread/required","contains":["id","turns"]},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/Thread/properties/parentThreadId/type","equals":["string","null"]},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/Turn/required","contains":["id","items","status"]},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/Turn/properties/items/type","equals":"array"},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/TurnItemsView","one_of_enum_contains":["full"]},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/MessagePhase","one_of_enum_contains":["commentary","final_answer"]},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/ThreadItem","one_of_property_enum_contains":{"property":"type","values":["agentMessage"]}},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/ThreadItem","one_of_title_property_contains":{"title":"AgentMessageThreadItem","properties":["id","text","phase","type"]}},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/ThreadItem","one_of_title_required_contains":{"title":"AgentMessageThreadItem","required":["id","text","type"]}},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/ThreadItem","one_of_title_property_contains":{"title":"CommandExecutionThreadItem","properties":["id","status","processId","type"]}},
+    {"file":"v2/ThreadReadResponse.json","pointer":"/definitions/ThreadItem","one_of_title_property_contains":{"title":"FileChangeThreadItem","properties":["changes","id","status","type"]}},
     {"file":"v2/TurnStartParams.json","pointer":"/required","contains":["threadId","input"]},
     {"file":"v2/TurnStartParams.json","pointer":"/properties/threadId/type","equals":"string"},
     {"file":"v2/TurnStartParams.json","pointer":"/properties/input/type","equals":"array"},
@@ -58,11 +128,30 @@
     {"file":"FileChangeRequestApprovalResponse.json","pointer":"/required","contains":["decision"]},
     {"file":"FileChangeRequestApprovalResponse.json","pointer":"/definitions/FileChangeApprovalDecision","one_of_enum_contains":["accept","acceptForSession","decline","cancel"]},
     {"file":"FileChangeRequestApprovalParams.json","pointer":"/required","contains":["itemId","startedAtMs","threadId","turnId"]},
+    {"file":"v2/FileChangePatchUpdatedNotification.json","pointer":"/required","contains":["changes","itemId","threadId","turnId"]},
+    {"file":"v2/FileChangePatchUpdatedNotification.json","pointer":"/properties/changes/type","equals":"array"},
+    {"file":"v2/FileChangePatchUpdatedNotification.json","pointer":"/definitions/FileUpdateChange/required","contains":["diff","kind","path"]},
+    {"file":"v2/FileChangePatchUpdatedNotification.json","pointer":"/definitions/PatchChangeKind","one_of_property_enum_contains":{"property":"type","values":["add","delete","update"]}},
     {"file":"PermissionsRequestApprovalResponse.json","pointer":"/required","contains":["permissions"]},
     {"file":"PermissionsRequestApprovalParams.json","pointer":"/required","contains":["cwd","itemId","permissions","startedAtMs","threadId","turnId"]},
     {"file":"ToolRequestUserInputResponse.json","pointer":"/required","contains":["answers"]},
     {"file":"ToolRequestUserInputResponse.json","pointer":"/properties/answers/type","equals":"object"},
+    {"file":"ToolRequestUserInputResponse.json","pointer":"/definitions/ToolRequestUserInputAnswer/required","contains":["answers"]},
+    {"file":"ToolRequestUserInputResponse.json","pointer":"/definitions/ToolRequestUserInputAnswer/properties/answers/type","equals":"array"},
+    {"file":"ToolRequestUserInputResponse.json","pointer":"/definitions/ToolRequestUserInputAnswer/properties/answers/items/type","equals":"string"},
     {"file":"ToolRequestUserInputParams.json","pointer":"/required","contains":["isBlocking","itemId","questions","threadId","turnId"]},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/properties/isBlocking/type","equals":"boolean"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/properties/questions/type","equals":"array"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/required","contains":["header","id","question"]},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/properties/header/type","equals":"string"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/properties/id/type","equals":"string"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/properties/question/type","equals":"string"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/properties/isOther/type","equals":"boolean"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/properties/isSecret/type","equals":"boolean"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputQuestion/properties/options/type","equals":["array","null"]},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputOption/required","contains":["description","label"]},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputOption/properties/description/type","equals":"string"},
+    {"file":"ToolRequestUserInputParams.json","pointer":"/definitions/ToolRequestUserInputOption/properties/label/type","equals":"string"},
     {"file":"McpServerElicitationRequestResponse.json","pointer":"/required","contains":["action"]},
     {"file":"McpServerElicitationRequestResponse.json","pointer":"/definitions/McpServerElicitationAction/enum","contains":["accept","decline","cancel"]},
     {"file":"McpServerElicitationRequestParams.json","pointer":"/required","contains":["serverName","threadId"]}
@@ -94,14 +183,14 @@
   "server_requests": {
     "item/commandExecution/requestApproval": {
       "support": "supported",
-      "kind": "command_approval",
-      "state": "waiting_approval",
+      "kind": "command_execution_approval",
+      "state": "waiting_interaction",
       "response_schema": "CommandExecutionRequestApprovalResponse"
     },
     "item/fileChange/requestApproval": {
       "support": "supported",
-      "kind": "file_approval",
-      "state": "waiting_approval",
+      "kind": "file_change_approval",
+      "state": "waiting_interaction",
       "response_schema": "FileChangeRequestApprovalResponse"
     },
     "item/permissions/requestApproval": {
@@ -109,7 +198,9 @@
       "response_schema": "PermissionsRequestApprovalResponse"
     },
     "item/tool/requestUserInput": {
-      "support": "recognized_unsupported",
+      "support": "supported_experimental_pinned",
+      "kind": "user_input",
+      "state": "waiting_interaction",
       "response_schema": "ToolRequestUserInputResponse"
     },
     "mcpServer/elicitation/request": {
@@ -124,6 +215,20 @@
     "cancel": "cancel"
   },
   "notifications": {
+    "file_change_patch": {
+      "method": "item/fileChange/patchUpdated",
+      "thread_id_pointer": "/params/threadId",
+      "turn_id_pointer": "/params/turnId",
+      "item_id_pointer": "/params/itemId",
+      "changes_pointer": "/params/changes"
+    },
+    "final_response": {
+      "source": "completed_root_turn_items",
+      "item_type": "agentMessage",
+      "phase_preference": ["final_answer", null],
+      "excluded_phase": "commentary",
+      "absent_result": null
+    },
     "terminal_turn": {
       "method": "turn/completed",
       "thread_id_pointer": "/params/threadId",
@@ -132,6 +237,13 @@
       "terminal_statuses": ["completed", "interrupted", "failed"],
       "nonterminal_statuses": ["inProgress"],
       "unlisted_status": "Unreadable"
+    },
+    "reasoning_policy": {
+      "classification": "content_not_retained",
+      "known_method_prefixes": ["item/reasoning/"],
+      "known_content_suffixes": ["textDelta", "summaryTextDelta", "summaryPartAdded"],
+      "initialization_suppression": "use generated-schema-supported notification opt-out when available",
+      "durable_fields": ["method", "byte_length", "sha256", "reason"]
     }
   },
   "behavioral_observations": {
@@ -148,6 +260,19 @@
     "unanswered_command_approval_status_after_restart": "interrupted",
     "recognized_unsupported_method_not_found_request": "mcpServer/elicitation/request",
     "recognized_unsupported_method_not_found_reply_code": -32601,
-    "recognized_unsupported_method_not_found_result": "generation_survived_turn_completed"
+    "recognized_unsupported_method_not_found_result": "generation_survived_turn_completed",
+    "user_input_schema_classification": "experimental_pinned_to_0.147.0",
+    "user_input_secret_answer_persistence": "forbidden",
+    "access_policy_transition": "unverified_until_live_probe",
+    "thread_scoped_background_terminal_api": "experimental_schema_present_live_completeness_failed_zero_entries",
+    "writer_background_execution_policy": "dedicated_lane_process_census_best_effort_personal_alpha",
+    "same_home_multi_app_server": "passed_task000g_live_probe",
+    "same_thread_cross_server_migration": "rejected_unsubscribe_left_source_loaded_and_resume_failed_active_writer",
+    "sticky_dedicated_policy_transition": "passed_task000g_live_probe",
+    "multi_workspace_concurrent_writers": "passed_task000g_live_probe",
+    "closed_generation_history_barrier": "passed_task000g_live_probe",
+    "native_subagent_completion": "inconclusive_bounded_timeout",
+    "command_execution_process_id": "opaque_correlation_hint_only",
+    "capsule_process_identity": "boot_pid_ppid_uid_pgid_session_start_executable"
   }
 }

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/profile-event/v1",
+  "title": "Dolgorae profile diagnostic event and delivery v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "cursor", "event_id", "timestamp", "profile", "server_key", "server_epoch", "type", "projection", "replay", "payload"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "cursor": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "event_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "profile": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 },
+    "server_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "server_epoch": { "type": ["integer", "null"], "minimum": 1 },
+    "type": { "enum": ["profile.operation", "profile.server_state", "profile.compatibility", "profile.log", "profile.error", "profile.recovery"] },
+    "projection": { "enum": ["minimal", "operational"] },
+    "replay": { "type": "boolean" },
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["severity", "status", "code", "message"],
+      "properties": {
+        "severity": { "enum": ["info", "warning", "error", "critical"] },
+        "status": { "enum": ["prepared", "applying", "ready", "completed", "failed", "blocked", "unknown"] },
+        "code": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "message": { "type": "string", "x-maxUtf8Bytes": 4096 },
+        "operation_id": { "type": ["string", "null"], "format": "uuid" },
+        "redacted_detail": { "type": ["object", "null"] }
+      }
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "projection": { "const": "minimal" } }, "required": ["projection"] }, "then": { "properties": { "payload": { "properties": { "redacted_detail": { "type": "null" } } } } } }
+  ]
+}

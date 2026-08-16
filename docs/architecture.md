@@ -11,25 +11,33 @@ progress by [roadmap.md](roadmap.md).
 
 ## System Context
 
-Dolgorae is a local process supervisor and protocol adapter between a master and
-Codex app-server. It adds durable run identity, account binding, access
-coordination, recovery, and audit around Codex threads without replacing Codex
-conversation storage.
+Dolgorae is the sole supported local process supervisor and protocol adapter
+between external masters and Codex app-server. It adds durable run identity,
+controller authorization, account binding, access coordination, recovery, and
+audit around Codex threads without replacing Codex conversation storage.
 
 ```text
                           project-local profile configuration
                           argv + expected CODEX_HOME
                                      |
                                      v
-master -> dolgorae CLI -> per-run worker -> per-run proxy connection
-             |              |                         |
-          JSON I/O       audit ledger                 v
-                                     profile app-server singleton -> Codex services
+master -> dolgorae CLI -> semantic service -> per-run worker
+             |                                  |       |
+       stable JSON/JSONL                    audit ledger | direct WebSocket/UDS
+                                                        v
+                                      +-> shared read-only Profile Server -> Codex services
+                                      `-> Run-owned Dedicated Server lane -> Codex services
 ```
 
-The master is the only orchestrator of independent Dolgorae runs. Codex may
-manage native subagents inside a run; those children remain within Codex's
-session tree and are not Dolgorae peers.
+The master is the only orchestrator of Independent Dolgorae Runs. A profile may
+permit Codex-native subagents before full lifecycle verification, but active or
+unverified native state blocks every quiescence-requiring transition. Those
+children remain within one Codex session tree and are never Dolgorae peer Runs,
+workers, or Dedicated Lane Servers.
+
+The v1 public boundary stops at the machine CLI. The worker socket and App
+Server transport remain private, and future adapters must call the same semantic
+service rather than reimplement state or authorization rules.
 
 ## Component Model
 
@@ -39,11 +47,12 @@ The visible `dolgorae` invocation is short-lived. It:
 
 1. resolves the canonical workspace;
 2. parses and validates machine-oriented input;
-3. resolves the explicit run ID when required;
-4. discovers or starts the owning worker;
-5. exchanges one request/response with the worker, or reads the fsynced
+3. validates a credential carrier and transfers its fd for a mutation;
+4. resolves the explicit run ID and performs only preliminary authorization;
+5. discovers or starts the owning worker;
+6. exchanges one request/response with the worker, or reads the fsynced
    projection directly for projection-only `events`;
-6. emits the stable stdout envelope and exits.
+7. emits the stable stdout envelope and exits.
 
 It never talks directly to app-server and never writes the audit ledger while a
 worker owns the run. Start-time bootstrap is the only period in which the
@@ -56,12 +65,22 @@ The worker is a hidden re-execution mode of the same `dolgorae` binary. It is th
 sole owner of:
 
 - the run control socket;
-- the run's exclusive app-server proxy connection;
+- the run's private direct WebSocket connection to its immutable shared or
+  dedicated execution lane;
 - JSON-RPC request IDs and correlation state;
 - run lifecycle and pending interactions;
 - the audit append handle and materialized state;
-- the writer lease when the run has write access;
-- cleanup of its proxy and run-scoped descendants.
+- participation in durable writer-authority transactions;
+- cleanup of its own connection and worker process, plus participation in its
+  exact recorded dedicated-lane generation cleanup.
+
+The worker does not own the shared singleton process or another run's App
+Server descendants. It owns dedicated-lane lifecycle only through durable
+staged records and exact census identities; the profile manager performs the spawn
+transaction. Connection loss, worker loss,
+`turn/interrupt` request, terminal turn evidence, singleton loss, and
+background-execution absence are separate facts and are never inferred from one
+another.
 
 One worker serves one run. There is no shared supervisor or global in-memory
 registry. Concurrent start/recovery attempts for the same run are serialized by
@@ -71,10 +90,7 @@ The worker is detached from the transient CLI before it accepts requests. It
 runs through the hidden `__worker` argv mode after a single fork and `setsid()`,
 with no controlling terminal, null stdin/stdout/stderr, and `umask(077)`. It
 ignores terminal-originated `SIGINT` and `SIGHUP` for itself and handles
-`SIGTERM` as a bounded shutdown request. App-server `posix_spawn` attributes use
-`SETSIGDEF` for every catchable signal and `SETSIGMASK` with an empty mask so
-ignored dispositions or a worker `sigwait` mask do not leak into Codex or its
-descendants; there is no child-side callback. Early-start and internal diagnostics
+`SIGTERM` as a bounded shutdown request. Early-start and internal diagnostics
 go to a 0600 log capped at 1 MiB with one rotation. The CLI holds byte 0 of the
 run's startup lock before fork. As its first post-`setsid`/re-exec operation,
 the worker opens that lock once, acquires byte 1, and never closes or reopens
@@ -85,10 +101,11 @@ means replay and compatibility validation completed. A structured failure may
 replace either acknowledgement. The bound wait is ten seconds; the ready wait
 is the larger operation-specific startup budget. EOF before an expected object
 is `TRANSPORT_FAILURE`; timeout never authorizes signalling the worker. The CLI
-parent keeps byte 0; its child's inherited startup fd is `FD_CLOEXEC` before
-`__worker` re-exec. Fd 3 is explicitly preserved across that re-exec. The worker
+parent keeps byte 0; the child's inherited byte-0 startup-lock fd is
+`FD_CLOEXEC` before `__worker` re-exec and is not fd 3. Startup status fd 3 is
+explicitly preserved across that re-exec. The worker
 opens one new startup fd for byte 1 and marks both it and fd 3 `FD_CLOEXEC`
-before app-server launch.
+before opening the App Server connection.
 The CLI creates no thread before fork. Between fork and re-exec the child
 performs only async-signal-safe operations; worker threads are created only
 after re-exec.
@@ -96,60 +113,189 @@ These rules make ownership handoff explicit and ensure
 that Ctrl-C or command substitution cannot terminate the worker or keep the
 caller's output pipe open.
 
-### Profile App-Server Singleton and Run Proxy
+### Historical Transient Writer-Capsule Candidate (Superseded)
 
-The first operation that needs a profile starts or attaches to one Codex
-app-server singleton keyed by canonical `CODEX_HOME` and the checked executable
-snapshot. Every run worker starts a profile-matched `app-server proxy` and owns
-one private JSONL connection through it. The proxy is an audit and ownership
-boundary, not another app-server. A singleton may therefore serve many runs and
-workspaces while each worker receives only its own connection frames.
+This section is retained to explain the evaluated candidate. It is
+non-normative and superseded by **Sticky Execution-Lane Topology** below.
 
-Before launch, the worker removes inherited `DOLGORAE_*` control variables and
-adds a fresh managed-run context containing its own workspace and run identity.
-The public CLI recognizes this context and exposes only read-only introspection
-of that same run. This is an accidental-recursion guard, not an unforgeable
-credential.
+The profile manager is lock-serialized logic in the Dolgorae executable, not a
+resident Dolgorae daemon. It computes a launch contract from canonical
+`CODEX_HOME`, the absolute direct Codex executable and checked global argv,
+resolved executable identity, sanitized explicit environment, deterministic
+symbolic `profile_state_directory_v1` cwd policy, normalized process-static configuration, version, schema,
+and feature digests. Runtime-mutable configuration is observed but excluded
+from the key. Compatible profile names are aliases for one `server_key`.
+Different stopped definitions for one canonical home may coexist, but a
+different contract cannot start while another verified lifetime is active.
 
-Each proxy connection performs exactly one `initialize` request followed by the
-`initialized` notification. A newly created run remains threadless until its
-first turn because pinned Codex does not persist a turnless thread across
-app-server restart. First `send`/`submit` uses `thread/start`; recovered runs use
-`thread/resume`, and history forks use `thread/fork`. After first-turn
-acceptance the worker maintains exactly one loaded Dolgorae-owned thread.
-Turns use `turn/start`, `turn/steer` only when explicitly exposed by a future
-specification, and `turn/interrupt` for cancellation. V1 does not enable the
-experimental app-server API capability.
+The Runtime Profile supplies deterministic `PATH`, `LANG`, and `LC_ALL`; caller
+shell, virtual-environment, and locale state is never inherited. The concrete
+launch directory is derived only after `server_key` is known and is not itself
+hashed into that key, avoiding a fixed-point identity. Profile start, stop,
+restart, migration, and repair are PREPARE/APPLY/COMMIT transactions: locks
+protect only revision-bound intents and commits, while spawn, network, policy,
+process, and user waits occur in APPLY with no file lock held.
 
-The profile singleton is started through the checked Codex daemon interface and
-has a profile-wide `server_epoch`. The worker-owned proxy is created with
-`POSIX_SPAWN_START_SUSPENDED`, `SETPGROUP`,
-`SETSIGDEF`, and `SETSIGMASK(empty)`. While the spawn image is suspended, the
-worker samples `PROC_PIDTBSDINFO`, opens the `proc_pidpath` target without
-following symlinks, computes spawn-image device/inode/SHA-256 from that fd, and
-repeats BSD info. A shebang or `/usr/bin/env` wrapper may expose its interpreter
-here. It persists the complete ten-field provisional identity before
-`SIGCONT`; missing or replaced operands fail closed without a partial record.
-An entry-image to final-image exec with unchanged PID/PGID/UID/start time is
-continuity, not replacement. Failure before continuation is cleaned as a start
-failure. After initialize, the worker repeats the sample and fsyncs
-`run_generation_started`; that record alone owns final proxy-executable identity.
+The manager launches the validated executable followed by `app-server --listen
+unix://<dedicated-socket>`. It never uses the official daemon or default Codex
+control socket. Shared-read-only workers connect to the shared Profile Server.
+A dedicated Run first owns only a durable logical lane; its first input lazily
+starts that lane's physical App Server with the identical immutable launch
+contract and canonical `CODEX_HOME`, a distinct short socket, UUIDv7 lane ID,
+process generation, globally unique server epoch, process group, and log
+drainer. Each run worker performs HTTP Upgrade and becomes a distinct masked
+WebSocket client over the appropriate socket. The adapter handles
+text/continuation frames, ping/pong, close, size limits and invalid frames, then
+hands normalized JSON-RPC objects to the existing correlation layer. The
+`app-server proxy` command is not part of the supported v1 topology because it
+preserves WebSocket framing while adding another process.
+
+Dedicated lane sockets use `/tmp/dolgorae-<uid>/c/<compact-hash>.sock`; the hash is the
+first 160 bits of domain-separated SHA-256 over the full server key, lane ID,
+and process generation. Internal state binds the compact name to the full preimage,
+path, device/inode, and process identity. Machine projection exposes only the
+resulting SHA-256 identity digest.
+
+Each connection performs its own `initialize`/`initialized`. A newly created
+run remains threadless until first turn; first input uses `thread/start`,
+recovery uses `thread/resume`, and history fork uses `thread/fork`. The worker
+owns only that client connection, one thread binding, correlation, lifecycle,
+audit and interactions. The connected App Server owns turn execution, commands,
+native subagents and its process tree. A narrowly tested user-input connection
+may advertise `experimentalApi`; no other experimental feature follows.
+
+The profile manager spawns the singleton suspended in a new process group.
+Its `posix_spawn` attributes use `SETSIGDEF` for every catchable signal and
+`SETSIGMASK` with an empty mask so caller signal state does not leak into Codex;
+there is no child-side callback. The manager
+records the direct executable identity before continuation, and publishes it
+only after WebSocket compatibility validation. It owns the singleton process
+identity and epoch. The singleton uses null stdin and sends stdout/stderr to a
+profile-scoped Dolgorae log-drainer in its process group; it never inherits a
+CLI or command-substitution pipe. The drainer applies diagnostic redaction and
+maintains mode-0600 `server.log` and `server.log.1` at 1 MiB each. Its exact
+identity is part of profile state, and loss fences new attachment until a
+controlled restart. Run workers neither signal the singleton nor its drainer.
+The profile manager owns their lifecycle. A writer worker requests capsule
+allocation through the same staged manager logic and owns only that capsule's
+exact recorded lifecycle; it never signals an unrelated process or the shared
+server.
+
+### Sticky Execution-Lane Topology
+
+The current architecture has one shared read-only server lane and zero or more
+Run-owned dedicated logical lanes per profile. Lane choice is immutable. A
+shared Run's thread is never loaded by a dedicated server; a dedicated Run's
+thread is never loaded by the shared server or a different dedicated lane.
+Read/write policy changes and workspace writer acquisition occur within one
+dedicated process generation. A shared Run that later needs write creates a
+lineage-linked dedicated successor.
+
+Each dedicated lane has a UUIDv7 lane ID, append-only process-generation
+journal, globally unique server epochs, short socket identity, exact leader and
+log-drainer identity, and process census. A new Run publishes the logical lane
+with null thread and absent physical server; first input starts its initial
+generation. Its physical server may also be absent while the Run is paused.
+Resume starts a new generation only after exact old
+generation/descendant absence, five complete empty samples, no active or
+unknown turn/interaction/goal/native descendant, and a durable-history barrier.
+The thread then resumes in the same logical lane. Infrastructure state,
+workspace writer authority, effective Codex policy, and background workload
+state are four independent facts.
+
+One canonical workspace has at most one writer. A profile may have concurrent
+dedicated writers in different workspaces; the home coordinator serializes
+launch contracts, not workspace writer cardinality. Profile stop/restart and
+migration enumerate the shared lane plus every dedicated-lane record. Restart
+brings back the shared server and starts dedicated generations lazily on Run
+resume.
+
+`control_mode` is independent of `purpose` and lane. Direct interactive Runs
+are controlled by a human CLI or interactive client and default to dedicated.
+Managed Runs are controlled by an orchestrator or automation broker and must
+state purpose, lane, and assurance. Purpose and its optional creation label are
+immutable. Only the Controller sees and resolves full normalized
+interactions; observers receive redacted projections. No Controller capability
+enters LLM-visible data.
+
+Instruction composition is immutable and versioned as common safety prefix,
+control-mode prefix, purpose prefix, then bounded Controller instructions. A
+shared Run forces Codex Plan Mode on every turn, read-only sandbox, disabled
+network, and never-approve policy. Its prefix permits bounded temporary-directory
+validation but forbids workspace mutation and long-lived background work. The
+shared server records command items and an aggregate process census, but cannot
+attribute or clean descendants per Run; only profile stop owns aggregate
+cleanup. Dedicated lanes retain exact per-generation census ownership.
+
+`run create-successor` is separate from history fork. It validates the source's
+current terminal Turn and same Controller, records immutable lineage and a
+bounded handoff digest, and publishes a new dedicated logical lane with no
+thread or physical generation. First input starts the destination generation;
+the source remains permanently shared and never transfers writer authority.
+
+Codex 0.147.0 achieved only `best_effort_personal_alpha`. Same-home operation,
+sticky policy transitions, different-workspace concurrent writers, and
+closed-generation history resume passed. Cross-server same-thread migration
+failed and background-terminal discovery failed. Dolgorae's live process census
+and exact cleanup subsequently passed, including unrelated-process exclusion.
+The retained native-subagent parser omitted exact wire item names and its
+no-child conclusion is withdrawn. The 0.147.0 profile defaults to permitting
+Codex-native subagents and advertises them as `unverified` until the corrected
+lifecycle/restart campaign passes. Polling and persisted child history fence
+pause, generation replacement, profile stop, and shutdown when native state is
+active or unknown. Polling remains
+process-census authority and cannot claim strong containment.
 
 ### Profile Registry and Singleton Membership
 
-`.dolgorae/local.yaml` is project-local, ignored by Git, and stores the project's
-named profile map without tokens or arbitrary environment values. A run manifest
-contains a private snapshot so later edits cannot silently change an existing
-run's account.
-The singleton membership index is separate XDG state keyed by `server_key`. It
-contains only server identity/epoch and workspace/run runtime-record locators,
-so stop/restart can enumerate active members across projects. It is recoverable
-from those records and stores no prompt, audit payload, or credentials.
-The Codex-owned daemon control socket remains below the profile's `CODEX_HOME`.
-If that pathname disappears, existing proxy connections may finish but new
-attachments are rejected and the profile becomes `degraded`; Dolgorae never
-starts a duplicate until the recorded daemon identity is proved absent or an
-identity-checked interrupting restart completes.
+`.dolgorae/local.yaml` is project-local and stores the named profile launch
+definition, including explicit non-secret environment values but no credential.
+The platform Application Support root contains a canonical-home coordinator at
+`Dolgorae/homes/<home-key>/{home.lock,active.json}` and contract state at
+`Dolgorae/profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,epoch,server.log,server.log.1}`.
+All components are current-uid-owned mode 0700/0600 and descriptor-relative.
+The socket node uses the validated short path
+`/tmp/dolgorae-<uid>/p/<base32-first-160-server-key-bits>.sock`; its full path
+and device/inode are recorded in profile state.
+
+Profile state records the restorable immutable launch snapshot, accepted
+generation contracts, process/executable/log-drainer/socket identity, lifecycle,
+compatibility, migration/quiesce revision, epoch, start time and membership
+revision. The
+hash-chained, directory-fsynced `membership.jsonl` is authoritative;
+`members.json` is an atomic derived snapshot bound to its revision/checksum.
+Membership records workspace/run/controller, worker generation, thread,
+connection, lifecycle, writer, observed epoch and runtime locator. Startup
+replays the journal, validates every referenced manifest/runtime record, and
+rejects missing/corrupt/revision-mismatched history; it does not rebuild by
+scanning incidental project directories. Operator repair verifies the valid
+prefix and exact confirmed orphan and appends a tombstone/new revision. A
+startup transaction holds
+home-keyed `home.lock` before contract-keyed `server.lock`, validates or claims
+the sole `active.json` contract, then validates or reserves a monotonically higher epoch,
+persists state, registers and fsyncs membership, connects and initializes the
+worker, then publishes its generation ready. A new process always consumes a
+new epoch; reconnect does not.
+
+Stop/restart uses fence, unlocked quiesce, and commit phases. Fence persists a
+quiesce revision under operator/home/server locks and rejects new work; no lock
+is held while turns or processes are awaited. Commit revalidates the same
+revision and exact identities, then proves process-group, log-drainer, and
+socket-inode absence before clearing state. Restart invalidates old connections
+and forces cross-epoch member reconciliation. Corrupt, missing, or unverifiable
+membership blocks the operation; an apparently empty partial index never
+authorizes termination.
+
+Server-key migration is an operator-only home transaction. Old and new server
+locks are acquired in ascending decoded-key order. A home-authoritative
+migration record prevents double membership, and failure before new ready
+retains old membership or lands in `migration_blocked` when rollback cannot be
+proved.
+
+The global order is operator, home, server keys in binary order, handoff,
+writer, run startup locks in UUID-byte order, then in-process run mutation
+mutexes in the same order. Operations persist a revision-bound intent and drop
+file locks before process, network, turn, or user waits; no path acquires upward.
 
 ### Persistent Run Store
 
@@ -158,25 +304,66 @@ event authority. `state.json`, transcripts, status views, and exports are
 projections. The Codex thread remains independently stored in the pinned
 `CODEX_HOME`.
 
+| Concept | Sole authority |
+| --- | --- |
+| Profile launch contract and accepted migrations | Immutable profile snapshot and accepted generation contracts |
+| Shared singleton process, log drainer, and server epoch | Profile manager `state.json` under home/server serialization |
+| Dedicated logical-lane generation identity, server epoch, census, and log drainer | Run lane-generation record under writer/run serialization |
+| Membership | Append-only profile `membership.jsonl` |
+| Run lifecycle and active turn intent | Run audit ledger reconciled with App Server history |
+| Codex root thread | Run thread binding |
+| Controller | Run controller record and generation |
+| Workspace writer | Durable workspace `writer.json` |
+| Interaction | Run interaction journal |
+| Client event | Schema-validated durable event record in the run ledger |
+| Projection/replay metadata | Delivery-time envelope |
+
+Derived indexes, runtime locators, sockets, and materialized projections never
+override these authorities.
+
+Profile operations have their own bounded diagnostic journal and cursor because
+startup can fail before any Run exists. Its minimal same-uid projection contains
+only redacted status/code/message; operator-authorized operational projection
+may add bounded redacted detail. A Run directory, ID, and audit genesis are
+published only after profile state commits a ready non-null server epoch.
+
+The run-private artifact store is a bounded projection adjunct, not an event
+authority. It accepts only exact file-change diffs and final responses, writes
+create-exclusive mode-0600 files, records byte length and SHA-256, and enforces
+8-MiB/file, 32-MiB/final-response, and 256-MiB/run quotas. Public reads use
+opaque artifact IDs and verified base64 chunks of at most 1 MiB; internal paths
+and reasoning content never cross the machine boundary.
+
+The manifest stores controller metadata, a domain-separated capability digest,
+controller generation, opaque purpose/parent metadata, and required/validated
+capabilities. Raw capability bytes exist only in the caller-owned credential
+carrier and are consumed before worker discovery; they never enter argv,
+environment, logs, audit, runtime records, or machine output.
+
 ## Process and Transport Topology
 
-For N live runs across P active profiles, the normal baseline is N workers, N
-proxy processes/connections, and P app-server singletons.
-Commands or Codex native subagents may temporarily create additional descendant
-processes.
+For N live Runs across P active launch contracts, the normal baseline is N
+workers and N WebSocket connections. Each active contract has at most one
+shared-read-only Profile Server plus one physical Dedicated Lane Server for
+each currently running dedicated generation. A stopped logical lane contributes
+no process; a successor replaces, rather than overlaps, its prior generation.
+Commands and supported Codex native-subagent work may temporarily create
+additional descendants inside the selected physical generation.
 
 ```text
 dolgorae CLI invocation
   |
   | Unix domain socket: framed JSONL request/response/notifications
   v
-dolgorae worker [run R, generation G]
+dolgorae worker [run R, worker generation G]
   |
-  | private stdin/stdout: app-server proxy JSONL
+  | HTTP Upgrade + masked WebSocket over selected private Unix socket
   v
-profile argv ... app-server proxy -> profile app-server singleton
+  +-- shared_readonly -> shared Profile Server [server key K, epoch E]
   |
-  +-- Codex-owned command and native-subagent descendants
+  `-- dedicated -> logical lane L -> Dedicated Lane Server [epoch E2]
+                                      |
+                                      +-- Codex-owned command/native descendants
 ```
 
 The worker control socket resides below `/tmp/dolgorae-<uid>/s/`. Dolgorae opens
@@ -207,32 +394,33 @@ The live worker watches the socket pathname and containing private directory.
 On `ENOENT`, it reopens and validates `/tmp`, recreates the private hierarchy,
 binds a replacement listener at the deterministic path, records its inode,
 increments `control_socket_epoch`, and atomically replaces the runtime record.
-Accepted connections and the proxy connection are independent of that listener
+Accepted CLI connections and the App Server WebSocket are independent of that listener
 replacement. An occupied or unsafe replacement path is fail-closed: the worker
 interrupts an active turn, records bounded evidence, and requires recovery.
 
 The actual socket path and process identity are discoverable from
 `.dolgorae/runtime/runs/<run-id>.json`; discovery never recomputes a path from
-`$TMPDIR`. The record contains full worker and proxy identity tuples: PID,
-PGID, UID, start seconds/microseconds, live executable path, executable
-device/inode, and executable SHA-256, together with
+`$TMPDIR`. The record contains the full worker identity tuple and App Server
+connection identity: PID, PGID, UID, start seconds/microseconds, live executable
+path/device/inode/SHA-256, together with
 the boot-session UUID, run generation, access state, socket path, Dolgorae
 version, binary digest, IPC protocol version, socket inode,
 `control_socket_epoch`, `server_key`, `server_epoch`, and `run_generation`. A
-new singleton epoch never validates a stale proxy generation.
-`.dolgorae/runtime/writer.json` points to the current writer run/generation and
-stores the incumbent identity plus `cleanup_in_progress`; it is replaced only
-after cleanup is confirmed. Runtime records use write-temp, `fsync`, rename,
-and directory `fsync`. They are recoverable coordination caches; the fsynced
-`run_generation_started` ledger record is process-identity authority.
+new shared or dedicated lane-server epoch never validates a stale connection
+generation.
+`.dolgorae/runtime/writer.json` is durable workspace authority, not a recoverable
+pointer. It stores the writer state and all facts required to reconcile a lost
+worker against its selected lane-server epoch and thread/turn. Other runtime records remain
+recoverable caches; the fsynced run ledger owns run history.
 
-Writer leases and startup locks live at fixed paths below
+Writer transaction and startup locks live at fixed paths below
 `.dolgorae/runtime/locks/`. The writer and handoff files are `writer.lock` and
 `handoff.lock`; startup files are `startup/<run-id>.lock`. The directory is
 opened through descriptor-relative, no-symlink operations, must be
 current-uid-owned mode 0700, and resides on the already-required local APFS
 workspace. The mechanisms never share an inode. Lock files are
-create-exclusive and permanent. The writer lease is nonblocking BSD `flock(2)`. The startup file has two POSIX
+create-exclusive and permanent. The writer lock serializes durable-authority
+transactions; it is not a lifetime truth source. The startup file has two POSIX
 byte-range locks: byte 0 is the transient CLI starter claim and byte 1 is the
 worker lifetime claim. The 8192-byte file body has separate version-1,
 zero-padded, SHA-256-checksummed owner records at `[0,4096)` for byte 0 and
@@ -258,20 +446,25 @@ recovers. A worker that loses byte 1 reports fd-3 `RUN_BUSY` and exits with no
 socket, ledger, or runtime mutation. Each owner process opens the file once; identity revalidation uses
 `fstat` on that held fd and never a second open, including through a hardlink.
 The descriptor is never reopened or closed during ownership and is marked
-close-on-exec before app-server launch.
+close-on-exec before the App Server connection opens.
 
-The worker/app-server transport intentionally uses stdio even though app-server
-also offers Unix and WebSocket listeners. Stdio gives the worker exclusive
-ownership, lifecycle coupling, and a single audit interposition point.
+The worker/App Server transport is direct WebSocket over the Dolgorae-owned Unix
+socket. The socket supplies local endpoint isolation; WebSocket supplies the
+actual app-server framing. The worker remains the correlation and audit
+interposition point without owning the shared process.
 
-App-server stdout and stderr are drained independently of every CLI observer.
+App-server WebSocket frames are drained independently of every CLI observer.
+Every App Server uses null stdin and separate nonblocking stdout/stderr pipes to
+its scoped bounded log drainer. A failed file sink switches the live drainer to
+drain-and-drop and marks the generation degraded; loss of the drainer process
+fences new attachment and requires controlled restart.
 Observers read fsynced ledger records by cursor and therefore cannot exert
-backpressure on the active protocol stream. Limits are 16 MiB per unsolicited
-stdout line, 1 MiB per stderr line, 2 MiB per raw selected ledger payload with a
+backpressure on the active protocol stream. Limits are 16 MiB per WebSocket
+frame, 32 MiB per reassembled message, 1 MiB per diagnostic line, 2 MiB per raw selected ledger payload with a
 3 MiB post-transform allowance, and 8 MiB per
-CLI-worker frame. CLI oversize affects only its caller; stderr oversize retains
-metadata and continues. Unsolicited stdout remains capped at 16 MiB per line;
-invalid or oversized unsolicited stdout stops the generation and quarantines
+CLI-worker frame. CLI oversize affects only its caller; diagnostic oversize
+retains metadata and continues. Invalid or oversized WebSocket input closes the
+connection and quarantines
 an accepted active turn as `outcome_unknown`. A solicited `thread/read` response
 is recognized only after its unique matching top-level `id` appears before byte
 16 MiB; outstanding request count is never a classifier. Once recognized it is
@@ -303,10 +496,10 @@ The repository-local layout is:
       worker.log.1           # 0600, single rotated diagnostic log
       recovery/              # 0700, preserved crash-tail evidence
   runtime/                   # ignored, recoverable local coordination
-    writer.json              # 0600, current writer/cleanup pointer
+    writer.json              # 0600, durable writer authority state machine
     workspace.json           # 0600, canonical workspace/runtime facts
     locks/                   # 0700, permanent workspace lock pathnames
-      writer.lock            # BSD flock writer lease
+      writer.lock            # BSD flock transaction serializer
       handoff.lock           # cross-profile handoff serialization
       startup/<uuidv7>.lock  # two-range worker startup ownership
     runs/<uuidv7>.json       # 0600, per-run process/socket discovery
@@ -332,6 +525,10 @@ completed with facts learned during start. Its fixed semantic fields include:
 - Dolgorae version, binary SHA-256, and IPC protocol version;
 - fixed model and initial/default reasoning effort;
 - immutable run instructions;
+- controller ID/kind/instance/subject, controller generation, and the
+  domain-separated capability digest (never the capability bytes);
+- purpose, optional external label and parent reference;
+- required capabilities and the accepted profile capability snapshot;
 - Codex thread ID when allocated;
 - fork provenance and last confirmed boundary when applicable;
 - audit policy and compatibility verdict.
@@ -406,19 +603,35 @@ containing source kind, observed byte length, streaming SHA-256, JSON Pointer
 when known, and reason; no original bytes or sidecar are retained. The ledger
 includes CLI intent accepted by the worker, lifecycle transitions,
 run generations, app-server requests/responses/notifications after
-redaction, approval decisions, state reconciliation, and cleanup results. Its
+redaction, normalized client events and interactions, controller resets,
+approval decisions, state reconciliation, and cleanup results. Its
 completeness claim covers Dolgorae lifecycle, main-turn wire traffic exposed by
-app-server, approvals, writer lease transitions, and profile/account provenance. Native
+app-server, approvals, writer-authority transitions, and profile/account provenance. Native
 subagent or other content not exposed in plaintext by app-server is retained
-only as an opaque event and is not claimed as reconstructable audit. Hidden
-reasoning and unexposed communication are outside the ledger's authority.
+only as an opaque event and is not claimed as reconstructable audit. Reasoning
+text, summaries, deltas, and internal planning streams are discarded before
+representation. Their method, byte length, digest, and suppression reason are
+the only durable accounting.
+
+Client events are normalized into discriminator-bound durable records and
+schema-validated before their ledger append. A record owns the canonical
+decimal-string cursor and server key/epoch but never a reader's projection or
+replay flag. Each observer receives a separate delivery envelope carrying those
+two delivery facts. The delivery schema conditionally permits state, final
+response, interaction, runtime error, writer, and recovery events in `minimal`;
+usage, workspace changes, command, diagnostics, generation, and reasoning-
+suppression metadata are `operational` only. Both streams filter the same safe
+records by one run-wide sequence cursor; they never project raw audit or app-server payloads. A filtered
+record creates a cursor gap rather than a second cursor namespace. Slow or
+disconnected observers replay fsynced records and never participate in
+WebSocket draining or worker state transitions.
 
 ### Materialized State
 
 `state.json` is atomically replaced only to a head at or before the last fsynced
 ledger record, at durability barriers and a bounded projection interval. It
 contains the current lifecycle state, run generation, thread ID, active/latest turn,
-pending requests, access mode, writer lease observation, default effort, last
+pending requests, access mode, writer-authority observation, default effort, last
 event cursor, and ledger head. If it is missing, stale, or invalid, the worker
 replays `audit.jsonl` before accepting ordinary mutations; the bounded control
 channel remains available from `bound` throughout replay.
@@ -426,22 +639,67 @@ If its head is ahead of the durable ledger, it is a stale projection rather
 than an audit-integrity failure: Dolgorae rebuilds it and appends
 `projection_rewound`.
 
+## Controller and Observer Boundary
+
+The caller creates a self-contained controller credential rather than a global
+controller registry. A helper command creates a new mode-0600 file
+create-exclusively; integrations may construct the same checked object and pass
+it through an inherited descriptor. The CLI validates carrier metadata and
+syntax, then transfers the opened descriptor with `SCM_RIGHTS` over the private
+worker socket. The request carries public controller generation, invocation,
+expected state revision and idempotency facts. Under the mutation lock, the
+worker reloads state, reads the bounded secret, compares its digest and all
+revision operands, zeroizes it, and applies the transition. No CLI-only check or
+`already_validated` claim crosses the serialization boundary.
+
+Read paths validate same uid and project/runtime path safety but require no
+controller credential. Their output always passes through the client-safe
+projection boundary. A controller mismatch deliberately has one error shape so
+run existence, controller-ID mismatch, and capability mismatch reveal no
+additional credential facts beyond information already available to local
+observers.
+
+An installation-scoped operator credential has a separate persisted digest and
+generation in the Application Support root. Initialization is create-exclusive;
+rotation requires the current capability. Profile stop/restart and controller
+reset accept it only by protected file/fd, while controller reset accepts the
+new controller through a distinct carrier. Server key is public identity, not
+authorization.
+
+Operator reset is staged. PREPARE holds operator, then writer when applicable,
+then run-startup/run serialization; it revalidates the already-open operator
+and new-controller carriers, all blockers and revisions, and fsyncs an operation
+token. APPLY drops every file lock before reader-policy/background verification
+or worker coordination. COMMIT reacquires the same ordered locks, revalidates
+the token, identities and revisions, clears writer authority when proved safe,
+and atomically publishes the new controller generation. If APPLY or COMMIT
+cannot prove safety, the old controller binding remains authoritative and the
+recorded writer failure state is preserved. Paused and outcome-unknown runs
+retain their recovery facts. Environment context markers are diagnostic only
+and do not participate in authorization.
+
 ## State Machine
 
 The worker is the normal state-transition authority. The only bootstrap
 exception is a byte-0 owner that proves no worker reached `bound`; it may append
-and seal `start_failed`. Present `Unverifiable` generations are never rewritten.
+and seal `start_failed`, but only for a Run already allocated after a ready
+Profile Server epoch. Failure before profile ready is a profile diagnostic and
+has no Run identity. Present `Unverifiable` generations are never rewritten.
 
-| State | Worker expected | App-server expected | New turn | Operation results |
+The run lifecycle table governs its worker and client connection only. Profile
+singleton existence is manager-owned and independent of any one row.
+
+| State | Worker expected | Run WebSocket expected | New turn | Operation results |
 | --- | --- | --- | --- | --- |
 | `starting` | Maybe | Maybe | No | `idle` or `start_failed` |
 | `idle` | Yes | Yes | Yes | `running`, `paused`, or `closed` |
-| `running` | Yes | Yes | No | `idle`, `waiting_approval`, or `outcome_unknown` |
-| `waiting_approval` | Yes | Yes | No | `running`, `idle`, or `outcome_unknown` |
+| `running` | Yes | Yes | No | `idle`, `waiting_interaction`, `reconciliation_required`, or `outcome_unknown` |
+| `waiting_interaction` | Yes | Yes | No | `running`, `idle`, `reconciliation_required`, or `outcome_unknown` |
+| `reconciliation_required` | No, except transient reconciliation | No, except a transient read-only connection | No | `paused` or `outcome_unknown` |
 | `paused` | No | No | No | `idle` after resume or `closed` |
 | `closed` | No | No | No | Final |
 | `start_failed` | No | No | No | Final |
-| `outcome_unknown` | No, except transient read-only reconciliation | No, except its transient app-server | No | `paused` after reconciliation or `closed` after proven cleanup |
+| `outcome_unknown` | No, except transient read-only reconciliation | No, except its transient connection | No | `paused` after reconciliation or `closed` after proven cleanup |
 
 The same run never has two active turns. `send`, `submit`, and idempotent retries
 all enter the same serialized turn-start path.
@@ -458,159 +716,164 @@ Unknown responses, mismatched IDs, duplicate terminal events, and invalid state
 transitions are recorded and fail closed. Known-but-unsupported server requests
 are recorded and receive method-not-found without stopping the generation;
 unparseable frames fail closed. Unknown additive notifications do not change
-state and are retained as raw redacted evidence.
+state and retain bounded redacted evidence unless classified as reasoning, in
+which case content is discarded before ledger representation.
 
-A new proxy/access-policy lifetime increments run generation; one worker may
+A new connection/access-policy lifetime increments run generation; one worker may
 host successive reader and writer generations. Pending requests never cross
 that boundary.
 
-## Writer Lease Architecture
+## Historical Transient Writer Authority Flow (Superseded)
 
-The lease is BSD `flock(2)` with `LOCK_EX | LOCK_NB` on
-`.dolgorae/runtime/locks/writer.lock`. Multiple readers open no writer lease. Each canonical Git worktree
-is a distinct workspace and therefore a distinct writer lane. An unresolved
-`writer.json` entry for another run is audited but does not gate acquisition:
-the kernel lease and the acquiring run's own generation safety determine who
-may attempt it. It does gate writer activation: the held inode must match the
-recorded lease inode, or that historical pair must be reconstructed only after
-the recorded generation is proved absent. The foreign proxy generation must be proven absent
-or identity-verified and cleaned before a new writer proxy starts.
-`Unverifiable` releases the new lease with `RECOVERY_REQUIRED`.
+The shared↔capsule transition flow below is historical and non-normative.
+`SPEC-014` and the Sticky Execution-Lane topology govern current behavior.
 
-Only the worker holds the lease. The descriptor is `FD_CLOEXEC` and is never
-inherited by proxy, singleton, or descendants. Lock lifetime covers idle,
-running, and waiting writer states until explicit idle release or safe lifecycle
-cleanup.
+The BSD `flock(2)` on `.dolgorae/runtime/locks/writer.lock` serializes
+transactions; it does not represent the lifetime of writer authority. The
+authoritative, atomically replaced and directory-fsynced `writer.json` has
+`none`, `reserved`, `active`, `handoff_prepared`, `releasing`, or
+`blocked_unknown` state and stores
+workspace/run, controller/generation, writer/worker generations, server
+key/epoch, thread/turn, lifecycle, pending-count, cursor and recovery facts.
+Every acquisition examines this record even when the kernel lock is free.
 
-Recovery of every byte-1 serving worker, reader or writer, uses the same
-control/identity guard. A successful control `hello` attaches and does not
-replace anything. If a recorded worker is alive but `hello` does not complete
-within ten seconds, the recovering CLI applies boot UUID,
-process/executable identity, kqueue, and revalidation rules. A live `Match`
-returns retryable `RUN_BUSY` without a signal; `Unverifiable` returns
-non-retryable `RECOVERY_REQUIRED`. Activity counters and CPU inactivity never
-authorize byte-1 takeover. After independently proven exit, the replacement
-competes for the startup lock, rechecks socket/runtime state, and acquires the
-writer lease normally only if it wins. The run-keyed startup-lock election
-serializes same-run replacements and never authorizes one run to terminate
-another run's healthy writer. If either a worker during shutdown or a transient
-starter remains alive while holding the startup lock, identity inspection may
-explain the contention but does not create signal authority. The contender
-returns `RUN_BUSY` for a revalidated `Match` or `RECOVERY_REQUIRED` for
-`Unverifiable`; only independently proven exit permits the sequence to continue.
+Run state keeps two orthogonal facts. `effective_policy` records the observed
+Codex access mode, verification status, policy epoch, and thread generation;
+`writer_authority` records the durable workspace owner and transaction state.
+Neither field is derived from the other.
 
-After acquisition and at every destructive barrier, the worker compares the
-held descriptor's `fstat` device/inode with a root-fd-relative `fstatat` of the
-lease pathname. The pair is stored in `writer.json`; mismatch, including manual
-unlink/replacement, fails closed until recorded-generation absence authorizes
-pointer reconstruction. Writer and startup lock files are permanent once
-created. Each claimant compares held-fd
-and root-relative pathname device/inode before owner-slot writes; it never
-recreates or proceeds through an unlink/replacement mismatch.
+Activation rejects known-unavailable policy support before mutation. Its
+prepare phase holds home, server, writer, then run serialization, fsyncs
+`reserved` plus an activation revision and releases all file locks. A threadless
+first write lazily starts the Run's selected Dedicated Lane Server and starts the
+thread there with writer policy. A bound dedicated reader remains on the same
+logical lane and applies the policy to that lane's current physical generation.
+After live policy verification, commit reacquires home, server, writer then run locks, fsyncs
+the lane-generation and thread binding, and publishes `active`. Only then may
+`turn/start` occur. Threadless `run acquire-write` is rejected rather than
+creating a turnless writer thread.
 
-After lease acquisition, every path uses this order for the prior app-server
-generation:
+Release fsyncs `releasing` under writer then run locks, drops locks, retires the
+selected lane generation, and proves its supported process scope empty. It then
+starts a successor physical generation for the same logical lane, resumes the
+same thread with reader policy, and reacquires locks to commit `none`. If the
+old generation is proved absent but reader resume fails, authority
+still commits `none` and the Run becomes `paused`; inability to prove lane-generation
+absence lands `blocked_unknown`. No network or process wait occurs under a
+global file lock. Crash recovery distinguishes reservation before capsule
+creation, allocated or continued capsule, provisional unbound thread,
+bound-not-active policy, active-before-turn, and releasing-before-empty-proof
+states and never creates or replays without absence proof.
 
-1. load the fsynced generation identity and current writer cleanup pointer; no
-   generation record yields `Absent`, while a present unreadable record is
-   `Unverifiable`;
-2. compare the recorded boot-session UUID; a difference proves the entire
-   generation `Absent` without consulting leader or group IDs;
-3. read `PROC_PIDTBSDINFO`, then `proc_pidpath`, executable device/inode/hash,
-   then BSD info again; changed start time is `Unverifiable`. An unavailable
-   `proc_pidpath` for a live process is non-dispositive when the remaining
-   tuple and group proof match; path replacement alone is not identity mismatch;
-4. classify the leader as `Absent`, `Mismatch`, `Match`, or `Unverifiable`;
-5. for `Match`, bind an `EVFILT_PROC/NOTE_EXIT` watch and revalidate; `ESRCH`
-   while binding proves `Absent`;
-6. prove generation absence only when the recorded group has no possible
-   surviving member by enumerating `proc_listpgrppids(recorded_pgid)`. Entry
-   capacity starts positive, the buffer size is `capacity * sizeof(pid_t)`, and
-   capacity doubles whenever the returned PID count equals capacity; `-1`,
-   truncation, or invalid `pgid <= 1` is `Unverifiable`. Zero with positive
-   capacity proves empty. A same-boot survivor matches only with the recorded
-   uid/pgid and start time at or after the recorded leader; an earlier process
-   is dismissed. `ESRCH` and zombies are absent. This predicate proves possible
-   survival, not signal authority. If neither the leader nor a persisted
-   snapshot member is kqueue-bound and revalidated `Match`, possible members
-   make the group `Unverifiable` and are not signalled;
-7. while continuity is kqueue-bound, snapshot every member's
-   PID/UID/PGID/start tuple. Persist `cleanup_in_progress` and the tuples, then signal only
-   revalidated snapshot members with `SIGTERM`; after five seconds re-enumerate
-   and signal with `SIGKILL` only full-tuple matches from that snapshot. Any new
-   or recycled member, or unsnapshotted member after leader loss, is
-   `Unverifiable` and never signalled. A later process must rebind/revalidate a
-   recorded member before inheriting continuity. `killpg` is never used;
-8. confirm group absence within ten seconds,
-   then start the new proxy and replace the writer pointer.
+Codex 0.147.0 is the compatibility baseline. Background safety does not wait for
+a future Codex terminal API: each Dedicated Lane Server is spawned suspended in a new
+process group, records full process identities before continuation, and runs a
+100-millisecond census using `proc_listpgrppids` plus all-PID/parent sampling.
+Command notifications trigger an immediate census. Foreground turn completion
+does not imply background absence. Five consecutive complete empty censuses
+after exact capsule-leader exit record `verified_absent`; a live member records
+`active`; PID reuse, incomplete enumeration, unreadable identity, unregistered
+survivors, and detected escape record `unverified` and return
+`BACKGROUND_EXECUTION_UNVERIFIED`. A live-tested native Codex terminal API may
+add `hybrid` evidence but never replaces the Dolgorae census authority.
 
-`Absent` and safe `Mismatch` observations are audited and proceed. Only
-`Unverifiable` returns non-retryable `RECOVERY_REQUIRED`; V1 has no force
-override and never resumes the same thread while an old generation may exist.
+Worker loss leaves the durable record authoritative. An active or uncertain
+incumbent becomes `blocked_unknown`; another run cannot activate. Only recovery
+of the exact incumbent may inspect its thread and turn. It first revalidates the
+recorded lane-generation identity and census. If it is alive, recovery may
+reconnect only to that exact lane/server epoch and perform `thread/read`. If
+the generation and all recorded descendants are proved absent, recovery publishes
+authority `none` and pauses the Run. A dedicated Run remains on its logical lane
+and never moves its thread to the shared server. Only terminal
+and required absence proof can clear authority.
+Connection close, a free kernel lock, or leader absence without the complete
+five-sample census never suffices.
 
-Every run starts and resumes as a reader. Only `acquire-write` and
-`send|submit --write` acquire the lease, before proxy policy replacement or turn
-submission. Successful `release-write` activates a reader generation before
-unlocking. Pause and close complete proxy cleanup before release; uncertain
-writer crashes record a logical `blocked_unknown` that kernel unlock alone does
-not clear. `RECOVERY_REQUIRED` from same-run safety checks takes precedence over
-`WRITER_BUSY`.
+Prepare/commit/cancel handoff remains same-controller and generation-bound.
+Prepare writes one five-minute record. APPLY retires the source lane generation
+and proves it empty before starting the destination lane generation. Commit acquires
+handoff, writer, then source/destination run locks in canonical UUID order,
+revalidates policies, epochs, turns, interactions and census evidence, and
+activates the destination. Destination failure after source retirement leaves
+no writer; uncertain cleanup leaves `blocked_unknown`, never two writers.
+Cross-controller, active, waiting,
+interrupting, recovering, reconciliation-required, outcome-unknown or
+unverifiable cases fail closed.
 
-On contention, `writer.json` and the holder runtime record supply nullable
-run/profile/state plus lease epoch. An idle holder permits generation-bound
-one-shot token issuance. The confirmed requester serializes with `handoff.lock`,
-cooperatively activates the holder as a reader, fsyncs its pointer, releases its
-lease, then acquires it. Requester failure leaves no writer. Starting, running, waiting, or
-unknown holders return retryable `WRITER_BUSY`; they are never signalled, killed,
-or queued. Same-user hostile mutation is not a security boundary, but manual
-lock-file unlink/replacement is detected by descriptor/path inode checks and
-fails closed.
+Reader/write policy transitions preserve the existing thread on the Run's fixed
+Dedicated Execution Lane; they may replace only that lane's physical generation
+after exact absence proof and never move the thread to the shared Profile Server.
+Compatibility records the tested
+sandbox, approval, developer-instruction, writable-root and network behavior.
+If the pinned server cannot safely change policy, Dolgorae returns
+`ACCESS_TRANSITION_UNSUPPORTED` and requires a lineage-linked new run/thread.
 
 ## Turn Execution Flow
 
-1. Validate run state, input, optional idempotency key, model-fixed invariant,
+1. Receive the controller fd and, under mutation serialization, validate run,
+   command, invocation, controller generation, state revision, capability
+   digest and idempotency key; zeroize the secret, then validate the model-fixed invariant,
    image readability, and requested effort.
-2. If `--write` is present, acquire or confirm the workspace lease and activate
-   the writer generation; on conflict, return before recording turn intent.
-3. Reserve the idempotency key, append intent, and fsync the ledger.
-4. For a threadless run, send `thread/start`, append its provisional thread ID,
+2. Before any App Server request, policy change, or writer mutation, reserve the
+   idempotency key, append a revision-bound operation intent, and fsync the
+   ledger. If `--write` is present, the same PREPARE transaction also publishes
+   `reserved` authority and a provisional thread identity when needed.
+3. Release every file lock. In APPLY, a threadless write starts its thread with
+   writer policy; a bound reader applies promotion. Verify live effective policy.
+4. Reacquire writer then run serialization, revalidate the operation token and
+   revisions, fsync a new thread binding when applicable, and publish `active`.
+   An indeterminate APPLY never starts a turn and lands in its specified
+   reserved or `blocked_unknown` recovery state.
+5. For a threadless read turn, send `thread/start`, append its provisional thread ID,
    and fsync before `turn/start`. If turn acceptance is uncertain, recover that
    exact provisional thread and retry only when stable history proves no turn
    was accepted or the thread is absent; unreadable/in-progress evidence is
    never retried.
-5. Capture a best-effort pre-turn workspace observation.
-6. Send `turn/start` with the fixed model, selected reasoning effort, canonical
+6. Capture a best-effort pre-turn workspace observation.
+7. Send `turn/start` with the fixed model, selected reasoning effort, canonical
    cwd, access-derived sandbox policy, approval policy, and message/images.
    Developer instructions were supplied by thread start/resume for this
    generation because turn start has no such field.
-7. Persist the permanent thread binding and accepted Codex turn ID before
+8. Persist the permanent thread binding and accepted Codex turn ID before
    acknowledging `submit`.
-8. Stream and audit correlated notifications.
-9. Surface server requests as generation-qualified pending requests.
-10. On terminal notification, read back persisted thread history when necessary,
-   capture a post-turn workspace observation, project the final response and
-   usage, and transition to idle.
+9. Stream and audit correlated notifications.
+10. Fsync supported server requests as generation-qualified normalized
+   interactions before observer delivery.
+11. On terminal notification, read back persisted thread history when necessary,
+   select the last root-turn `phase:final_answer` item or last phase-null
+   compatibility item in authoritative order, capture a post-turn workspace
+   observation, and transition to idle. Commentary or absent messages never
+   fabricate a final response.
 
 The delivery mode is not part of idempotency identity: `send` waits, while
-`submit` returns after step 7.
+`submit` returns after step 8.
 
 ## Recovery and Reconciliation
 
 Recovery never auto-replays user input. The new worker first replays the ledger,
 validates profile identity and compatibility, and inspects the pinned Codex
-thread with stable history APIs only after prior generation absence is proved.
+thread with stable history APIs only after the lane-specific barrier below is
+proved.
 
 - Confirmed idle history resumes normally.
 - A terminal turn absent from Dolgorae's projection is appended as reconciled
   evidence and the run returns to idle.
 - An active turn without authoritative terminal evidence produces
-  `outcome_unknown`; the replacement proxy is stopped and any kernel writer
-  lease is released while the workspace pointer remains `blocked_unknown`.
-- `reconcile` starts a lease-free transient worker generation, launches
-  app-server with read-only sandbox policy, and calls only
-  `thread/read(includeTurns: true)`. It never loads or resumes the thread and
-  never starts a turn. It appends evidence and transition records, terminates
-  the app-server group, and exits. Confirmed terminal evidence moves an unknown
+  `outcome_unknown`; the replacement connection is closed while durable writer
+  authority remains `blocked_unknown`.
+- `reconcile` branches by immutable lane. For `dedicated`, it proves the
+  recorded Dedicated Lane Server generation and descendants absent, satisfies
+  the durable-history barrier, and attaches the same logical lane at a new
+  compatible epoch. For `shared_readonly`, it never treats the shared singleton
+  as run-owned or terminates it; it validates the currently recorded compatible
+  shared epoch and uses profile-level singleton recovery when that server is
+  actually unavailable. It then starts a writer-authority-free transient worker
+  generation and calls only
+  `thread/read(includeTurns: true)` over a read-only connection. It never loads
+  or resumes the thread and never starts a turn. It appends old/new key/epoch,
+  lane-qualified absence or shared-epoch validation, history, and
+  writer-resolution evidence, closes the connection, and
+  exits. Confirmed terminal evidence moves an unknown
   run to `paused`; later bare resume uses read access.
 - Every history-copying fork scans newest-to-oldest and uses the latest
   status listed as forkable in the checked manifest; terminal-but-rejected
@@ -624,7 +887,7 @@ thread with stable history APIs only after prior generation absence is proved.
   source projection. It creates an empty threadless read-only run and
   records source run, observed lifecycle state, and unresolved-turn provenance
   without asserting an outcome. It is therefore available even when a source
-  in `running` or `waiting_approval` has an unreachable socket and unverifiable process
+  in `running` or `waiting_interaction` has an unreachable socket and unverifiable process
   identity.
 
 Every fork copies the source profile snapshot and immutable run instructions,
@@ -639,15 +902,14 @@ worker.
 
 ## Process Cleanup
 
-The detached worker owns an proxy process group distinct from both the
-transient CLI and the worker session. Pause, close, recovery, and failed start
-obtain leader-or-persisted-member continuity before signalling only snapshot
-members, then use a five-second graceful phase, revalidation, and individual
-forced termination of remaining snapshot matches. New or recycled members are
-never signalled; ten-second absence failure is `RECOVERY_REQUIRED`. Cleanup
-results are audited. Close cannot finalize a run whose prior generation remains
-unverifiable. A recycled PID or PGID is never killed solely because its number
-matches a stale record.
+The detached worker owns only its worker process and private client connection.
+Pause, close and recovery may request `turn/interrupt`, close that connection,
+and terminate an identity-verified worker, but they cannot signal singleton
+commands or native subagents. Cleanup records connection close, interrupt
+request and terminal history as distinct evidence. Close cannot finalize an
+active or uncertain run, nor can worker exit establish command termination.
+Profile-wide operator shutdown alone may signal the verified singleton after
+complete membership handling.
 
 ## Runtime and Dependency Boundary
 
@@ -673,25 +935,36 @@ exact versions; adding a runtime dependency or changing one of these mechanism
 bindings requires an ADR amendment and conformance fixture.
 
 The shared fake app-server is a test-only Python subprocess under
-`tools/fake_app_server/` that speaks the real stdio JSONL boundary. TASK-004 is
+`tools/fake_app_server/` that speaks the real Unix-socket WebSocket boundary.
+TASK-004 is
 its sole owner; later tasks consume or extend it. Declarative scenarios are
 validated against the checked Codex manifest, and the fake shares no production
 parser or state-machine code with Dolgorae.
 
-Descendants that deliberately daemonize, escape the process group, or perform
-remote side effects cannot be guaranteed to stop. The agent prompt therefore
-forbids background processes without explicit master direction.
+Dedicated lane-generation descendants are discovered by process-group enumeration plus
+all-PID BSD parent/session samples, and an observed identity remains tracked
+after reparenting or group/session change. Cleanup sends TERM, then KILL after
+five seconds, only to exact revalidated identities and requires five complete
+empty censuses within a ten-second total budget. PID reuse, truncated or failed
+enumeration, unreadable identities, unregistered survivors, and detected escape
+create durable `background_execution:unverified` and block release, handoff,
+close, or generation replacement.
+Deliberate fork/setsid/reparent escape wholly between 100-millisecond polls and
+remote side effects remain outside the trusted same-user personal-alpha model;
+the prompt discourages them only as defense in depth. A native Codex terminal
+API is optional hybrid evidence, not a release dependency.
 
 On worker `SIGTERM`, bounded clean shutdown appends and fsyncs `cleanup_intent`
 with reason `generation_shutdown_requested`, rejects new control mutations, and, when a
 turn is active, sends `turn/interrupt` and waits up to five seconds for terminal
-history before continuing. It then completes child
-group cleanup, appends and fsyncs `run_generation_stopped` with shutdown reason and
-the last known turn state, releases the writer lease, and attempts bounded startup-lock acquisition
+history before closing its connection. It then appends and fsyncs
+`run_generation_stopped` with shutdown reason and the last known turn state and
+attempts bounded startup-lock acquisition
 for socket unlink. If that lock cannot be acquired, it leaves stale
 coordination files for the next verified owner rather than blocking shutdown,
-then exits zero. Failure of any step is recorded when the ledger
-remains writable and produces a nonzero exit.
+then exits. Active or uncertain writer authority persists as
+`blocked_unknown`; worker shutdown never releases it implicitly. Failure of any
+step is recorded when the ledger remains writable and produces a nonzero exit.
 
 ## Security and Trust Boundaries
 
@@ -703,26 +976,26 @@ It does provide:
 - user-private local sockets and run files;
 - fail-closed account, request, thread, turn, and generation correlation;
 - Codex sandbox selection for reader/writer turns;
-- a Dolgorae-only writer lease per canonical worktree;
+- durable Dolgorae writer authority per canonical worktree;
 - normative recursive redaction and tamper-evident hash chaining;
 - explicit approval and destructive-action boundaries;
-- a managed-run context guard against ordinary recursive Dolgorae control.
+- bearer-capability separation between one run controller and local observers;
+- client-safe projections that discard reasoning before persistence;
+- separate controller and local-operator capability boundaries.
 
 It does not provide:
 
 - protection from a hostile process running as the same OS user;
+- remote authentication or authorization for observer projections;
 - filesystem isolation from editors or non-Dolgorae tools;
 - rollback of partial writes;
 - attribution of observed changes to Codex;
 - control of external MCP/app/plugin side effects;
-- serialization of multiple native Codex execution lanes inside the one writer
-  app-server;
-- control of descendants that deliberately leave the recorded app-server
-  process group;
+- OS-level per-run ownership or termination of commands/native subagents in the
+  shared App Server process tree;
 - cryptographic signatures or remote audit attestation;
 - direct communication or trust delegation between independent Dolgorae runs;
-- protection when a hostile same-user child deliberately removes or forges the
-  managed-run context marker.
+- authorization based on a diagnostic environment marker.
 
 ## Compatibility Boundary
 
