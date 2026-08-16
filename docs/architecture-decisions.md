@@ -51,7 +51,7 @@ the same semantic service and cannot expose private worker sockets.
 
 ## ADR-002: Use Direct WebSocket Over a Dolgorae-Owned Unix Socket
 
-Status: Under Review pending TASK-000-D transport and multi-client probes
+Status: Accepted
 
 ### Context
 
@@ -133,8 +133,8 @@ turnless `thread/start` across app-server restart.
 
 ## ADR-004: Operate in the Canonical Workspace With Durable Writer Authority
 
-Status: Under Review pending TASK-000-D crash and policy-transition probes;
-the former shared-reader/Writer-Capsule topology is superseded by ADR-019
+Status: Accepted; the former shared-reader/Writer-Capsule topology is
+superseded by ADR-019
 
 ### Context
 
@@ -770,7 +770,7 @@ single controller cannot authorize effects on other singleton members.
 
 ## ADR-016: Bind Mutations to a Controller Capability and Keep Local Observation Open
 
-Status: Under Review pending TASK-000-D credential-carrier probes
+Status: Accepted
 
 ### Context
 
@@ -846,7 +846,7 @@ secret after parsing.
 
 ## ADR-017: Separate Durable Event Records From Delivery Metadata
 
-Status: Under Review pending TASK-000-D schema and replay probes
+Status: Accepted
 
 ### Context
 
@@ -966,8 +966,7 @@ only after the Profile Server has durably published a ready non-null epoch.
 
 ## ADR-019: Use Sticky Dedicated Execution Lanes and Explicit Control Modes
 
-Status: Under Review pending the TASK-000-D third follow-up evidence and
-independent review
+Status: Accepted
 
 ### Context
 

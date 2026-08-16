@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "target_version": "0.147.0",
-  "release_eligible": false,
+  "release_eligible": true,
   "release_requirements": {
     "runtime_baseline": "0.147.0",
     "topology": "shared_readonly_plus_sticky_dedicated_lanes",
     "background_authority": "dolgorae_dedicated_lane_process_census",
     "required_live_evidence": ["same_home_shared_and_multiple_dedicated_servers", "globally_unique_server_epochs", "fixed_thread_residency", "closed_generation_history_barrier", "complete_dedicated_lane_census", "exact_cleanup", "unrelated_process_not_signalled"],
-    "failure": "TASK-000-D_THIRD_FOLLOW_UP_EVIDENCE_PENDING"
+    "failure": null
   },
   "stable_schema_bundle_sha256": "f3dec1e031d99a420b137b903f02196d4325eece57620c925bb7130b25f168d2",
   "experimental_schema_bundle_sha256": "ff10829cd75b67297019b39ab508ac699198574663579aa18336b7dc55ea178f",

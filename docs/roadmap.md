@@ -2,7 +2,7 @@
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
 Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete. External-runtime
-contract stabilization `TASK-000-D` is active; no production implementation
+contract stabilization `TASK-000-D` is complete; no production implementation
 Task is active.
 
 This document owns execution order and delivery status. Product requirements
@@ -206,7 +206,7 @@ or probe code changes, and TASK-001 remains planned.
 
 ## EPIC-000-D: External Runtime Contract Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Rebaseline the unreleased v1 contract so interactive clients and workflow
 orchestrators share launch-contract coordination while selecting either the
@@ -216,7 +216,7 @@ and client-safe replay.
 
 ### TASK-000-D: Controller, Projection, and Integration Contract
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Preserve `prompt.md` as non-normative input and record its
 [requirement disposition](external-runtime-disposition.md) plus the
@@ -272,15 +272,15 @@ WebSocket fragmentation/ping/close/multi-client behavior, singleton crash and
 restart reconciliation, writer crash boundaries, policy transitions, and
 reasoning non-retention through deterministic and pinned live fixtures. Run the full offline gate,
 requirement reverse index, Markdown links, obsolete-contract scans, and Git
-whitespace checks. TASK-000-D does not enter `IN_REVIEW` until the third
-follow-up live campaigns, reproducible evidence package, and independent review
-are complete.
+whitespace checks. TASK-000-D completed after the third follow-up live
+campaigns, reproducible evidence package, and independent review all passed.
 
 Epic acceptance: the input disposition, SOT, architecture, ADRs, checked
 schemas, roadmap ownership, and verification fixtures agree; an independent
 read-only review has no unresolved blocking finding; an implementation note
 links task-scoped commits; no production source exists; TASK-001 remains
-planned until this gate is complete.
+planned until this gate is complete. This gate is complete; TASK-001 remains
+`PLANNED` and is the next implementation task.
 
 ## EPIC-001: Foundation and Durable State
 
