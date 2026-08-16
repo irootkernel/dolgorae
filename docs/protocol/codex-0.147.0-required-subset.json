@@ -51,7 +51,7 @@
       "closed_classification": ["process_static", "operator_migratable", "runtime_mutable", "ignored"],
       "unknown_field": "compatibility_rejected",
       "active_server_key": "frozen_for_lifetime",
-      "classification_status": "pending_pinned_live_probe"
+      "classification_status": "deferred_to_TASK-005_production_verification_non_gating"
     },
     "feature_policy": {
       "multi_agent": {

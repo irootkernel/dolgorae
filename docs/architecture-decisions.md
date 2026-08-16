@@ -900,8 +900,8 @@ event or a `FINAL_RESPONSE_UNAVAILABLE` error.
 
 ## ADR-018: Own Writer-Capsule Census and Expose Bounded Artifacts and Profile Diagnostics
 
-Status: Superseded in its Writer Capsule portion by ADR-019; artifact and
-diagnostic decisions remain Under Review
+Status: Accepted in its bounded-artifact and profile-diagnostic portions;
+superseded in its Writer Capsule portion by ADR-019
 
 ### Context
 
