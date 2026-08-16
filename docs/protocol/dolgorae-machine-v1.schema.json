@@ -227,6 +227,7 @@
     },
     "run": {
       "type": "object",
+      "x-semanticValidator": "validate_run_projection_v1",
       "additionalProperties": false,
       "required": ["workspace_id", "run_id", "state", "state_variant", "control_mode", "purpose", "execution_lane", "effective_policy", "writer_authority", "server_lane", "workload_background_state", "requested_assurance", "achieved_assurance", "instruction_contract", "lineage", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "controller", "parent_ref", "required_capabilities", "model", "effort", "event_cursor", "pending_count", "identity_verdict", "recovery", "last_terminal"],
       "properties": {
@@ -278,6 +279,9 @@
         "last_terminal": { "oneOf": [{ "$ref": "#/$defs/turn" }, { "type": "null" }] }
       },
       "allOf": [
+        { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/semantic_constraints" },
+        { "if": { "properties": { "state_variant": { "const": "dedicated_unstarted" } }, "required": ["state_variant"] }, "then": { "properties": { "thread_id": { "type": "null" } } } },
+        { "if": { "properties": { "state_variant": { "enum": ["dedicated_reader", "dedicated_writer_reserved", "dedicated_writer_active", "dedicated_releasing"] } }, "required": ["state_variant"] }, "then": { "properties": { "thread_id": { "type": "string", "minLength": 1 } } } },
         {
           "if": { "properties": { "writer_authority": { "properties": { "state": { "const": "active" } } } } },
           "then": { "properties": { "execution_lane": { "const": "dedicated" }, "effective_policy": { "properties": { "access": { "const": "write" }, "verification": { "const": "verified" } } }, "server_lane": { "properties": { "kind": { "const": "dedicated" }, "state": { "const": "ready" } } } } }
@@ -528,6 +532,7 @@
         { "if": { "properties": { "command": { "const": "profile.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile_event_data" } } } },
         { "if": { "properties": { "command": { "enum": ["profile.remove", "run.delete"] } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_successor", "run.close", "run.controller.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
+        { "if": { "properties": { "command": { "const": "run.create_successor" } }, "required": ["command"] }, "then": { "properties": { "data": { "properties": { "lineage": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/lineage" } } } } } },
         { "if": { "properties": { "command": { "const": "run.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/run" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.send", "run.submit", "run.wait"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/turn" } } } },
         { "if": { "properties": { "command": { "const": "run.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/event_data" } } } },

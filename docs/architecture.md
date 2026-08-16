@@ -176,10 +176,10 @@ CLI or command-substitution pipe. The drainer applies diagnostic redaction and
 maintains mode-0600 `server.log` and `server.log.1` at 1 MiB each. Its exact
 identity is part of profile state, and loss fences new attachment until a
 controlled restart. Run workers neither signal the singleton nor its drainer.
-The profile manager owns their lifecycle. A writer worker requests capsule
-allocation through the same staged manager logic and owns only that capsule's
-exact recorded lifecycle; it never signals an unrelated process or the shared
-server.
+The profile manager owns their lifecycle. A dedicated worker requests lazy
+lane-generation startup through the same staged manager logic and owns only
+that generation's exact recorded lifecycle; it never signals an unrelated
+process or the shared server.
 
 ### Sticky Execution-Lane Topology
 
@@ -726,88 +726,11 @@ that boundary.
 
 ## Historical Transient Writer Authority Flow (Superseded)
 
-The shared↔capsule transition flow below is historical and non-normative.
-`SPEC-014` and the Sticky Execution-Lane topology govern current behavior.
-
-The BSD `flock(2)` on `.dolgorae/runtime/locks/writer.lock` serializes
-transactions; it does not represent the lifetime of writer authority. The
-authoritative, atomically replaced and directory-fsynced `writer.json` has
-`none`, `reserved`, `active`, `handoff_prepared`, `releasing`, or
-`blocked_unknown` state and stores
-workspace/run, controller/generation, writer/worker generations, server
-key/epoch, thread/turn, lifecycle, pending-count, cursor and recovery facts.
-Every acquisition examines this record even when the kernel lock is free.
-
-Run state keeps two orthogonal facts. `effective_policy` records the observed
-Codex access mode, verification status, policy epoch, and thread generation;
-`writer_authority` records the durable workspace owner and transaction state.
-Neither field is derived from the other.
-
-Activation rejects known-unavailable policy support before mutation. Its
-prepare phase holds home, server, writer, then run serialization, fsyncs
-`reserved` plus an activation revision and releases all file locks. A threadless
-first write lazily starts the Run's selected Dedicated Lane Server and starts the
-thread there with writer policy. A bound dedicated reader remains on the same
-logical lane and applies the policy to that lane's current physical generation.
-After live policy verification, commit reacquires home, server, writer then run locks, fsyncs
-the lane-generation and thread binding, and publishes `active`. Only then may
-`turn/start` occur. Threadless `run acquire-write` is rejected rather than
-creating a turnless writer thread.
-
-Release fsyncs `releasing` under writer then run locks, drops locks, retires the
-selected lane generation, and proves its supported process scope empty. It then
-starts a successor physical generation for the same logical lane, resumes the
-same thread with reader policy, and reacquires locks to commit `none`. If the
-old generation is proved absent but reader resume fails, authority
-still commits `none` and the Run becomes `paused`; inability to prove lane-generation
-absence lands `blocked_unknown`. No network or process wait occurs under a
-global file lock. Crash recovery distinguishes reservation before capsule
-creation, allocated or continued capsule, provisional unbound thread,
-bound-not-active policy, active-before-turn, and releasing-before-empty-proof
-states and never creates or replays without absence proof.
-
-Codex 0.147.0 is the compatibility baseline. Background safety does not wait for
-a future Codex terminal API: each Dedicated Lane Server is spawned suspended in a new
-process group, records full process identities before continuation, and runs a
-100-millisecond census using `proc_listpgrppids` plus all-PID/parent sampling.
-Command notifications trigger an immediate census. Foreground turn completion
-does not imply background absence. Five consecutive complete empty censuses
-after exact capsule-leader exit record `verified_absent`; a live member records
-`active`; PID reuse, incomplete enumeration, unreadable identity, unregistered
-survivors, and detected escape record `unverified` and return
-`BACKGROUND_EXECUTION_UNVERIFIED`. A live-tested native Codex terminal API may
-add `hybrid` evidence but never replaces the Dolgorae census authority.
-
-Worker loss leaves the durable record authoritative. An active or uncertain
-incumbent becomes `blocked_unknown`; another run cannot activate. Only recovery
-of the exact incumbent may inspect its thread and turn. It first revalidates the
-recorded lane-generation identity and census. If it is alive, recovery may
-reconnect only to that exact lane/server epoch and perform `thread/read`. If
-the generation and all recorded descendants are proved absent, recovery publishes
-authority `none` and pauses the Run. A dedicated Run remains on its logical lane
-and never moves its thread to the shared server. Only terminal
-and required absence proof can clear authority.
-Connection close, a free kernel lock, or leader absence without the complete
-five-sample census never suffices.
-
-Prepare/commit/cancel handoff remains same-controller and generation-bound.
-Prepare writes one five-minute record. APPLY retires the source lane generation
-and proves it empty before starting the destination lane generation. Commit acquires
-handoff, writer, then source/destination run locks in canonical UUID order,
-revalidates policies, epochs, turns, interactions and census evidence, and
-activates the destination. Destination failure after source retirement leaves
-no writer; uncertain cleanup leaves `blocked_unknown`, never two writers.
-Cross-controller, active, waiting,
-interrupting, recovering, reconciliation-required, outcome-unknown or
-unverifiable cases fail closed.
-
-Reader/write policy transitions preserve the existing thread on the Run's fixed
-Dedicated Execution Lane; they may replace only that lane's physical generation
-after exact absence proof and never move the thread to the shared Profile Server.
-Compatibility records the tested
-sandbox, approval, developer-instruction, writable-root and network behavior.
-If the pinned server cannot safely change policy, Dolgorae returns
-`ACCESS_TRANSITION_UNSUPPORTED` and requires a lineage-linked new run/thread.
+The former shared↔capsule protocol is not part of the normative architecture.
+Its rationale and rejected state machine remain in the historical ADR and
+review records for auditability. `SPEC-014`, ADR-019, and the Sticky
+Execution-Lane sections above are the only executable requirements; no capsule
+state name or transition in the historical record may be implemented.
 
 ## Turn Execution Flow
 

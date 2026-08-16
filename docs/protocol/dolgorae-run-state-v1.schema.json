@@ -20,7 +20,10 @@
     "instruction_contract": { "$ref": "#/$defs/instruction_contract" },
     "lineage": { "oneOf": [{ "$ref": "#/$defs/lineage" }, { "type": "null" }] }
   },
-  "allOf": [
+  "allOf": [{ "$ref": "#/$defs/semantic_constraints" }],
+  "$defs": {
+    "semantic_constraints": {
+      "allOf": [
     {
       "if": { "properties": { "execution_lane": { "const": "shared_readonly" } }, "required": ["execution_lane"] },
       "then": { "properties": {
@@ -52,9 +55,58 @@
     {
       "if": { "properties": { "effective_policy": { "properties": { "access": { "const": "write" } }, "required": ["access"] } } },
       "then": { "properties": { "writer_authority": { "properties": { "state": { "const": "active" } } } } }
+    },
+    {
+      "if": { "properties": { "state_variant": { "const": "dedicated_reader" } }, "required": ["state_variant"] },
+      "then": { "properties": {
+        "execution_lane": { "const": "dedicated" },
+        "effective_policy": { "properties": { "access": { "const": "read" }, "verification": { "const": "verified" }, "server_epoch": { "type": "integer" }, "writer_generation": { "type": "null" } } },
+        "writer_authority": { "properties": { "state": { "const": "none" }, "transaction_id": { "type": "null" } } },
+        "server_lane": { "properties": { "kind": { "const": "dedicated" }, "state": { "const": "ready" }, "server_epoch": { "type": "integer" } } }
+      } }
+    },
+    {
+      "if": { "properties": { "state_variant": { "const": "dedicated_writer_reserved" } }, "required": ["state_variant"] },
+      "then": { "properties": {
+        "execution_lane": { "const": "dedicated" },
+        "effective_policy": { "not": { "properties": { "access": { "const": "write" }, "verification": { "const": "verified" } }, "required": ["access", "verification"] } },
+        "writer_authority": { "properties": { "state": { "const": "reserved" }, "writer_generation": { "type": "integer", "minimum": 1 }, "transaction_id": { "$ref": "#/$defs/uuid" } } }
+      } }
+    },
+    {
+      "if": { "properties": { "state_variant": { "const": "dedicated_writer_active" } }, "required": ["state_variant"] },
+      "then": { "properties": {
+        "execution_lane": { "const": "dedicated" },
+        "effective_policy": { "properties": { "access": { "const": "write" }, "verification": { "const": "verified" }, "server_epoch": { "type": "integer" }, "writer_generation": { "type": "integer" } } },
+        "writer_authority": { "properties": { "state": { "const": "active" }, "writer_generation": { "type": "integer", "minimum": 1 } } },
+        "server_lane": { "properties": { "kind": { "const": "dedicated" }, "state": { "const": "ready" }, "server_epoch": { "type": "integer" } } }
+      } }
+    },
+    {
+      "if": { "properties": { "state_variant": { "const": "dedicated_releasing" } }, "required": ["state_variant"] },
+      "then": { "properties": {
+        "execution_lane": { "const": "dedicated" },
+        "effective_policy": { "properties": { "access": { "enum": ["write", "transitioning", "unknown"] } } },
+        "writer_authority": { "properties": { "state": { "const": "releasing" }, "writer_generation": { "type": "integer", "minimum": 1 }, "transaction_id": { "$ref": "#/$defs/uuid" } } }
+      } }
+    },
+    {
+      "if": { "properties": { "state_variant": { "const": "dedicated_blocked_unknown" } }, "required": ["state_variant"] },
+      "then": { "properties": {
+        "execution_lane": { "const": "dedicated" },
+        "writer_authority": { "properties": { "state": { "const": "blocked_unknown" }, "reconciliation_action": { "type": "string" } } }
+      } }
+    },
+    {
+      "if": { "properties": { "state_variant": { "enum": ["dedicated_paused", "dedicated_generation_failed"] } }, "required": ["state_variant"] },
+      "then": { "properties": {
+        "execution_lane": { "const": "dedicated" },
+        "effective_policy": { "not": { "properties": { "access": { "const": "write" }, "verification": { "const": "verified" } }, "required": ["access", "verification"] } },
+        "writer_authority": { "properties": { "state": { "const": "none" } } }
+      } }
     }
-  ],
-  "$defs": {
+  ]
+    },
     "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "control_mode": { "enum": ["direct_interactive", "managed_agent"] },
@@ -78,7 +130,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["state", "writer_generation", "transaction_id", "reconciliation_action"],
       "properties": {
-        "state": { "enum": ["none", "reserved", "active", "handoff_prepared", "releasing", "blocked_unknown"] },
+        "state": { "enum": ["none", "reserved", "active", "releasing", "blocked_unknown"] },
         "writer_generation": { "type": "integer", "minimum": 0 },
         "transaction_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
         "reconciliation_action": { "type": ["string", "null"], "enum": ["retry_census", "reconcile_dedicated_lane", "operator_repair", "reverify_writer_policy", null] }

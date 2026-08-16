@@ -178,10 +178,10 @@ or conflicting policy returns
 
 ## SPEC-003: Profile, Account, and Singleton Binding
 
-The Writer Capsule and shared↔capsule migration paragraphs retained in this
-section are historical candidate text and are non-normative. `SPEC-014`
-supersedes them for execution-lane cardinality, residency, server generations,
-profile lifecycle, and process census.
+The earlier Writer Capsule candidate is preserved only in historical ADR and
+review artifacts. `SPEC-014` is the sole current authority for execution-lane
+cardinality, residency, server generations, profile lifecycle, and process
+census.
 
 The project-local profile configuration lives at:
 
@@ -2202,6 +2202,12 @@ This is a personal-alpha behavior boundary, not per-Run process containment.
 Observers receive only authorized
 redacted projections and MUST NOT resolve an interaction. V1 has no single-use
 observer delegation.
+
+Every persisted Run state and every machine-readable Run projection MUST pass
+both `dolgorae-run-state-v1.schema.json` and the normative
+`run_state_semantic_validator_v1` after extracting the shared state fields.
+Schema-only acceptance is insufficient; persistence and projection fail closed
+when the validator rejects any cross-field invariant.
 
 One profile owns one shared read-only logical lane and zero or more dedicated
 logical lanes. A shared Run's persistent thread is loaded only in the shared
