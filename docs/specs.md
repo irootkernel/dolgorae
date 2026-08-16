@@ -219,6 +219,14 @@ and cleanup, so it advertises `native_subagents:supported`. Active or unknown
 native state still blocks pause, physical-generation replacement, profile stop,
 and shutdown. The disabled case also produced a child, so an explicitly disabled
 0.147.0 profile advertises `unverified`, not `unavailable`.
+For the 0.147.0 production profile, initialize MUST send
+`optOutNotificationMethods:[]`. It MUST NOT suppress `item/started`,
+`item/completed`, `thread/started`, turn lifecycle, or correlation methods.
+Observed lifecycle suppression downgrades `native_subagents` to `unverified`
+and rejects every quiescence-dependent operation. Reasoning content is
+discarded after receipt; this pin does not use initialization suppression
+because it cannot safely isolate reasoning-only methods from required native
+lifecycle evidence.
 Changing the policy changes the immutable launch contract and requires an
 operator-authorized migration.
 Environment names are explicit, require `PATH`, `LANG`, and `LC_ALL`, reserve `CODEX_HOME`, `HOME`,

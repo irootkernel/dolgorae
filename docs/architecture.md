@@ -34,6 +34,10 @@ permit Codex-native subagents before full lifecycle verification, but active or
 unverified native state blocks every quiescence-requiring transition. Those
 children remain within one Codex session tree and are never Dolgorae peer Runs,
 workers, or Dedicated Lane Servers.
+The 0.147.0 production initialize contract fixes
+`optOutNotificationMethods:[]`. Lifecycle or correlation suppression
+invalidates native support and fences every quiescence-dependent operation;
+reasoning content is redacted after receipt instead.
 
 The v1 public boundary stops at the machine CLI. The worker socket and App
 Server transport remain private, and future adapters must call the same semantic

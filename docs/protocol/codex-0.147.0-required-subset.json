@@ -66,6 +66,12 @@
         "reason": "Codex-native subagents are permitted but distinct from independent Dolgorae Runs; the retained parser contradicted its wire evidence"
       }
     },
+    "initialize_capabilities": {
+      "optOutNotificationMethods": [],
+      "reason": "Codex 0.147.0 native lifecycle and child correlation require item/started and item/completed; exact reasoning-only suppression is not safely separable for this pin",
+      "suppression_observed_capability": "unverified",
+      "suppression_observed_transition_rule": "reject_quiescence_dependent_operations"
+    },
     "other_include_mechanisms": "rejected"
   },
   "schema_constraints": [
@@ -242,7 +248,7 @@
       "classification": "content_not_retained",
       "known_method_prefixes": ["item/reasoning/"],
       "known_content_suffixes": ["textDelta", "summaryTextDelta", "summaryPartAdded"],
-      "initialization_suppression": "use generated-schema-supported notification opt-out when available",
+      "initialization_suppression": "forbidden_for_0.147.0_profile; discard reasoning content after receipt because native lifecycle correlation requires unsuppressed item notifications",
       "durable_fields": ["method", "byte_length", "sha256", "reason"]
     }
   },
