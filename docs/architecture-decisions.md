@@ -147,7 +147,9 @@ simultaneous writers within that worktree conflict.
 
 Run Codex in the canonical workspace selected by the caller. A linked Git
 worktree is an independent canonical workspace and supported parallel writer
-lane. Start every run as a reader. Allow concurrent readers and at most one
+lane. Start every Run with writer authority `none`: a shared Run starts as a
+verified reader, while a dedicated Run starts physically absent with unknown,
+unverified effective policy until its first turn. Allow concurrent readers and at most one
 Dolgorae writer across every profile in a canonical worktree. Persist one
 authority record whose states are `none`, `reserved`, `active`,
 `handoff_prepared`, `releasing`, and `blocked_unknown`; only explicit audited transitions may grant or remove
@@ -180,8 +182,9 @@ writer-configured thread and activate authority before `turn/start`.
 Codex 0.147.0 is the compatibility baseline. Under ADR-019, every dedicated Run
 uses a Sticky Dedicated logical lane; a `shared_readonly` Run remains on the
 shared lane and creates a lineage-linked dedicated successor if it needs write.
-Reader and writer access are policy states of a dedicated lane, not migrations
-to a shared server or a Writer Capsule. A dedicated lane may
+Reader and writer access are policy states of a dedicated lane and never move
+the thread to the shared server. The superseded transient topology is retained
+only as historical rationale. A dedicated lane may
 advance to a successor process generation only after exact absence and a
 durable-history barrier. Dolgorae owns each lane generation's process identity,
 100-millisecond process census, exact cleanup, and five-sample empty proof.
