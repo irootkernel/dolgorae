@@ -257,9 +257,11 @@ background-terminal authority failed, but Dolgorae's exact process-census
 cleanup campaign passed. The retained native-subagent conclusion is invalid:
 its parser reported no collaboration item while bounded wire evidence contains
 `subAgentActivity` and `collabAgentToolCall`. Codex-native child threads are
-distinct from independent Dolgorae Runs and workers. Native execution is
-permitted by the selected product policy, but quiescence-requiring transitions
-fail closed until a corrected exact-version lifecycle campaign completes.
+distinct from independent Dolgorae Runs and workers. The corrected exact-version
+campaign recognizes both shapes, proves the enabled parent/child lifecycle and
+restart history, and permits `supported`; active or unknown native state still
+makes quiescence-requiring transitions fail closed. The disabled diagnostic
+produced a child and cannot advertise `unavailable`.
 
 Verification: parse and meta-validate all protocol JSON; resolve every cross-file
 reference; prove command/data/error enum equality and typed positive/negative

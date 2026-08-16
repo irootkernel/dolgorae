@@ -451,8 +451,9 @@ master/subagent relationship, current access, and hard safety invariants. Append
 run-specific instructions as subordinate context. Continue to respect profile
 AGENTS files, skills, plugins, apps, and checked MCP servers unless they conflict
 with the hard invariants. Native subagents additionally require a profile
-capability snapshot of `supported`; the exact 0.147.0 launch contract forces
-`--disable multi_agent` and reports `unavailable`.
+capability snapshot of `supported`; the corrected exact 0.147.0 enabled campaign
+passes that gate. Its disabled diagnostic produced a child and remains
+`unverified`, so disablement is not an availability proof.
 
 ### Consequences
 
@@ -1013,12 +1014,12 @@ Advertise only `best_effort_personal_alpha` for Codex 0.147.0. Requested
 assurance is checked before allocation. Polling and exact identity revalidation
 remain the background-work authority, but do not claim adversarial containment.
 Treat Codex-native `multi_agent` as a profile policy independent of Dolgorae
-Run/worker concurrency. The selected default permits native subagents. Until a
+Run/worker concurrency. The selected default permits native subagents. The
 corrected exact-version campaign proves child identity, parent, terminal
-lifecycle, persisted history, and restart continuity, advertise the enabled
-profile as `unverified` and refuse operations that require proven native
-quiescence. An explicitly disabled profile is accepted only after its disabled
-case produces no child.
+lifecycle, persisted history, restart continuity, and exact cleanup, so the
+enabled profile reports `supported`. Operations still refuse active or unknown
+native state when they require quiescence. The disabled case produced a child
+and therefore reports `unverified`, not `unavailable`.
 
 ### Consequences
 

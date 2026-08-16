@@ -212,13 +212,13 @@ allowed after `argv[0]`. V1 accepts canonical `--profile <name>`, repeatable
 other option. Normalization preserves argument and repetition order exactly.
 The `multi_agent` Codex flag is reserved to Dolgorae and MUST NOT appear in raw
 profile argv. Dolgorae injects exactly one canonical `--enable multi_agent` or
-`--disable multi_agent` pair from `native_subagents`. An enabled 0.147.0 profile
-advertises `native_subagents:unverified` until the corrected exact-version
-campaign proves child identity, parent relationship, terminal lifecycle,
-persisted history, and restart continuity. It may run turns, but active or
-unverified native state blocks pause, physical-generation replacement, profile
-stop, and shutdown. A disabled profile advertises `unavailable` only when the
-disabled campaign observes no child; otherwise compatibility is rejected.
+`--disable multi_agent` pair from `native_subagents`. The corrected exact-version
+campaign for an enabled 0.147.0 profile proved child identity, parent
+relationship, active/terminal lifecycle, persisted history, restart continuity,
+and cleanup, so it advertises `native_subagents:supported`. Active or unknown
+native state still blocks pause, physical-generation replacement, profile stop,
+and shutdown. The disabled case also produced a child, so an explicitly disabled
+0.147.0 profile advertises `unverified`, not `unavailable`.
 Changing the policy changes the immutable launch contract and requires an
 operator-authorized migration.
 Environment names are explicit, require `PATH`, `LANG`, and `LC_ALL`, reserve `CODEX_HOME`, `HOME`,
@@ -1954,8 +1954,9 @@ The profile's own Codex configuration, AGENTS instructions, skills, plugins,
 and apps remain available unless they conflict with Dolgorae's hard invariants.
 MCP servers follow the checked launch snapshot. Native subagents remain
 available only when the profile snapshot reports them `supported`. The pinned
-0.147.0 snapshot forces `--disable multi_agent` and reports `unavailable`
-because its enabled live probe exposed no child lifecycle.
+0.147.0 default enables `multi_agent`; its corrected live campaign proved the
+complete child lifecycle and reports `supported`. Its disabled diagnostic still
+created a child and therefore reports `unverified`, never `unavailable`.
 
 ## SPEC-012: Orchestration Boundary and Compatibility
 
@@ -2034,10 +2035,10 @@ It also exposes profile-specific `native_subagents` as `supported`,
 MUST NOT produce `supported`; the pinned probe must observe child identity,
 parent relationship, active/terminal lifecycle, and restart behavior. A binary-
 level query without a profile returns `unverified`. The exact 0.147.0 enabled
-probe produced no child lifecycle, so its tested profile contract forces
-`--disable multi_agent` and reports `unavailable`. A later pinned contract may
-report `supported` only after the complete live gate passes and an
-operator-authorized profile migration installs that contract. Binary-level support
+probe passed that complete gate and reports `supported`. The disabled diagnostic
+also produced a persisted child, so it reports `unverified` rather than
+`unavailable`. A later pin must rerun the same gate; a policy change still
+requires operator-authorized profile migration. Binary-level support
 does not override a rejected or incapable profile. A run declaring a required
 capability MUST fail before allocation when that profile does not provide it.
 
@@ -2270,11 +2271,12 @@ Requested and achieved levels are durable Run state. Codex 0.147.0 is capped at
 `best_effort_personal_alpha`: same-home, policy transition, multi-workspace,
 closed-generation history, and Dolgorae process-census cleanup tests passed.
 Background-terminal completeness failed. The prior native-subagent semantic
-result contradicted its retained wire shapes and is withdrawn. Codex-native
-subagents are allowed independently of Dolgorae Run concurrency, but an enabled
-profile advertises them as `unverified` until the corrected campaign proves the
-complete lifecycle. Active or unverified native state blocks every operation
-that requires quiescence. Polling alone MUST NOT claim either higher level.
+result contradicted its retained wire shapes and is withdrawn. The corrected
+campaign recognized `subAgentActivity` and `collabAgentToolCall` per case and
+proved enabled parent/child identity, active-to-terminal lifecycle, persisted
+history, restart continuity, and cleanup; enabled 0.147.0 therefore reports
+`supported`. Active or unknown native state still blocks every operation that
+requires quiescence. Polling alone MUST NOT claim either higher assurance level.
 
 The checked decision rejects transient shared↔dedicated thread migration. On
 exact 0.147.0 `thread/unsubscribe` returned `unsubscribed` while the source

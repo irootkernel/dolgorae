@@ -239,9 +239,10 @@ closed-generation history resume passed. Cross-server same-thread migration
 failed and background-terminal discovery failed. Dolgorae's live process census
 and exact cleanup subsequently passed, including unrelated-process exclusion.
 The retained native-subagent parser omitted exact wire item names and its
-no-child conclusion is withdrawn. The 0.147.0 profile defaults to permitting
-Codex-native subagents and advertises them as `unverified` until the corrected
-lifecycle/restart campaign passes. Polling and persisted child history fence
+no-child conclusion is withdrawn. The corrected 0.147.0 enabled campaign proved
+the complete parent/child lifecycle and restart history, so the default profile
+advertises Codex-native subagents as `supported`. The disabled diagnostic also
+created a child and therefore remains `unverified`. Polling and persisted child history fence
 pause, generation replacement, profile stop, and shutdown when native state is
 active or unknown. Polling remains
 process-census authority and cannot claim strong containment.
