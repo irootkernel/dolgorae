@@ -2,7 +2,7 @@
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
 Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete. External-runtime
-contract stabilization `TASK-000-D` is active for its fourth consistency pass;
+contract stabilization `TASK-000-D` is complete after its fourth consistency pass;
 no production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
@@ -206,7 +206,7 @@ or probe code changes, and TASK-001 remains planned.
 
 ## EPIC-000-D: External Runtime Contract Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Rebaseline the unreleased v1 contract so interactive clients and workflow
 orchestrators share launch-contract coordination while selecting either the
@@ -216,7 +216,7 @@ and client-safe replay.
 
 ### TASK-000-D: Controller, Projection, and Integration Contract
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Treat the repository-root `prompt.md` as user-owned, ignored, non-normative
 input; preserve only its digest and disposition in tracked review records. Record its
@@ -281,8 +281,8 @@ Epic acceptance: the input disposition, SOT, architecture, ADRs, checked
 schemas, roadmap ownership, and verification fixtures agree; an independent
 read-only review has no unresolved blocking finding; an implementation note
 links task-scoped commits; no production source exists; TASK-001 remains
-planned until this gate is complete. This gate is currently incomplete;
-TASK-001 remains `PLANNED` and MUST NOT start before TASK-000-D closes again.
+planned until this gate is complete. This architecture gate is complete;
+TASK-001 remains `PLANNED` as the next implementation task.
 
 ## EPIC-001: Foundation and Durable State
 

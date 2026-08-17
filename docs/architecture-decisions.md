@@ -967,7 +967,7 @@ only after the Profile Server has durably published a ready non-null epoch.
 
 ## ADR-019: Use Sticky Dedicated Execution Lanes and Explicit Control Modes
 
-Status: Under Review for the fourth consistency pass
+Status: Accepted after the fourth consistency pass
 
 ### Context
 

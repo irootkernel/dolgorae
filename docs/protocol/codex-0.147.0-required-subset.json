@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "target_version": "0.147.0",
-  "architecture_contract_eligible": false,
+  "architecture_contract_eligible": true,
   "production_runtime_eligible": false,
   "eligibility_owners": {
     "architecture_contract_eligible": "TASK-000-D",
