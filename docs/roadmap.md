@@ -61,14 +61,14 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
 
 ### TASK-000: Architecture Reconciliation and Codex Probe
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Reconcile the then-current writer-lock contract, stale-generation cleanup, runtime discovery,
 `outcome_unknown`, audit encoding/redaction/durability, protocol bounds, public
@@ -206,7 +206,7 @@ or probe code changes, and TASK-001 remains planned.
 
 ## EPIC-000-D: External Runtime Contract Stabilization
 
-Status: `COMPLETE`
+Status: `ACTIVE`
 
 Goal: Rebaseline the unreleased v1 contract so interactive clients and workflow
 orchestrators share launch-contract coordination while selecting either the
@@ -216,7 +216,7 @@ and client-safe replay.
 
 ### TASK-000-D: Controller, Projection, and Integration Contract
 
-Status: `COMPLETE`
+Status: `ACTIVE`
 
 Treat the repository-root `prompt.md` as user-owned, ignored, non-normative
 input; preserve only its digest and disposition in tracked review records. Record its

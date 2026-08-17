@@ -586,8 +586,8 @@ dolgorae [--human] run events <run-id> [--workspace <path>] [--after <cursor>] [
 dolgorae [--human] run pending <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] interaction get <run-id> <request-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] respond <run-id> --request-id <id> --idempotency-key <key> [--workspace <path>] [--response-fd <fd>]
-dolgorae [--human] run artifact show <run-id> <artifact-id> [--workspace <path>]
-dolgorae [--human] run artifact read <run-id> <artifact-id> --offset <n> --length <n> [--workspace <path>]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] artifact show <run-id> <artifact-id> [--workspace <path>]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] artifact read <run-id> <artifact-id> --offset <n> --length <n> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] artifact export <run-id> <artifact-id> --output <path> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] interrupt <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] set-effort <run-id> <effort> [--workspace <path>]
@@ -974,6 +974,9 @@ normative:
 | `INTERACTION_RESPONSE_INVALID` | 4 | `run respond` | the response does not satisfy the recorded normalized schema |
 | `SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN` | 4 | `run create-successor` | the request attempts to change inherited workspace, profile, or control mode |
 | `SUCCESSOR_MODEL_UNSUPPORTED` | 4 | `run create-successor` | the requested destination model or effort is not supported by the inherited profile snapshot |
+| `SUCCESSOR_SOURCE_NOT_TERMINAL` | 4 | `run create-successor` | the named source Turn is absent, nonterminal, stale, or no longer current |
+| `SUCCESSOR_LINEAGE_INVALID` | 4 | `run create-successor`, projection validation | source existence, workspace identity, fresh Run/thread identity, or immutable lineage validation failed |
+| `SUCCESSOR_CONTROLLER_INVALID` | 4 | `run create-successor` | the destination credential is reused, belongs to a different principal, or has an incompatible Controller kind |
 | `FILE_CHANGE_ARTIFACT_UNAVAILABLE` | 4 | `run pending/respond` | the exact correlated proposed change cannot be represented or its artifact is missing, oversized, or digest-stale |
 | `ARTIFACT_NOT_FOUND` | 3 | artifact show/read/export | the artifact ID is absent or does not belong to the addressed Run |
 | `ARTIFACT_RANGE_INVALID` | 2 | artifact read | offset/length is outside the artifact or the 1-MiB call bound |
@@ -1118,6 +1121,16 @@ COMMIT revalidates the same operation token and revisions. A reservation with
 no accepted turn is released only after stable history proves non-acceptance;
 otherwise it remains bound to the original intent across restart.
 
+`create-successor` has its own operation-class key space. Its JCS-normalized
+digest contains source Run ID and exact terminal Turn ID, purpose/label, selected
+or inherited model and effort, requested assurance, required capabilities in
+canonical sorted unique order, handoff and destination-instruction byte lengths
+and SHA-256 values, artifact references in caller order, and the public identity
+and generation of the new destination Controller. Credential carrier paths,
+descriptor numbers, and secret bytes are excluded. A same-key retry returns the
+original destination Run and credential-delivery receipt; any changed normalized
+field returns `IDEMPOTENCY_CONFLICT` without allocating another Run.
+
 A terminal result includes the final agent response, stable outcome code and
 state, workspace/run/thread/turn IDs, fixed model, turn reasoning effort, usage
 when supplied by Codex, event cursor, and:
@@ -1165,7 +1178,8 @@ uses safe create-exclusive destination handling and streaming verification.
 Same-uid observers may show/read only `observer` artifacts referenced by their
 client-safe Run projection. A controller-only artifact returns
 `INTERACTION_ARTIFACT_REQUIRES_CONTROLLER` before metadata or bytes are exposed;
-no command exposes the internal artifact path.
+the optional Controller carrier unlocks show/read only after serialization-point
+revalidation. No command exposes the internal artifact path.
 
 Observed paths are populated only when `measured` is true and describe workspace
 changes during the terminal turn interval. In Git mode
@@ -1703,7 +1717,10 @@ kinds `command_execution_approval`, `file_change_approval`, and `user_input`.
 generic title, Controller kind, whether user escalation is required, whether
 the request contains protected input, and timestamps. It never returns command
 text, cwd, questions/options, response schema, decision tokens, artifact IDs,
-thread/turn/item IDs, or server epoch. `run interaction get` is
+thread/turn/item IDs, or server epoch. The title is selected only from the
+checked fixed enum by kind/status and the protected-input boolean. It is never
+derived from command, cwd, diff, question, option, reason, response schema, or
+other payload text. `run interaction get` is
 Controller-authorized and returns the full discriminator-bound interaction
 needed to resolve that request. Approval responses
 contain only `decision`. User-input responses contain an `answers` map keyed by
@@ -2263,6 +2280,13 @@ write, Dolgorae creates a lineage-linked dedicated successor or returns
 Mode. Shared background control is `profile_aggregate_only`: Run close cannot
 claim per-Run descendant cleanup, and profile stop owns complete aggregate
 census and cleanup.
+The shared lane is for lightweight read-only analysis. Select a dedicated lane
+for compiler or test execution, formatters, file watchers, long-running
+validation, background processes, reliable per-Run command lifecycle, or
+higher cleanup assurance. Scheduling follows expected command behavior,
+expected write behavior, and required assurance—not purpose alone. A planning
+or review Run that executes substantial local tooling therefore uses a dedicated
+lane.
 
 A write-capable Run owns one UUIDv7 dedicated logical lane for its entire
 lifetime. Its thread MUST be started, resumed, and read only through that lane.

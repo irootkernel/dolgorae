@@ -11,7 +11,7 @@ Git history preserves the prior text. Contradictory active ADRs are invalid.
 
 ## ADR-001: Ship One Binary Without an Installed Daemon
 
-Status: Under Review for the fourth consistency pass
+Status: Accepted
 
 ### Context
 
@@ -966,7 +966,7 @@ only after the Profile Server has durably published a ready non-null epoch.
 
 ## ADR-019: Use Sticky Dedicated Execution Lanes and Explicit Control Modes
 
-Status: Accepted
+Status: Under Review for the fourth consistency pass
 
 ### Context
 
@@ -1003,6 +1003,11 @@ dedicated writers in different workspaces. Separate effective policy, writer
 authority, server-lane infrastructure, and background-workload state in durable
 state and projections. Profile lifecycle enumerates the shared lane and all
 dedicated lane journals; dedicated servers restart lazily.
+Use the shared lane only for lightweight read-only analysis. Compiler/test
+execution, formatters, watchers, long-running validation, background processes,
+or work needing reliable command ownership and cleanup selects a dedicated
+lane. Routing follows expected command/write behavior and assurance, never
+purpose alone.
 
 Make `direct_interactive` and `managed_agent` immutable control modes, separate
 from purpose and lane. Direct mode accepts `human_cli` or `interactive_client`

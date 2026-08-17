@@ -11,7 +11,7 @@
     "run_id": { "$ref": "#/$defs/uuid7" },
     "kind": { "enum": ["command_execution_approval", "file_change_approval", "user_input"] },
     "status": { "enum": ["pending", "resolved", "stale"] },
-    "title": { "type": "string", "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 256 },
+    "title": { "enum": ["Command approval requested", "File change approval requested", "User input requested", "Protected input requested", "Interaction resolved", "Interaction stale"] },
     "controller_kind": { "enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation"] },
     "user_escalation_required": { "type": "boolean" },
     "protected_input": { "type": "boolean" },
