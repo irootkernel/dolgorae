@@ -19,6 +19,15 @@
     "expires_at": { "type": ["string", "null"], "format": "date-time" },
     "resolved_at": { "type": ["string", "null"], "format": "date-time" }
   },
+  "allOf": [
+    { "if": { "properties": { "status": { "const": "pending" } } }, "then": { "properties": { "resolved_at": { "const": null } } } },
+    { "if": { "properties": { "status": { "const": "resolved" } } }, "then": { "properties": { "title": { "const": "Interaction resolved" }, "resolved_at": { "type": "string" } } } },
+    { "if": { "properties": { "status": { "const": "stale" } } }, "then": { "properties": { "title": { "const": "Interaction stale" }, "resolved_at": { "type": "string", "format": "date-time" } } } },
+    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "command_execution_approval" } } }, "then": { "properties": { "title": { "const": "Command approval requested" }, "protected_input": { "const": false } } } },
+    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "file_change_approval" } } }, "then": { "properties": { "title": { "const": "File change approval requested" }, "protected_input": { "const": false } } } },
+    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "user_input" }, "protected_input": { "const": true } } }, "then": { "properties": { "title": { "const": "Protected input requested" } } } },
+    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "user_input" }, "protected_input": { "const": false } } }, "then": { "properties": { "title": { "const": "User input requested" } } } }
+  ],
   "$defs": {
     "uuid7": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
   }

@@ -2127,14 +2127,14 @@ validator; JSON Schema character-count validation alone never satisfies a byte
 limit.
 
 Controller authorization applies before worker attachment or any external
-effect to `send`, `submit`, `respond`, `interrupt`, `set-effort`, write acquire
+effect to `send`, `submit`, `respond`, `interrupt`, `set-effort`, `create-successor`, write acquire
 or release, pause, resume, recover, reconcile, fork, close, delete, and writer
 handoff. Controller equality requires both the controller ID and a constant-time
 comparison of the persisted capability digest. A normal fork inherits the
 controller. A mismatch is non-retryable and MUST NOT reveal whether controller
 ID or capability comparison failed. All same-uid local callers may list runs
 and read status, wait results,
-pending interaction payloads, client-safe events, writer status, verification,
+pending interaction summaries, client-safe events, writer status, verification,
 and exports without a capability. Controller metadata is visible; capability
 bytes and their digest are never visible. External applications own any
 authentication and authorization applied before exposing those observer results
@@ -2279,6 +2279,11 @@ shared state fields. Machine projections additionally pass
 selected-server, shared-server, and lineage context.
 Schema-only acceptance is insufficient; persistence and projection fail closed
 when the validator rejects any cross-field invariant.
+The module's `validate_run_state_v1` helper checks structural cross-fields for
+fixtures only. The normative persistence CLI calls
+`validate_authoritative_run_state_v1`, which requires committed-policy and
+selected-server context and, for lineage, authoritative source/workspace and
+destination identity. Missing context is rejection, never an omitted check.
 
 One profile owns one shared read-only logical lane and zero or more dedicated
 logical lanes. A shared Run's persistent thread is loaded only in the shared

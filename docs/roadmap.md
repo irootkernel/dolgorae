@@ -273,15 +273,16 @@ WebSocket fragmentation/ping/close/multi-client behavior, singleton crash and
 restart reconciliation, writer crash boundaries, policy transitions, and
 reasoning non-retention through deterministic and pinned live fixtures. Run the full offline gate,
 requirement reverse index, Markdown links, obsolete-contract scans, and Git
-whitespace checks. TASK-000-D completed after the third follow-up live
-campaigns, reproducible evidence package, and independent review all passed.
+whitespace checks. At the third-follow-up historical checkpoint TASK-000-D was
+complete, but the fourth follow-up reopened the gate for corrected contracts,
+fresh live campaigns, a reproducible evidence package, and independent review.
 
 Epic acceptance: the input disposition, SOT, architecture, ADRs, checked
 schemas, roadmap ownership, and verification fixtures agree; an independent
 read-only review has no unresolved blocking finding; an implementation note
 links task-scoped commits; no production source exists; TASK-001 remains
-planned until this gate is complete. This gate is complete; TASK-001 remains
-`PLANNED` and is the next implementation task.
+planned until this gate is complete. This gate is currently incomplete;
+TASK-001 remains `PLANNED` and MUST NOT start before TASK-000-D closes again.
 
 ## EPIC-001: Foundation and Durable State
 
