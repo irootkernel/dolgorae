@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "target_version": "0.147.0",
-  "release_eligible": true,
+  "architecture_contract_eligible": false,
+  "production_runtime_eligible": false,
   "release_requirements": {
     "runtime_baseline": "0.147.0",
     "topology": "shared_readonly_plus_sticky_dedicated_lanes",

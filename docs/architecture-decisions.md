@@ -11,7 +11,7 @@ Git history preserves the prior text. Contradictory active ADRs are invalid.
 
 ## ADR-001: Ship One Binary Without an Installed Daemon
 
-Status: Accepted
+Status: Under Review for the fourth consistency pass
 
 ### Context
 

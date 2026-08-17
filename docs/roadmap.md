@@ -2,8 +2,8 @@
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
 Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete. External-runtime
-contract stabilization `TASK-000-D` is complete; no production implementation
-Task is active.
+contract stabilization `TASK-000-D` is active for its fourth consistency pass;
+no production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -61,14 +61,14 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `COMPLETE`
+Status: `ACTIVE`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
 
 ### TASK-000: Architecture Reconciliation and Codex Probe
 
-Status: `COMPLETE`
+Status: `ACTIVE`
 
 Reconcile the then-current writer-lock contract, stale-generation cleanup, runtime discovery,
 `outcome_unknown`, audit encoding/redaction/durability, protocol bounds, public
@@ -218,7 +218,8 @@ and client-safe replay.
 
 Status: `COMPLETE`
 
-Preserve `prompt.md` as non-normative input and record its
+Treat the repository-root `prompt.md` as user-owned, ignored, non-normative
+input; preserve only its digest and disposition in tracked review records. Record its
 [requirement disposition](external-runtime-disposition.md) plus the
 [singleton-correction disposition](singleton-correction-disposition.md) and
 [follow-up disposition](reviews/task-000-d-follow-up-disposition.md), plus the
