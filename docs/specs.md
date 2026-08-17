@@ -2063,6 +2063,15 @@ method-not-found, and do not stop the generation; unparseable frames fail
 closed. All app-server messages are correlated with request ID, thread
 ID, turn ID, and run generation before affecting state.
 
+The required-subset manifest has two independent eligibility fields.
+`architecture_contract_eligible` is owned by TASK-000-D and becomes true only
+after checked artifacts, reproducible pinned evidence, the self-contained
+package, and a no-P0/P1 independent architecture review agree.
+`production_runtime_eligible` is owned by TASK-015 and remains false until the
+implemented two-profile runtime passes every production smoke, migration,
+cleanup, interaction, artifact, and review gate. Architecture closure never
+promotes production eligibility.
+
 ## SPEC-013: External Runtime and Controller Contract
 
 The machine CLI is the sole required v1 integration transport. CLI, worker, and

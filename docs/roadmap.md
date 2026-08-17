@@ -767,4 +767,7 @@ version is accepted for an existing profile only through the operator-authorized
 commands cannot approve process-static drift.
 
 Epic acceptance: mark the personal alpha ready only after TASK-015 and the full
-Task completion gate are satisfied.
+Task completion gate are satisfied. TASK-015 alone owns the transition of the
+checked manifest's `production_runtime_eligible` field from false to true and
+must leave it false on any missing, failed, unverified, or stale production
+campaign. TASK-000-D owns only `architecture_contract_eligible`.

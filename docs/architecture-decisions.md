@@ -920,7 +920,8 @@ command notifications, clean only exact revalidated identities, and require
 five complete empty samples after leader exit. Treat malformed or incomplete
 census, PID reuse, unregistered survivors, unreadable identity, and detected
 escape as `unverified`. A native Codex terminal API is optional `hybrid`
-evidence, never the authority. Codex 0.147.0 may become release eligible after
+evidence, never the authority. In this superseded candidate, Codex 0.147.0 was
+considered architecture-contract eligible after
 the same-home multi-server, shared-to-capsule thread-resume, census, cleanup, and
 unrelated-process non-signalling campaigns pass.
 
@@ -1041,6 +1042,11 @@ assurance request. The source Controller authorizes creation and a new
 same-principal credential binds the destination. This avoids cloning authority,
 Controller instructions, or hidden history while allowing an orchestrator to
 specialize the successor deliberately.
+The destination Run is intentionally threadless at creation. Eager thread
+allocation is rejected because local publication may still fail and the sticky
+lane starts its physical generation lazily. The creation projection therefore
+requires a null destination thread; once first input binds it, the thread must
+be non-null and different from the lineage source thread.
 
 ### Consequences
 
