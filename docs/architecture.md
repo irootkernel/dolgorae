@@ -8,6 +8,8 @@ repository already implements it. Product behavior is owned by
 [specs.md](specs.md), rationale by
 [architecture-decisions.md](architecture-decisions.md), and implementation
 progress by [roadmap.md](roadmap.md).
+Document roles and the required synchronization procedure are defined by the
+[documentation authority map](README.md).
 
 ## System Context
 
@@ -202,7 +204,7 @@ with null thread and absent physical server; first input starts its initial
 generation. Its physical server may also be absent while the Run is paused.
 Resume starts a new generation only after exact old
 generation/descendant absence, five complete empty samples, no active or
-unknown turn/interaction/goal/native descendant, and a durable-history barrier.
+unknown turn/interaction/native descendant, and a durable-history barrier.
 The thread then resumes in the same logical lane. Infrastructure state,
 workspace writer authority, effective Codex policy, and background workload
 state are four independent facts.
@@ -495,8 +497,9 @@ follows SPEC-006's active-turn quarantine rule.
 
 The canonical workspace ID is SPEC-002's full lowercase SHA-256 over the
 domain-separated libc `realpath(3)` byte sequence. The same raw digest feeds the
-writer filename, startup filename, and socket derivations; no component performs
-case folding, Unicode normalization, or an alternate path hash.
+socket derivation; no component performs case folding, Unicode normalization, or
+an alternate path hash. Lock pathnames are fixed names below the per-workspace
+lock root and carry no digest.
 
 The repository-local layout is:
 
@@ -762,7 +765,8 @@ state name or transition in the historical record may be implemented.
    ledger. If `--write` is present, the same PREPARE transaction also publishes
    `reserved` authority and a provisional thread identity when needed.
 3. Release every file lock. In APPLY, a threadless write starts its thread with
-   writer policy; a bound reader applies promotion. Verify live effective policy.
+   writer policy; a bound reader keeps its thread `sandbox` value and applies
+   writer policy through the turn carrier alone. Verify live effective policy.
 4. Reacquire writer then run serialization, revalidate the operation token and
    revisions, fsync a new thread binding when applicable, and publish `active`.
    An indeterminate APPLY never starts a turn and lands in its specified

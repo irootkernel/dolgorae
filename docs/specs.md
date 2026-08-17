@@ -7,9 +7,13 @@ is owned by [architecture.md](architecture.md), decision rationale by
 [architecture-decisions.md](architecture-decisions.md), and delivery state by
 [roadmap.md](roadmap.md). A contradiction between SOT documents is an invalid
 state and must be reconciled before an implementation task becomes active.
+Document roles and the required synchronization procedure are defined by the
+[documentation authority map](README.md).
 
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.
+Constraints in checked JSON Schemas and rejection by an executable semantic
+validator explicitly named by this specification are also normative.
 
 ## Definitions
 
@@ -115,9 +119,9 @@ non-Git mode before any digest is computed.
 
 The workspace digest is lowercase hexadecimal SHA-256 over
 `"dolgorae-workspace-v1\0"` followed by those canonical path bytes. The full
-64-character digest is the workspace ID and writer-lock filename. The startup
-filename is lowercase hexadecimal SHA-256 over
-`"dolgorae-startup-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The short
+64-character digest is the workspace ID. Lock pathnames are fixed names below
+the per-workspace lock root owned by SPEC-007 and are never digest-derived,
+because that root is already scoped to one canonical workspace. The short
 socket name is RFC 4648 uppercase unpadded base32 of the first 160 bits of
 SHA-256 over
 `"dolgorae-socket-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The manifest
@@ -556,6 +560,7 @@ dolgorae [--human] operator credential rotate [--operator-file <path> | --operat
 
 dolgorae [--human] workspace inspect [--workspace <path>]
 dolgorae [--human] workspace writer status [--workspace <path>]
+dolgorae [--human] workspace writer reset [--workspace <path>] [--operator-file <path> | --operator-fd <fd>] --confirm-workspace-id <id> --require-worker-absence
 dolgorae [--human] workspace writer handoff-prepare --workspace <path> --from <run-id> --to <run-id> --expected-generation <n> [--controller-file <path> | --controller-fd <fd>]
 dolgorae [--human] workspace writer handoff-commit --workspace <path> --handoff-id <id> --expected-generation <n> [--controller-file <path> | --controller-fd <fd>]
 dolgorae [--human] workspace writer handoff-cancel --workspace <path> --handoff-id <id> [--controller-file <path> | --controller-fd <fd>]
@@ -924,7 +929,7 @@ Exit status classes are stable:
 | 5 | Codex compatibility, profile validation, or Dolgorae protocol-version failure |
 | 6 | Worker, app-server, transport, or internal runtime failure |
 | 7 | A `send` or `wait` request observed its turn end failed or interrupted |
-| 8 | Audit integrity verification failure |
+| 8 | Audit, artifact, or durable run-state integrity verification failure |
 
 Exit statuses outside `{0,2,3,4,5,6,7,8,130}` carry no machine envelope and
 MUST NOT be interpreted as semantic Dolgorae error codes. Exit 130 is reserved
@@ -955,6 +960,7 @@ normative:
 | `PROFILE_SERVER_EPOCH_MISMATCH` | 4 | run attach/recovery and writer operations | a connection or writer record names a different selected shared/dedicated lane-server epoch |
 | `WORKSPACE_INITIALIZATION_CONFLICT` | 4 | `init` | re-init, nesting, Git mode, partial-layout, or policy-file facts conflict |
 | `RUN_STATE_CONFLICT` | 4 | all state-changing `run` commands | the lifecycle state forbids the requested transition |
+| `RUN_STATE_INVARIANT_VIOLATION` | 8 | persistence and projection of run state | the executable run-state semantic validator named by SPEC-014 rejects a cross-field invariant; schema-only acceptance is never sufficient |
 | `POLICY_REJECTED` | 4 | policy-sensitive commands | workspace or hard-agent policy rejects the operation |
 | `RUN_BUSY` | 4 | state-changing run commands | another turn owns turn-start serialization, or another contender owns per-run worker startup/attachment serialization |
 | `WRITER_BUSY` | 4 | `run send/submit --write`, `run acquire-write` | durable workspace authority names another run or is blocked unknown; details identify the holder and whether a same-controller idle handoff may be prepared |
@@ -963,11 +969,15 @@ normative:
 | `STALE_WRITER_GENERATION` | 4 | writer handoff commands | a prepared handoff no longer matches writer or run generations |
 | `CONTROLLER_MISMATCH` | 4 | controller-authorized mutation | the supplied capability does not own the run |
 | `CONTROLLER_RESET_NOT_ALLOWED` | 4 | `run controller reset` | active work, a pending interaction, handoff, or unverifiable writer state blocks reset |
-| `OPERATOR_MISMATCH` | 4 | operator credential rotation, profile stop/restart, controller reset | the supplied separate local operator capability is absent, stale, or invalid |
+| `OPERATOR_MISMATCH` | 4 | operator credential rotation, profile stop/restart, controller reset, `workspace writer reset` | the supplied separate local operator capability is absent, stale, or invalid |
+| `CONTROL_MODE_REQUIRED` | 2 | `run start` | a `workflow_orchestrator` or `automation` controller did not supply `--control-mode`; managed runs never inherit interactive defaults |
+| `CONTROL_MODE_CONTROLLER_MISMATCH` | 4 | `run start`, `run create-successor` | the controller kind is not permitted by the requested control mode, or is `other` |
+| `PURPOSE_REQUIRED` | 2 | `run start` | a managed run did not supply `--purpose` |
+| `EXECUTION_LANE_REQUIRED` | 2 | `run start` | a managed run did not supply `--execution-lane` |
 | `CAPABILITY_UNSUPPORTED` | 4 | `run start`, projection and interaction commands | a required Dolgorae or profile feature is unavailable |
 | `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE` | 4 | profile add/update/doctor | the public profile requests disable enforcement that pinned Codex 0.147.0 did not provide |
 | `ACCESS_TRANSITION_UNSUPPORTED` | 4 | write acquire/release and handoff | the tested profile cannot safely apply the requested policy to the existing thread; fork a new run/thread |
-| `BACKGROUND_EXECUTION_UNVERIFIED` | 4 | writer release/handoff/close and recovery | the Dedicated lane-generation census or exact cleanup cannot prove the supported process scope empty |
+| `BACKGROUND_EXECUTION_UNVERIFIED` | 4 | writer release/handoff/close, `workspace writer reset`, and recovery | the Dedicated lane-generation census or exact cleanup cannot prove the supported process scope empty |
 | `IDEMPOTENCY_CONFLICT` | 4 | `run send/submit/respond/create-successor` | a run-scoped key was reused with different normalized input |
 | `INTERACTION_ALREADY_RESOLVED` | 4 | `run respond` | another valid response already won |
 | `INTERACTION_STALE` | 4 | `run respond` | the interaction belongs to an older or cleared generation |
@@ -977,13 +987,22 @@ normative:
 | `SUCCESSOR_SOURCE_NOT_TERMINAL` | 4 | `run create-successor` | the named source Turn is absent, nonterminal, stale, or no longer current |
 | `SUCCESSOR_LINEAGE_INVALID` | 4 | `run create-successor`, projection validation | source existence, workspace identity, fresh Run/thread identity, or immutable lineage validation failed |
 | `SUCCESSOR_CONTROLLER_INVALID` | 4 | `run create-successor` | the destination credential is reused, belongs to a different principal, or has an incompatible Controller kind |
+| `EXECUTION_LANE_UNSUPPORTED` | 4 | `run start`, `run create-successor` | the selected profile cannot host the requested execution lane |
+| `EXECUTION_LANE_IMMUTABLE` | 4 | state-changing run commands | an operation attempted to change a run's recorded execution lane |
+| `SHARED_RUN_WRITE_FORBIDDEN` | 4 | `run send/submit --write`, `run acquire-write` | a `shared_readonly` run requested write; a lineage-linked dedicated successor is required |
+| `THREAD_RESIDENCY_CONFLICT` | 4 | run attach/recovery/reconcile and writer operations | a thread was observed outside its immutable logical lane |
+| `SAME_HOME_MULTI_SERVER_UNSAFE` | 5 | `profile doctor`, `run start`, and lane-starting run commands | the pinned same-home shared/dedicated coexistence campaign did not pass for this profile |
+| `ASSURANCE_LEVEL_UNAVAILABLE` | 4 | `run start`, `run create-successor` | `required_assurance` exceeds the profile snapshot's achievable level; only lowering the pre-allocation request is permitted |
+| `DEDICATED_HISTORY_BARRIER_FAILED` | 4 | `run resume/recover/reconcile` | the persisted history revision/digest barrier did not admit a successor generation in the same logical lane |
+| `PROFILE_LANE_MIGRATION_REQUIRED` | 4 | `profile server migrate` | a live lane is incompatible with the requested generation contract and the complete lane set requires operator migration |
+| `DEDICATED_SERVER_START_FAILED` | 6 | `run send/submit`, `run resume` | a physical Dedicated Lane Server generation could not start; the logical run stays idle and the same lane may be retried |
 | `FILE_CHANGE_ARTIFACT_UNAVAILABLE` | 4 | `run pending/respond` | the exact correlated proposed change cannot be represented or its artifact is missing, oversized, or digest-stale |
 | `ARTIFACT_NOT_FOUND` | 3 | artifact show/read/export | the artifact ID is absent or does not belong to the addressed Run |
 | `ARTIFACT_RANGE_INVALID` | 2 | artifact read | offset/length is outside the artifact or the 1-MiB call bound |
 | `ARTIFACT_INTEGRITY_FAILURE` | 8 | artifact show/read/export and run verify | stored bytes do not match authoritative artifact metadata |
 | `PROJECTION_PROFILE_UNSUPPORTED` | 4 | `run events` | the requested client-safe projection is unavailable |
 | `OUTCOME_UNKNOWN` | 4 | state-changing run commands | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
-| `RECOVERY_REQUIRED` | 4 | writer acquire/release and lifecycle/recovery commands | prior same-run identity or a `blocked_unknown` workspace writer generation cannot be proved safe; new reader runs and projection-only commands are excluded and the code is never generically retryable |
+| `RECOVERY_REQUIRED` | 4 | writer acquire/release, `workspace writer reset`, and lifecycle/recovery commands | prior same-run identity or a `blocked_unknown` workspace writer generation cannot be proved safe; new reader runs and projection-only commands are excluded and the code is never generically retryable |
 | `PROFILE_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable profile identity differs from the manifest |
 | `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork/create-successor` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
 | `DOLGORAE_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Dolgorae version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
@@ -1210,10 +1229,16 @@ dedicated generation derives its effective policy from durable writer authority
 and reconciliation; it never becomes write-effective without active matching
 authority. Readers use thread `sandbox:"read-only"`, turn
 `sandboxPolicy:{"type":"readOnly","networkAccess":false}`, and
-`approvalPolicy:"never"`. Writers use thread `sandbox:"workspace-write"`,
-turn `sandboxPolicy:{"type":"workspaceWrite","writableRoots":[...],
+`approvalPolicy:"never"`. Writers use turn
+`sandboxPolicy:{"type":"workspaceWrite","writableRoots":[...],
 "networkAccess":false,"excludeSlashTmp":false,
-"excludeTmpdirEnvVar":false}`, and `approvalPolicy:"on-request"`.
+"excludeTmpdirEnvVar":false}`, and `approvalPolicy:"on-request"`. A thread's
+`sandbox` value is selected once by the `thread/start` or `thread/resume` that
+creates its generation and MUST NOT be treated as the writer discriminator. The
+pinned client method set cannot change it on a bound thread, so a dedicated
+reader that later activates writer authority keeps thread `sandbox:"read-only"`
+while its writer turns carry the workspace-write turn policy above. Only the
+turn carrier and verified effective policy determine write capability.
 `writableRoots` is the sorted unique set of the canonical workspace plus, in
 Git mode, libc `realpath(3)` of `git -C <canonical-workspace> rev-parse
 --path-format=absolute --git-common-dir` and `git -C <canonical-workspace>
@@ -1369,7 +1394,26 @@ If any lock pathname or the locks directory is missing while a run history
 exists, Dolgorae MUST fail closed rather than create a new inode that could split
 an existing serializer. Recovery requires explicit operator repair only after
 all recorded workers are absent and the incumbent thread/turn and singleton
-epoch have been reconciled. A writer crash with an active or uncertain turn
+epoch have been reconciled.
+
+`workspace writer reset` is that operator repair and is the only v1 escape from
+a `blocked_unknown` authority record. It is an exceptional same-user correctness
+override, not a force takeover: it MUST require the operator capability, an
+exact `--confirm-workspace-id` match, and explicit `--require-worker-absence`.
+PREPARE acquires writer then run serialization, revalidates the operator
+capability and the recorded authority revision, and fsyncs a reset token. APPLY
+drops every file lock and MUST prove every run recorded by the authority record
+`Absent` under SPEC-007 process identity, with a complete five-sample empty
+workload census for each recorded dedicated lane generation. COMMIT reacquires
+the same ordered prefix, revalidates the token and revision, appends the repair
+evidence to each affected run ledger, and only then publishes authority `none`.
+If any recorded worker is `Match` or `Unverifiable`, or any census is
+incomplete, the command MUST fail with `RECOVERY_REQUIRED` or
+`BACKGROUND_EXECUTION_UNVERIFIED` and leave the record unchanged. It MUST NOT
+signal any process, recreate a missing lock inode without the same absence
+proof, or fabricate a turn outcome. This is the action named by
+`BACKGROUND_EXECUTION_UNVERIFIED.details.required_action` value
+`operator_repair`. A writer crash with an active or uncertain turn
 persists `blocked_unknown`; kernel unlock, worker exit, connection close, and
 socket absence are never sufficient to clear it.
 
@@ -1437,10 +1481,9 @@ post-WebSocket-handshake sample is the sole final-executable identity authority
 and is stored with the server epoch. No run worker launches or owns this
 process.
 
-The recorded lock root already denotes the directory ending in `locks/`.
-Writer locks use `writer/<workspace-digest>` and startup locks use
-`startup/<workspace-and-run-digest>` relative to that root and MUST never share an inode. The
-per-run startup file contains two POSIX byte-range locks: byte 0 is held by
+The recorded lock root already denotes the directory ending in `locks/`. The
+fixed pathnames above are relative to that root and MUST never share an inode.
+The per-run startup file contains two POSIX byte-range locks: byte 0 is held by
 the CLI before fork until worker `bound`; byte 1 is acquired as the worker's
 first post-`setsid`/re-exec action and held for its entire serving lifetime.
 The 8192-byte lock body contains separate version-1, zero-padded owner records
@@ -1705,9 +1748,9 @@ maps stable server requests as follows:
   snapshot records a successful pinned live round trip; it becomes
   `waiting_interaction`;
 - `item/permissions/requestApproval` and `mcpServer/elicitation/request` are
-  recognized but unsupported in v1. Dolgorae persists an immediately resolved
-  `unsupported_request` interaction, replies JSON-RPC method-not-found, and
-  keeps draining the turn. They never appear in `run pending`. Connector
+  recognized but unsupported in v1. Dolgorae MUST persist an immediately
+  resolved `unsupported_request` interaction, reply JSON-RPC method-not-found,
+  and keep draining the turn. They MUST NOT appear in `run pending`. Connector
   approval remains unavailable.
 
 Supported requests are represented by the discriminator-bound interaction
@@ -1715,22 +1758,22 @@ kinds `command_execution_approval`, `file_change_approval`, and `user_input`.
 `run pending` is an observer-safe operation and returns only strict
 `dolgorae-interaction-summary/v1` records: request and Run IDs, kind, status,
 generic title, Controller kind, whether user escalation is required, whether
-the request contains protected input, and timestamps. It never returns command
+the request contains protected input, and timestamps. It MUST NOT return command
 text, cwd, questions/options, response schema, decision tokens, artifact IDs,
-thread/turn/item IDs, or server epoch. The title is selected only from the
-checked fixed enum by kind/status and the protected-input boolean. It is never
-derived from command, cwd, diff, question, option, reason, response schema, or
-other payload text. `run interaction get` is
+thread/turn/item IDs, or server epoch. The title MUST be selected only from the
+checked fixed enum by kind/status and the protected-input boolean, and MUST NOT
+be derived from command, cwd, diff, question, option, reason, response schema, or
+other payload text. `run interaction get` MUST be
 Controller-authorized and returns the full discriminator-bound interaction
 needed to resolve that request. Approval responses
 contain only `decision`. User-input responses contain an `answers` map keyed by
 question ID, each with a nonempty string array; Dolgorae validates IDs, option
 membership, and `isOther` semantics before translating to the pinned Codex
-response. If any answered question is secret, all answers exist only in the
-controller request and upstream write buffer and are zeroized. The durable
+response. If any answered question is secret, all answers MUST exist only in the
+controller request and upstream write buffer and MUST be zeroized. The durable
 resolution stores `contained_secret:true`, answer count, the winning
-idempotency key, and an opaque UUIDv7 resolution receipt; it stores no plaintext,
-unkeyed digest, HMAC, or other content-binding value. Unknown decisions,
+idempotency key, and an opaque UUIDv7 resolution receipt; it MUST NOT store
+plaintext, an unkeyed digest, an HMAC, or any other content-binding value. Unknown decisions,
 question IDs, response schemas,
 or raw Codex tokens return `INTERACTION_RESPONSE_INVALID`. Malformed frames
 stop the generation. Other known-but-unsupported requests receive JSON-RPC
@@ -1740,10 +1783,10 @@ a terminal turn event. If Codex instead leaves the turn nonterminal, the Master
 sees the run as `running` with no Dolgorae pending request and uses `run interrupt`
 as the bounded escape.
 
-The interaction is fsynced before any observer delivery. Controller disconnect
-does not affect it, the first valid idempotent response wins, an identical
-non-secret retry returns the recorded result, and another response returns
-`INTERACTION_ALREADY_RESOLVED`. A response from a non-controller returns
+The interaction MUST be fsynced before any observer delivery. Controller
+disconnect does not affect it, the first valid idempotent response MUST win, an
+identical non-secret retry returns the recorded result, and another response
+returns `INTERACTION_ALREADY_RESOLVED`. A response from a non-controller returns
 `CONTROLLER_MISMATCH`; schema mismatch returns
 `INTERACTION_RESPONSE_INVALID`. Interactions from an older run generation,
 cleared upstream request, terminal turn, or different server epoch return
@@ -1766,7 +1809,7 @@ diff. The initial `fileChange` item is the durable revision-0 baseline for exact
 `item/fileChange/patchUpdated` replaces the snapshot and advances its revision;
 the approval binds the latest durably stored revision. A patch update after the
 request makes that request stale. An approval request with no complete bound
-snapshot is rejected rather than displayed. Each upstream change preserves the
+snapshot MUST be rejected rather than displayed. Each upstream change preserves the
 closed `add`, `delete`, or `update` kind. `move_path` is null for add/delete and
 may be null or a destination only for update; Dolgorae does not invent a
 separate rename kind. Every change has a lossless workspace-contained path and
@@ -1777,7 +1820,7 @@ validator explicitly implements them. A larger aggregate up to 8 MiB is streamed
 run-private mode-0600 artifact and represented by artifact ID, media type,
 byte length, SHA-256, and `truncated:false`; the ledger stores only the reference.
 Larger, missing, path-escaping, uncorrelated, changed, or digest-mismatched
-content returns `FILE_CHANGE_ARTIFACT_UNAVAILABLE` and cannot be approved. The
+content returns `FILE_CHANGE_ARTIFACT_UNAVAILABLE` and MUST NOT be approved. The
 approval binds the snapshot SHA-256 and revision; a later patch update or item
 disappearance makes it `INTERACTION_STALE`.
 
@@ -1798,8 +1841,8 @@ Command- and file-change approval decisions exposed by Dolgorae are:
 For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `decline`, and `cancel`.
 
-Reader auto-decline is implemented solely by `approvalPolicy:"never"`; Dolgorae
-does not install a second approval interception mechanism. A server request
+Reader auto-decline MUST be implemented solely by `approvalPolicy:"never"`;
+Dolgorae MUST NOT install a second approval interception mechanism. A server request
 that nevertheless arrives is handled by the recognized-unsupported rule above.
 
 The pinned server's session-scoped approval value remains an observed wire
@@ -1927,9 +1970,13 @@ as opaque activity when observable and is not claimed as reconstructable audit.
 
 Reasoning text, reasoning summaries, reasoning deltas, and internal planning
 streams MUST NOT be persisted in the ledger, projections, logs, diagnostics, or
-exports. The worker SHOULD request notification suppression for every reasoning
-method pinned by the required-subset manifest and MUST independently filter an
-unexpected reasoning method before representation. It appends only the method,
+exports. The worker MUST independently filter every reasoning method before
+representation. Initialization-time suppression is not available on the pinned
+0.147.0 production profile, whose SPEC-003 launch contract requires
+`optOutNotificationMethods:[]` because reasoning-only methods cannot be
+isolated from required native lifecycle evidence. Receipt-side filtering is
+therefore the sole normative mechanism for that profile; a future pin that
+proves safe isolation MAY additionally request suppression. It appends only the method,
 raw byte length, SHA-256, and `reasoning_content_not_retained` classification.
 Client-safe events are normalized and schema-validated at append time; later
 projection never needs to reinterpret a version-specific raw payload.
@@ -2186,6 +2233,7 @@ token never restores a prior assumption or creates two authorities.
 | Threadless first write / reader promotion | Writer, run startup/mutation | None |
 | Existing writer turn | Writer validation, run mutation | None |
 | Writer release | Writer, run mutation | None |
+| Writer authority operator reset | Operator, writer, run startup/mutation | None during absence proof and census |
 | Handoff prepare/commit | Handoff, writer, source/destination run locks in UUID order | None |
 | Handoff cancel | Handoff, then affected run locks in UUID order | None |
 | Successor creation | Source/destination run locks in UUID order | None; allocation and capability delivery occur after PREPARE |
@@ -2317,7 +2365,7 @@ hard cap.
 A dedicated lane may stop its physical App Server while paused. It may start a
 new process generation only after the previous generation and every recorded
 descendant have exact `Absent` identity, the five-sample complete empty census
-has passed, no active or unknown goal, interaction, turn, or native descendant
+has passed, no active or unknown interaction, turn, or native descendant
 remains, and persisted `thread/read` history satisfies the revision/digest
 barrier. The new generation keeps the same lane ID, receives a new process
 generation and globally unique server epoch, and resumes the thread only in
@@ -2392,7 +2440,7 @@ lane; `EXECUTION_LANE_IMMUTABLE` rejects an attempted in-place lane change;
 `PROFILE_LANE_MIGRATION_REQUIRED` requires operator migration of the complete
 lane set; and `DEDICATED_SERVER_START_FAILED` permits a bounded retry of the
 same logical lane. Identity uncertainty still uses `RECOVERY_REQUIRED`, active
-goal/native work uses `RUN_BUSY`, workload uncertainty uses
+native work uses `RUN_BUSY`, workload uncertainty uses
 `BACKGROUND_EXECUTION_UNVERIFIED`, and writer/handoff conflicts keep their
 existing errors.
 

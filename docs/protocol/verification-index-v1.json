@@ -13,9 +13,9 @@
     "SPEC-007": {"tasks": ["TASK-002", "TASK-004", "TASK-007", "TASK-009-B"], "catches": ["sandbox mapping", "durable writer authority", "global lock hierarchy", "independent effective policy and writer authority", "same-controller handoff"]},
     "SPEC-008": {"tasks": ["TASK-006", "TASK-006-A", "TASK-009-A", "TASK-009-C"], "catches": ["lifecycle", "controller reset", "recovery", "fork", "effort defaults"]},
     "SPEC-009": {"tasks": ["TASK-008"], "catches": ["normalized interactions", "file snapshot and artifact correlation", "secret receipt non-binding", "idempotent resolution", "generation staleness"]},
-    "SPEC-010": {"tasks": ["TASK-003-A", "TASK-003-B", "TASK-003-C", "TASK-010", "TASK-012"], "catches": ["JSON ingest", "audit durability", "reasoning non-retention", "safe projection", "export and deletion"]},
-    "SPEC-011": {"tasks": ["TASK-011"], "catches": ["agent policy", "managed side effects"]},
-    "SPEC-012": {"tasks": ["TASK-005", "TASK-006-A", "TASK-010", "TASK-011", "TASK-013", "TASK-015"], "catches": ["orchestration boundary", "capability authorization", "Codex compatibility and observations"]},
+    "SPEC-010": {"tasks": ["TASK-003-A", "TASK-003-B", "TASK-003-C", "TASK-010", "TASK-011", "TASK-012"], "catches": ["JSON ingest", "audit durability", "reasoning non-retention", "safe projection", "export and deletion"]},
+    "SPEC-011": {"tasks": ["TASK-012"], "catches": ["agent policy", "managed side effects"]},
+    "SPEC-012": {"tasks": ["TASK-005", "TASK-006-A", "TASK-010", "TASK-012", "TASK-013", "TASK-015"], "catches": ["orchestration boundary", "capability authorization", "Codex compatibility and observations"]},
     "SPEC-013": {"tasks": ["TASK-000-D", "TASK-001", "TASK-005", "TASK-006-A", "TASK-007", "TASK-008", "TASK-010", "TASK-013", "TASK-014", "TASK-015"], "catches": ["external master transport", "runtime capabilities", "controller and observer", "operator reset and migration", "purpose and parent metadata", "event replay", "cross-epoch reconciliation", "profile diagnostics and artifact retrieval"]},
     "SPEC-014": {"tasks": ["TASK-000-D", "TASK-001", "TASK-004", "TASK-005", "TASK-006-A", "TASK-007", "TASK-008", "TASK-009-B", "TASK-011", "TASK-015"], "catches": ["control-mode compatibility", "immutable execution lane", "fixed thread residency", "sticky dedicated process generations", "per-workspace writer cardinality", "server-workload separation", "assurance negotiation", "profile lane lifecycle"]}
   }

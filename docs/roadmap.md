@@ -8,6 +8,8 @@ no production implementation Task is active.
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
 them.
+Document roles and the required synchronization procedure are defined by the
+[documentation authority map](README.md).
 
 ## Status Model
 
@@ -508,7 +510,10 @@ cross-profile same-controller prepare/commit/cancel handoff, and fail-closed
 background-execution uncertainty before activating or releasing authority.
 Persist `effective_policy` and `writer_authority` independently and implement
 revision-bound PREPARE/APPLY/COMMIT/cancel transitions without external waits
-under file locks.
+under file locks. Implement the operator-authorized `workspace writer reset`
+repair, which is the only v1 escape from a `blocked_unknown` record and requires
+proved absence of every recorded worker plus a complete empty census per
+recorded dedicated lane generation.
 Acquire/release retains the same worker, byte-1 owner, logical lane, and thread.
 Policy changes occur within the current dedicated generation or, after exact
 absence and a durable-history barrier, within its same-lane successor
@@ -537,6 +542,11 @@ union and revalidation, supported model/effort overrides, recomposed instruction
 prefixes, and non-inheritance of source Controller instructions or hidden history.
 Also cover `F_SETLKWTIMEOUT`, spawn-image versus final-image identity, and
 fail-closed byte-1 control timeout without any activity-derived signal.
+Measure the exact SPEC-007 writer turn carrier, including
+`excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`, against the pinned
+profile and prove that a writer turn can write both the workspace and the OS
+temporary directory. The TASK-000 probe campaign used the excluding variant, so
+these two normative field values have no prior live evidence.
 Add deterministic interleavings for the normative lock matrix and every
 threadless first-write crash boundary; `acquire-write` on a threadless run is a
 state conflict. No task claims OS ownership of shared App Server descendants.
@@ -755,8 +765,9 @@ persist credentials or secret-bearing raw output in fixtures.
 The campaign must prove same-home shared Profile Server plus multiple Dedicated
 Run Server coexistence, globally unique epochs, fixed thread residency,
 dedicated-lane process census and exact cleanup, no unrelated signalling, policy
-transitions, profile diagnostic minimal/operational views, and artifact
-integrity/range behavior. If any required dedicated-lane behavior fails, TASK-015 and
+transitions, profile diagnostic minimal/operational views, artifact
+integrity/range behavior, and the exact SPEC-007 writer turn carrier with
+`excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`. If any required dedicated-lane behavior fails, TASK-015 and
 release remain blocked; absence of a future native terminal API is not itself a
 blocker.
 

@@ -15,7 +15,7 @@
       "enum": [
         "unknown", "help", "version", "init", "runtime.capabilities", "controller.credential.create",
         "operator.credential.initialize", "operator.credential.rotate",
-        "workspace.inspect", "workspace.writer.status", "workspace.writer.handoff_prepare",
+        "workspace.inspect", "workspace.writer.status", "workspace.writer.reset", "workspace.writer.handoff_prepare",
         "workspace.writer.handoff_commit", "workspace.writer.handoff_cancel",
         "profile.add", "profile.list", "profile.show", "profile.remove",
         "profile.doctor", "profile.server.status", "profile.server.start",
@@ -526,7 +526,7 @@
         { "if": { "properties": { "command": { "enum": ["operator.credential.initialize", "operator.credential.rotate"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/operator_credential_created" } } } },
         { "if": { "properties": { "command": { "const": "init" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/workspace" } } } },
         { "if": { "properties": { "command": { "const": "workspace.inspect" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/workspace" } } } },
-        { "if": { "properties": { "command": { "const": "workspace.writer.status" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/writer_status" } } } },
+        { "if": { "properties": { "command": { "enum": ["workspace.writer.status", "workspace.writer.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/writer_status" } } } },
         { "if": { "properties": { "command": { "enum": ["workspace.writer.handoff_prepare", "workspace.writer.handoff_commit", "workspace.writer.handoff_cancel"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/handoff" } } } },
         { "if": { "properties": { "command": { "enum": ["profile.add", "profile.show", "profile.doctor", "profile.server.status", "profile.server.start", "profile.server.stop", "profile.server.restart", "profile.server.migrate", "profile.state.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile" } } } },
         { "if": { "properties": { "command": { "enum": ["profile.membership.verify", "profile.membership.tombstone_orphan"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/membership_verification" } } } },

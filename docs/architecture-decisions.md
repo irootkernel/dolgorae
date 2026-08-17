@@ -8,6 +8,8 @@ This document owns decision rationale. Each ADR describes the currently
 accepted decision, not an append-only historical chain. If a decision changes,
 edit its ADR in place and update every affected SOT document in the same change;
 Git history preserves the prior text. Contradictory active ADRs are invalid.
+Document roles and the required synchronization procedure are defined by the
+[documentation authority map](README.md).
 
 ## ADR-001: Ship One Binary Without an Installed Daemon
 
@@ -898,32 +900,17 @@ event or a `FINAL_RESPONSE_UNAVAILABLE` error.
 - Treating projection membership as prose only: rejected because a syntactically
   valid minimal envelope could otherwise carry operational command data.
 
-## ADR-018: Own Writer-Capsule Census and Expose Bounded Artifacts and Profile Diagnostics
+## ADR-018: Expose Bounded Artifacts and Profile Diagnostics
 
-Status: Accepted in its bounded-artifact and profile-diagnostic portions;
-superseded in its Writer Capsule portion by ADR-019
+Status: Accepted
 
 ### Context
 
-Codex 0.147.0 has no thread-scoped background-terminal authority, and waiting
-for an unspecified future interface would leave the core writer guarantee
-undeliverable. Final answers and exact file-change snapshots can exceed the safe
-inline machine boundary. Profile startup can also fail before a Run exists, so
+Final answers and exact file-change snapshots can exceed the safe inline
+machine boundary. Profile startup can also fail before a Run exists, so
 run-scoped events cannot represent all actionable failures.
 
 ### Decision
-
-Use an exclusive Writer Capsule App Server for each active writer generation.
-Spawn it suspended in a new process group, persist full process identities and
-exit observation before continuation, census every 100 milliseconds and on
-command notifications, clean only exact revalidated identities, and require
-five complete empty samples after leader exit. Treat malformed or incomplete
-census, PID reuse, unregistered survivors, unreadable identity, and detected
-escape as `unverified`. A native Codex terminal API is optional `hybrid`
-evidence, never the authority. In this superseded candidate, Codex 0.147.0 was
-considered architecture-contract eligible after
-the same-home multi-server, shared-to-capsule thread-resume, census, cleanup, and
-unrelated-process non-signalling campaigns pass.
 
 Store only `file_change_diff` and `final_response` artifacts in the run-private
 mode-0600 store. Bound a file diff at 8 MiB, a final response at 32 MiB, and a
@@ -944,20 +931,10 @@ only after the Profile Server has durably published a ready non-null epoch.
 
 - Large client-safe values remain retrievable without unbounded envelopes.
 - Profile start failures are discoverable without inventing a failed Run.
-- Failure of the Writer Capsule live campaigns is an explicit release blocker;
-  a future Codex terminal API is not.
 - Artifact and diagnostic retention/authorization require dedicated tests.
 
 ### Rejected alternatives
 
-- Infer background absence from turn completion: rejected because terminal turn
-  state does not prove process absence.
-- Wait for a future Codex background-terminal API: rejected because Dolgorae can
-  create and police an exclusive writer process boundary now, while an external
-  release has no delivery commitment.
-- Run all Codex instances with
-  `--dangerously-bypass-approvals-and-sandbox`: rejected because it disables the
-  approval/sandbox contract and does not create thread or process ownership.
 - Put large values in the audit line or stdout envelope: rejected because it
   defeats bounded parsing and replay.
 - Attribute profile startup failures to a synthetic Run: rejected because no
@@ -979,10 +956,10 @@ rejected resume as already having an active writer. The same campaign proved
 same-home server initialization and catalog stability, read/write policy
 changes on one server, concurrent writers in two workspaces, ten live idle
 servers, and closed-generation history resume. Background-terminal discovery
-returned no entries. A subsequent Dolgorae census/cleanup campaign passed. The
-later native-subagent conclusion is unusable: its semantic result reported no
+returned no entries. A subsequent Dolgorae census/cleanup campaign passed. An
+earlier native-subagent conclusion was unusable: its semantic result reported no
 collaboration item while retained wire shapes contain `subAgentActivity` and
-`collabAgentToolCall`. The corrected campaign must separate Codex-native child
+`collabAgentToolCall`. The corrected campaign separated Codex-native child
 threads from independent Dolgorae Runs and workers.
 
 Purpose metadata also cannot define who controls a Run, how interactions route,
@@ -1004,6 +981,16 @@ dedicated writers in different workspaces. Separate effective policy, writer
 authority, server-lane infrastructure, and background-workload state in durable
 state and projections. Profile lifecycle enumerates the shared lane and all
 dedicated lane journals; dedicated servers restart lazily.
+
+Dolgorae owns the exact-identity process census for a dedicated generation. It
+samples every 100 milliseconds and on command notifications, signals or cleans
+only exact revalidated identities, and requires five complete empty samples
+after leader exit. A malformed or incomplete census, PID reuse, an unregistered
+survivor, unreadable identity, or detected escape makes background state
+`unverified`. A native Codex terminal API may add `hybrid` evidence but is not
+the authority. These rules survive from the rejected Writer Capsule candidate;
+the capsule topology and its shared-to-capsule thread-resume campaign do not.
+
 Use the shared lane only for lightweight read-only analysis. Compiler/test
 execution, formatters, watchers, long-running validation, background processes,
 or work needing reliable command ownership and cleanup selects a dedicated
@@ -1058,8 +1045,11 @@ be non-null and different from the lineage source thread.
 - Multiple workspaces retain concurrent writers without a profile-global
   downgrade.
 - Codex-native descendants and independent Dolgorae Runs are different
-  concepts. Native descendants may run, but active or unknown native state and
-  goals block pause, generation replacement, profile stop, and shutdown.
+  concepts. Native descendants may run, but active or unknown native state
+  blocks pause, generation replacement, profile stop, and shutdown. Codex goal
+  state is not a v1 quiescence operand: the pinned client method set exposes no
+  goal query, so requiring it would make every quiescence-dependent transition
+  fail closed.
 - The v1 pre-implementation schemas are rebaselined in place; no production
   state migration is required.
 
