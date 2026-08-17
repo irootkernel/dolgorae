@@ -19,19 +19,27 @@ controller authorization, account binding, access coordination, recovery, and
 audit around Codex threads without replacing Codex conversation storage.
 
 ```text
-                          project-local profile configuration
-                          argv + expected CODEX_HOME
-                                     |
-                                     v
-master -> dolgorae CLI -> semantic service -> per-run worker
-             |                                  |       |
-       stable JSON/JSONL                    audit ledger | direct WebSocket/UDS
-                                                        v
-                                      +-> shared read-only Profile Server -> Codex services
-                                      `-> Run-owned Dedicated Server lane -> Codex services
+Gul Go core / local automation
+          |
+          +-- Machine CLI: stable JSON/JSONL
+          |
+          `-- public gRPC: HTTP/2 over user-private Unix socket
+                         |
+                  semantic service
+                         |
+                   per-run worker
+                    |          |
+               audit ledger    | private WebSocket/UDS
+                               v
+             +-- shared read-only Profile Server -> Codex services
+             `-- Run-owned Dedicated Server lane -> Codex services
 ```
 
-The master is the only orchestrator of Independent Dolgorae Runs. A profile may
+The master is the only orchestrator of Independent Dolgorae Runs. A trusted
+external automation broker may accept a parent model's subagent request, but the
+broker remains the child Run's master and Controller and invokes only a public
+adapter. The requesting model receives no Controller capability and never
+controls the child directly. A profile may
 permit Codex-native subagents before full lifecycle verification, but active or
 unverified native state blocks every quiescence-requiring transition. Those
 children remain within one Codex session tree and are never Dolgorae peer Runs,
@@ -41,11 +49,23 @@ The 0.147.0 production initialize contract fixes
 invalidates native support and fences every quiescence-dependent operation;
 reasoning content is redacted after receipt instead.
 
-The v1 public boundary stops at the machine CLI. The worker socket and App
-Server transport remain private, and future adapters must call the same semantic
-service rather than reimplement state or authorization rules.
+The v1 public boundary contains the Machine CLI and optional supervised local
+gRPC gateway. Both call one semantic service. The gateway is a delivery adapter,
+not a state owner or worker supervisor. Worker sockets and App Server transports
+remain private and inaccessible to Gul.
 
 ## Component Model
+
+### Shared Semantic Service
+
+The semantic service owns every public operation independently of wire format.
+It accepts validated domain requests, performs Controller and Operator
+authorization at the existing serialization points, coordinates workers and
+durable repositories, and returns domain results or typed Dolgorae errors. The
+Machine CLI converts those results to closed JSON envelopes; the gRPC gateway
+converts them to Protobuf messages and typed gRPC status details. Neither
+adapter may duplicate state transitions, idempotency normalization, writer
+policy, recovery, redaction, or projection rules.
 
 ### CLI Front End
 
@@ -64,6 +84,72 @@ It never talks directly to app-server and never writes the audit ledger while a
 worker owns the run. Start-time bootstrap is the only period in which the
 front-end may create the run directory and initial records before worker
 ownership transfers.
+
+### Public gRPC Gateway
+
+`dolgorae serve --socket <absolute-path>` is an optional foreground re-execution
+of the same binary. It is started and supervised by Gul or another trusted
+same-user client and never installs a launchd unit. It binds only the supplied
+Unix socket, checks every accepted connection with the platform peer-credential
+API, and offers unary operations plus Run-scoped event streams. The gateway
+serves multiple workspaces, but every request after the initial
+`InspectWorkspace` bootstrap supplies an absolute workspace path and expected
+workspace ID; bootstrap inspection accepts the absolute path alone and returns
+the calculated identity. There is no global in-memory Run registry.
+
+The gateway holds the installation-scoped Application Support
+`Dolgorae/rpc/gateway.lock` for its lifetime and publishes `gateway.json` with
+boot UUID, PID/start identity, binary digest, socket path/inode, server instance
+ID, and protocol range. The lock is never acquired by an ordinary semantic
+operation and therefore is outside the global operation lock hierarchy. A
+second gateway returns `RPC_SERVER_ALREADY_RUNNING`.
+
+Socket traversal is descriptor-relative and no-follow. The supplied path must
+be absolute, its existing parent must be a current-uid-owned mode-0700 directory,
+and the new node is mode 0600. Symlinks, non-socket collisions, foreign nodes,
+unsafe permissions, and stale nodes not bound to the exact prior record return
+`RPC_SOCKET_UNSAFE`. A graceful shutdown stops new calls, drains admitted unary
+calls for at most five seconds, terminates open streams with
+`SERVER_SHUTDOWN`, and unlinks only the inode it bound.
+
+The ownership split is strict: Gul may create and validate the private parent,
+choose an unused pathname, launch the process, and verify readiness. Dolgorae
+alone owns the singleton lock/record, bind, node mode, stale proof, unlink, and
+graceful cleanup. A client never unlinks the provider socket, including after a
+failed start. `RPC_SOCKET_UNSAFE` instructs the client to fix or replace its
+private socket parent/path before a new attempt; gateway restart with unchanged
+unsafe inputs is not a remediation.
+
+The gateway uses a bounded `tokio` runtime only to operate tonic HTTP/2, UDS
+acceptance, cancellation, and per-stream delivery. Blocking semantic operations
+enter a bounded worker pool. Each event stream has an independent queue limited
+to 32 envelopes or 4 MiB and five seconds of stalled delivery. Pressure closes
+only that stream with `SLOW_CONSUMER`; it never blocks ledger append, App Server
+draining, another Run stream, or an active turn.
+
+Gateway loss has no worker, Run, writer, or App Server lifecycle consequence.
+An admitted mutation may continue after its caller loses the response, so the
+client applies the operation's idempotency or reconciliation contract rather
+than interpreting connection loss as failure. A new gateway reconstructs
+projections from authoritative workspace state and resumes streams from the
+client's durable cursor.
+
+The adapter maps shared semantic DTOs into typed Protobuf projections. Run,
+writer, policy, assurance, recovery, interaction, lineage, capability, and
+required-action states use closed enums/structures. Full Controller Interaction
+payloads use a typed `oneof`; only the protected response remains bounded JSON.
+Run/Writer/Interaction snapshots and events carry a common revision stamp so a
+client never combines incompatible aggregates to enable a mutation. Public
+filesystem output uses a UTF-8/opaque-byte path `oneof`, and capability blockers
+use a closed code enum. Durable event delivery uses a typed event `oneof`;
+heartbeat and stream-end variants are non-durable and do not consume cursor
+values. No business decision depends on parsing diagnostic text or private
+worker state.
+
+The adapter preserves `recognized_unsupported` as a distinct Interaction
+support value. Profile model normalization rejects duplicate IDs, duplicate or
+empty effort tokens, and zero or multiple defaults before either adapter emits
+a profile; `ModelCapability.is_default` is the only default-model source.
 
 ### Per-Run Worker
 
@@ -195,7 +281,7 @@ shared Run's thread is never loaded by a dedicated server; a dedicated Run's
 thread is never loaded by the shared server or a different dedicated lane.
 Read/write policy changes and workspace writer acquisition occur within one
 dedicated process generation. A shared Run that later needs write creates a
-lineage-linked dedicated successor.
+lineage-linked dedicated write continuation.
 
 Each dedicated lane has a UUIDv7 lane ID, append-only process-generation
 journal, globally unique server epochs, short socket identity, exact leader and
@@ -225,6 +311,15 @@ through `run interaction get`; observers receive strict summaries without
 payload, response-schema, artifact, thread, turn, item, or server identity. No Controller capability
 enters LLM-visible data.
 
+A brokered independent subagent is an ordinary `managed_agent` Run with an
+`automation` Controller, a Dedicated Execution Lane, and opaque parent
+provenance. It uses the existing credential-create, run-start, input,
+observation, interrupt, writer, and close operations rather than a second
+orchestration state machine. The broker owns the child credential and carries a
+bounded safe result back to the parent. Broker or parent disconnection does not
+imply child termination or writer release. A later MCP adapter may wrap this
+composition, but it may not change its authorization or lifecycle semantics.
+
 Instruction composition is immutable and versioned as common safety prefix,
 control-mode prefix, purpose prefix, then bounded Controller instructions. A
 shared Run forces Codex Plan Mode on every turn, read-only sandbox, disabled
@@ -234,16 +329,19 @@ shared server records command items and an aggregate process census, but cannot
 attribute or clean descendants per Run; only profile stop owns aggregate
 cleanup. Dedicated lanes retain exact per-generation census ownership.
 
-`run create-successor` is separate from history fork. The source Controller
-authorizes a current-terminal-Turn transition, while a new same-principal
-credential binds the destination. Workspace, profile, and control mode are
-fixed; model/effort, purpose, capability additions, and non-decreasing assurance
-are validated before allocation. Common/mode/purpose instructions are
-recomposed and only explicit bounded destination instructions are appended.
-The operation records immutable lineage and a bounded handoff digest, then
-publishes a dedicated logical lane with no thread or physical generation. First
-input starts the destination generation; the source remains permanently shared
-and never transfers writer authority or hidden history.
+`run create-write-continuation` is separate from history fork. It accepts a
+shared-readonly source or a dedicated reader whose write-policy transition is
+unavailable or unverified. The source Controller authorizes a current-terminal-
+Turn transition, while a new same-principal credential binds the destination.
+Workspace, profile, and control mode are fixed; model/effort, purpose,
+capability additions, and non-decreasing assurance are validated before
+allocation. Common/mode/purpose instructions are recomposed and only explicit
+bounded destination instructions are appended. The operation records immutable
+lineage, creation reason, and a bounded handoff digest, then publishes a
+dedicated logical lane with no thread or physical generation. First input starts
+the destination generation. Source lane, writer authority, recovery state,
+Controller instructions, reasoning, and hidden native-subagent history remain
+unchanged and are never copied.
 
 Codex 0.147.0 achieved only `best_effort_personal_alpha`. Basic same-home
 coexistence and bounded storage integrity passed under the tested configuration;
@@ -349,16 +447,42 @@ The run-private artifact store is a bounded projection adjunct, not an event
 authority. It accepts only exact file-change diffs and final responses, writes
 create-exclusive mode-0600 files, records byte length and SHA-256, and enforces
 8-MiB/file, 32-MiB/final-response, and 256-MiB/run quotas. Public reads use
-opaque artifact IDs and verified base64 chunks of at most 1 MiB. Artifact
+opaque artifact IDs and verified base64 chunks of at most 1 MiB. Inline final
+responses are at most 1 MiB. Client presentation and download limits may be
+stricter but never enlarge provider bounds; complete downloads verify both
+length and digest. Artifact
 metadata carries `observer` or `controller_only` visibility; interaction-derived
 artifacts are controller-only. Internal paths and reasoning content never cross
 the machine boundary.
 
 The manifest stores controller metadata, a domain-separated capability digest,
-controller generation, opaque purpose/parent metadata, and required/validated
-capabilities. Raw capability bytes exist only in the caller-owned credential
+controller generation, accepted profile/model, closed purpose and optional
+label, parent metadata, required/validated capabilities, instruction-contract
+versions, normalized Controller-instruction length/digest, and the initial and
+current default effort. These facts reconstruct `RunConfigurationProjection`
+after restart; workspace/profile defaults never overwrite an existing Run.
+Raw capability bytes exist only in the caller-owned credential
 carrier and are consumed before worker discovery; they never enter argv,
 environment, logs, audit, runtime records, or machine output.
+
+For public gRPC, the only accepted Controller carrier is an absolute protected
+file reference below the canonical mode-0700 Application Support directory
+`Dolgorae/controller-carriers/`. The Protobuf request contains the path and
+expected public Controller ID/generation, never capability bytes. The semantic
+service reopens the file beneath an already validated directory descriptor and
+revalidates root containment, regular-file type, no-symlink identity, current
+UID, mode 0600, 4-KiB bound, Controller identity/generation, and target-Run
+authorization immediately before each authorized read or mutation. The
+side-effect-free `VerifyController` operation runs this same check without
+opening a worker or changing durable state.
+
+The capability response publishes the checked credential schema identity and
+digest plus the carrier policy. This permits a trusted Gul backend to create a
+new generation-1 credential with create-exclusive semantics under
+`controller-carriers/gul/<installation-id>/`; it does not grant Gul access to
+Operator credentials or add a credential-generation RPC. Continuation
+authorization compares normalized principals and requires a new Controller ID
+and capability.
 
 ## Process and Transport Topology
 
@@ -371,10 +495,12 @@ Commands and supported Codex native-subagent work may temporarily create
 additional descendants inside the selected physical generation.
 
 ```text
-dolgorae CLI invocation
-  |
-  | Unix domain socket: framed JSONL request/response/notifications
-  v
+Machine CLI invocation ----+
+                           |
+Gul -- gRPC/HTTP2/UDS -----+--> shared semantic service
+                                   |
+                                   | private framed JSONL/UDS
+                                   v
 dolgorae worker [run R, worker generation G]
   |
   | HTTP Upgrade + masked WebSocket over selected private Unix socket
@@ -866,6 +992,14 @@ durability and process work uses dedicated OS threads rather than an async
 runtime: control/protocol, stdout, stderr, ledger/state authority,
 kqueue/liveness, and `sigwait` each have an explicit owner.
 
+The public RPC gateway is the sole exception to the no-async-runtime default.
+It uses `tonic`, `prost`, and an adapter-private bounded `tokio` runtime for
+HTTP/2-over-UDS transport, cancellation, and server-stream delivery. Durable
+state, locks, process control, worker IPC, and semantic transitions remain on
+the existing blocking owners. The gateway invokes them through a bounded
+blocking pool and may never hold a Tokio task, stream queue, or HTTP/2 channel
+as authority evidence.
+
 One `darwin` module is the only unsafe OS boundary. It wraps `libc` bindings for
 `posix_spawn` attributes, libproc sampling/enumeration, kqueue, byte-range
 fcntl/flock inspection, `fstatfs/MNT_LOCAL/APFS`, and boot-UUID sysctl. Core recovery
@@ -942,7 +1076,13 @@ It does not provide:
   shared App Server process tree;
 - cryptographic signatures or remote audit attestation;
 - direct communication or trust delegation between independent Dolgorae runs;
+  externally brokered child operation remains hub-and-spoke orchestration;
 - authorization based on a diagnostic environment marker.
+- public Internet, TCP, or direct Tailscale exposure of the local gRPC socket;
+- remote authentication or authorization inside Dolgorae; Gul owns that
+  boundary before exposing local results;
+- Gul access to private worker sockets, profile/dedicated App Server sockets,
+  App Server protocol frames, or Operator credentials.
 
 ## Compatibility Boundary
 

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "package": "dolgorae.public.v1",
+  "protocol_version": 1,
+  "minimum_client_protocol_version": 1,
+  "maximum_client_protocol_version": 1,
+  "source": "dolgorae/public/v1/dolgorae.proto",
+  "source_sha256": "e50b13fde04360535a84ae49afa209afdbd3b11e6c97fec1966b80c4ee57a344",
+  "descriptor": "dolgorae-public-v1.descriptor.pb",
+  "descriptor_sha256": "95e49ed4280762e14d43ae4e1157ea79f2d2505ce35bda288ea51b09eefe1956",
+  "include_imports": true,
+  "include_source_info": true,
+  "buf_breaking": {
+    "baseline": null,
+    "result": "not_applicable_initial_public_v1"
+  },
+  "generator": {
+    "protoc": "35.1",
+    "buf": "1.66.1"
+  }
+}

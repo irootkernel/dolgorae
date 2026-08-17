@@ -13,7 +13,7 @@
     "json_value": {},
     "command": {
       "enum": [
-        "unknown", "help", "version", "init", "runtime.capabilities", "controller.credential.create",
+        "unknown", "help", "version", "init", "serve", "runtime.capabilities", "controller.credential.create",
         "operator.credential.initialize", "operator.credential.rotate",
         "workspace.inspect", "workspace.writer.status", "workspace.writer.reset", "workspace.writer.handoff_prepare",
         "workspace.writer.handoff_commit", "workspace.writer.handoff_cancel",
@@ -23,10 +23,10 @@
         "profile.membership.verify", "profile.membership.tombstone_orphan", "profile.state.reset",
         "profile.diagnostics.list", "profile.events",
         "run.start", "run.list", "run.status", "run.send",
-        "run.submit", "run.wait", "run.events", "run.pending", "run.interaction.get", "run.respond",
+        "run.submit", "run.wait", "run.events", "run.timeline", "run.pending", "run.interaction.get", "run.respond",
         "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write",
-        "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_successor",
-        "run.close", "run.delete", "run.verify", "run.export", "run.controller.reset",
+        "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_write_continuation",
+        "run.close", "run.delete", "run.verify", "run.export", "run.controller.reset", "run.controller.verify",
         "run.artifact.show", "run.artifact.read", "run.artifact.export"
       ]
     },
@@ -44,17 +44,19 @@
         "CONTROL_MODE_REQUIRED", "CONTROL_MODE_CONTROLLER_MISMATCH", "PURPOSE_REQUIRED", "EXECUTION_LANE_REQUIRED",
         "CAPABILITY_UNSUPPORTED", "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE", "ACCESS_TRANSITION_UNSUPPORTED", "BACKGROUND_EXECUTION_UNVERIFIED",
         "EXECUTION_LANE_UNSUPPORTED", "EXECUTION_LANE_IMMUTABLE", "SHARED_RUN_WRITE_FORBIDDEN",
-        "SUCCESSOR_SOURCE_NOT_TERMINAL", "SUCCESSOR_LINEAGE_INVALID", "SUCCESSOR_CONTROLLER_INVALID",
-        "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN", "SUCCESSOR_MODEL_UNSUPPORTED",
+        "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL", "WRITE_CONTINUATION_LINEAGE_INVALID", "WRITE_CONTINUATION_CONTROLLER_INVALID",
+        "WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN", "WRITE_CONTINUATION_MODEL_UNSUPPORTED",
         "THREAD_RESIDENCY_CONFLICT", "SAME_HOME_MULTI_SERVER_UNSAFE", "ASSURANCE_LEVEL_UNAVAILABLE",
         "DEDICATED_HISTORY_BARRIER_FAILED", "PROFILE_LANE_MIGRATION_REQUIRED", "DEDICATED_SERVER_START_FAILED",
         "IDEMPOTENCY_CONFLICT", "INTERACTION_ALREADY_RESOLVED", "INTERACTION_STALE",
-        "INTERACTION_RESPONSE_INVALID", "FILE_CHANGE_ARTIFACT_UNAVAILABLE", "ARTIFACT_NOT_FOUND", "ARTIFACT_RANGE_INVALID", "ARTIFACT_INTEGRITY_FAILURE", "PROJECTION_PROFILE_UNSUPPORTED", "OUTCOME_UNKNOWN",
+        "INTERACTION_RESPONSE_INVALID", "INTERACTION_RESPONSE_TOO_LARGE", "INTERACTION_PAYLOAD_TOO_LARGE", "INTERACTION_OUTCOME_UNKNOWN", "FILE_CHANGE_ARTIFACT_UNAVAILABLE", "ARTIFACT_NOT_FOUND", "ARTIFACT_RANGE_INVALID", "ARTIFACT_INTEGRITY_FAILURE", "PROJECTION_PROFILE_UNSUPPORTED", "OUTCOME_UNKNOWN",
         "RECOVERY_REQUIRED", "PROFILE_MISMATCH", "COMPATIBILITY_REJECTED",
-        "DOLGORAE_PROTOCOL_MISMATCH", "PROTOCOL_VERSION_UNSUPPORTED", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
+        "DOLGORAE_PROTOCOL_MISMATCH", "PROTOCOL_VERSION_UNSUPPORTED", "UNSUPPORTED_SCHEMA_VERSION", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT",
         "PROTOCOL_FRAME_TOO_LARGE", "RUNTIME_PATH_INVALID",
         "RUNTIME_PATH_COLLISION", "REDACTION_FAILURE", "INTERNAL_ERROR",
-        "TURN_FAILED", "TURN_INTERRUPTED", "AUDIT_INTEGRITY_FAILURE"
+        "TURN_FAILED", "TURN_INTERRUPTED", "AUDIT_INTEGRITY_FAILURE",
+        "THREADLESS_REQUIRES_WRITE_TURN", "SLOW_CONSUMER", "EVENT_CURSOR_INVALID",
+        "RPC_SERVER_ALREADY_RUNNING", "RPC_SOCKET_UNSAFE", "SERVER_SHUTDOWN"
       ]
     },
     "path": {
@@ -437,7 +439,7 @@
         "run_generation": { "type": "integer", "minimum": 0 },
         "kind": {
           "enum": [
-            "workspace_initialized", "run_created", "successor_created", "turn_intent",
+            "workspace_initialized", "run_created", "write_continuation_created", "turn_intent",
             "thread_bound", "turn_started", "turn_terminal",
             "lifecycle_transition", "run_generation_started",
             "run_generation_stopped", "app_server_request",
@@ -456,6 +458,29 @@
         "payload": { "$ref": "#/$defs/json_value" },
         "previous_hash": { "$ref": "#/$defs/sha256" },
         "hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "rpc_server_ready": {
+      "type": "object", "additionalProperties": false,
+      "required": ["server_instance_id", "socket_path", "rpc_protocol_version", "minimum_client_version", "maximum_client_version", "descriptor_sha256"],
+      "properties": {
+        "server_instance_id": { "$ref": "#/$defs/uuid" },
+        "socket_path": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 4096 },
+        "rpc_protocol_version": { "const": 1 },
+        "minimum_client_version": { "const": 1 },
+        "maximum_client_version": { "const": 1 },
+        "descriptor_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "controller_verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "controller_id", "controller_generation", "controller_kind", "verified_at"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "controller_id": { "$ref": "#/$defs/uuid" },
+        "controller_generation": { "type": "integer", "minimum": 1 },
+        "controller_kind": { "enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation"] },
+        "verified_at": { "type": "string", "format": "date-time" }
       }
     },
     "event_data": {
@@ -494,10 +519,12 @@
         { "$ref": "#/$defs/membership_verification" },
         { "$ref": "#/$defs/writer_status" }, { "$ref": "#/$defs/handoff" },
         { "$ref": "#/$defs/controller_credential_created" }, { "$ref": "#/$defs/operator_credential_created" },
+        { "$ref": "#/$defs/rpc_server_ready" }, { "$ref": "#/$defs/controller_verification" },
         { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata" },
         { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/read" },
         { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/export" },
         { "$ref": "#/$defs/profile_event_data" },
+        { "$ref": "https://dolgorae.local/schema/controller-timeline/v1" },
         { "$ref": "https://dolgorae.local/schema/capabilities/v1" },
         { "$ref": "#/$defs/event_data" }, { "$ref": "#/$defs/meta" },
         { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array" } } },
@@ -521,6 +548,7 @@
         { "type": "object", "additionalProperties": false, "required": ["schema_version", "ok", "command", "invocation_id", "data"], "properties": { "schema_version": { "const": 1 }, "ok": { "const": true }, "command": { "$ref": "#/$defs/command" }, "invocation_id": { "$ref": "#/$defs/uuid" }, "data": { "$ref": "#/$defs/data" } } },
         { "not": { "properties": { "command": { "const": "unknown" } }, "required": ["command"] } },
         { "if": { "properties": { "command": { "enum": ["help", "version"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/meta" } } } },
+        { "if": { "properties": { "command": { "const": "serve" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/rpc_server_ready" } } } },
         { "if": { "properties": { "command": { "const": "runtime.capabilities" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/capabilities/v1" } } } },
         { "if": { "properties": { "command": { "const": "controller.credential.create" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/controller_credential_created" } } } },
         { "if": { "properties": { "command": { "enum": ["operator.credential.initialize", "operator.credential.rotate"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/operator_credential_created" } } } },
@@ -534,14 +562,16 @@
         { "if": { "properties": { "command": { "const": "profile.diagnostics.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": { "items": { "type": "array", "items": { "$ref": "https://dolgorae.local/schema/profile-event/v1" } }, "next_cursor": { "$ref": "#/$defs/cursor_zero" } } } } } },
         { "if": { "properties": { "command": { "const": "profile.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/profile_event_data" } } } },
         { "if": { "properties": { "command": { "enum": ["profile.remove", "run.delete"] } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "const": true } } } } } },
-        { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_successor", "run.close", "run.controller.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
-        { "if": { "properties": { "command": { "const": "run.create_successor" } }, "required": ["command"] }, "then": { "properties": { "data": { "properties": { "lineage": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/lineage" } } } } } },
+        { "if": { "properties": { "command": { "enum": ["run.start", "run.status", "run.respond", "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write", "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_write_continuation", "run.close", "run.controller.reset"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/run" } } } },
+        { "if": { "properties": { "command": { "const": "run.create_write_continuation" } }, "required": ["command"] }, "then": { "properties": { "data": { "properties": { "lineage": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/lineage" } } } } } },
         { "if": { "properties": { "command": { "const": "run.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/run" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.send", "run.submit", "run.wait"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/turn" } } } },
         { "if": { "properties": { "command": { "const": "run.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/event_data" } } } },
+        { "if": { "properties": { "command": { "const": "run.timeline" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/controller-timeline/v1" } } } },
         { "if": { "properties": { "command": { "const": "run.pending" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/interaction_summary" } } } } } } },
         { "if": { "properties": { "command": { "const": "run.interaction.get" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/interaction" } } } },
         { "if": { "properties": { "command": { "const": "run.verify" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/verification" } } } },
+        { "if": { "properties": { "command": { "const": "run.controller.verify" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/controller_verification" } } } },
         { "if": { "properties": { "command": { "const": "run.export" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["output_path", "bundle_schema_version", "files", "verification"], "properties": { "output_path": { "$ref": "#/$defs/path" }, "bundle_schema_version": { "const": 1 }, "files": { "type": "array", "items": { "type": "string" } }, "verification": { "$ref": "#/$defs/verification" } } } } } },
         { "if": { "properties": { "command": { "const": "run.artifact.show" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata" } } } },
         { "if": { "properties": { "command": { "const": "run.artifact.export" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/export" } } } },

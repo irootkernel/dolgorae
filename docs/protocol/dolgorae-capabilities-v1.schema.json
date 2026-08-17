@@ -4,12 +4,55 @@
   "title": "Dolgorae runtime capabilities v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["dolgorae_version", "machine_protocol_version", "event_protocol_version", "supported_transports", "app_server_transport", "profile_launch_mode", "projection_profiles", "control_modes", "execution_lanes", "assurance", "lane_capabilities", "independent_run_concurrency", "features", "interactions", "access_policy_transition", "background_execution_control", "native_subagents", "native_subagents_policy", "profile"],
+  "required": ["dolgorae_version", "machine_protocol_version", "event_protocol_version", "rpc_protocol_version", "timeline_protocol_version", "event_projection_version", "grpc_error_detail_version", "minimum_rpc_client_version", "maximum_rpc_client_version", "rpc_descriptor_sha256", "grpc_methods", "controller_carrier_root", "controller_credential", "artifact_bounds", "supported_transports", "app_server_transport", "profile_launch_mode", "projection_profiles", "control_modes", "execution_lanes", "assurance", "lane_capabilities", "independent_run_concurrency", "features", "interactions", "access_policy_transition", "background_execution_control", "native_subagents", "native_subagents_policy", "profile"],
   "properties": {
     "dolgorae_version": { "type": "string", "minLength": 1 },
     "machine_protocol_version": { "const": 1 },
     "event_protocol_version": { "const": 1 },
-    "supported_transports": { "type": "array", "const": ["machine_cli"] },
+    "rpc_protocol_version": { "const": 1 },
+    "timeline_protocol_version": { "const": 1 },
+    "event_projection_version": { "const": 1 },
+    "grpc_error_detail_version": { "const": 1 },
+    "minimum_rpc_client_version": { "const": 1 },
+    "maximum_rpc_client_version": { "const": 1 },
+    "rpc_descriptor_sha256": { "const": "95e49ed4280762e14d43ae4e1157ea79f2d2505ce35bda288ea51b09eefe1956" },
+    "grpc_methods": { "type": "array", "const": ["ArtifactService.GetArtifact", "ArtifactService.ReadArtifactChunk", "ControllerService.VerifyController", "InteractionService.GetControllerInteraction", "InteractionService.ListPendingInteractions", "InteractionService.ResolveInteraction", "ObservationService.ListRunTimelineItems", "ObservationService.WatchRunEvents", "RunService.CloseRun", "RunService.CreateWriteContinuation", "RunService.DeleteRun", "RunService.ForkRun", "RunService.GetRun", "RunService.InterruptTurn", "RunService.ListRuns", "RunService.PauseRun", "RunService.ReconcileRun", "RunService.RecoverRun", "RunService.ResumeRun", "RunService.SetDefaultEffort", "RunService.StartRun", "RunService.SubmitTurn", "RunService.VerifyRun", "RuntimeService.GetCapabilities", "RuntimeService.GetProfile", "RuntimeService.InspectWorkspace", "RuntimeService.ListProfileDiagnostics", "RuntimeService.ListProfiles", "WriterService.AcquireWriter", "WriterService.CancelWriterHandoff", "WriterService.CommitWriterHandoff", "WriterService.GetWorkspaceWriterStatus", "WriterService.PrepareWriterHandoff", "WriterService.ReleaseWriter"] },
+    "controller_carrier_root": { "const": "application_support/Dolgorae/controller-carriers" },
+    "controller_credential": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_id", "schema_version", "schema_sha256", "accepted_kinds", "capability_byte_length", "capability_encoding", "parent_directory_mode", "file_mode", "same_uid", "regular_file", "symlinks", "create_exclusive", "maximum_file_bytes", "client_descendant_pattern", "normalized_principal", "initial_generation"],
+      "properties": {
+        "schema_id": { "const": "https://dolgorae.local/schema/controller-credential/v1" },
+        "schema_version": { "const": 1 },
+        "schema_sha256": { "const": "51d143825b7649880b219836606ce6bd025c0a80d365c2157642eb89c409fb0c" },
+        "accepted_kinds": { "type": "array", "const": ["human_cli", "interactive_client", "workflow_orchestrator", "automation", "other"] },
+        "capability_byte_length": { "const": 32 },
+        "capability_encoding": { "const": "base64url_no_padding" },
+        "parent_directory_mode": { "const": "0700" },
+        "file_mode": { "const": "0600" },
+        "same_uid": { "const": true },
+        "regular_file": { "const": true },
+        "symlinks": { "const": "forbidden" },
+        "create_exclusive": { "const": true },
+        "maximum_file_bytes": { "const": 4096 },
+        "client_descendant_pattern": { "const": "<client>/<installation-id>/" },
+        "normalized_principal": { "const": "kind+subject_id_else_kind+instance_id" },
+        "initial_generation": { "const": 1 }
+      }
+    },
+    "artifact_bounds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maximum_artifact_bytes", "maximum_chunk_bytes", "maximum_inline_response_bytes", "digest", "exact_byte_length", "visibility_classes"],
+      "properties": {
+        "maximum_artifact_bytes": { "const": 33554432 },
+        "maximum_chunk_bytes": { "const": 1048576 },
+        "maximum_inline_response_bytes": { "const": 1048576 },
+        "digest": { "const": "sha256" },
+        "exact_byte_length": { "const": true },
+        "visibility_classes": { "type": "array", "const": ["observer", "controller_only"] }
+      }
+    },
+    "supported_transports": { "type": "array", "const": ["machine_cli", "local_grpc"] },
     "app_server_transport": { "const": "direct_websocket_unix" },
     "profile_launch_mode": { "const": "dolgorae_owned_direct_executable" },
     "projection_profiles": { "type": "array", "const": ["minimal", "operational"] },
@@ -65,29 +108,32 @@
     },
     "features": {
       "type": "object", "additionalProperties": false,
-      "required": ["persistent_runs", "run_fork", "reader_writer_access", "threadless_acquire_write", "writer_handoff", "durable_writer_authority", "sticky_dedicated_lanes", "control_modes", "assurance_negotiation", "profile_server_migration", "profile_membership_repair", "event_replay", "artifact_retrieval", "profile_diagnostics", "controller_binding", "worker_controller_revalidation", "operator_capability", "operator_controller_reset", "safe_client_projection", "public_local_socket", "workspace_event_stream"],
+      "required": ["persistent_runs", "run_fork", "reader_writer_access", "threadless_acquire_write", "first_write_via_submit_turn", "write_continuation", "controller_timeline", "writer_handoff", "durable_writer_authority", "sticky_dedicated_lanes", "control_modes", "brokered_independent_subagent_runs", "assurance_negotiation", "profile_server_migration", "profile_membership_repair", "event_replay", "artifact_retrieval", "profile_diagnostics", "controller_binding", "worker_controller_revalidation", "operator_capability", "operator_controller_reset", "safe_client_projection", "public_local_socket", "workspace_event_stream"],
       "properties": {
         "persistent_runs": { "const": true }, "run_fork": { "const": true },
-        "reader_writer_access": { "const": true }, "threadless_acquire_write": { "const": false }, "writer_handoff": { "const": true },
+        "reader_writer_access": { "const": true }, "threadless_acquire_write": { "const": false },
+        "first_write_via_submit_turn": { "const": true }, "write_continuation": { "const": true }, "controller_timeline": { "const": true }, "writer_handoff": { "const": true },
         "durable_writer_authority": { "const": true },
-        "sticky_dedicated_lanes": { "const": true }, "control_modes": { "const": true }, "assurance_negotiation": { "const": true },
+        "sticky_dedicated_lanes": { "const": true }, "control_modes": { "const": true }, "brokered_independent_subagent_runs": { "const": true }, "assurance_negotiation": { "const": true },
         "profile_server_migration": { "const": true }, "profile_membership_repair": { "const": true },
         "event_replay": { "const": true }, "artifact_retrieval": { "const": true }, "profile_diagnostics": { "const": true }, "controller_binding": { "const": true },
         "worker_controller_revalidation": { "const": true }, "operator_capability": { "const": true },
         "operator_controller_reset": { "const": true }, "safe_client_projection": { "const": true },
-        "public_local_socket": { "const": false }, "workspace_event_stream": { "const": false }
+        "public_local_socket": { "const": true }, "workspace_event_stream": { "const": false }
       }
     },
     "interactions": {
       "type": "object", "additionalProperties": false,
-      "required": ["command_execution_approval", "file_change_approval", "permission_request", "user_input", "mcp_elicitation", "connector_approval"],
+      "required": ["command_execution_approval", "file_change_approval", "permission_request", "user_input", "mcp_elicitation", "connector_approval", "maximum_response_bytes", "maximum_safe_payload_bytes"],
       "properties": {
         "command_execution_approval": { "$ref": "#/$defs/support" },
         "file_change_approval": { "$ref": "#/$defs/support" },
         "permission_request": { "$ref": "#/$defs/support" },
         "user_input": { "$ref": "#/$defs/support" },
         "mcp_elicitation": { "$ref": "#/$defs/support" },
-        "connector_approval": { "$ref": "#/$defs/support" }
+        "connector_approval": { "$ref": "#/$defs/support" },
+        "maximum_response_bytes": { "const": 1048576 },
+        "maximum_safe_payload_bytes": { "const": 8388608 }
       }
     },
     "access_policy_transition": { "enum": ["supported", "unavailable", "unverified"] },
@@ -122,5 +168,8 @@
     { "if": { "properties": { "native_subagents": { "properties": { "lifecycle_observation": { "const": "supported" }, "quiescence_tracking": { "const": "supported" } } } } }, "then": { "properties": { "profile": { "type": "string" } } } },
     { "if": { "properties": { "profile": { "type": "null" } } }, "then": { "properties": { "access_policy_transition": { "const": "unverified" }, "background_execution_control": { "properties": { "support": { "const": "unverified" }, "mechanism": { "const": "dedicated_lane_process_census" } } }, "native_subagents": { "properties": { "lifecycle_observation": { "const": "unverified" }, "quiescence_tracking": { "const": "unverified" } } } } } }
   ],
-  "$defs": { "support": { "enum": ["supported", "recognized_unsupported", "unavailable"] } }
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "support": { "enum": ["supported", "recognized_unsupported", "unavailable"] }
+  }
 }

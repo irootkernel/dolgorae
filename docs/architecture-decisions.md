@@ -11,7 +11,7 @@ Git history preserves the prior text. Contradictory active ADRs are invalid.
 Document roles and the required synchronization procedure are defined by the
 [documentation authority map](README.md).
 
-## ADR-001: Ship One Binary Without an Installed Daemon
+## ADR-001: Ship One Binary With Two Public Adapters and No Installed Daemon
 
 Status: Accepted
 
@@ -27,10 +27,14 @@ Ship one `dolgorae` executable. For every live run, re-execute that binary in a
 hidden worker mode and attach a private WebSocket connection to the Run's
 immutable shared-read-only or dedicated execution lane. A short-lived profile manager owns
 singleton creation, epoch transitions, and membership reconciliation. Install
-no Dolgorae launchd unit, global daemon, or
-project daemon. Recover workers on demand after process loss or reboot. The
-machine CLI is the sole v1 external-master transport; a future adapter must use
-the same semantic service and cannot expose private worker sockets.
+no Dolgorae launchd unit, global daemon, or project daemon. Recover workers on
+demand after process loss or reboot. Expose the public semantic contract through
+two coequal adapters: the Machine CLI for scripting, automation, diagnostics,
+recovery, conformance, and Operator administration; and an optional supervised
+local gRPC gateway for long-lived interactive clients. Both adapters call the
+same semantic application service and preserve the same authorization,
+idempotency, writer, interaction, recovery, audit, and projection rules.
+Neither adapter exposes private worker or App Server sockets.
 
 ### Consequences
 
@@ -41,6 +45,8 @@ the same semantic service and cannot expose private worker sockets.
   member of that launch contract.
 - Idle runs consume processes until explicitly paused or closed.
 - The binary still depends on external Codex profiles and their `CODEX_HOME`.
+- The gRPC gateway is a foreground process supervised by its same-user client;
+  it is neither required for Machine CLI use nor a durable-state authority.
 
 ### Rejected alternatives
 
@@ -183,7 +189,7 @@ writer-configured thread and activate authority before `turn/start`.
 
 Codex 0.147.0 is the compatibility baseline. Under ADR-019, every dedicated Run
 uses a Sticky Dedicated logical lane; a `shared_readonly` Run remains on the
-shared lane and creates a lineage-linked dedicated successor if it needs write.
+shared lane and creates a lineage-linked dedicated write continuation if it needs write.
 Reader and writer access are policy states of a dedicated lane and never move
 the thread to the shared server. The superseded transient topology is retained
 only as historical rationale. A dedicated lane may
@@ -321,7 +327,7 @@ writer acquire/release keeps the same worker, logical lane, and thread. It
 applies and verifies the new policy inside the current dedicated generation, or
 uses a same-lane successor generation only after exact absence and a durable
 history barrier. A shared-readonly compatibility Run is never promoted in
-place; it creates a fresh lineage-linked dedicated successor Run. Authority
+place; it creates a fresh lineage-linked dedicated write-continuation Run. Authority
 advances transactionally and uses the pinned stable sandbox-policy surface when
 supported. If the requested policy cannot be proved, v1 returns
 `ACCESS_TRANSITION_UNSUPPORTED`; it never moves a thread between servers or
@@ -499,13 +505,18 @@ Use a hub-and-spoke model in v1. One capability-bound controller mutates each
 independent run, while same-user observers may read its client-safe projection.
 Dolgorae-managed agents may use Codex native subagents only when the profile
 capability snapshot reports `supported`; they must not control another
-Dolgorae run or connect to its socket. Defer any future inter-run feature as
+Dolgorae run or connect to its socket. A trusted external automation broker may
+accept a model request and control a separate child Run with its own broker-held
+Controller credential; the broker remains the hub and returns only bounded safe
+status and result material. Defer any actual parent-held inter-run authority as
 capability-scoped hierarchical delegation, not peer messaging.
 
 ### Consequences
 
 - Independent run authority and audit provenance remain clear.
 - The master explicitly carries results between runs.
+- A model may request brokered child work without receiving authority over the
+  child or learning its Controller capability.
 - A writer cannot deadlock by waiting on another writer it attempted to spawn.
 - Supported native Codex subagents remain available for bounded parallel work inside a
   run.
@@ -974,7 +985,7 @@ entire lifetime. Read/write policy and workspace authority may change within
 that lane. A stopped physical server may be replaced only after exact absence,
 complete process census, native-work quiescence, and durable-history proof; the
 successor is a new process generation of the same lane. A shared Run needing
-write creates a lineage-linked dedicated successor.
+write creates a lineage-linked dedicated write continuation.
 
 Keep writer authority per canonical workspace. The profile may have concurrent
 dedicated writers in different workspaces. Separate effective policy, writer
@@ -1023,11 +1034,14 @@ Operations still refuse active or unknown native state when they require
 quiescence. Disable enforcement is unavailable; the disabled case is a
 diagnostic-only unverified observation.
 
-`run create-successor` preserves workspace, profile, and control mode, but may
+`run create-write-continuation` preserves workspace, profile, and control mode,
+accepts only a shared-readonly or access-transition-unavailable/unverified
+creation reason, and may
 apply validated model/effort, purpose, capability additions, and a non-decreasing
 assurance request. The source Controller authorizes creation and a new
 same-principal credential binds the destination. This avoids cloning authority,
-Controller instructions, or hidden history while allowing an orchestrator to
+Controller instructions, reasoning, native-subagent hidden history, or writer
+authority while allowing an orchestrator to
 specialize the successor deliberately.
 The destination Run is intentionally threadless at creation. Eager thread
 allocation is rejected because local publication may still fail and the sticky
@@ -1067,3 +1081,176 @@ be non-null and different from the lineage source thread.
   live discovery returned zero entries for the background-workload probe.
 - Claim verified thread-scoped or strong containment: rejected until a future
   pin proves complete descendant control or supplies kernel enforcement.
+
+## ADR-020: Standardize Brokered Independent Subagents on Public Adapters
+
+Status: Accepted
+
+### Context
+
+The existing `managed_agent` Run, automation Controller, parent reference,
+durable result, and writer-authority contracts can support a trusted host that
+uses an Independent Dolgorae Run as a subagent. The active contract nevertheless
+described only generic workflow orchestration and explicitly deferred every MCP
+adapter, leaving ordinary Codex and Gul-hosted direct sessions without a named,
+discoverable composition to target.
+
+### Decision
+
+Standardize a brokered independent-subagent composition over the public
+semantic service through either the Machine CLI or local gRPC adapter. The
+trusted host creates and retains one protected `automation`
+Controller credential per child, starts a `managed_agent` in a `dedicated` lane
+with explicit purpose, assurance, and opaque parent reference, and drives it
+through the existing input, observation, interaction, writer, interrupt, and
+close operations. No new `subagent` command or alternate lifecycle is added.
+
+Expose `features.brokered_independent_subagent_runs=true` only when that
+composition and its Controller separation are implemented. The requesting model
+may receive non-secret identity, status, and bounded result material, but never a
+Controller capability. The child remains durable after a parent or broker
+disconnect. Every child write uses the existing canonical-workspace writer
+authority; external editors and non-Dolgorae Codex processes remain outside that
+guarantee.
+
+The first release does not add MCP transport, an installed daemon, parent-held
+delegation capabilities, nested authority transfer, or peer messaging. A future
+stdio MCP adapter must be a thin wrapper over this exact semantic composition.
+
+### Consequences
+
+- Ordinary Codex and Gul-hosted direct sessions can target the common public
+  adapter contract without changing Dolgorae Run semantics.
+- Gul may display only the parent turn's tool result and need not own the child
+  Controller, lifecycle, persistence, or navigation model.
+- Competing Dolgorae writers from different clients still converge on the one
+  durable workspace authority and `WRITER_BUSY` result.
+- Capability-scoped hierarchical delegation remains a separate future design.
+
+### Rejected alternatives
+
+- Give the parent model a child Controller credential: rejected because it
+  places mutation authority in an LLM-visible channel.
+- Add a second subagent lifecycle API: rejected because the existing Run
+  operations already own every required transition and failure rule.
+- Reintroduce transient same-thread Writer Capsules: rejected because the
+  pinned cross-server migration gate failed; brokered writers use existing
+  sticky Dedicated Runs.
+
+## ADR-021: Expose a Supervised Local gRPC Gateway Over a Private Unix Socket
+
+Status: Accepted
+
+### Context
+
+The Machine CLI remains appropriate for finite automation, diagnostics,
+recovery, and conformance, but a long-lived Gul process needs to observe many
+Runs without retaining one `run events --follow` subprocess per Run. It also
+needs bounded-latency unary mutations, independent Run streams on one channel,
+and reconnect from the durable event cursor. A mandatory installed daemon or a
+public network listener would enlarge the lifecycle and authentication boundary
+without improving Dolgorae authority.
+
+### Decision
+
+Add `dolgorae serve --socket <absolute-private-socket-path>` as an optional
+foreground gateway supervised by Gul or another trusted same-user client. V1
+binds only a Unix domain socket, validates the peer UID, and exposes no TCP,
+remote bind, Tailscale, HTTP authentication, client-streaming, or bidirectional
+streaming contract. One gateway may run per Dolgorae user installation. A
+lifetime `gateway.lock` and identity-complete `gateway.json` under the
+user-private Application Support root serialize startup without entering the
+ordinary operation lock hierarchy.
+
+The supplied socket parent must already be a current-uid-owned non-symlink
+directory with mode 0700. The socket is mode 0600. Descriptor-relative
+no-follow traversal rejects symlinks, ownership or permission mismatch,
+non-socket collisions, and unowned stale sockets. A stale socket may be removed
+only when its inode matches the prior gateway record and that exact process is
+proved absent. Graceful SIGTERM stops acceptance, gives admitted unary calls a
+five-second drain, terminates streams with typed `SERVER_SHUTDOWN`, and unlinks
+only the still-matching socket inode.
+
+Gul owns only private-parent creation/validation, unused-path selection,
+process supervision, and post-readiness verification. Dolgorae exclusively owns
+the lock/record, bind, chmod, stale proof, unlink, and graceful socket cleanup;
+clients never unlink the provider socket. V1 does not attach to an existing
+gateway or permit multiple gateways for one installation.
+
+Use versioned standard gRPC over HTTP/2 with unary RPCs for commands, snapshots,
+timeline pages, and artifact chunks, plus Run-scoped server streaming for
+events. Use `tonic` and `prost`; isolate the `tokio` runtime inside the gateway
+adapter and dispatch into the shared semantic service through bounded work
+queues. No adapter owns an in-memory business-rule fork. Per-stream delivery is
+bounded to 32 envelopes or 4 MiB and five seconds of stalled delivery. Pressure
+terminates only that Run stream with typed `SLOW_CONSUMER`; the client resumes
+from its own last committed durable cursor.
+
+The public schema uses typed projections for closed semantic state and a typed
+event `oneof` covering every client-safe event variant. Full Controller
+Interaction payloads are also a typed `oneof`; `response_schema_id` applies
+only to the bounded protected response body. Run, Writer, Interaction, and
+event projections share a revision stamp, public output paths preserve UTF-8
+or opaque POSIX bytes, and capability blocker codes are closed enums.
+`GetCapabilities` is a
+version-zero handshake and publishes the full capability and Controller-carrier
+schema inventory plus exact Interaction response/payload and artifact bounds.
+The carrier capability separates its canonical
+Application-Support-relative root locator from a closed root-policy enum, and
+uses closed enums for capability encoding and normalized-principal rules.
+`SubmitTurn` returns accepted Turn plus typed Run and Writer
+snapshots. `CreateWriteContinuation` returns the destination, immutable
+lineage, new same-principal Controller, source-unchanged receipt, and exact-
+replay indication.
+
+`RunProjection` includes the durable accepted profile, purpose, model, required
+capabilities, parent and instruction identities, and current default effort.
+Lost `StartRun` responses use exact same-key replay as the primary recovery
+path; allocation tombstones have no TTL and prevent post-delete key reuse from
+allocating another Run. Shared-readonly and unsupported-transition failures
+direct clients to `CREATE_WRITE_CONTINUATION`, while a threadless dedicated Run
+continues to require its first `SubmitTurn(WRITE)`.
+
+Controller timeline interaction items include typed kind and status plus a
+bounded safe title; they never expose private prompts or raw interaction
+payloads. Unsafe socket startup returns the typed client action
+`FIX_SOCKET_PATH`, so the supervisor repairs or replaces the path before a
+fresh start rather than treating gateway restart as sufficient remediation.
+
+Interaction support uses a dedicated enum so Machine
+`recognized_unsupported` remains distinguishable from `unavailable` over
+gRPC. Profile model entries own their single default through `is_default`; a
+second top-level default-model field is rejected as an ambiguous authority.
+
+The gateway does not supervise workers or App Servers. Its exit never releases
+writer authority, changes Run lifecycle, or signals those processes. Restart
+reconstructs safe projections from the workspace path, expected workspace ID,
+run ledger, and other authoritative Dolgorae state supplied by each request.
+Gul remains responsible for every remote HTTP authentication and authorization
+decision before it exposes local results.
+
+### Consequences
+
+- One HTTP/2 channel may carry independent streams for many Runs without
+  creating a universal command stream or shared cursor/failure boundary.
+- Channel establishment or successful request-byte delivery proves only
+  transport delivery. A successful `SubmitTurn` response proves durable
+  acceptance, while Turn completion still requires events or a snapshot.
+- The Rust runtime dependency boundary grows, but asynchronous code remains an
+  adapter mechanism rather than lifecycle or durability authority.
+- Operator administration remains Machine CLI-only. Controller credential
+  creation has no RPC, but a trusted same-user client may create a checked-
+  schema carrier below its advertised client-specific descendant; overlapping
+  CLI and gRPC operations require semantic conformance tests.
+
+### Rejected alternatives
+
+- Permanent system daemon: rejected because client supervision is sufficient
+  and durable Runs already outlive the public gateway.
+- TCP or direct Tailscale binding: rejected because Dolgorae does not implement
+  a remote authentication boundary.
+- One bidirectional command/event stream: rejected because stream loss would
+  ambiguously couple mutation results to observation delivery.
+- Direct Gul access to worker or App Server sockets: rejected because it
+  bypasses Controller, writer, idempotency, recovery, redaction, and audit
+  semantics.

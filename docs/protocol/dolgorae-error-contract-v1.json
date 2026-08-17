@@ -45,11 +45,12 @@
     "EXECUTION_LANE_UNSUPPORTED": 4,
     "EXECUTION_LANE_IMMUTABLE": 4,
     "SHARED_RUN_WRITE_FORBIDDEN": 4,
-    "SUCCESSOR_SOURCE_NOT_TERMINAL": 4,
-    "SUCCESSOR_LINEAGE_INVALID": 4,
-    "SUCCESSOR_CONTROLLER_INVALID": 4,
-    "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN": 4,
-    "SUCCESSOR_MODEL_UNSUPPORTED": 4,
+    "THREADLESS_REQUIRES_WRITE_TURN": 4,
+    "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL": 4,
+    "WRITE_CONTINUATION_LINEAGE_INVALID": 4,
+    "WRITE_CONTINUATION_CONTROLLER_INVALID": 4,
+    "WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN": 4,
+    "WRITE_CONTINUATION_MODEL_UNSUPPORTED": 4,
     "THREAD_RESIDENCY_CONFLICT": 4,
     "SAME_HOME_MULTI_SERVER_UNSAFE": 5,
     "ASSURANCE_LEVEL_UNAVAILABLE": 4,
@@ -59,6 +60,9 @@
     "INTERACTION_ALREADY_RESOLVED": 4,
     "INTERACTION_STALE": 4,
     "INTERACTION_RESPONSE_INVALID": 4,
+    "INTERACTION_RESPONSE_TOO_LARGE": 4,
+    "INTERACTION_PAYLOAD_TOO_LARGE": 4,
+    "INTERACTION_OUTCOME_UNKNOWN": 4,
     "FILE_CHANGE_ARTIFACT_UNAVAILABLE": 4,
     "ARTIFACT_NOT_FOUND": 3,
     "ARTIFACT_RANGE_INVALID": 2,
@@ -70,9 +74,15 @@
     "COMPATIBILITY_REJECTED": 5,
     "DOLGORAE_PROTOCOL_MISMATCH": 5,
     "PROTOCOL_VERSION_UNSUPPORTED": 5,
+    "UNSUPPORTED_SCHEMA_VERSION": 5,
     "TRANSPORT_FAILURE": 6,
     "OPERATION_TIMEOUT": 6,
     "PROTOCOL_FRAME_TOO_LARGE": 6,
+    "SLOW_CONSUMER": 4,
+    "EVENT_CURSOR_INVALID": 2,
+    "RPC_SERVER_ALREADY_RUNNING": 4,
+    "RPC_SOCKET_UNSAFE": 6,
+    "SERVER_SHUTDOWN": 6,
     "RUNTIME_PATH_INVALID": 6,
     "RUNTIME_PATH_COLLISION": 6,
     "REDACTION_FAILURE": 6,
@@ -228,19 +238,22 @@
       "$ref": "#/$defs/shared_run_write_forbidden"
     },
     {
-      "$ref": "#/$defs/successor_source_not_terminal"
+      "$ref": "#/$defs/threadless_requires_write_turn"
     },
     {
-      "$ref": "#/$defs/successor_lineage_invalid"
+      "$ref": "#/$defs/write_continuation_source_not_terminal"
     },
     {
-      "$ref": "#/$defs/successor_controller_invalid"
+      "$ref": "#/$defs/write_continuation_lineage_invalid"
     },
     {
-      "$ref": "#/$defs/successor_profile_override_forbidden"
+      "$ref": "#/$defs/write_continuation_controller_invalid"
     },
     {
-      "$ref": "#/$defs/successor_model_unsupported"
+      "$ref": "#/$defs/write_continuation_profile_override_forbidden"
+    },
+    {
+      "$ref": "#/$defs/write_continuation_model_unsupported"
     },
     {
       "$ref": "#/$defs/thread_residency_conflict"
@@ -271,6 +284,15 @@
     },
     {
       "$ref": "#/$defs/interaction_response_invalid"
+    },
+    {
+      "$ref": "#/$defs/interaction_response_too_large"
+    },
+    {
+      "$ref": "#/$defs/interaction_payload_too_large"
+    },
+    {
+      "$ref": "#/$defs/interaction_outcome_unknown"
     },
     {
       "$ref": "#/$defs/file_change_artifact_unavailable"
@@ -306,6 +328,9 @@
       "$ref": "#/$defs/protocol_version_unsupported"
     },
     {
+      "$ref": "#/$defs/unsupported_schema_version"
+    },
+    {
       "$ref": "#/$defs/transport_retryable"
     },
     {
@@ -316,6 +341,21 @@
     },
     {
       "$ref": "#/$defs/protocol_frame_too_large"
+    },
+    {
+      "$ref": "#/$defs/slow_consumer"
+    },
+    {
+      "$ref": "#/$defs/event_cursor_invalid"
+    },
+    {
+      "$ref": "#/$defs/rpc_server_already_running"
+    },
+    {
+      "$ref": "#/$defs/rpc_socket_unsafe"
+    },
+    {
+      "$ref": "#/$defs/server_shutdown"
     },
     {
       "$ref": "#/$defs/runtime_path_invalid"
@@ -383,11 +423,12 @@
         "EXECUTION_LANE_UNSUPPORTED",
         "EXECUTION_LANE_IMMUTABLE",
         "SHARED_RUN_WRITE_FORBIDDEN",
-        "SUCCESSOR_SOURCE_NOT_TERMINAL",
-        "SUCCESSOR_LINEAGE_INVALID",
-        "SUCCESSOR_CONTROLLER_INVALID",
-        "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN",
-        "SUCCESSOR_MODEL_UNSUPPORTED",
+        "THREADLESS_REQUIRES_WRITE_TURN",
+        "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL",
+        "WRITE_CONTINUATION_LINEAGE_INVALID",
+        "WRITE_CONTINUATION_CONTROLLER_INVALID",
+        "WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN",
+        "WRITE_CONTINUATION_MODEL_UNSUPPORTED",
         "THREAD_RESIDENCY_CONFLICT",
         "SAME_HOME_MULTI_SERVER_UNSAFE",
         "ASSURANCE_LEVEL_UNAVAILABLE",
@@ -398,6 +439,9 @@
         "INTERACTION_ALREADY_RESOLVED",
         "INTERACTION_STALE",
         "INTERACTION_RESPONSE_INVALID",
+        "INTERACTION_RESPONSE_TOO_LARGE",
+        "INTERACTION_PAYLOAD_TOO_LARGE",
+        "INTERACTION_OUTCOME_UNKNOWN",
         "FILE_CHANGE_ARTIFACT_UNAVAILABLE",
         "ARTIFACT_NOT_FOUND",
         "ARTIFACT_RANGE_INVALID",
@@ -409,9 +453,15 @@
         "COMPATIBILITY_REJECTED",
         "DOLGORAE_PROTOCOL_MISMATCH",
         "PROTOCOL_VERSION_UNSUPPORTED",
+        "UNSUPPORTED_SCHEMA_VERSION",
         "TRANSPORT_FAILURE",
         "OPERATION_TIMEOUT",
         "PROTOCOL_FRAME_TOO_LARGE",
+        "SLOW_CONSUMER",
+        "EVENT_CURSOR_INVALID",
+        "RPC_SERVER_ALREADY_RUNNING",
+        "RPC_SOCKET_UNSAFE",
+        "SERVER_SHUTDOWN",
         "RUNTIME_PATH_INVALID",
         "RUNTIME_PATH_COLLISION",
         "REDACTION_FAILURE",
@@ -433,6 +483,10 @@
     "integer": {
       "type": "integer",
       "minimum": 0
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
     },
     "uuid": {
       "type": "string",
@@ -631,20 +685,23 @@
     "shared_run_write_forbidden": {
       "$ref": "#/$defs/v_SHARED_RUN_WRITE_FORBIDDEN_false_lane"
     },
-    "successor_source_not_terminal": {
-      "$ref": "#/$defs/v_SUCCESSOR_SOURCE_NOT_TERMINAL_false_successor"
+    "threadless_requires_write_turn": {
+      "$ref": "#/$defs/v_THREADLESS_REQUIRES_WRITE_TURN_false_threadless_write"
     },
-    "successor_lineage_invalid": {
-      "$ref": "#/$defs/v_SUCCESSOR_LINEAGE_INVALID_false_successor"
+    "write_continuation_source_not_terminal": {
+      "$ref": "#/$defs/v_WRITE_CONTINUATION_SOURCE_NOT_TERMINAL_false_write_continuation"
     },
-    "successor_controller_invalid": {
-      "$ref": "#/$defs/v_SUCCESSOR_CONTROLLER_INVALID_false_successor"
+    "write_continuation_lineage_invalid": {
+      "$ref": "#/$defs/v_WRITE_CONTINUATION_LINEAGE_INVALID_false_write_continuation"
     },
-    "successor_profile_override_forbidden": {
-      "$ref": "#/$defs/v_SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN_false_successor"
+    "write_continuation_controller_invalid": {
+      "$ref": "#/$defs/v_WRITE_CONTINUATION_CONTROLLER_INVALID_false_write_continuation"
     },
-    "successor_model_unsupported": {
-      "$ref": "#/$defs/v_SUCCESSOR_MODEL_UNSUPPORTED_false_successor"
+    "write_continuation_profile_override_forbidden": {
+      "$ref": "#/$defs/v_WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN_false_write_continuation"
+    },
+    "write_continuation_model_unsupported": {
+      "$ref": "#/$defs/v_WRITE_CONTINUATION_MODEL_UNSUPPORTED_false_write_continuation"
     },
     "thread_residency_conflict": {
       "$ref": "#/$defs/v_THREAD_RESIDENCY_CONFLICT_false_lane"
@@ -675,6 +732,15 @@
     },
     "interaction_response_invalid": {
       "$ref": "#/$defs/v_INTERACTION_RESPONSE_INVALID_false_interaction_response"
+    },
+    "interaction_response_too_large": {
+      "$ref": "#/$defs/v_INTERACTION_RESPONSE_TOO_LARGE_false_interaction_limit"
+    },
+    "interaction_payload_too_large": {
+      "$ref": "#/$defs/v_INTERACTION_PAYLOAD_TOO_LARGE_false_interaction_limit"
+    },
+    "interaction_outcome_unknown": {
+      "$ref": "#/$defs/v_INTERACTION_OUTCOME_UNKNOWN_false_interaction_outcome_unknown"
     },
     "file_change_artifact_unavailable": {
       "$ref": "#/$defs/v_FILE_CHANGE_ARTIFACT_UNAVAILABLE_false_file_artifact"
@@ -709,8 +775,26 @@
     "protocol_version_unsupported": {
       "$ref": "#/$defs/v_PROTOCOL_VERSION_UNSUPPORTED_false_protocol_version"
     },
+    "unsupported_schema_version": {
+      "$ref": "#/$defs/v_UNSUPPORTED_SCHEMA_VERSION_false_schema_version"
+    },
     "protocol_frame_too_large": {
       "$ref": "#/$defs/v_PROTOCOL_FRAME_TOO_LARGE_false_channel_observed_bytes_limit_bytes"
+    },
+    "slow_consumer": {
+      "$ref": "#/$defs/v_SLOW_CONSUMER_false_slow_consumer"
+    },
+    "event_cursor_invalid": {
+      "$ref": "#/$defs/v_EVENT_CURSOR_INVALID_false_event_cursor"
+    },
+    "rpc_server_already_running": {
+      "$ref": "#/$defs/v_RPC_SERVER_ALREADY_RUNNING_false_rpc_server"
+    },
+    "rpc_socket_unsafe": {
+      "$ref": "#/$defs/v_RPC_SOCKET_UNSAFE_false_rpc_socket"
+    },
+    "server_shutdown": {
+      "$ref": "#/$defs/v_SERVER_SHUTDOWN_false_server_shutdown"
     },
     "runtime_path_invalid": {
       "$ref": "#/$defs/v_RUNTIME_PATH_INVALID_false_path_reason"
@@ -1341,57 +1425,57 @@
         }
       }
     },
-    "v_SUCCESSOR_SOURCE_NOT_TERMINAL_false_successor": {
+    "v_WRITE_CONTINUATION_SOURCE_NOT_TERMINAL_false_write_continuation": {
       "properties": {
         "code": {
-          "const": "SUCCESSOR_SOURCE_NOT_TERMINAL"
+          "const": "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL"
         },
         "retryable": {
           "const": false
         },
         "details": {
-          "$ref": "#/$defs/d_successor"
+          "$ref": "#/$defs/d_write_continuation"
         }
       }
     },
-    "v_SUCCESSOR_LINEAGE_INVALID_false_successor": {
+    "v_WRITE_CONTINUATION_LINEAGE_INVALID_false_write_continuation": {
       "properties": {
         "code": {
-          "const": "SUCCESSOR_LINEAGE_INVALID"
+          "const": "WRITE_CONTINUATION_LINEAGE_INVALID"
         },
         "retryable": {
           "const": false
         },
         "details": {
-          "$ref": "#/$defs/d_successor"
+          "$ref": "#/$defs/d_write_continuation"
         }
       }
     },
-    "v_SUCCESSOR_CONTROLLER_INVALID_false_successor": {
+    "v_WRITE_CONTINUATION_CONTROLLER_INVALID_false_write_continuation": {
       "properties": {
         "code": {
-          "const": "SUCCESSOR_CONTROLLER_INVALID"
+          "const": "WRITE_CONTINUATION_CONTROLLER_INVALID"
         },
         "retryable": {
           "const": false
         },
         "details": {
-          "$ref": "#/$defs/d_successor"
+          "$ref": "#/$defs/d_write_continuation"
         }
       }
     },
-    "v_SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN_false_successor": {
+    "v_WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN_false_write_continuation": {
       "properties": {
-        "code": { "const": "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN" },
+        "code": { "const": "WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN" },
         "retryable": { "const": false },
-        "details": { "$ref": "#/$defs/d_successor" }
+        "details": { "$ref": "#/$defs/d_write_continuation" }
       }
     },
-    "v_SUCCESSOR_MODEL_UNSUPPORTED_false_successor": {
+    "v_WRITE_CONTINUATION_MODEL_UNSUPPORTED_false_write_continuation": {
       "properties": {
-        "code": { "const": "SUCCESSOR_MODEL_UNSUPPORTED" },
+        "code": { "const": "WRITE_CONTINUATION_MODEL_UNSUPPORTED" },
         "retryable": { "const": false },
-        "details": { "$ref": "#/$defs/d_successor" }
+        "details": { "$ref": "#/$defs/d_write_continuation" }
       }
     },
     "v_THREAD_RESIDENCY_CONFLICT_false_lane": {
@@ -1522,6 +1606,27 @@
         "details": {
           "$ref": "#/$defs/d_interaction_response"
         }
+      }
+    },
+    "v_INTERACTION_RESPONSE_TOO_LARGE_false_interaction_limit": {
+      "properties": {
+        "code": { "const": "INTERACTION_RESPONSE_TOO_LARGE" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_interaction_limit" }
+      }
+    },
+    "v_INTERACTION_PAYLOAD_TOO_LARGE_false_interaction_limit": {
+      "properties": {
+        "code": { "const": "INTERACTION_PAYLOAD_TOO_LARGE" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_interaction_limit" }
+      }
+    },
+    "v_INTERACTION_OUTCOME_UNKNOWN_false_interaction_outcome_unknown": {
+      "properties": {
+        "code": { "const": "INTERACTION_OUTCOME_UNKNOWN" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_interaction_outcome_unknown" }
       }
     },
     "v_FILE_CHANGE_ARTIFACT_UNAVAILABLE_false_file_artifact": {
@@ -1667,6 +1772,13 @@
         }
       }
     },
+    "v_UNSUPPORTED_SCHEMA_VERSION_false_schema_version": {
+      "properties": {
+        "code": { "const": "UNSUPPORTED_SCHEMA_VERSION" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_schema_version" }
+      }
+    },
     "v_PROTOCOL_FRAME_TOO_LARGE_false_channel_observed_bytes_limit_bytes": {
       "properties": {
         "code": {
@@ -1732,6 +1844,48 @@
         }
       }
     },
+    "v_THREADLESS_REQUIRES_WRITE_TURN_false_threadless_write": {
+      "properties": {
+        "code": { "const": "THREADLESS_REQUIRES_WRITE_TURN" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_threadless_write" }
+      }
+    },
+    "v_SLOW_CONSUMER_false_slow_consumer": {
+      "properties": {
+        "code": { "const": "SLOW_CONSUMER" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_slow_consumer" }
+      }
+    },
+    "v_EVENT_CURSOR_INVALID_false_event_cursor": {
+      "properties": {
+        "code": { "const": "EVENT_CURSOR_INVALID" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_event_cursor" }
+      }
+    },
+    "v_RPC_SERVER_ALREADY_RUNNING_false_rpc_server": {
+      "properties": {
+        "code": { "const": "RPC_SERVER_ALREADY_RUNNING" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_rpc_server" }
+      }
+    },
+    "v_RPC_SOCKET_UNSAFE_false_rpc_socket": {
+      "properties": {
+        "code": { "const": "RPC_SOCKET_UNSAFE" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_rpc_socket" }
+      }
+    },
+    "v_SERVER_SHUTDOWN_false_server_shutdown": {
+      "properties": {
+        "code": { "const": "SERVER_SHUTDOWN" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_server_shutdown" }
+      }
+    },
     "v_TURN_FAILED_false_run_id_turn_id_status": {
       "properties": {
         "code": {
@@ -1769,6 +1923,69 @@
         "details": {
           "$ref": "#/$defs/d_audit"
         }
+      }
+    },
+    "d_threadless_write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "required_action"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "required_action": { "const": "submit_write_turn" }
+      }
+    },
+    "d_slow_consumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "last_server_sent_cursor", "required_action"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "last_server_sent_cursor": {
+          "oneOf": [
+            { "$ref": "#/$defs/cursor" },
+            { "type": "null" }
+          ]
+        },
+        "required_action": { "const": "resume_from_client_committed_cursor" }
+      }
+    },
+    "d_event_cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "requested_cursor", "head_cursor"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "requested_cursor": { "$ref": "#/$defs/cursor" },
+        "head_cursor": { "$ref": "#/$defs/cursor" }
+      }
+    },
+    "d_rpc_server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server_instance_id", "socket_path", "required_action"],
+      "properties": {
+        "server_instance_id": { "$ref": "#/$defs/nullable_uuid" },
+        "socket_path": { "$ref": "#/$defs/path" },
+        "required_action": { "$ref": "#/$defs/string" }
+      }
+    },
+    "d_rpc_socket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "required_action"],
+      "properties": {
+        "reason": { "$ref": "#/$defs/string" },
+        "required_action": { "$ref": "#/$defs/string" }
+      }
+    },
+    "d_server_shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "operation_id", "run_id"],
+      "properties": {
+        "action": { "$ref": "#/$defs/string" },
+        "operation_id": { "$ref": "#/$defs/nullable_uuid" },
+        "run_id": { "$ref": "#/$defs/nullable_uuid" }
       }
     },
     "d_argument_reason": {
@@ -2018,10 +2235,10 @@
             "shared_server_epoch_mismatch",
             "assurance_order_invalid",
             "state_variant_mismatch",
-            "successor_lineage_invalid",
-            "successor_source_missing",
-            "successor_turn_not_terminal",
-            "successor_workspace_mismatch"
+            "write_continuation_lineage_invalid",
+            "write_continuation_source_missing",
+            "write_continuation_turn_not_terminal",
+            "write_continuation_workspace_mismatch"
           ]
         },
         "required_action": {
@@ -2257,7 +2474,7 @@
         },
         "required_action": {
           "enum": [
-            "fork_new_writer_thread",
+            "create_write_continuation",
             "retire_writer_then_new_reader"
           ]
         }
@@ -2272,7 +2489,7 @@
               "const": "write"
             },
             "required_action": {
-              "const": "fork_new_writer_thread"
+              "const": "create_write_continuation"
             }
           }
         },
@@ -2369,7 +2586,7 @@
         },
         "required_action": {
           "enum": [
-            "create_dedicated_successor",
+            "create_dedicated_write_continuation",
             "retain_original_lane",
             "reconcile_thread_residency",
             "use_supported_profile",
@@ -2382,7 +2599,7 @@
         }
       }
     },
-    "d_successor": {
+    "d_write_continuation": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2568,6 +2785,26 @@
         "reason": {
           "$ref": "#/$defs/string"
         }
+      }
+    },
+    "d_interaction_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "request_id", "observed_bytes", "limit_bytes"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "request_id": { "$ref": "#/$defs/string" },
+        "observed_bytes": { "$ref": "#/$defs/integer" },
+        "limit_bytes": { "$ref": "#/$defs/integer" }
+      }
+    },
+    "d_interaction_outcome_unknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "request_id"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "request_id": { "$ref": "#/$defs/string" }
       }
     },
     "d_file_artifact": {
@@ -2794,6 +3031,19 @@
         }
       }
     },
+    "d_schema_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "requested", "supported"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/string" },
+        "requested": { "$ref": "#/$defs/integer" },
+        "supported": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/integer" }
+        }
+      }
+    },
     "d_protocol_version": {
       "type": "object",
       "additionalProperties": false,
@@ -2806,7 +3056,9 @@
         "protocol": {
           "enum": [
             "machine",
-            "event"
+            "event",
+            "rpc",
+            "timeline"
           ]
         },
         "requested": {

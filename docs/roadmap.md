@@ -2,8 +2,10 @@
 
 Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
 Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete. External-runtime
-contract stabilization `TASK-000-D` is complete after its fourth consistency pass;
-no production implementation Task is active.
+contract stabilization `TASK-000-D` is complete after its fourth consistency pass.
+CLI-first broker stabilization `TASK-000-E` is superseded by the active local
+gRPC contract stabilization `TASK-000-F`; no production
+implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -286,6 +288,95 @@ links task-scoped commits; no production source exists; TASK-001 remains
 planned until this gate is complete. This architecture gate is complete;
 TASK-001 remains `PLANNED` as the next implementation task.
 
+## EPIC-000-E: Brokered Independent-Subagent Contract Stabilization
+
+Status: `SUPERSEDED` by `EPIC-000-F`
+
+Goal: Make the existing machine CLI a complete, discoverable foundation for a
+future trusted host adapter that lets ordinary Codex and Gul-hosted direct
+sessions request Independent Dolgorae Runs as subagents without receiving Run
+authority.
+
+### TASK-000-E: CLI-First Brokered Subagent Contract
+
+Status: `SUPERSEDED` by `TASK-000-F`
+
+Add the brokered hub-and-spoke use case to SPEC-012, ADR-010/020, architecture,
+runtime capabilities, writer semantics, and downstream verification ownership.
+The broker remains each child's `automation` Controller, uses the existing
+credential and Run commands, creates a `managed_agent` Dedicated Run with opaque
+parent provenance, and returns only bounded safe status/result material. Keep
+MCP transport, public sockets, parent-held delegation capabilities, nested
+authority, peer messaging, and transient same-thread Writer Capsules outside
+this task.
+
+Verification: parse and meta-validate every checked schema; run the SOT
+consistency and link gates; validate positive capability fixtures and rejection
+of a missing brokered-subagent feature; exercise a deterministic fake-broker
+composition for ordinary-Codex-shaped and Gul-direct-shaped parent references;
+prove Controller canaries never enter model-visible data; and prove competing
+Dolgorae writers in one canonical workspace converge on one authority plus
+`WRITER_BUSY` without claiming serialization of external editors.
+
+The task was superseded before its completion gate. Its broker-held Controller,
+hub-and-spoke orchestration, bounded result, and writer-conflict requirements
+are carried into `TASK-000-F`; no completion or independent-review evidence is
+inferred from the superseded state.
+
+## EPIC-000-F: Gul Local gRPC Contract Stabilization
+
+Status: `ACTIVE`
+
+Goal: Rebaseline the unreleased public v1 contract around two adapters sharing
+one semantic service, with a supervised local gRPC gateway suitable for Gul and
+without weakening Controller, writer, recovery, event, audit, or private-
+transport boundaries.
+
+### TASK-000-F: Public Local gRPC SOT and Protocol Contract
+
+Status: `ACTIVE`
+
+Amend ADR-001, add ADR-021 and SPEC-015, revise architecture/security/lifecycle,
+and publish `dolgorae.public.v1` Protobuf source plus deterministic descriptor,
+error mapping, mutation policy, capabilities, timeline, artifact, and machine-
+CLI derivatives. Generalize `create-successor` as
+`CreateWriteContinuation`, make Run allocation idempotent, add side-effect-free
+Controller verification, preserve threadless first-write rules, and retain the
+TASK-000-E broker composition over either public adapter. Add a derived
+implementation memo and assign production implementation to downstream tasks;
+this stabilization Task MUST NOT add production Rust code.
+
+Complete the Gul-facing v1 draft with absolute-path workspace bootstrap,
+version-zero capability negotiation, full typed capability/profile/Run/writer/
+interaction/lineage projections, typed Controller Interaction payloads and
+limits, durable accepted Run configuration, typed event `oneof` plus aggregate
+revision stamps, typed error actions including write continuation,
+discoverable Controller-carrier schema policy, same-principal continuation
+receipts, lossless output paths, closed capability blockers, exact StartRun
+replay, stream-end behavior, and explicit protected-input/socket ownership
+rules. The public v1 MUST remain unfrozen until all 30 memo criteria are
+verified and every runtime-pending case is closed.
+
+Verification: parse and meta-validate every JSON artifact; compile and lint the
+Protobuf module; regenerate and byte-compare the descriptor; prove command,
+error, capability, method-kind, mutation-policy, cursor, artifact, timeline,
+and Controller-carrier consistency; run Markdown links, obsolete sole-CLI/
+public-socket scans, semantic run-state fixtures, and `git diff --check`.
+Independently review at least the server-lifecycle, UDS attack, stream-pressure,
+credential TOCTOU, ambiguous-mutation, threadless-write, continuation-lineage,
+timeline-redaction, artifact, error-mapping, and version-evolution boundaries.
+Descriptor-backed adapter conformance MUST parse concrete Protobuf fixtures,
+compare normalized Machine/gRPC projections, preserve all Interaction support
+states, reject invalid profile default-model catalogs, and report production
+runtime cases separately rather than hardcoding completion.
+
+Epic acceptance: all 30 acceptance rows in the local-gRPC implementation memo
+resolve to active authorities and deterministic verification; one independent
+read-only review reports no unresolved blocking finding; an implementation note
+and review index record the completed evidence and task-scoped commit; no
+production source exists; and `TASK-001` remains `PLANNED` until this gate is
+complete.
+
 ## EPIC-001: Foundation and Durable State
 
 Status: `PLANNED`
@@ -300,7 +391,10 @@ Status: `PLANNED`
 Implement the Rust 2024 binary skeleton, command parser, UUIDv7 identities,
 stable JSON success/error envelopes, exit-status mapping, typed lifecycle,
 control-mode, purpose, execution-lane, assurance, and access enums,
-external-runtime commands and controller/capability types,
+external-runtime commands and controller/capability types, including the
+`brokered_independent_subagent_runs` discovery flag,
+the adapter-independent semantic-service interface, shared domain DTOs,
+`dolgorae.public.v1` generated types and descriptor digest,
 help/version/unknown-command output, `--human` rendering boundary,
 pinned Rust 1.97.1 toolchain,
 machine-output schema validation, injectable monotonic clock, identity/boot/
@@ -489,7 +583,9 @@ wrong owner/mode, symlink, oversize, malformed base64url, argv/environment leak,
 zeroization and mismatch cases; every mutating command versus every observer;
 same credential across runs; reset for idle reader/writer, paused and
 outcome-unknown runs; rejection for active, pending, handoff and unverifiable
-states; failure before binding change; controller generation and audit proof.
+states; failure before binding change; controller generation and audit proof;
+and a broker-owned automation credential whose non-secret child identity may be
+shown to a parent without granting mutation authority.
 
 ## EPIC-003: Access, Interaction, and Recovery Safety
 
@@ -518,7 +614,7 @@ Acquire/release retains the same worker, byte-1 owner, logical lane, and thread.
 Policy changes occur within the current dedicated generation or, after exact
 absence and a durable-history barrier, within its same-lane successor
 generation. A shared-readonly Run is never promoted: it creates a lineage-linked
-dedicated successor Run. Startup locks use the pinned timed-record-lock layout
+dedicated write-continuation Run. Startup locks use the pinned timed-record-lock layout
 and offsets.
 
 Verification: multiprocess tests proving multiple readers, one writer authority
@@ -526,7 +622,7 @@ per worktree, no shared-singleton restart on policy change, deterministic writer
 conflicts, crash boundaries for `none→reserved→active` and
 `active→releasing→none` including every proof/failure landing, missing/replaced
 local lock refusal, PID reuse refusal, safe pause/close release and unknown-state
-blocking, fixed thread residency, dedicated-successor creation, source-lane
+blocking, fixed thread residency, dedicated write-continuation creation, source-lane
 retirement during handoff, destination failure leaving `none`, acquire races,
 idle handoff,
 active/waiting/cross-controller refusal, expiry, stale writer/run generations,
@@ -534,14 +630,17 @@ cancel/commit races and requester-failure-with-no-writer, and
 separate locks for distinct canonical workspaces, permanent writer/startup
 pathnames, held-fd/path and historical-inode splits, linked-worktree Git writable
 roots, access-policy mappings, explicit unsupported-transition refusal, a fresh
-lineage-linked dedicated successor Run for shared-readonly to writer, and verified incumbent retirement
+lineage-linked dedicated write-continuation Run for shared-readonly to writer, and verified incumbent retirement
 before write-to-read authority release.
-Successor tests must prove fixed workspace/profile/control mode, a new
+Write-continuation tests must prove fixed workspace/profile/control mode, a new
 same-principal destination Controller, non-decreasing assurance, capability
 union and revalidation, supported model/effort overrides, recomposed instruction
 prefixes, and non-inheritance of source Controller instructions or hidden history.
 Also cover `F_SETLKWTIMEOUT`, spawn-image versus final-image identity, and
 fail-closed byte-1 control timeout without any activity-derived signal.
+Include brokered children created from Gul-shaped and ordinary-Codex-shaped
+parents in the same-workspace writer race; client origin and parent reference
+must not affect the one-writer result.
 Measure the exact SPEC-007 writer turn carrier, including
 `excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`, against the pinned
 profile and prove that a writer turn can write both the workspace and the OS
@@ -668,6 +767,30 @@ truncation, Git/non-Git algorithms, and every command `data` variant. Test
 identity, observer/controller interaction and artifact denial matrices, profile
 redaction/authorization, and pre-ready failures that create no Run.
 
+### TASK-010-A: Supervised Local gRPC Gateway and Gul Contract
+
+Status: `PLANNED`
+
+Implement `dolgorae serve`, the single-instance gateway record/lock, strict
+private Unix-socket lifecycle, peer-UID validation, pinned tonic/prost codegen,
+and every Gul-scope service in `dolgorae.public.v1`. Route every method into the
+shared semantic service. Add bounded independent Run streams, Controller
+carrier-file revalidation, side-effect-free verification, Controller timeline
+pagination, raw-byte artifact chunks, typed `google.rpc.Status` details, and
+graceful shutdown/restart behavior. Do not expose Operator methods, TCP,
+client-streaming, bidirectional streaming, worker sockets, or App Server
+transports.
+
+Verification: deterministic fake-semantic-service tests for every unary and
+stream method; method-kind/descriptor golden tests; unsafe path, symlink,
+permission, stale inode, peer UID, concurrent serve, readiness, graceful and
+crash restart cases; 32-envelope/4-MiB/5-second pressure boundaries; independent
+Run streams on one channel; cancellation; Controller carrier TOCTOU and secret
+canaries; snapshot-plus-replay; accepted-only SubmitTurn; allocation response
+loss; threadless first write; continuation lineage; timeline redaction and image
+metadata; artifact cancellation/digest/range; and exhaustive typed error map.
+All timing uses injectable clocks and no test binds TCP.
+
 ### TASK-011: Verify, Export, and Confirmed Delete
 
 Status: `PLANNED`
@@ -689,8 +812,8 @@ Status: `PLANNED`
 
 Implement bounded versioned direct-interactive and managed-agent instruction
 prefixes, subordinate run instructions, `.dolgorae` reservation, access-aware mutation policy, explicit Git
-and background-process rules, advisory managed-run context, capability-checked
-independent-run control, manager-owned bounded singleton shutdown, and cleanup
+and background-process rules, advisory managed-run context, broker-requested
+independent Run composition with broker-only control, manager-owned bounded singleton shutdown, and cleanup
 audit records.
 
 Verification: mode-specific prompt-composition snapshots, controller-kind
@@ -698,7 +821,8 @@ compatibility, observer interaction denial, capability non-disclosure, and confl
 are separate from sandbox-policy enforcement tests; also cover self-read-only
 and attempted cross-run CLI control, marker-removal limitation reporting,
 malformed/foreign/nonexistent managed markers, non-exec MCP marker absence,
-write-heavy native-subagent delegation language,
+write-heavy native-subagent delegation language, brokered-child result routing
+without Controller disclosure,
 detached-worker signal/stdout behavior, five-second graceful/forced cleanup, and
 escaped-process limitation reporting.
 
@@ -722,8 +846,13 @@ compatibility, unknown additive data, server requests, terminal history,
 native-subagent opaque/event passthrough, controller/observer matrices,
 capability discovery, interaction idempotency, safe event profiles, and every
 documented error mapping, including artifact, independent run-state, and
-profile-event schemas, canonical upstream file-change kinds, and semantic
+profile-event schemas, the brokered independent-subagent capability and CLI
+composition, canonical upstream file-change kinds, and semantic
 multi-diff aggregate bounds.
+Drive every operation shared by Machine CLI and gRPC from one golden semantic
+scenario and require equal normalized result, typed error, durable state,
+ledger/event cursor, idempotency receipt, and redaction result after removing
+adapter-only envelope and transport metadata.
 
 Verification: the complete unit/integration suite passes without network,
 credentials, timing-sensitive sleeps, or real Codex quota. Injectable time
@@ -741,6 +870,10 @@ fail-closed correlation. Include operation-token crash points around every
 PREPARE/APPLY/COMMIT boundary and concurrent same/different-controller handoff,
 operator reset, observer disconnect, and proof that failures never expose a
 capability or create two writers.
+Include gateway lock/record and socket-inode crash points, peer-credential and
+carrier-file replacement races, concurrent Run streams, slow-consumer pressure,
+gateway restart during an accepted mutation, and proof that no gateway failure
+signals a worker/App Server or releases writer authority.
 
 Verification: drive each named fault barrier and injected identity/boot/
 enumeration schedule deterministically, then run 100 stress iterations as
@@ -770,6 +903,13 @@ integrity/range behavior, and the exact SPEC-007 writer turn carrier with
 `excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`. If any required dedicated-lane behavior fails, TASK-015 and
 release remain blocked; absence of a future native terminal API is not itself a
 blocker.
+The live campaign also runs one broker-owned Dedicated managed child, returns a
+bounded result to a parent-shaped harness, and proves that a conflicting
+Dolgorae writer is rejected without exposing the child Controller credential.
+It additionally drives a Gul Go harness over one local gRPC channel, observes at
+least two independent Run streams, restarts the supervised gateway while a Run
+survives, resumes each cursor, verifies Controller adoption without mutation,
+and reads large final-response and approval artifacts.
 
 Verification: both profile reports pass on Apple Silicon macOS; required-subset
 and early-ID gates match each executable; every SOT contract has deterministic

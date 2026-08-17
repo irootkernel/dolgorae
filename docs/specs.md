@@ -18,8 +18,8 @@ validator explicitly named by this specification are also normative.
 ## Definitions
 
 - **Master**: a human, interactive client, workflow orchestrator, or local
-  automation process that invokes the `dolgorae` CLI and owns orchestration
-  decisions.
+  automation process that invokes a public Dolgorae adapter and owns
+  orchestration decisions.
 - **Controller**: the one master authorized by a durable capability binding to
   mutate a run.
 - **Observer**: a same-OS-user caller allowed to read client-safe projections
@@ -44,6 +44,9 @@ validator explicitly named by this specification are also normative.
   a Run's immutable dedicated logical lane.
 - **Event Projection**: the `minimal` or `operational` delivery view over one
   durable event cursor domain.
+- **Public RPC Gateway**: the optional foreground `dolgorae serve` process that
+  exposes the shared semantic service as standard gRPC over a user-private Unix
+  domain socket without owning Run or worker lifecycle.
 - **Codex Config Profile**: a Codex `--profile` selection inside normalized
   global argv; it is not a Dolgorae Runtime Profile.
 - **Reader**: a run whose turns use Codex read-only sandbox policy.
@@ -84,13 +87,16 @@ never replaces lane-generation identity, census, or cleanup.
 
 Dolgorae MUST be the only Codex app-server supervisor used by supported
 external-master integrations. An external master MUST use the stable Dolgorae
-machine CLI and MUST NOT start, connect to, or control the singleton, its
-dedicated App Server socket, or a private worker socket. This is a
+Machine CLI or public local gRPC adapter and MUST NOT start, connect to, or
+control the singleton, its dedicated App Server socket, or a private worker
+socket. This is a
 supported-integration boundary, not a
 claim that Dolgorae can prevent a hostile same-user process or an unrelated
 editor from mutating the workspace. Dolgorae remains local-only: v1 MUST NOT
 bind a public TCP port, provide remote authentication, or require a remote
-client to remain connected.
+client to remain connected. V1 MUST NOT expose TCP, a remote bind, direct
+Tailscale access, or remote authentication; a Gul deployment owns remote HTTP
+authentication and authorization outside Dolgorae.
 
 ## SPEC-002: Workspace Initialization and Discovery
 
@@ -552,6 +558,7 @@ The initial public command surface is:
 dolgorae [--human] --help
 dolgorae [--human] --version
 dolgorae [--human] init [PATH] [--non-git]
+dolgorae [--human] serve --socket <absolute-private-socket-path> [--ready-fd <fd>]
 
 dolgorae [--human] runtime capabilities
 dolgorae [--human] controller credential create --kind <kind> --instance-id <id> [--subject-id <id>] --output <new-path>
@@ -581,13 +588,14 @@ dolgorae [--human] profile state reset <name> [--workspace <path>] [--operator-f
 dolgorae [--human] profile diagnostics list <name> [--workspace <path>] [--after <cursor>] [--limit <n>] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
 dolgorae [--human] profile events <name> [--workspace <path>] [--after <cursor>] [--follow] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
 
-dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] start --workspace <path> --profile <name> [--control-mode <direct-interactive|managed-agent>] [--execution-lane <shared-readonly|dedicated>] [--required-assurance <best-effort-personal-alpha|verified-thread-scoped-control|strong-process-containment>] [--model <model>] [--effort <effort>] [--purpose <purpose>] [--purpose-label <label>] [--parent-namespace <value> --parent-kind <value> --parent-id <value>] [--require-capability <name>]... [--instructions <text> | --instructions-file <path> | --instructions-stdin]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] start --workspace <path> --profile <name> [--control-mode <direct-interactive|managed-agent>] [--execution-lane <shared-readonly|dedicated>] [--required-assurance <best-effort-personal-alpha|verified-thread-scoped-control|strong-process-containment>] [--model <model>] [--effort <effort>] [--purpose <purpose>] [--purpose-label <label>] [--parent-namespace <value> --parent-kind <value> --parent-id <value>] [--require-capability <name>]... [--instructions <text> | --instructions-file <path> | --instructions-stdin] --idempotency-key <key>
 dolgorae [--human] run list [--workspace <path>]
 dolgorae [--human] run status <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] send <run-id> [--workspace <path>] [--write] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] --idempotency-key <key> [--timeout <duration>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] submit <run-id> [--workspace <path>] [--write] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] --idempotency-key <key>
 dolgorae [--human] run wait <run-id> <turn-id> [--workspace <path>] [--timeout <duration>]
 dolgorae [--human] run events <run-id> [--workspace <path>] [--after <cursor>] [--follow] [--projection <minimal|operational>]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] timeline <run-id> [--workspace <path>] [--after <cursor>] [--limit <n>]
 dolgorae [--human] run pending <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] interaction get <run-id> <request-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] respond <run-id> --request-id <id> --idempotency-key <key> [--workspace <path>] [--response-fd <fd>]
@@ -602,13 +610,14 @@ dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] pause <
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] resume <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] recover <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] reconcile <run-id> [--workspace <path>]
-dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>]
-dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] create-successor --from <run-id> --from-turn <turn-id> --purpose <purpose> [--purpose-label <label>] [--model <model>] [--effort <effort>] [--required-assurance <level>] [--require-capability <name>]... [--instructions-fd <fd>] [--handoff-summary-fd <fd>] [--artifact-ref <artifact-id>]... --idempotency-key <key> [--workspace <path>] (--new-controller-file <path> | --new-controller-fd <fd>)
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>] --idempotency-key <key>
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] create-write-continuation --from <run-id> --from-turn <turn-id> --reason <shared-readonly-source|access-transition-unavailable|access-transition-unverified> --purpose <purpose> [--purpose-label <label>] [--model <model>] [--effort <effort>] [--required-assurance <level>] [--require-capability <name>]... [--instructions-fd <fd>] [--handoff-summary-fd <fd>] [--artifact-ref <artifact-id>]... --idempotency-key <key> [--workspace <path>] (--new-controller-file <path> | --new-controller-fd <fd>)
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] close <run-id> [--workspace <path>] [--interrupt]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] delete <run-id> --confirm [--workspace <path>]
 dolgorae [--human] run verify <run-id> [--workspace <path>]
 dolgorae [--human] run export <run-id> [--output <directory>] [--workspace <path>]
 dolgorae [--human] run [--operator-file <path> | --operator-fd <fd>] controller reset <run-id> [--workspace <path>] --confirm <run-id> [--new-controller-file <path> | --new-controller-fd <fd>]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] controller verify <run-id> [--workspace <path>]
 ```
 
 `run start` creates an empty idle Dolgorae session and MUST NOT allocate a Codex
@@ -655,9 +664,13 @@ ready non-null server epoch. Failure to start a physical dedicated generation
 leaves the logical Run idle and returns `DEDICATED_SERVER_START_FAILED`; it does
 not fabricate a Turn or change lanes.
 
-`run create-successor` requires a `shared_readonly` source, its exact current
-terminal Turn, no active Turn, and no unresolved interaction. It creates a new
-Run ID and dedicated lane. Workspace, profile, and control mode are inherited
+`run create-write-continuation` requires an exact current terminal Turn, no
+active Turn, no unresolved interaction, and one closed creation reason:
+`shared_readonly_source`, `access_transition_unavailable`, or
+`access_transition_unverified`. The first reason requires a `shared_readonly`
+source; the latter two require a dedicated source whose recorded transition
+support or result has the named verdict. It creates a new Run ID and dedicated
+lane. Workspace, profile, and control mode are inherited
 and cannot be overridden. Model and effort may be overridden only when the
 selected profile supports them. Required assurance defaults to the source and
 may be retained or raised, never lowered; required capabilities are the union
@@ -665,17 +678,30 @@ of the source set and additions and are revalidated before allocation. The
 source Controller authorizes creation, but the destination is bound to a new
 same-principal per-Run Controller credential supplied through exactly one new
 controller descriptor. Possession of the source secret does not authorize the
-successor after publication. It
-never mutates the source lane, copies hidden reasoning, or inherits writer
-authority. The immutable lineage records source Run/thread/terminal-Turn IDs,
+continuation after publication. It never mutates the source lane, source writer
+authority, effective policy, or recovery evidence, and it never copies hidden
+reasoning, source Controller instructions, native-subagent hidden history, or
+writer authority. A blocked source writer therefore continues to block the
+destination's later first-write attempt until independently reconciled. The
+immutable lineage records source Run/thread/terminal-Turn IDs,
 creation reason, source/destination Controller kinds, timestamp, workspace
 baseline, at most 64 artifact references, and the SHA-256 of an optional UTF-8
-handoff summary of at most 65,536 bytes. The successor remains threadless and
+handoff summary of at most 65,536 bytes. The continuation remains threadless and
 physically absent until first input; its first instruction composition may
 include the bounded summary, selected artifact references, and bounded
 destination instructions read from `--instructions-fd`. Common, mode, and
 purpose prefixes are recomposed; source Controller instructions and hidden
 history are never copied. A different principal is rejected in v1.
+
+`serve` is a supervised foreground command, not a finite semantic invocation.
+It MUST bind only the supplied absolute Unix-socket path and MUST NOT accept a
+TCP, remote-bind, or daemonization option. When `--ready-fd` is supplied it
+writes exactly one bounded `rpc_server.ready` success or failure envelope and
+closes that descriptor; otherwise it writes the readiness envelope to stdout
+and performs no later stdout writes. Graceful SIGTERM exits zero after the
+five-second drain contract. Startup collision, unsafe socket state, or a fatal
+runtime failure exits with the mapped typed error and MUST NOT affect Runs,
+workers, writer authority, Profile Servers, or Dedicated Lane Servers.
 
 In JSON mode `--help` and `--version` emit ordinary success envelopes with
 commands `help` and `version`; `--human` selects presentation-only text. A
@@ -802,7 +828,14 @@ The checked [machine-output schema](protocol/dolgorae-machine-v1.schema.json),
 [interaction schema](protocol/dolgorae-interaction-v1.schema.json),
 [capability schema](protocol/dolgorae-capabilities-v1.schema.json), and
 [controller-credential schema](protocol/dolgorae-controller-credential-v1.schema.json),
-and [operator-credential schema](protocol/dolgorae-operator-credential-v1.schema.json)
+[operator-credential schema](protocol/dolgorae-operator-credential-v1.schema.json),
+[artifact schema](protocol/dolgorae-artifact-v1.schema.json),
+[Controller timeline schema](protocol/dolgorae-timeline-v1.schema.json),
+[RPC mutation policy](protocol/dolgorae-rpc-mutation-policy-v1.json),
+[gRPC client policy](protocol/dolgorae-grpc-client-policy-v1.json),
+[gRPC error map](protocol/dolgorae-grpc-error-mapping-v1.json),
+[Protobuf source](protocol/dolgorae/public/v1/dolgorae.proto), and
+[descriptor manifest](protocol/dolgorae-public-v1.descriptor.json)
 are normative.
 `command` is a closed dotted
 subcommand enum and `invocation_id` is a UUIDv7. `data` is a command-tagged
@@ -971,28 +1004,31 @@ normative:
 | `CONTROLLER_RESET_NOT_ALLOWED` | 4 | `run controller reset` | active work, a pending interaction, handoff, or unverifiable writer state blocks reset |
 | `OPERATOR_MISMATCH` | 4 | operator credential rotation, profile stop/restart, controller reset, `workspace writer reset` | the supplied separate local operator capability is absent, stale, or invalid |
 | `CONTROL_MODE_REQUIRED` | 2 | `run start` | a `workflow_orchestrator` or `automation` controller did not supply `--control-mode`; managed runs never inherit interactive defaults |
-| `CONTROL_MODE_CONTROLLER_MISMATCH` | 4 | `run start`, `run create-successor` | the controller kind is not permitted by the requested control mode, or is `other` |
+| `CONTROL_MODE_CONTROLLER_MISMATCH` | 4 | `run start`, `run create-write-continuation` | the controller kind is not permitted by the requested control mode, or is `other` |
 | `PURPOSE_REQUIRED` | 2 | `run start` | a managed run did not supply `--purpose` |
 | `EXECUTION_LANE_REQUIRED` | 2 | `run start` | a managed run did not supply `--execution-lane` |
 | `CAPABILITY_UNSUPPORTED` | 4 | `run start`, projection and interaction commands | a required Dolgorae or profile feature is unavailable |
 | `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE` | 4 | profile add/update/doctor | the public profile requests disable enforcement that pinned Codex 0.147.0 did not provide |
-| `ACCESS_TRANSITION_UNSUPPORTED` | 4 | write acquire/release and handoff | the tested profile cannot safely apply the requested policy to the existing thread; fork a new run/thread |
+| `ACCESS_TRANSITION_UNSUPPORTED` | 4 | write acquire/release and handoff | the tested profile cannot safely apply the requested policy to the existing thread; create a lineage-linked write continuation |
 | `BACKGROUND_EXECUTION_UNVERIFIED` | 4 | writer release/handoff/close, `workspace writer reset`, and recovery | the Dedicated lane-generation census or exact cleanup cannot prove the supported process scope empty |
-| `IDEMPOTENCY_CONFLICT` | 4 | `run send/submit/respond/create-successor` | a run-scoped key was reused with different normalized input |
+| `IDEMPOTENCY_CONFLICT` | 4 | `run start/fork/send/submit/respond/create-write-continuation` | an operation-scoped key was reused with different normalized input |
 | `INTERACTION_ALREADY_RESOLVED` | 4 | `run respond` | another valid response already won |
 | `INTERACTION_STALE` | 4 | `run respond` | the interaction belongs to an older or cleared generation |
 | `INTERACTION_RESPONSE_INVALID` | 4 | `run respond` | the response does not satisfy the recorded normalized schema |
-| `SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN` | 4 | `run create-successor` | the request attempts to change inherited workspace, profile, or control mode |
-| `SUCCESSOR_MODEL_UNSUPPORTED` | 4 | `run create-successor` | the requested destination model or effort is not supported by the inherited profile snapshot |
-| `SUCCESSOR_SOURCE_NOT_TERMINAL` | 4 | `run create-successor` | the named source Turn is absent, nonterminal, stale, or no longer current |
-| `SUCCESSOR_LINEAGE_INVALID` | 4 | `run create-successor`, projection validation | source existence, workspace identity, fresh Run/thread identity, or immutable lineage validation failed |
-| `SUCCESSOR_CONTROLLER_INVALID` | 4 | `run create-successor` | the destination credential is reused, belongs to a different principal, or has an incompatible Controller kind |
-| `EXECUTION_LANE_UNSUPPORTED` | 4 | `run start`, `run create-successor` | the selected profile cannot host the requested execution lane |
+| `INTERACTION_RESPONSE_TOO_LARGE` | 4 | `run respond`, `ResolveInteraction` | the raw response body exceeds the advertised 1-MiB pre-parse bound |
+| `INTERACTION_PAYLOAD_TOO_LARGE` | 4 | `run interaction get`, `GetControllerInteraction` | the typed safe payload exceeds the advertised 8-MiB encoded bound and is not returned |
+| `INTERACTION_OUTCOME_UNKNOWN` | 4 | Interaction lost-response reconciliation | authorized snapshots cannot determine whether the resolution committed; protected input must not be replayed automatically |
+| `WRITE_CONTINUATION_PROFILE_OVERRIDE_FORBIDDEN` | 4 | `run create-write-continuation` | the request attempts to change inherited workspace, profile, or control mode |
+| `WRITE_CONTINUATION_MODEL_UNSUPPORTED` | 4 | `run create-write-continuation` | the requested destination model or effort is not supported by the inherited profile snapshot |
+| `WRITE_CONTINUATION_SOURCE_NOT_TERMINAL` | 4 | `run create-write-continuation` | the named source Turn is absent, nonterminal, stale, or no longer current |
+| `WRITE_CONTINUATION_LINEAGE_INVALID` | 4 | `run create-write-continuation`, projection validation | source existence, workspace identity, fresh Run/thread identity, creation reason, or immutable lineage validation failed |
+| `WRITE_CONTINUATION_CONTROLLER_INVALID` | 4 | `run create-write-continuation` | the destination credential is reused, belongs to a different principal, or has an incompatible Controller kind |
+| `EXECUTION_LANE_UNSUPPORTED` | 4 | `run start`, `run create-write-continuation` | the selected profile cannot host the requested execution lane |
 | `EXECUTION_LANE_IMMUTABLE` | 4 | state-changing run commands | an operation attempted to change a run's recorded execution lane |
-| `SHARED_RUN_WRITE_FORBIDDEN` | 4 | `run send/submit --write`, `run acquire-write` | a `shared_readonly` run requested write; a lineage-linked dedicated successor is required |
+| `SHARED_RUN_WRITE_FORBIDDEN` | 4 | `run send/submit --write`, `run acquire-write` | a `shared_readonly` run requested write; a lineage-linked write continuation is required |
 | `THREAD_RESIDENCY_CONFLICT` | 4 | run attach/recovery/reconcile and writer operations | a thread was observed outside its immutable logical lane |
 | `SAME_HOME_MULTI_SERVER_UNSAFE` | 5 | `profile doctor`, `run start`, and lane-starting run commands | the pinned same-home shared/dedicated coexistence campaign did not pass for this profile |
-| `ASSURANCE_LEVEL_UNAVAILABLE` | 4 | `run start`, `run create-successor` | `required_assurance` exceeds the profile snapshot's achievable level; only lowering the pre-allocation request is permitted |
+| `ASSURANCE_LEVEL_UNAVAILABLE` | 4 | `run start`, `run create-write-continuation` | `required_assurance` exceeds the profile snapshot's achievable level; only lowering the pre-allocation request is permitted |
 | `DEDICATED_HISTORY_BARRIER_FAILED` | 4 | `run resume/recover/reconcile` | the persisted history revision/digest barrier did not admit a successor generation in the same logical lane |
 | `PROFILE_LANE_MIGRATION_REQUIRED` | 4 | `profile server migrate` | a live lane is incompatible with the requested generation contract and the complete lane set requires operator migration |
 | `DEDICATED_SERVER_START_FAILED` | 6 | `run send/submit`, `run resume` | a physical Dedicated Lane Server generation could not start; the logical run stays idle and the same lane may be retried |
@@ -1004,9 +1040,10 @@ normative:
 | `OUTCOME_UNKNOWN` | 4 | state-changing run commands | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
 | `RECOVERY_REQUIRED` | 4 | writer acquire/release, `workspace writer reset`, and lifecycle/recovery commands | prior same-run identity or a `blocked_unknown` workspace writer generation cannot be proved safe; new reader runs and projection-only commands are excluded and the code is never generically retryable |
 | `PROFILE_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable profile identity differs from the manifest |
-| `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork/create-successor` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
+| `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork/create-write-continuation` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
 | `DOLGORAE_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Dolgorae version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
 | `PROTOCOL_VERSION_UNSUPPORTED` | 5 | machine commands | the caller requests an unsupported machine or event schema version |
+| `UNSUPPORTED_SCHEMA_VERSION` | 5 | gRPC requests and projections | the caller supplies an unknown input enum or unsupported projection/detail schema version |
 | `TRANSPORT_FAILURE` | 6 | every command that contacts a worker or singleton | Unix socket, WebSocket, or protocol transport fails |
 | `OPERATION_TIMEOUT` | 6 | `profile doctor` and run commands performing local replay/schema work | a bounded local operation expired without uncertain external acceptance |
 | `PROTOCOL_FRAME_TOO_LARGE` | 6 | every command receiving a CLI-worker frame | the CLI-worker request or response frame exceeds its byte limit |
@@ -1017,6 +1054,12 @@ normative:
 | `TURN_FAILED` | 7 | `run send/wait` | the addressed turn reaches failed terminal state |
 | `TURN_INTERRUPTED` | 7 | `run send/wait` | the addressed turn reaches interrupted terminal state |
 | `AUDIT_INTEGRITY_FAILURE` | 8 | `run verify/export/events/status` and any state-changing run command after ledger validation | newline-terminated record structure, sequence, or hash validation fails |
+| `THREADLESS_REQUIRES_WRITE_TURN` | 4 | `run acquire-write`, `AcquireWriter` | a threadless dedicated Run must perform its first write through `SubmitTurn(write_intent=WRITE)` |
+| `SLOW_CONSUMER` | 4 | `WatchRunEvents` | one Run stream exceeded its bounded delivery queue or stall deadline; resume from the client's last committed cursor |
+| `EVENT_CURSOR_INVALID` | 2 | `run events/timeline`, `WatchRunEvents`, `ListRunTimelineItems` | the cursor is noncanonical or beyond the authoritative Run ledger head; projection gaps are never this error |
+| `RPC_SERVER_ALREADY_RUNNING` | 4 | `serve` | the installation-scoped gateway lock is held by a matching live server |
+| `RPC_SOCKET_UNSAFE` | 6 | `serve` | the requested socket path, parent, existing node, ownership, mode, or stale identity cannot be proved safe |
+| `SERVER_SHUTDOWN` | 6 | public gRPC calls | graceful gateway shutdown ended an admitted call or stream without changing Run state |
 
 `RUN_BUSY` means another turn is already active or won the serialized turn-start
 race, or another process owns the run's worker startup/attachment serialization.
@@ -1025,8 +1068,9 @@ operation. Every command specification and conformance fixture MUST use this
 table rather than assign an exit class locally.
 “State-changing run command” means start, send, submit, respond, interrupt,
 set-effort, acquire-write, release-write, pause, resume, recover, reconcile,
-fork, close, delete, controller reset, or writer handoff. Status, list, wait,
-events, pending, writer status, verify, and export are observers; export
+fork, create-write-continuation, close, delete, controller reset, or writer
+handoff. Status, list, wait, events, pending, writer status, controller verify,
+verify, and export are observers; timeline is a Controller-authorized read. Export
 embeds a failing verification result rather than refusing. Confirmed delete is
 the explicit integrity-failure escape described in SPEC-010.
 For a write recovery path, same-run identity safety is evaluated before
@@ -1086,6 +1130,30 @@ Because an exit-7 failure envelope is intentionally minimal, a Master needing
 response, usage, cursor, or measured workspace changes reads
 `run status.data.last_terminal` after the failed or interrupted turn.
 
+`run timeline` and `ListRunTimelineItems` expose a Controller-authorized
+`controller_timeline` projection version 1. They use the Run ledger cursor
+domain and exclusive `after_cursor`, default to 100 items, reject limits above
+500, and return the captured head plus a nullable next cursor. Filtered cursor
+gaps are valid. The only item types are `user_input.accepted`,
+`assistant_response.final`, `interaction.opened`, `interaction.resolved`, and
+`turn.terminal`. Each item carries Run/Turn identity, ledger cursor, UTC time,
+and provider item ID/order when supplied. Ordering follows authoritative
+provider item order normalized into the ledger, never notification arrival
+order.
+
+The accepted user input record is fsynced before `submit` acknowledges the
+Turn. UTF-8 text at most 1 MiB is inline; larger accepted text up to the 8-MiB
+public-request bound is streamed to a `user_input` Controller-only artifact.
+Image inputs retain only caller order, detail, media type, raw byte length, and
+SHA-256. Their source path and bytes are not retained for timeline display.
+Interaction timeline items contain typed `interaction_kind`, typed
+`interaction_status`, bounded `interaction_safe_title`, and identity only;
+the full payload remains available solely through the separately authorized
+interaction operation. Timeline records MUST NOT contain hidden reasoning,
+internal planning, private worker payloads, raw tool payloads, private transport
+frames, hidden native-subagent history, credential material, or an internal
+artifact path.
+
 Profile diagnostics have a separate append-only journal and canonical decimal
 cursor. `profile events` and `profile diagnostics list` never reuse or advance a
 Run cursor. Minimal profile events are same-uid readable, redacted, bounded, and
@@ -1121,8 +1189,8 @@ accepts `turn/start` and Dolgorae fsyncs the permanent thread binding and turn I
 `wait` requires both run and turn
 IDs. Waiting and caller-timeout returns use exit 0.
 
-An idempotency key is REQUIRED for `send`, `submit`, `respond`, and
-`create-successor` and is unique
+An idempotency key is REQUIRED for `run start`, `run fork`, `send`, `submit`,
+`respond`, and `create-write-continuation` and is unique
 for the run's lifetime within its operation class. Reusing a key with
 the same normalized message, image paths/details/byte digests, and turn options resolves to
 the original turn. Reusing it with different input returns
@@ -1140,12 +1208,24 @@ COMMIT revalidates the same operation token and revisions. A reservation with
 no accepted turn is released only after stable history proves non-acceptance;
 otherwise it remains bound to the original intent across restart.
 
-`create-successor` has its own operation-class key space. Its JCS-normalized
+Run allocation reserves its key before publishing a Run. `run start`
+normalization contains canonical workspace identity, resolved profile snapshot,
+Controller ID/generation, control mode, execution lane, purpose/parent,
+model/effort, assurance, required capabilities, and instruction byte length and
+SHA-256. `run fork` additionally contains source Run, fork mode, selected model,
+and the exact history/provenance boundary. Their carrier paths and secret bytes
+are excluded. Response loss is reconciled by retrying the identical allocation
+key, which returns the original Run; changed normalized input is
+`IDEMPOTENCY_CONFLICT` and can never allocate another Run under that key.
+
+`create-write-continuation` has its own operation-class key space. Its
+JCS-normalized
 digest contains source Run ID and exact terminal Turn ID, purpose/label, selected
 or inherited model and effort, requested assurance, required capabilities in
 canonical sorted unique order, handoff and destination-instruction byte lengths
-and SHA-256 values, artifact references in caller order, and the public identity
-and generation of the new destination Controller. Credential carrier paths,
+and SHA-256 values, artifact references in caller order, creation reason, and
+the public identity and generation of the new destination Controller.
+Credential carrier paths,
 descriptor numbers, and secret bytes are excluded. A same-key retry returns the
 original destination Run and credential-delivery receipt; any changed normalized
 field returns `IDEMPOTENCY_CONFLICT` without allocating another Run.
@@ -1183,9 +1263,10 @@ never truncated or converted into a failed Turn. The event and machine Turn use
 the same union, and only inline/artifact variants emit `response.final`.
 
 Run artifacts are create-exclusive mode-0600 files under the run-private store
-with an append-only metadata index. Supported kinds are `file_change_diff` and
-`final_response`; reasoning content is forbidden. A file-change artifact is at
-most 8 MiB, a final response at most 32 MiB, and total retained artifact bytes
+with an append-only metadata index. Supported kinds are `file_change_diff`,
+`user_input`, and `final_response`; reasoning content is forbidden. A
+file-change or user-input artifact is at most 8 MiB, a final response at most 32
+MiB, and total retained artifact bytes
 per Run are at most 256 MiB. Retention equals Run lifetime; an unresolved
 interaction's artifact cannot be removed. `artifact show` returns metadata only.
 `artifact read` uses raw-byte offsets, requires `1 <= length <= 1048576`, returns
@@ -1249,10 +1330,18 @@ Dolgorae limit and MAY observe a writer's intermediate files; there is no
 snapshot isolation or rollback. A canonical workspace has at most one Dolgorae
 writer across every run and profile.
 
+A brokered independent subagent Run participates in that same workspace writer
+authority without regard to which client or broker caused its creation. If a
+Gul-origin Run, ordinary-Codex-origin child, or any other Dolgorae Run already
+owns the canonical workspace, a competing child write MUST return `WRITER_BUSY`;
+it MUST NOT queue, take over, or infer permission from its parent relationship.
+Editors and Codex processes operating outside Dolgorae remain outside this
+serialization guarantee.
+
 Writer acquisition is lazy and explicit. `run send|submit --write` MUST activate
 durable writer authority before submitting any prompt. `run acquire-write` is
 valid only after a thread is durably bound; a threadless run returns
-`RUN_STATE_CONFLICT` with reason `threadless_requires_write_turn`. It never
+`THREADLESS_REQUIRES_WRITE_TURN`. It never
 creates a turnless writer thread or treats a reservation as an idle writer.
 Dolgorae MUST NOT infer write intent from natural language or use mid-turn
 permission escalation. A failed activation MUST NOT start the turn.
@@ -1295,15 +1384,16 @@ run/writer revisions and normalized input/idempotency, persists/fsyncs the turn
 transaction intent, then persists `reserved` and provisional-thread intent
 referencing that same transaction, reserves a never-reused dedicated process
 generation/server epoch, and releases all file locks before any App Server wait.
-For a threadless first write, the worker starts the Run's Dedicated Lane Server,
-then calls `thread/start` there with writer policy, verifies the
+For a threadless first write, `SubmitTurn(write_intent=WRITE)` reserves writer
+authority before any prompt submission. The worker starts the Run's Dedicated
+Lane Server, then calls `thread/start` there with writer policy, verifies the
 effective policy, and reacquires home, server, writer, then run locks to fsync the lane/thread
 binding and `active` state; only afterward may it release locks and call
 `turn/start`. An existing dedicated reader uses the same
 prepare/apply/verify/commit shape in its current physical generation. If that
 generation is absent, it may use `thread/resume` only on a proved successor
 generation of the same logical lane. A shared reader cannot use this protocol
-and must create a dedicated successor. An existing
+and must create a dedicated write continuation. An existing
 writer turn revalidates `active` under writer then run locks, fsyncs its turn
 intent, releases the writer lock, and starts the turn under the worker mutation
 mutex. No global file lock is held across a network or turn-completion wait.
@@ -1868,7 +1958,7 @@ ordinary tampering; it is not a signature and does not defend against a hostile
 same-user attacker.
 
 The v1 audit-kind enum is closed:
-`workspace_initialized`, `run_created`, `successor_created`, `turn_intent`, `thread_bound`,
+`workspace_initialized`, `run_created`, `write_continuation_created`, `turn_intent`, `thread_bound`,
 `turn_started`, `turn_terminal`, `lifecycle_transition`,
 `run_generation_started`, `run_generation_stopped`, `app_server_request`,
 `app_server_response`, `app_server_notification`, `approval_requested`,
@@ -2068,6 +2158,26 @@ create, address, interrupt, fork, pause, close, or delete them. A Dolgorae-manag
 agent MUST NOT invoke `dolgorae` to control another run or connect to another
 run's worker socket. V1 has no peer messaging or run-to-run delegation.
 
+A trusted external automation broker MAY accept a model-originated request to
+operate an Independent Dolgorae Run as a subagent. The broker, not the requesting
+model or parent Run, remains that child's master and `automation` Controller.
+This is brokered hub-and-spoke orchestration, not delegated Run authority. The
+broker MUST keep the child Controller credential outside every LLM-visible
+channel and MUST use the existing public CLI composition: create one protected
+Controller credential, `run start` with `managed-agent`, `dedicated`, explicit
+purpose and assurance, and an all-or-none parent reference, then use ordinary
+`send`/`submit`, `wait`/`events`, `interrupt`, writer, and `close` operations.
+The child is durable across broker or parent disconnect and MUST NOT be closed or
+have writer authority released merely because either caller disappears.
+
+The parent reference and any child Run ID returned to the requesting model are
+non-authoritative provenance and routing data. They MUST NOT authorize a child
+mutation. Only the broker may retrieve or resolve the child's full interactions;
+the parent may receive bounded client-safe status and result material selected by
+the broker. A child remains prohibited from shelling out to control its parent or
+another Run. Parent-held delegation capabilities, nested authority transfer, and
+peer messaging remain outside v1.
+
 The shared singleton has one profile-generation environment, so Dolgorae MUST
 NOT claim that a per-run `DOLGORAE_*` marker reaches commands, MCP servers, or
 native subagents. A diagnostic marker, if observed, is advisory only and cannot
@@ -2121,16 +2231,26 @@ promotes production eligibility.
 
 ## SPEC-013: External Runtime and Controller Contract
 
-The machine CLI is the sole required v1 integration transport. CLI, worker, and
-any future adapter MUST call one semantic application service with identical
-state transitions, authorization, idempotency, errors, and projections. The
-private per-run worker socket is not a public contract. V1 provides no public
-local socket, WebSocket, HTTP, gRPC, MCP adapter, or workspace-multiplexed event
-stream.
+The Machine CLI and optional local gRPC gateway are the two public v1 adapters.
+Both MUST call one semantic application service with identical state
+transitions, authorization, idempotency, errors, audit effects, and safe
+projections for every overlapping operation. The CLI additionally owns
+the built-in credential-creation command, Operator-authorized profile/repair
+operations, and path-writing export. No credential-creation RPC exists; a
+trusted same-user client may instead create a checked-schema Controller carrier
+under its capability-advertised descendant. The private per-Run worker socket, shared/dedicated App
+Server sockets, direct WebSocket transport, and Codex protocol remain private.
+V1 provides no MCP adapter, TCP listener, remote bind, direct Tailscale
+exposure, remote authentication, client-streaming, bidirectional streaming, or
+workspace-wide event stream.
 
-`runtime capabilities` MUST return finite machine/event protocol versions,
-supported transports, projection profiles, stable Dolgorae feature flags, and
-known interaction kinds. It also exposes `access_policy_transition` as
+`runtime capabilities` and `GetCapabilities` MUST return finite machine/event/
+RPC protocol versions, accepted client range, checked descriptor SHA-256,
+supported transports and methods, projection/timeline versions, stable
+Dolgorae feature flags, and known interaction kinds. `supported_transports` is
+exactly `machine_cli` and `local_grpc`; `public_local_socket` is true while
+`workspace_event_stream` remains false. It also exposes
+`access_policy_transition` as
 `unverified`, `supported`, or `unavailable`; only a successful pinned live
 transition probe may produce `supported`. `profile doctor` and `profile show`
 MUST additionally return the profile-specific Codex capability snapshot.
@@ -2155,6 +2275,11 @@ a child. A later pin must rerun the same gate; a policy change still
 requires operator-authorized profile migration. Binary-level support
 does not override a rejected or incapable profile. A run declaring a required
 capability MUST fail before allocation when that profile does not provide it.
+The stable binary feature `brokered_independent_subagent_runs` is true when the
+SPEC-012 public-adapter composition and Controller separation are implemented. A broker
+MUST require that feature before presenting the composition as supported; the
+flag does not advertise an MCP adapter, Operator authority, or parent-held
+delegation capability.
 
 A controller credential is a strict object conforming to the checked v1 schema.
 It contains a UUIDv7 `controller_id`, one of `human_cli`,
@@ -2173,8 +2298,37 @@ exactly 32 bytes, re-encodes canonically, and compares the result to the supplie
 validator; JSON Schema character-count validation alone never satisfies a byte
 limit.
 
+The non-secret Controller principal key is `(kind, subject_id)` when
+`subject_id` is present and `(kind, instance_id)` otherwise. “Same principal”
+means exact byte equality of that normalized pair; it is a local correctness
+identity, not remote authentication. A write-continuation destination MUST use
+a different Controller UUID, generation 1, and the same principal key as the
+source. The source and destination Controller UUID/generation are both part of
+the operation's idempotency identity.
+
+The gRPC adapter MUST NOT accept Controller or Operator secret bytes in a
+Protobuf field or gRPC metadata. Its `ControllerCarrierRef` contains only an
+absolute protected file path plus the expected public Controller ID and
+generation. The path MUST remain below the canonical current-uid-owned
+mode-0700 Application Support root `Dolgorae/controller-carriers/`. Immediately
+before authorization, the semantic service MUST reopen it descriptor-relative,
+reject every symlink, require a same-uid mode-0600 regular file no larger than 4
+KiB, parse the expected Controller identity, compare the current Run generation
+and capability digest in constant time, and zeroize capability bytes. Carrier
+path, secret bytes, secret digest, raw content, and mismatch subreason MUST NOT
+appear in a response, status detail, log, event, audit payload, or metadata.
+
+`run controller verify` and `VerifyController` are side-effect-free. They MUST
+perform the complete serialization-point carrier and target-Run authorization
+check but MUST NOT start or attach a worker, append to the ledger, change a
+projection, reserve idempotency, or update last-access metadata. Success returns
+only the verified public Controller ID, generation, kind, Run ID, and
+verification time; a mismatch uses the same non-oracular `CONTROLLER_MISMATCH`
+shape as a mutation.
+
 Controller authorization applies before worker attachment or any external
-effect to `send`, `submit`, `respond`, `interrupt`, `set-effort`, `create-successor`, write acquire
+effect to `send`, `submit`, `respond`, `interrupt`, `set-effort`,
+`create-write-continuation`, write acquire
 or release, pause, resume, recover, reconcile, fork, close, delete, and writer
 handoff. Controller equality requires both the controller ID and a constant-time
 comparison of the persisted capability digest. A normal fork inherits the
@@ -2186,6 +2340,8 @@ and exports without a capability. Controller metadata is visible; capability
 bytes and their digest are never visible. External applications own any
 authentication and authorization applied before exposing those observer results
 remotely.
+Full interactions, controller-only artifacts, and the safe Run timeline require
+the same immediate Controller revalidation even though they are reads.
 
 The operator credential is a separate UUIDv7 and canonical 256-bit capability
 registered by create-exclusive `operator credential initialize` in the
@@ -2236,7 +2392,7 @@ token never restores a prior assumption or creates two authorities.
 | Writer authority operator reset | Operator, writer, run startup/mutation | None during absence proof and census |
 | Handoff prepare/commit | Handoff, writer, source/destination run locks in UUID order | None |
 | Handoff cancel | Handoff, then affected run locks in UUID order | None |
-| Successor creation | Source/destination run locks in UUID order | None; allocation and capability delivery occur after PREPARE |
+| Write-continuation creation | Source/destination run locks in UUID order | None; allocation and capability delivery occur after PREPARE |
 | Controller reset, non-writer | Operator, run startup/mutation | None when external work is needed |
 | Controller reset, writer | Operator, writer, run startup/mutation | None |
 | Run deletion | Writer when named by authority, then run startup/mutation | None |
@@ -2313,7 +2469,7 @@ carries Codex
 read-only sandbox, `networkAccess:false`, and `approvalPolicy:"never"`. Its
 immutable prefix prohibits workspace modification, privilege escalation, and
 long-lived background work, permits bounded validation under the OS temporary
-directory, and directs workspace-writing validation to a dedicated successor.
+directory, and directs workspace-writing validation to a dedicated write continuation.
 This is a personal-alpha behavior boundary, not per-Run process containment.
 Observers receive only authorized
 redacted projections and MUST NOT resolve an interaction. V1 has no single-use
@@ -2337,7 +2493,7 @@ One profile owns one shared read-only logical lane and zero or more dedicated
 logical lanes. A shared Run's persistent thread is loaded only in the shared
 server and its effective policy MUST remain verified read-only. It MUST NOT
 acquire workspace writer authority or be promoted in place. When it needs
-write, Dolgorae creates a lineage-linked dedicated successor or returns
+write, Dolgorae creates a lineage-linked dedicated write continuation or returns
 `SHARED_RUN_WRITE_FORBIDDEN`. Read-only foreground commands are allowed in Plan
 Mode. Shared background control is `profile_aggregate_only`: Run close cannot
 claim per-Run descendant cleanup, and profile stop owns complete aggregate
@@ -2419,8 +2575,9 @@ The checked decision rejects transient shared↔dedicated thread migration. On
 exact 0.147.0 `thread/unsubscribe` returned `unsubscribed` while the source
 still reported the thread loaded after two seconds, and a second server rejected
 resume as an active writer. `THREAD_RESIDENCY_CONFLICT` therefore fails closed;
-a shared Run needing write uses a fresh dedicated successor. The public
-`run create-successor` operation requires the source's current terminal Turn,
+a shared Run needing write uses a fresh dedicated write continuation. A dedicated reader
+whose access transition is unavailable or unverified uses the same generalized
+public operation. `run create-write-continuation` requires the source's current terminal Turn,
 no active Turn or pending interaction, source-Controller authorization, a new
 same-principal destination Controller credential, and an idempotency key. It
 records immutable lineage and creates a threadless, physically absent dedicated
@@ -2432,7 +2589,7 @@ remains a separate history-copy operation.
 Lane-specific errors are used only for distinct recovery semantics.
 `EXECUTION_LANE_UNSUPPORTED` rejects a profile that cannot host the selected
 lane; `EXECUTION_LANE_IMMUTABLE` rejects an attempted in-place lane change;
-`SHARED_RUN_WRITE_FORBIDDEN` requires a dedicated successor;
+`SHARED_RUN_WRITE_FORBIDDEN` requires a dedicated write continuation;
 `THREAD_RESIDENCY_CONFLICT` requires residency reconciliation;
 `SAME_HOME_MULTI_SERVER_UNSAFE` rejects a profile whose pinned campaign failed;
 `ASSURANCE_LEVEL_UNAVAILABLE` permits only lowering the pre-allocation request;
@@ -2443,6 +2600,318 @@ same logical lane. Identity uncertainty still uses `RECOVERY_REQUIRED`, active
 native work uses `RUN_BUSY`, workload uncertainty uses
 `BACKGROUND_EXECUTION_UNVERIFIED`, and writer/handoff conflicts keep their
 existing errors.
+
+## SPEC-015: Supervised Local gRPC and Gul Integration
+
+Dolgorae MUST expose versioned package `dolgorae.public.v1` as standard gRPC
+over HTTP/2 on the user-private Unix socket owned by `dolgorae serve`. The
+protocol version is integer 1 and the initial accepted client range is `[1,1]`.
+The pre-negotiation `GetCapabilities` request MUST set
+`context.protocol_version=0` and supply the client's minimum and maximum
+versions. The server selects a common version or returns typed
+`PROTOCOL_VERSION_UNSUPPORTED`. Every later request MUST carry the negotiated
+version and a client request UUID. Initial `InspectWorkspace` is the sole
+workspace bootstrap exception: it requires only an absolute path and may carry
+an expected workspace ID for attachment revalidation. Its response contains
+the canonical root, calculated workspace ID, typed inspection status, and
+typed compatibility/safety blockers. Every other workspace request requires
+the absolute path and expected workspace ID; every Run request also carries
+the Run UUID. Workspace canonicalization and identity MUST use SPEC-002 and
+MUST NOT trust an in-memory gateway registration.
+
+The public gRPC v1 surface is:
+
+- `RuntimeService`: unary `GetCapabilities`, `InspectWorkspace`,
+  `ListProfiles`, `GetProfile`, and `ListProfileDiagnostics`;
+- `RunService`: unary `StartRun`, `ListRuns`, `GetRun`, `SubmitTurn`,
+  `InterruptTurn`, `SetDefaultEffort`, `PauseRun`, `ResumeRun`, `CloseRun`,
+  `DeleteRun`, `RecoverRun`, `ReconcileRun`, `ForkRun`, `VerifyRun`, and
+  `CreateWriteContinuation`;
+- `ObservationService`: server-streaming `WatchRunEvents` and unary
+  `ListRunTimelineItems`;
+- `InteractionService`: unary `ListPendingInteractions`,
+  `GetControllerInteraction`, and `ResolveInteraction`;
+- `WriterService`: unary `GetWorkspaceWriterStatus`, `AcquireWriter`,
+  `ReleaseWriter`, `PrepareWriterHandoff`, `CommitWriterHandoff`, and
+  `CancelWriterHandoff`;
+- `ControllerService`: unary `VerifyController`; and
+- `ArtifactService`: unary metadata-only `GetArtifact` and bounded
+  `ReadArtifactChunk`.
+
+Workspace initialization, profile mutation/lifecycle, Operator-authorized
+reset/repair/migration, and server-side filesystem export MUST remain Machine
+CLI-only. Controller credential creation has no gRPC method, but a trusted
+same-user caller MAY create a strict checked-schema credential create-
+exclusively under the capability-advertised carrier root. A Gul installation
+uses `controller-carriers/gul/<installation-id>/`; every parent is same-uid
+mode 0700 and every carrier is a same-uid, no-symlink, mode-0600 regular file.
+`GetCapabilities` publishes the credential schema ID/version/SHA-256, accepted
+Controller kinds, 32-byte base64url-no-padding capability encoding, 4-KiB file
+bound, root/layout policy, generation-1 rule, and normalized-principal rule. The
+gRPC projection carries the canonical
+`application_support/Dolgorae/controller-carriers` root locator separately from
+the typed Dolgorae-owned Application Support root policy. Capability encoding
+and normalized-principal selection are closed enums; Gul MUST NOT parse
+diagnostic text to derive either rule.
+Method availability is capability-advertised;
+absence from gRPC MUST NOT create an alternate semantic rule. There is no
+client-streaming or bidirectional RPC in v1.
+
+`GetCapabilities` MUST also return typed Dolgorae/protocol versions, descriptor
+digest, supported methods, transports, control modes, lanes, assurance and lane
+capabilities, stable feature flags, Interaction kinds, access-transition and
+background-control support, native-subagent behavior, Interaction request and
+safe-payload byte limits, inline/fetched artifact bounds, and event/timeline
+projections. The limits are exactly 1,048,576 raw bytes in
+`ResolveInteractionRequest.response_json` before JSON parsing and 8,388,608
+bytes for the encoded selected typed `ControllerInteraction` payload
+submessage before transmission. `GetProfile` MUST return typed compatibility,
+runtime version, structured model/default/effort capabilities, lanes, maximum
+assurance, transition/background/Interaction/native-subagent support, feature
+flags, and typed blockers. Closed output enums unknown to a v1 client are not
+actionable: Gul MUST fail closed, refresh capabilities, and MUST NOT infer a
+state from diagnostic text.
+
+`CapabilityBlocker.code` is the closed `CapabilityBlockerCode` enum. It covers
+configuration, workspace safety, profile compatibility/migration/membership,
+lane and assurance support, access/background support, Interaction support,
+and native-subagent support. `safe_message` is presentation-only; clients MUST
+derive actions from the enum and the surrounding typed capability state.
+
+Interaction support has its own closed three-state enum: `supported`,
+`recognized_unsupported`, and `unavailable`. It MUST preserve the identically
+named Machine capability state and MUST NOT collapse recognized unsupported
+requests into runtime unavailability. For a compatible profile with a nonempty
+model catalog, `ModelCapability.is_default` is the sole default-model authority:
+exactly one model is default, model IDs are nonempty and unique, and every model
+has a nonempty unique effort list. The removed draft `default_model_id` field
+has no compatibility meaning and its Protobuf name and number remain reserved.
+
+`RunProjection.configuration` MUST durably expose the accepted profile, closed
+purpose and optional label, effective accepted model, current default effort,
+sorted unique required capabilities, optional parent provenance, instruction-
+contract versions, and the byte length and SHA-256 of the normalized Controller
+instructions. Profile, purpose, model, capabilities, parent, and instruction
+identity are immutable; only current default effort changes through
+`SetDefaultEffort`. The projection survives gateway/Dolgorae restart and is the
+authority after reconnect rather than the client's original request.
+`RunProjection` MUST otherwise preserve the checked run-state distinctions through typed
+lifecycle/state variant, Controller, thread and active Turn, effective policy
+and verification epochs, writer authority/generation/transaction and
+reconciliation action, server lane, background census, requested/achieved
+assurance, recovery state/action, state revision, and immutable lineage.
+`WriterState` MUST expose owner, authority, generation/handoff, effective
+policy, lane, assurances, background/recovery blockers, reconciliation action,
+revision, and a `ProjectionStamp`. Run, Writer, Interaction, and durable-event
+projections carry the same stamp shape: captured durable head plus Run, Writer,
+and Interaction revisions. A client MUST derive actions only from compatible
+typed projections and MUST keep mutations disabled while any required
+aggregate is older than an invalidating event or the stamps do not converge.
+
+`SubmitTurn` is accepted-operation unary RPC. It MUST return only after the
+App Server accepts `turn/start` and Dolgorae fsyncs the permanent thread and
+Turn binding. Its result contains the accepted Turn, correlation and
+idempotency identities, and the authoritative typed Run and Writer projections
+at acceptance. For a threadless write these projections prove reservation,
+lane activation, thread creation, effective-policy verification, and active
+writer authority; `AcquireWriter` remains forbidden before the first write
+Turn. It MUST NOT wait for terminal completion. Progress, final response,
+interactions, terminal
+status, and recovery requirements arrive through `WatchRunEvents` or fresh
+authoritative snapshots. Successful RPC delivery MUST NOT be interpreted as
+successful Turn completion.
+
+`WatchRunEvents` requires Run identity, exclusive `after_cursor`, projection
+profile, and projection version. Events are ordered within that Run by the
+durable cursor defined in SPEC-006. A stream is only a delivery mechanism;
+disconnect, cancellation, HTTP/2 failure, or gateway restart MUST NOT change
+the Run or imply its failure. Projection gaps are valid. Duplicate delivery is
+permitted and deduplicated by event ID plus cursor. A heartbeat MAY report the
+current durable head and Run state every 30 seconds but MUST NOT append a record
+or advance the cursor.
+
+The stream envelope is a typed `oneof`: a durable event, heartbeat, or stream
+end. A durable event carries the complete client-safe metadata and exactly one
+typed variant for every minimal/operational event in the checked public event
+schema. There is no untyped `event_type` plus JSON payload escape hatch.
+Heartbeat and stream-end envelopes carry an advisory durable head but never
+create or advance a semantic cursor. Unknown event variants fail closed and
+require capability/snapshot refresh.
+
+Event variants have the following aggregate semantics. “Invalidate” means the
+event is a notification, not a replacement snapshot; the named projection MUST
+be fetched at or beyond the event's `ProjectionStamp` before it enables a
+mutation.
+
+| Durable variant | Complete update | Invalidates / required refresh | Mutation effect |
+| --- | --- | --- | --- |
+| `run_state_changed` | None | Run; Writer when lifecycle can affect authority | Disable affected Run actions until Run/Writer stamps converge |
+| `turn_state_changed` | Turn status only | Run and timeline | Never enables a mutation by itself |
+| `final_response_available` | Final-response value | Run and timeline | No writer action |
+| `interaction_opened` | Interaction identity/kind only | Interaction and Run pending count | Fetch summary and authorized full Interaction |
+| `interaction_resolved` | Interaction outcome only | Interaction, Run pending count, and timeline | Disable response action until refreshed |
+| `writer_state_changed` | Writer generation hint only | Writer and Run | Disable all writer actions until both refresh |
+| `recovery_required` | Recovery notification only | Run and Writer | Disable conflicting mutations |
+| `runtime_error_occurred` | Diagnostic only | Run when its stamp advances | Never marks the Run failed by itself |
+| `generation_changed` | Generation/epoch only | Run, Writer, and Interaction | Disable mutations until all required aggregates refresh |
+| `workspace_changes` | Workspace-change observation | Timeline only | No authority change |
+| `command_started`, `command_completed` | Command observation | Timeline only | No authority change |
+| `usage_reported` | Usage observation | Timeline only | No authority change |
+| `diagnostic_reported` | Diagnostic observation | Timeline only | No authority change |
+| `reasoning_suppressed` | Suppression metadata | Timeline only | No authority change |
+
+Timeline compatibility is established by `captured_head_cursor`; Run, Writer,
+and Interaction compatibility is established by the complete projection stamp.
+A snapshot with a later stamp supersedes an earlier invalidation. Equal stamps
+are mutually compatible. A client observing continually advancing state keeps
+the relevant action disabled rather than combining revisions.
+
+Each Run stream has a queue bounded by 32 envelopes, 4 MiB of encoded payload,
+and five seconds of stalled delivery. Exceeding any bound MUST close only that
+stream with gRPC `RESOURCE_EXHAUSTED` and typed `SLOW_CONSUMER`. Any server-last-
+sent cursor is advisory; the client MUST resume from its last committed cursor.
+Streams for other Runs multiplexed on the same HTTP/2 channel
+remain independent. A client that cannot reconcile its view MUST fetch
+`GetRun`, capture its head cursor, page the Controller timeline when authorized,
+and resume event replay from the chosen durable boundary.
+
+`RUN_TERMINAL` is a normal end of Run observation: the client obtains the final
+Run and required timeline/artifact snapshots and MUST NOT reconnect
+indefinitely. `SERVER_SHUTDOWN` is a gateway interruption; durable Run state is
+unchanged and the client MAY reconnect and resume after its last committed
+cursor. `SLOW_CONSUMER` is not a stream-end envelope in v1: it is
+`RESOURCE_EXHAUSTED` with typed `SLOW_CONSUMER` detail and closes only the
+affected Run stream. A transport failure is never evidence that a Run failed.
+
+Artifact access retains the offset/length contract. `GetArtifact` returns only
+opaque ID, kind, visibility, media type, exact byte length, SHA-256, and maximum
+chunk size. `ReadArtifactChunk` requires `1 <= length <= 1048576`, uses raw-byte
+offsets, returns Protobuf `bytes`, actual offset/length and EOF, verifies the
+full digest before first access in the invocation, and honors gRPC cancellation.
+Observer versus Controller-only authorization is identical to the CLI; no RPC
+returns an internal path.
+
+Provider bounds are 1 MiB for inline final responses, 32 MiB for one artifact,
+and 1 MiB for one requested chunk. A client MAY use a smaller presentation
+threshold and request smaller chunks. The effective total client-download
+limit is the minimum of the provider and client limits. An inline provider
+response above a client's presentation threshold is not a provider contract
+violation; Gul MAY convert it to its own browser-safe presentation. Every
+artifact download MUST verify both exact byte length and SHA-256 before use.
+
+The checked mutation-policy registry is normative. `StartRun`, `ForkRun`,
+`SubmitTurn`, `ResolveInteraction`, and `CreateWriteContinuation` require an
+idempotency key and permit only same-key/same-normalized-identity replay. All
+other mutation RPCs are explicitly tokenless and state-convergent or
+reconciliation-driven as recorded in that registry. The checked gRPC service
+config MUST define no transparent retry policy for a mutation. A client MUST
+recover a lost `StartRun` response first by repeating the same request with the
+same idempotency key, Controller ID/generation, and normalized semantic
+identity. That identity is canonical workspace, accepted profile snapshot,
+Controller, control mode, purpose/label, effective model/current default
+effort, lane, assurance, sorted unique required capabilities, parent reference,
+and Controller-instruction byte length/SHA-256. Exact replay returns the
+original Run with `exact_replay=true`; Controller or identity drift is
+`IDEMPOTENCY_CONFLICT` and never allocates another Run. `ListRuns` filtered by
+the unique Controller ID is secondary reconciliation when the Run ID is not
+known; `GetRun` and `ReconcileRun` cannot be primary in that case.
+
+StartRun allocation records have no TTL and live for the workspace lifetime.
+Explicit Run deletion retains a non-secret allocation tombstone. Replay after
+deletion returns `RUN_NOT_FOUND` with the original safe Run ID and MUST NOT
+allocate a replacement under the old key. Other lost responses use the
+interaction/writer snapshot, returned operation ID when known, and
+`ReconcileRun` where required.
+`OUTCOME_UNKNOWN` and `RECOVERY_REQUIRED` always forbid blind automatic retry.
+
+`CreateWriteContinuation` returns a dedicated threadless destination Run,
+typed immutable lineage, new destination Controller, idempotency key, and a
+source receipt proving the source revision and writer authority were unchanged.
+The destination Controller ID and capability MUST be new, generation MUST be
+1, and its normalized principal `(kind, subject_id)` or, absent subject,
+`(kind, instance_id)` MUST equal the source principal. Same key, destination
+Controller, source terminal Turn, and normalized request replay MUST return the
+original destination Run; any identity drift returns typed
+`WRITE_CONTINUATION_CONTROLLER_INVALID` or `IDEMPOTENCY_CONFLICT`.
+
+Interaction summaries MUST use typed kind/status/Controller kind and include
+creation, nullable expiry, and nullable resolution timestamps; absent expiry
+means the provider supplied no deadline. `ControllerInteraction` MUST select
+exactly one typed payload matching `summary.kind`: command approval, file-change
+approval, user input, or recognized unsupported Interaction. Permission and MCP
+elicitation requests map to the unsupported payload; unavailable connector
+approval produces no Interaction. `response_schema_id` identifies only the
+accepted `ResolveInteraction.response_json` schema. Decisions use the closed
+`InteractionDecision` enum. A kind/payload mismatch, unspecified enum, or
+unknown future variant fails closed; no unversioned safe JSON payload exists.
+
+Every filesystem path in a public output projection uses `PathProjection` with
+exactly one UTF-8 string or opaque POSIX byte sequence. Dolgorae MUST NOT emit a
+lossy Unicode replacement string. This applies to the canonical workspace root
+returned by `InspectWorkspace`, workspace-change paths, command cwd,
+file-change paths, and move paths.
+
+Protected response bytes are a
+bounded one-shot `ResolveInteraction` body only: never metadata, audit, trace,
+journal, retry queue, or typed error detail, and buffers are zeroized where
+practical. The 1-MiB raw byte bound is checked before JSON parsing. Automatic
+replay is forbidden. After a lost response the caller MUST refetch the summary
+and, when still pending and authorized, the full Interaction. Resolved means
+complete. Pending protected input requires explicit user re-entry and MUST NOT
+use a retained body. An indeterminate result is typed
+`INTERACTION_OUTCOME_UNKNOWN`. A winning secret idempotency key may return the
+original opaque receipt after resolution without comparing, hashing, or
+replaying a supplied body; it does not authorize transparent secret replay.
+
+Semantic failures MUST use an appropriate gRPC status code and attach versioned
+`DolgoraeErrorDetail` through `google.rpc.Status`. The detail contains the
+canonical Dolgorae error code, typed required-client-action enum, safe
+Run/Turn/Interaction IDs, operation
+ID, safe idempotency key, retry classification, recovery classification, and an
+optional safe resume cursor. Clients MUST NOT parse human-readable status text.
+The checked gRPC error map owns the exhaustive mapping. Secret values, secret
+digests, raw carrier contents, mismatch subreason, internal paths, and hidden
+payloads are forbidden in status details.
+
+Writer recovery actions are exact: a threadless dedicated Run maps
+`THREADLESS_REQUIRES_WRITE_TURN` to `SUBMIT_WRITE_TURN`; a shared read-only Run
+maps `SHARED_RUN_WRITE_FORBIDDEN` to `CREATE_WRITE_CONTINUATION`; and an
+unavailable or unverified in-place access transition maps
+`ACCESS_TRANSITION_UNSUPPORTED` to `CREATE_WRITE_CONTINUATION`. Outcome-unknown
+state requires reconciliation before any conflicting mutation. No client may
+translate any of these cases into another write submission by parsing status
+text.
+
+Protobuf v1 evolution is additive. Field numbers MUST NOT be reused; removed
+numbers and names are reserved; every enum starts with an `UNSPECIFIED=0` value
+and appends values only. Unknown control/input enum values fail closed with
+`UNSUPPORTED_SCHEMA_VERSION`; unknown output values remain representable to the
+generated client and require capability or snapshot refresh. A removal or
+meaning change requires a new package major version. The repository MUST
+publish the `.proto` source, deterministic descriptor set, descriptor SHA-256,
+minimum/maximum client range, and Buf compatibility result. Machine JSON and
+Protobuf may differ on the wire but MUST pass shared semantic conformance
+fixtures for equivalent operations and error outcomes.
+
+The gateway is local same-user API, not remote authentication. It MUST validate
+peer UID, socket path and record identity before serving. It MUST NOT expose the
+socket on the public Internet, TCP, or Tailscale; disclose worker/App Server
+transports; or accept Operator credentials. Gateway restart MUST leave durable
+Runs and permitted surviving workers/App Servers unchanged. The replacement
+gateway reconstructs projections from authoritative state and a mutation whose
+response was lost follows the same application-level idempotency or
+reconciliation contract as CLI process loss.
+
+Dolgorae alone owns the gateway lock/record, bind, socket chmod, stale-inode
+proof, unlink, and graceful cleanup. Gul creates and validates the private
+parent, selects an unused absolute pathname, starts the foreground process, and
+verifies the socket after readiness; it MUST NOT unlink the socket. A live
+singleton collision returns typed `RPC_SERVER_ALREADY_RUNNING` and v1 does not
+attach to or support multiple independently supervised gateways.
+`RPC_SOCKET_UNSAFE` returns typed action `FIX_SOCKET_PATH`: Gul repairs or
+replaces the private parent/path and starts a fresh gateway attempt. It MUST NOT
+blindly restart with the same unsafe pathname and MUST NOT unlink a provider
+socket.
 
 ## External Protocol References
 

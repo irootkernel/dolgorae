@@ -1,0 +1,52 @@
+{
+  "contract_id": "dolgorae.grpc-client-policy/v1",
+  "schema_version": 1,
+  "mutation_retry_policy": {
+    "transparent_retries": "disabled",
+    "retry_middleware": "forbidden",
+    "hedging": "forbidden",
+    "application_replay": "only_as_declared_by_dolgorae-rpc-mutation-policy-v1"
+  },
+  "interaction_policy": {
+    "maximum_response_bytes": 1048576,
+    "maximum_safe_payload_bytes": 8388608,
+    "response_limit_applies_to": "raw ResolveInteractionRequest.response_json bytes before JSON parsing",
+    "safe_payload_limit_applies_to": "encoded selected ControllerInteraction payload submessage",
+    "protected_body_persistence": "forbidden",
+    "protected_body_automatic_replay": "forbidden"
+  },
+  "stream_end_policy": {
+    "RUN_TERMINAL": "fetch final required snapshots and do not reconnect indefinitely",
+    "SERVER_SHUTDOWN": "refresh gateway state and reconnect from the last committed cursor",
+    "SLOW_CONSUMER": "RESOURCE_EXHAUSTED typed error; refresh affected Run and resume from the last committed cursor",
+    "TRANSPORT_FAILURE": "never interpret as Run failure"
+  },
+  "grpc_service_config": {
+    "loadBalancingConfig": [{ "pick_first": {} }],
+    "methodConfig": [
+      {
+        "name": [
+          { "service": "dolgorae.public.v1.RunService", "method": "StartRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "SubmitTurn" },
+          { "service": "dolgorae.public.v1.RunService", "method": "InterruptTurn" },
+          { "service": "dolgorae.public.v1.RunService", "method": "SetDefaultEffort" },
+          { "service": "dolgorae.public.v1.RunService", "method": "PauseRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "ResumeRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "CloseRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "DeleteRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "RecoverRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "ReconcileRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "ForkRun" },
+          { "service": "dolgorae.public.v1.RunService", "method": "CreateWriteContinuation" },
+          { "service": "dolgorae.public.v1.InteractionService", "method": "ResolveInteraction" },
+          { "service": "dolgorae.public.v1.WriterService", "method": "AcquireWriter" },
+          { "service": "dolgorae.public.v1.WriterService", "method": "ReleaseWriter" },
+          { "service": "dolgorae.public.v1.WriterService", "method": "PrepareWriterHandoff" },
+          { "service": "dolgorae.public.v1.WriterService", "method": "CommitWriterHandoff" },
+          { "service": "dolgorae.public.v1.WriterService", "method": "CancelWriterHandoff" }
+        ],
+        "waitForReady": false
+      }
+    ]
+  }
+}

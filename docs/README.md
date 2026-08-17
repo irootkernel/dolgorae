@@ -17,10 +17,11 @@ files are derived views and MUST NOT silently redefine their owner.
 | Component boundaries, state ownership, process topology, and technical invariants | [architecture.md](architecture.md) | ADR consequences, implementation plans, diagrams |
 | Accepted choices, rationale, and rejected alternatives | [architecture-decisions.md](architecture-decisions.md) | Historical review and disposition records |
 | Delivery order, task state, task scope, and completion gates | [roadmap.md](roadmap.md) | Implementation-note summaries and review closure statements |
-| Serialized machine, event, credential, artifact, and persisted-state shapes | [`protocol/`](protocol/) | Examples, generated snapshots, probe fixtures |
+| Serialized machine, Protobuf/RPC, event, timeline, credential, artifact, and persisted-state shapes | [`protocol/`](protocol/) | Examples, generated snapshots, probe fixtures |
 | Cross-field run-state and projection validity | [`tools/validators/`](../tools/validators/) | JSON Schemas and validator fixtures |
 | Requirement-to-verification ownership | [verification-index-v1.json](protocol/verification-index-v1.json) | Roadmap verification prose and probe reports |
 | Completed-task implementation and verification evidence | [implementation-notes.md](implementation-notes.md) | Probe results and review closure artifacts |
+| Derived implementation design for the public local RPC gateway | [local-grpc-implementation-memo.md](local-grpc-implementation-memo.md) | SPEC-015, architecture, ADR-021, roadmap tasks, checked Protobuf artifacts |
 | Deferred, explicitly non-blocking review findings | [deferred-feedback.md](deferred-feedback.md) | Review dispositions |
 | Uncommitted future ideas | [todo.md](todo.md) | None; candidates grant no implementation authority |
 | Preserved review chronology and historical findings | [reviews/README.md](reviews/README.md) | Review inputs, dispositions, closure reports, packages |
@@ -53,7 +54,9 @@ The following are not independent contract authorities:
 - `docs/probes/`, `docs/probes/results/`, and closure packages, which prove only
   the bounded observations they record;
 - `implementation-notes.md`, which records completed evidence without creating
-  requirements; and
+  requirements;
+- `local-grpc-implementation-memo.md`, which is a decision-complete handoff but
+  cannot override SPEC, architecture, ADR, protocol, or roadmap owners; and
 - `todo.md`, whose candidates are neither scheduled nor approved.
 
 A measured upstream behavior becomes a Dolgorae dependency only after the

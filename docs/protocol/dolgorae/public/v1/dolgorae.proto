@@ -1,0 +1,1540 @@
+syntax = "proto3";
+
+package dolgorae.public.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/rootkernel/dolgorae/gen/go/dolgorae/public/v1;dolgoraev1";
+
+service RuntimeService {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc InspectWorkspace(InspectWorkspaceRequest) returns (InspectWorkspaceResponse);
+  rpc ListProfiles(ListProfilesRequest) returns (ListProfilesResponse);
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+  rpc ListProfileDiagnostics(ListProfileDiagnosticsRequest) returns (ListProfileDiagnosticsResponse);
+}
+
+service RunService {
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc SubmitTurn(SubmitTurnRequest) returns (SubmitTurnAccepted);
+  rpc InterruptTurn(InterruptTurnRequest) returns (RunMutationResponse);
+  rpc SetDefaultEffort(SetDefaultEffortRequest) returns (RunMutationResponse);
+  rpc PauseRun(PauseRunRequest) returns (RunMutationResponse);
+  rpc ResumeRun(ResumeRunRequest) returns (RunMutationResponse);
+  rpc CloseRun(CloseRunRequest) returns (RunMutationResponse);
+  rpc DeleteRun(DeleteRunRequest) returns (DeleteRunResponse);
+  rpc RecoverRun(RecoverRunRequest) returns (RunMutationResponse);
+  rpc ReconcileRun(ReconcileRunRequest) returns (RunMutationResponse);
+  rpc ForkRun(ForkRunRequest) returns (StartRunResponse);
+  rpc VerifyRun(VerifyRunRequest) returns (VerifyRunResponse);
+  rpc CreateWriteContinuation(CreateWriteContinuationRequest) returns (CreateWriteContinuationResponse);
+}
+
+service ObservationService {
+  rpc WatchRunEvents(WatchRunEventsRequest) returns (stream RunEventEnvelope);
+  rpc ListRunTimelineItems(ListRunTimelineItemsRequest) returns (ListRunTimelineItemsResponse);
+}
+
+service InteractionService {
+  rpc ListPendingInteractions(ListPendingInteractionsRequest) returns (ListPendingInteractionsResponse);
+  rpc GetControllerInteraction(GetControllerInteractionRequest) returns (GetControllerInteractionResponse);
+  rpc ResolveInteraction(ResolveInteractionRequest) returns (ResolveInteractionResponse);
+}
+
+service WriterService {
+  rpc GetWorkspaceWriterStatus(GetWorkspaceWriterStatusRequest) returns (GetWorkspaceWriterStatusResponse);
+  rpc AcquireWriter(AcquireWriterRequest) returns (WriterState);
+  rpc ReleaseWriter(ReleaseWriterRequest) returns (WriterState);
+  rpc PrepareWriterHandoff(PrepareWriterHandoffRequest) returns (WriterHandoffResponse);
+  rpc CommitWriterHandoff(CommitWriterHandoffRequest) returns (WriterHandoffResponse);
+  rpc CancelWriterHandoff(CancelWriterHandoffRequest) returns (WriterHandoffResponse);
+}
+
+service ControllerService {
+  rpc VerifyController(VerifyControllerRequest) returns (VerifyControllerResponse);
+}
+
+service ArtifactService {
+  rpc GetArtifact(GetArtifactRequest) returns (GetArtifactResponse);
+  rpc ReadArtifactChunk(ReadArtifactChunkRequest) returns (ReadArtifactChunkResponse);
+}
+
+message RequestContext {
+  uint32 protocol_version = 1;
+  string client_request_id = 2;
+  string client_instance_id = 3;
+}
+
+message ResponseContext {
+  uint32 protocol_version = 1;
+  string server_instance_id = 2;
+  optional string operation_id = 3;
+}
+
+message WorkspaceRef {
+  string absolute_path = 1;
+  string expected_workspace_id = 2;
+}
+
+message RunRef {
+  WorkspaceRef workspace = 1;
+  string run_id = 2;
+}
+
+message ControllerCarrierRef {
+  string absolute_file_path = 1;
+  string expected_controller_id = 2;
+  uint64 expected_controller_generation = 3;
+}
+
+enum ProjectionProfile {
+  PROJECTION_PROFILE_UNSPECIFIED = 0;
+  PROJECTION_PROFILE_MINIMAL = 1;
+  PROJECTION_PROFILE_OPERATIONAL = 2;
+}
+
+enum PublicTransport {
+  PUBLIC_TRANSPORT_UNSPECIFIED = 0;
+  PUBLIC_TRANSPORT_MACHINE_CLI = 1;
+  PUBLIC_TRANSPORT_LOCAL_GRPC = 2;
+}
+
+enum AppServerTransport {
+  APP_SERVER_TRANSPORT_UNSPECIFIED = 0;
+  APP_SERVER_TRANSPORT_DIRECT_WEBSOCKET_UNIX = 1;
+}
+
+enum ProfileLaunchMode {
+  PROFILE_LAUNCH_MODE_UNSPECIFIED = 0;
+  PROFILE_LAUNCH_MODE_DOLGORAE_OWNED_DIRECT_EXECUTABLE = 1;
+}
+
+enum NativeSubagentPolicy {
+  NATIVE_SUBAGENT_POLICY_UNSPECIFIED = 0;
+  NATIVE_SUBAGENT_POLICY_ENABLED = 1;
+}
+
+enum RunLifecycle {
+  RUN_LIFECYCLE_UNSPECIFIED = 0;
+  RUN_LIFECYCLE_STARTING = 1;
+  RUN_LIFECYCLE_IDLE = 2;
+  RUN_LIFECYCLE_RUNNING = 3;
+  RUN_LIFECYCLE_WAITING_INTERACTION = 4;
+  RUN_LIFECYCLE_RECONCILIATION_REQUIRED = 5;
+  RUN_LIFECYCLE_PAUSED = 6;
+  RUN_LIFECYCLE_CLOSED = 7;
+  RUN_LIFECYCLE_START_FAILED = 8;
+  RUN_LIFECYCLE_OUTCOME_UNKNOWN = 9;
+}
+
+enum ControlMode {
+  CONTROL_MODE_UNSPECIFIED = 0;
+  CONTROL_MODE_DIRECT_INTERACTIVE = 1;
+  CONTROL_MODE_MANAGED_AGENT = 2;
+}
+
+enum ExecutionLane {
+  EXECUTION_LANE_UNSPECIFIED = 0;
+  EXECUTION_LANE_SHARED_READONLY = 1;
+  EXECUTION_LANE_DEDICATED = 2;
+}
+
+enum WriteIntent {
+  WRITE_INTENT_UNSPECIFIED = 0;
+  WRITE_INTENT_READ = 1;
+  WRITE_INTENT_WRITE = 2;
+}
+
+enum ImageDetail {
+  IMAGE_DETAIL_UNSPECIFIED = 0;
+  IMAGE_DETAIL_AUTO = 1;
+  IMAGE_DETAIL_LOW = 2;
+  IMAGE_DETAIL_HIGH = 3;
+}
+
+enum WriteContinuationReason {
+  WRITE_CONTINUATION_REASON_UNSPECIFIED = 0;
+  WRITE_CONTINUATION_REASON_SHARED_READONLY_SOURCE = 1;
+  WRITE_CONTINUATION_REASON_ACCESS_TRANSITION_UNAVAILABLE = 2;
+  WRITE_CONTINUATION_REASON_ACCESS_TRANSITION_UNVERIFIED = 3;
+}
+
+enum PurposeKind {
+  PURPOSE_KIND_UNSPECIFIED = 0;
+  PURPOSE_KIND_INTERACTIVE = 1;
+  PURPOSE_KIND_PLANNING = 2;
+  PURPOSE_KIND_IMPLEMENTATION = 3;
+  PURPOSE_KIND_REVIEW = 4;
+  PURPOSE_KIND_RESEARCH = 5;
+  PURPOSE_KIND_DISCUSSION = 6;
+  PURPOSE_KIND_WORKFLOW_STAGE = 7;
+  PURPOSE_KIND_OTHER = 8;
+}
+
+enum ControllerKind {
+  CONTROLLER_KIND_UNSPECIFIED = 0;
+  CONTROLLER_KIND_HUMAN_CLI = 1;
+  CONTROLLER_KIND_INTERACTIVE_CLIENT = 2;
+  CONTROLLER_KIND_WORKFLOW_ORCHESTRATOR = 3;
+  CONTROLLER_KIND_AUTOMATION = 4;
+  CONTROLLER_KIND_OTHER = 5;
+}
+
+enum SupportState {
+  SUPPORT_STATE_UNSPECIFIED = 0;
+  SUPPORT_STATE_SUPPORTED = 1;
+  SUPPORT_STATE_UNAVAILABLE = 2;
+  SUPPORT_STATE_UNVERIFIED = 3;
+  SUPPORT_STATE_UNSAFE = 4;
+}
+
+enum InteractionSupport {
+  INTERACTION_SUPPORT_UNSPECIFIED = 0;
+  INTERACTION_SUPPORT_SUPPORTED = 1;
+  INTERACTION_SUPPORT_RECOGNIZED_UNSUPPORTED = 2;
+  INTERACTION_SUPPORT_UNAVAILABLE = 3;
+}
+
+enum CommandExecutionSupport {
+  COMMAND_EXECUTION_SUPPORT_UNSPECIFIED = 0;
+  COMMAND_EXECUTION_SUPPORT_SUPPORTED = 1;
+  COMMAND_EXECUTION_SUPPORT_BOUNDED_BEST_EFFORT = 2;
+  COMMAND_EXECUTION_SUPPORT_UNAVAILABLE = 3;
+}
+
+enum BackgroundControlSupport {
+  BACKGROUND_CONTROL_SUPPORT_UNSPECIFIED = 0;
+  BACKGROUND_CONTROL_SUPPORT_BEST_EFFORT_PERSONAL_ALPHA = 1;
+  BACKGROUND_CONTROL_SUPPORT_PROFILE_AGGREGATE_ONLY = 2;
+  BACKGROUND_CONTROL_SUPPORT_UNAVAILABLE = 3;
+  BACKGROUND_CONTROL_SUPPORT_UNVERIFIED = 4;
+}
+
+enum ProcessCleanupSupport {
+  PROCESS_CLEANUP_SUPPORT_UNSPECIFIED = 0;
+  PROCESS_CLEANUP_SUPPORT_BOUNDED_PROCESS_CENSUS = 1;
+  PROCESS_CLEANUP_SUPPORT_UNAVAILABLE = 2;
+}
+
+enum AssuranceLevel {
+  ASSURANCE_LEVEL_UNSPECIFIED = 0;
+  ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA = 1;
+  ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL = 2;
+  ASSURANCE_LEVEL_STRONG_PROCESS_CONTAINMENT = 3;
+}
+
+enum ProfileCompatibility {
+  PROFILE_COMPATIBILITY_UNSPECIFIED = 0;
+  PROFILE_COMPATIBILITY_COMPATIBLE = 1;
+  PROFILE_COMPATIBILITY_INCOMPATIBLE = 2;
+  PROFILE_COMPATIBILITY_UNVERIFIED = 3;
+  PROFILE_COMPATIBILITY_UNAVAILABLE = 4;
+}
+
+enum RunStateVariant {
+  RUN_STATE_VARIANT_UNSPECIFIED = 0;
+  RUN_STATE_VARIANT_SHARED_READONLY = 1;
+  RUN_STATE_VARIANT_DEDICATED_UNSTARTED = 2;
+  RUN_STATE_VARIANT_DEDICATED_READER = 3;
+  RUN_STATE_VARIANT_DEDICATED_WRITER_RESERVED = 4;
+  RUN_STATE_VARIANT_DEDICATED_WRITER_ACTIVE = 5;
+  RUN_STATE_VARIANT_DEDICATED_RELEASING = 6;
+  RUN_STATE_VARIANT_DEDICATED_BLOCKED_UNKNOWN = 7;
+  RUN_STATE_VARIANT_DEDICATED_PAUSED = 8;
+  RUN_STATE_VARIANT_DEDICATED_GENERATION_FAILED = 9;
+}
+
+enum EffectiveAccess {
+  EFFECTIVE_ACCESS_UNSPECIFIED = 0;
+  EFFECTIVE_ACCESS_READ = 1;
+  EFFECTIVE_ACCESS_WRITE = 2;
+  EFFECTIVE_ACCESS_TRANSITIONING = 3;
+  EFFECTIVE_ACCESS_UNSUPPORTED = 4;
+  EFFECTIVE_ACCESS_UNKNOWN = 5;
+}
+
+enum PolicyVerification {
+  POLICY_VERIFICATION_UNSPECIFIED = 0;
+  POLICY_VERIFICATION_VERIFIED = 1;
+  POLICY_VERIFICATION_UNVERIFIED = 2;
+  POLICY_VERIFICATION_FAILED = 3;
+}
+
+enum WriterAuthorityState {
+  WRITER_AUTHORITY_STATE_UNSPECIFIED = 0;
+  WRITER_AUTHORITY_STATE_NONE = 1;
+  WRITER_AUTHORITY_STATE_RESERVED = 2;
+  WRITER_AUTHORITY_STATE_ACTIVE = 3;
+  WRITER_AUTHORITY_STATE_HANDOFF_PREPARED = 4;
+  WRITER_AUTHORITY_STATE_RELEASING = 5;
+  WRITER_AUTHORITY_STATE_BLOCKED_UNKNOWN = 6;
+}
+
+enum ReconciliationAction {
+  RECONCILIATION_ACTION_UNSPECIFIED = 0;
+  RECONCILIATION_ACTION_NONE = 1;
+  RECONCILIATION_ACTION_RETRY_CENSUS = 2;
+  RECONCILIATION_ACTION_RECONCILE_DEDICATED_LANE = 3;
+  RECONCILIATION_ACTION_OPERATOR_REPAIR = 4;
+  RECONCILIATION_ACTION_REVERIFY_WRITER_POLICY = 5;
+}
+
+enum ServerLaneState {
+  SERVER_LANE_STATE_UNSPECIFIED = 0;
+  SERVER_LANE_STATE_STARTING = 1;
+  SERVER_LANE_STATE_READY = 2;
+  SERVER_LANE_STATE_STOPPING = 3;
+  SERVER_LANE_STATE_ABSENT = 4;
+  SERVER_LANE_STATE_UNVERIFIED = 5;
+  SERVER_LANE_STATE_FAILED = 6;
+}
+
+enum BackgroundExecutionState {
+  BACKGROUND_EXECUTION_STATE_UNSPECIFIED = 0;
+  BACKGROUND_EXECUTION_STATE_VERIFIED_ABSENT = 1;
+  BACKGROUND_EXECUTION_STATE_ACTIVE = 2;
+  BACKGROUND_EXECUTION_STATE_UNVERIFIED = 3;
+  BACKGROUND_EXECUTION_STATE_NOT_APPLICABLE = 4;
+}
+
+enum BackgroundExecutionMechanism {
+  BACKGROUND_EXECUTION_MECHANISM_UNSPECIFIED = 0;
+  BACKGROUND_EXECUTION_MECHANISM_DEDICATED_LANE_PROCESS_CENSUS = 1;
+  BACKGROUND_EXECUTION_MECHANISM_HYBRID = 2;
+  BACKGROUND_EXECUTION_MECHANISM_SHARED_PROFILE_AGGREGATE = 3;
+}
+
+enum RecoveryState {
+  RECOVERY_STATE_UNSPECIFIED = 0;
+  RECOVERY_STATE_NOT_REQUIRED = 1;
+  RECOVERY_STATE_REQUIRED = 2;
+  RECOVERY_STATE_RECONCILIATION_REQUIRED = 3;
+  RECOVERY_STATE_OUTCOME_UNKNOWN = 4;
+}
+
+enum RecoveryAction {
+  RECOVERY_ACTION_UNSPECIFIED = 0;
+  RECOVERY_ACTION_NONE = 1;
+  RECOVERY_ACTION_REFRESH_SNAPSHOT = 2;
+  RECOVERY_ACTION_RECONCILE_RUN = 3;
+  RECOVERY_ACTION_RECOVER_RUN = 4;
+  RECOVERY_ACTION_OPERATOR_REPAIR = 5;
+}
+
+enum TurnStatus {
+  TURN_STATUS_UNSPECIFIED = 0;
+  TURN_STATUS_RESERVED = 1;
+  TURN_STATUS_ACCEPTED = 2;
+  TURN_STATUS_RUNNING = 3;
+  TURN_STATUS_WAITING_INTERACTION = 4;
+  TURN_STATUS_INTERRUPTING = 5;
+  TURN_STATUS_COMPLETED = 6;
+  TURN_STATUS_FAILED = 7;
+  TURN_STATUS_INTERRUPTED = 8;
+  TURN_STATUS_OUTCOME_UNKNOWN = 9;
+}
+
+message ControllerProjection {
+  string controller_id = 1;
+  uint64 generation = 2;
+  ControllerKind kind = 3;
+  string instance_id = 4;
+  optional string subject_id = 5;
+}
+
+message EffectivePolicyProjection {
+  EffectiveAccess access = 1;
+  PolicyVerification verification = 2;
+  uint64 policy_epoch = 3;
+  uint64 thread_generation = 4;
+  optional uint64 server_epoch = 5;
+  optional uint64 writer_generation = 6;
+}
+
+message WriterAuthorityProjection {
+  WriterAuthorityState state = 1;
+  uint64 writer_generation = 2;
+  optional string transaction_id = 3;
+  ReconciliationAction reconciliation_action = 4;
+}
+
+message ServerLaneProjection {
+  ExecutionLane kind = 1;
+  optional string lane_id = 2;
+  optional uint64 process_generation = 3;
+  optional uint64 server_epoch = 4;
+  ServerLaneState state = 5;
+  optional string socket_identity_sha256 = 6;
+}
+
+message BackgroundExecutionProjection {
+  BackgroundExecutionState state = 1;
+  BackgroundExecutionMechanism mechanism = 2;
+  uint64 census_revision = 3;
+  uint32 observed_process_count = 4;
+  optional google.protobuf.Timestamp quiescent_since = 5;
+  uint32 consecutive_empty_samples = 6;
+}
+
+message RecoveryProjection {
+  RecoveryState state = 1;
+  optional string blocker_code = 2;
+  RecoveryAction required_action = 3;
+}
+
+message ParentRefProjection {
+  string namespace = 1;
+  string kind = 2;
+  string id = 3;
+}
+
+message InstructionContractProjection {
+  string schema_id = 1;
+  uint32 common_prefix_version = 2;
+  uint32 mode_prefix_version = 3;
+  uint32 purpose_prefix_version = 4;
+}
+
+message RunConfigurationProjection {
+  string profile_name = 1;
+  PurposeKind purpose = 2;
+  optional string purpose_label = 3;
+  string model_id = 4;
+  string default_effort = 5;
+  repeated string required_capabilities = 6;
+  optional ParentRefProjection parent = 7;
+  InstructionContractProjection instruction_contract = 8;
+  uint64 controller_instructions_byte_length = 9;
+  string controller_instructions_sha256 = 10;
+}
+
+message LineageProjection {
+  string source_run_id = 1;
+  string source_turn_id = 2;
+  string source_thread_id = 3;
+  WriteContinuationReason creation_reason = 4;
+  ControllerKind source_controller_kind = 5;
+  ControllerKind destination_controller_kind = 6;
+  optional string continuation_id = 7;
+  optional string handoff_summary_sha256 = 8;
+  repeated string artifact_refs = 9;
+  string workspace_baseline_sha256 = 10;
+  google.protobuf.Timestamp created_at = 11;
+  bool immutable = 12;
+}
+
+message ThreadProjection {
+  string thread_id = 1;
+  uint64 thread_generation = 2;
+  optional uint64 server_epoch = 3;
+}
+
+message ProjectionStamp {
+  string captured_head_cursor = 1;
+  uint64 run_state_revision = 2;
+  uint64 writer_state_revision = 3;
+  uint64 interaction_state_revision = 4;
+}
+
+message WriterState {
+  ResponseContext context = 1;
+  string workspace_id = 2;
+  WriterAuthorityState authority_state = 3;
+  optional string owner_run_id = 4;
+  uint64 writer_generation = 5;
+  optional string handoff_id = 6;
+  bool handoff_eligible = 7;
+  EffectiveAccess effective_access = 8;
+  PolicyVerification policy_verification = 9;
+  ExecutionLane execution_lane = 10;
+  AssuranceLevel requested_assurance = 11;
+  AssuranceLevel achieved_assurance = 12;
+  optional string background_execution_blocker = 13;
+  optional string recovery_blocker = 14;
+  ReconciliationAction reconciliation_action = 15;
+  uint64 state_revision = 16;
+  ProjectionStamp stamp = 17;
+}
+
+message FinalResponse {
+  oneof value {
+    string inline_utf8 = 1;
+    ArtifactRef artifact = 2;
+    UnavailableContent unavailable = 3;
+  }
+}
+
+message UnavailableContent {
+  uint64 observed_byte_length = 1;
+  string sha256 = 2;
+  string reason = 3;
+}
+
+message RunProjection {
+  string workspace_id = 1;
+  string run_id = 2;
+  RunLifecycle lifecycle = 3;
+  ControlMode control_mode = 4;
+  ExecutionLane execution_lane = 5;
+  ControllerProjection controller = 6;
+  optional ThreadProjection thread = 7;
+  optional TurnProjection active_turn = 8;
+  string event_cursor = 9;
+  uint32 pending_interaction_count = 10;
+  RecoveryProjection recovery = 11;
+  EffectivePolicyProjection effective_policy = 12;
+  WriterAuthorityProjection writer_authority = 13;
+  uint64 state_revision = 14;
+  optional FinalResponse last_final_response = 15;
+  RunStateVariant state_variant = 16;
+  ServerLaneProjection server_lane = 17;
+  BackgroundExecutionProjection background_execution = 18;
+  AssuranceLevel requested_assurance = 19;
+  AssuranceLevel achieved_assurance = 20;
+  optional LineageProjection lineage = 21;
+  RunConfigurationProjection configuration = 22;
+  ProjectionStamp stamp = 23;
+}
+
+message TurnProjection {
+  string run_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  TurnStatus status = 4;
+  string cursor = 5;
+  optional FinalResponse final_response = 6;
+}
+
+message GetCapabilitiesRequest {
+  RequestContext context = 1;
+  uint32 minimum_protocol_version = 2;
+  uint32 maximum_protocol_version = 3;
+}
+
+message ProtocolCapabilities {
+  uint32 rpc_protocol_version = 1;
+  uint32 minimum_client_protocol_version = 2;
+  uint32 maximum_client_protocol_version = 3;
+  uint32 machine_protocol_version = 4;
+  uint32 event_protocol_version = 5;
+  uint32 timeline_protocol_version = 6;
+  uint32 event_projection_version = 7;
+  uint32 grpc_error_detail_version = 8;
+  repeated ProjectionProfile projection_profiles = 9;
+}
+
+enum ControllerCarrierRootPolicy {
+  CONTROLLER_CARRIER_ROOT_POLICY_UNSPECIFIED = 0;
+  CONTROLLER_CARRIER_ROOT_POLICY_DOLGORAE_OWNED_APPLICATION_SUPPORT = 1;
+}
+
+enum ControllerCapabilityEncoding {
+  CONTROLLER_CAPABILITY_ENCODING_UNSPECIFIED = 0;
+  CONTROLLER_CAPABILITY_ENCODING_BASE64URL_NO_PADDING = 1;
+}
+
+enum ControllerPrincipalRule {
+  CONTROLLER_PRINCIPAL_RULE_UNSPECIFIED = 0;
+  CONTROLLER_PRINCIPAL_RULE_KIND_SUBJECT_ID_ELSE_KIND_INSTANCE_ID = 1;
+}
+
+message CredentialCarrierCapabilities {
+  string schema_id = 1;
+  uint32 schema_version = 2;
+  string schema_sha256 = 3;
+  string carrier_root_locator = 4;
+  repeated ControllerKind accepted_controller_kinds = 5;
+  uint32 capability_byte_length = 6;
+  ControllerCapabilityEncoding capability_encoding = 7;
+  uint32 parent_directory_mode = 8;
+  uint32 credential_file_mode = 9;
+  bool same_uid_required = 10;
+  bool regular_file_required = 11;
+  bool symlinks_forbidden = 12;
+  bool create_exclusive_required = 13;
+  uint64 maximum_file_bytes = 14;
+  string client_descendant_pattern = 15;
+  ControllerPrincipalRule normalized_principal_rule = 16;
+  uint64 initial_generation = 17;
+  ControllerCarrierRootPolicy carrier_root_policy = 18;
+}
+
+message RuntimeFeatureCapabilities {
+  bool persistent_runs = 1;
+  bool run_fork = 2;
+  bool reader_writer_access = 3;
+  bool threadless_acquire_write = 4;
+  bool first_write_via_submit_turn = 5;
+  bool write_continuation = 6;
+  bool controller_timeline = 7;
+  bool writer_handoff = 8;
+  bool durable_writer_authority = 9;
+  bool sticky_dedicated_lanes = 10;
+  bool event_replay = 11;
+  bool artifact_retrieval = 12;
+  bool controller_binding = 13;
+  bool worker_controller_revalidation = 14;
+  bool safe_client_projection = 15;
+  bool public_local_socket = 16;
+  bool workspace_event_stream = 17;
+  bool control_modes = 18;
+  bool brokered_independent_subagent_runs = 19;
+  bool assurance_negotiation = 20;
+  bool profile_server_migration = 21;
+  bool profile_membership_repair = 22;
+  bool profile_diagnostics = 23;
+  bool operator_capability = 24;
+  bool operator_controller_reset = 25;
+}
+
+message InteractionCapability {
+  InteractionKind kind = 1;
+  InteractionSupport support = 2;
+}
+
+message InteractionCapabilities {
+  repeated InteractionKind known_kinds = 1;
+  repeated InteractionCapability items = 2;
+  uint32 maximum_response_bytes = 3;
+  uint32 maximum_safe_payload_bytes = 4;
+}
+
+message AssuranceCapabilities {
+  repeated AssuranceLevel supported = 1;
+  AssuranceLevel maximum_achievable = 2;
+  bool selected_before_run_allocation = 3;
+}
+
+message LaneCapability {
+  ExecutionLane lane = 1;
+  CommandExecutionSupport command_execution = 2;
+  BackgroundControlSupport background_control = 3;
+  ProcessCleanupSupport per_run_process_cleanup = 4;
+  AssuranceLevel maximum_assurance = 5;
+  bool writer_support = 6;
+  bool lazy_first_input = 7;
+}
+
+message LaneCapabilities {
+  repeated ExecutionLane supported_lanes = 1;
+  repeated LaneCapability items = 2;
+}
+
+message BackgroundExecutionCapabilities {
+  SupportState support = 1;
+  repeated BackgroundExecutionMechanism mechanisms = 2;
+}
+
+message NativeSubagentCapabilities {
+  SupportState lifecycle_observation = 1;
+  SupportState disable_enforcement = 2;
+  SupportState quiescence_tracking = 3;
+  bool enabled = 4;
+  string safe_reason = 5;
+}
+
+message ArtifactCapabilities {
+  uint64 maximum_artifact_size = 1;
+  uint32 maximum_chunk_size = 2;
+  bool digest_verification_required = 3;
+  bool exact_byte_length_reported = 4;
+  repeated ArtifactVisibility visibility_classes = 5;
+  uint32 maximum_inline_response_bytes = 6;
+}
+
+message IndependentRunConcurrencyCapabilities {
+  SupportState basic_same_home_coexistence = 1;
+  SupportState storage_and_long_duration = 2;
+  uint32 resource_warning_live_dedicated = 3;
+}
+
+message GetCapabilitiesResponse {
+  ResponseContext context = 1;
+  string dolgorae_version = 2;
+  ProtocolCapabilities protocol = 3;
+  CredentialCarrierCapabilities controller_carrier = 4;
+  RuntimeFeatureCapabilities features = 5;
+  InteractionCapabilities interactions = 6;
+  AssuranceCapabilities assurance = 7;
+  LaneCapabilities lanes = 8;
+  NativeSubagentCapabilities native_subagents = 9;
+  ArtifactCapabilities artifacts = 10;
+  repeated string supported_methods = 11;
+  string descriptor_sha256 = 12;
+  repeated ControlMode supported_control_modes = 13;
+  SupportState access_policy_transition = 14;
+  BackgroundExecutionCapabilities background_execution = 15;
+  repeated PublicTransport supported_transports = 16;
+  IndependentRunConcurrencyCapabilities independent_run_concurrency = 17;
+  AppServerTransport app_server_transport = 18;
+  ProfileLaunchMode profile_launch_mode = 19;
+  NativeSubagentPolicy native_subagent_policy = 20;
+}
+
+message InspectWorkspaceRequest {
+  RequestContext context = 1;
+  string absolute_path = 2;
+  optional string expected_workspace_id = 3;
+}
+
+enum WorkspaceInspectionStatus {
+  WORKSPACE_INSPECTION_STATUS_UNSPECIFIED = 0;
+  WORKSPACE_INSPECTION_STATUS_COMPATIBLE = 1;
+  WORKSPACE_INSPECTION_STATUS_BLOCKED = 2;
+  WORKSPACE_INSPECTION_STATUS_UNINITIALIZED = 3;
+}
+
+enum WorkspaceMode {
+  WORKSPACE_MODE_UNSPECIFIED = 0;
+  WORKSPACE_MODE_GIT = 1;
+  WORKSPACE_MODE_NON_GIT = 2;
+}
+
+enum CapabilityBlockerCode {
+  CAPABILITY_BLOCKER_CODE_UNSPECIFIED = 0;
+  CAPABILITY_BLOCKER_CODE_CONFIG_INVALID = 1;
+  CAPABILITY_BLOCKER_CODE_WORKSPACE_NOT_INITIALIZED = 2;
+  CAPABILITY_BLOCKER_CODE_WORKSPACE_PATH_UNSAFE = 3;
+  CAPABILITY_BLOCKER_CODE_PROFILE_CONFIG_INVALID = 4;
+  CAPABILITY_BLOCKER_CODE_PROFILE_RUNTIME_INCOMPATIBLE = 5;
+  CAPABILITY_BLOCKER_CODE_PROFILE_MIGRATION_REQUIRED = 6;
+  CAPABILITY_BLOCKER_CODE_PROFILE_MEMBERSHIP_INCOMPLETE = 7;
+  CAPABILITY_BLOCKER_CODE_PROFILE_SERVER_UNAVAILABLE = 8;
+  CAPABILITY_BLOCKER_CODE_EXECUTION_LANE_UNSUPPORTED = 9;
+  CAPABILITY_BLOCKER_CODE_ASSURANCE_UNAVAILABLE = 10;
+  CAPABILITY_BLOCKER_CODE_ACCESS_TRANSITION_UNAVAILABLE = 11;
+  CAPABILITY_BLOCKER_CODE_ACCESS_TRANSITION_UNVERIFIED = 12;
+  CAPABILITY_BLOCKER_CODE_BACKGROUND_EXECUTION_UNAVAILABLE = 13;
+  CAPABILITY_BLOCKER_CODE_BACKGROUND_EXECUTION_UNVERIFIED = 14;
+  CAPABILITY_BLOCKER_CODE_INTERACTION_UNAVAILABLE = 15;
+  CAPABILITY_BLOCKER_CODE_NATIVE_SUBAGENT_UNAVAILABLE = 16;
+  CAPABILITY_BLOCKER_CODE_NATIVE_SUBAGENT_UNVERIFIED = 17;
+}
+
+message CapabilityBlocker {
+  CapabilityBlockerCode code = 1;
+  string safe_message = 2;
+}
+
+message InspectWorkspaceResponse {
+  ResponseContext context = 1;
+  string workspace_id = 2;
+  PathProjection canonical_path = 3;
+  WorkspaceMode mode = 4;
+  WorkspaceInspectionStatus status = 5;
+  repeated CapabilityBlocker blockers = 6;
+}
+
+message ListProfilesRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+}
+
+message ModelCapability {
+  string model_id = 1;
+  bool is_default = 2;
+  repeated string supported_efforts = 3;
+}
+
+message ProfileProjection {
+  reserved 7;
+  reserved "default_model_id";
+  string name = 1;
+  string server_key = 2;
+  optional uint64 server_epoch = 3;
+  ProfileCompatibility compatibility = 4;
+  repeated ModelCapability models = 5;
+  optional string runtime_version = 6;
+  repeated ExecutionLane supported_execution_lanes = 8;
+  AssuranceLevel maximum_assurance = 9;
+  SupportState access_policy_transition = 10;
+  BackgroundExecutionCapabilities background_execution = 11;
+  repeated InteractionKind supported_interaction_kinds = 12;
+  NativeSubagentCapabilities native_subagents = 13;
+  repeated string feature_flags = 14;
+  repeated CapabilityBlocker blockers = 15;
+}
+
+message ListProfilesResponse {
+  ResponseContext context = 1;
+  repeated ProfileProjection items = 2;
+}
+
+message GetProfileRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  string profile_name = 3;
+}
+
+message GetProfileResponse {
+  ResponseContext context = 1;
+  ProfileProjection profile = 2;
+}
+
+message ListProfileDiagnosticsRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  string profile_name = 3;
+  string after_cursor = 4;
+  uint32 limit = 5;
+  ProjectionProfile projection = 6;
+}
+
+message ProfileDiagnostic {
+  string cursor = 1;
+  string diagnostic_id = 2;
+  string severity = 3;
+  string category = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  string message = 6;
+}
+
+message ListProfileDiagnosticsResponse {
+  ResponseContext context = 1;
+  repeated ProfileDiagnostic items = 2;
+  string captured_head_cursor = 3;
+  optional string next_after_cursor = 4;
+}
+
+message StartRunRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  ControllerCarrierRef controller = 3;
+  string idempotency_key = 4;
+  string profile_name = 5;
+  ControlMode control_mode = 6;
+  ExecutionLane execution_lane = 7;
+  PurposeKind purpose = 8;
+  optional string purpose_label = 9;
+  optional string model = 10;
+  optional string effort = 11;
+  AssuranceLevel required_assurance = 12;
+  repeated string required_capabilities = 13;
+  optional string instructions = 14;
+  reserved 15, 16, 17;
+  reserved "parent_namespace", "parent_kind", "parent_id";
+  optional ParentRefProjection parent = 18;
+}
+
+message StartRunResponse {
+  ResponseContext context = 1;
+  RunProjection run = 2;
+  string idempotency_key = 3;
+  bool exact_replay = 4;
+}
+
+message ListRunsRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  optional string controller_id = 3;
+}
+
+message ListRunsResponse {
+  ResponseContext context = 1;
+  repeated RunProjection items = 2;
+}
+
+message GetRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+}
+
+message GetRunResponse {
+  ResponseContext context = 1;
+  RunProjection run = 2;
+}
+
+message ImageInput {
+  string absolute_file_path = 1;
+  ImageDetail detail = 2;
+}
+
+message SubmitTurnRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  string idempotency_key = 4;
+  WriteIntent write_intent = 5;
+  string message = 6;
+  repeated ImageInput images = 7;
+  optional string effort = 8;
+  uint64 expected_state_revision = 9;
+}
+
+message SubmitTurnAccepted {
+  ResponseContext context = 1;
+  TurnProjection accepted_turn = 2;
+  RunProjection run = 3;
+  WriterState writer = 4;
+  string idempotency_key = 5;
+  string correlation_id = 6;
+}
+
+message InterruptTurnRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  uint64 expected_state_revision = 4;
+}
+
+message SetDefaultEffortRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  string effort = 4;
+  uint64 expected_state_revision = 5;
+}
+
+message PauseRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  bool interrupt = 4;
+  uint64 expected_state_revision = 5;
+}
+
+message ResumeRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  uint64 expected_state_revision = 4;
+}
+
+message CloseRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  bool interrupt = 4;
+  uint64 expected_state_revision = 5;
+}
+
+message DeleteRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  bool confirm = 4;
+  uint64 expected_state_revision = 5;
+}
+
+message DeleteRunResponse {
+  ResponseContext context = 1;
+  string workspace_id = 2;
+  string run_id = 3;
+  bool deleted = 4;
+}
+
+message RecoverRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  uint64 expected_state_revision = 4;
+}
+
+message ReconcileRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  uint64 expected_state_revision = 4;
+}
+
+message RunMutationResponse {
+  ResponseContext context = 1;
+  RunProjection run = 2;
+}
+
+message ForkRunRequest {
+  RequestContext context = 1;
+  RunRef source = 2;
+  ControllerCarrierRef controller = 3;
+  string idempotency_key = 4;
+  bool fresh = 5;
+  optional string model = 6;
+}
+
+message VerifyRunRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+}
+
+message VerifyRunResponse {
+  ResponseContext context = 1;
+  string run_id = 2;
+  bool verified = 3;
+  string ledger_head_cursor = 4;
+  string detail = 5;
+}
+
+message CreateWriteContinuationRequest {
+  RequestContext context = 1;
+  RunRef source = 2;
+  string source_turn_id = 3;
+  ControllerCarrierRef source_controller = 4;
+  ControllerCarrierRef destination_controller = 5;
+  string idempotency_key = 6;
+  WriteContinuationReason reason = 7;
+  PurposeKind purpose = 8;
+  optional string purpose_label = 9;
+  optional string model = 10;
+  optional string effort = 11;
+  optional AssuranceLevel required_assurance = 12;
+  repeated string required_capabilities = 13;
+  optional string destination_instructions = 14;
+  optional string handoff_summary = 15;
+  repeated string artifact_refs = 16;
+}
+
+message SourceRunReceipt {
+  string run_id = 1;
+  string terminal_turn_id = 2;
+  uint64 unchanged_state_revision = 3;
+  bool writer_authority_unchanged = 4;
+}
+
+message CreateWriteContinuationResponse {
+  ResponseContext context = 1;
+  RunProjection destination_run = 2;
+  LineageProjection lineage = 3;
+  ControllerProjection destination_controller = 4;
+  string idempotency_key = 5;
+  SourceRunReceipt source_receipt = 6;
+  bool exact_replay = 7;
+}
+
+message WatchRunEventsRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  string after_cursor = 3;
+  ProjectionProfile projection = 4;
+  uint32 projection_version = 5;
+}
+
+message RunStateChanged {
+  optional RunLifecycle previous = 1;
+  RunLifecycle current = 2;
+}
+
+message TurnStateChanged {
+  optional TurnStatus previous = 1;
+  TurnStatus current = 2;
+}
+
+message FinalResponseAvailable {
+  FinalResponse response = 1;
+}
+
+message PathProjection {
+  oneof value {
+    string utf8_path = 1;
+    bytes opaque_path = 2;
+  }
+}
+
+enum InteractionKind {
+  INTERACTION_KIND_UNSPECIFIED = 0;
+  INTERACTION_KIND_COMMAND_EXECUTION_APPROVAL = 1;
+  INTERACTION_KIND_FILE_CHANGE_APPROVAL = 2;
+  INTERACTION_KIND_PERMISSION_REQUEST = 3;
+  INTERACTION_KIND_USER_INPUT = 4;
+  INTERACTION_KIND_MCP_ELICITATION = 5;
+  INTERACTION_KIND_CONNECTOR_APPROVAL = 6;
+  INTERACTION_KIND_UNSUPPORTED_REQUEST = 7;
+}
+
+enum InteractionStatus {
+  INTERACTION_STATUS_UNSPECIFIED = 0;
+  INTERACTION_STATUS_PENDING = 1;
+  INTERACTION_STATUS_RESOLVED = 2;
+  INTERACTION_STATUS_STALE = 3;
+}
+
+enum InteractionOutcome {
+  INTERACTION_OUTCOME_UNSPECIFIED = 0;
+  INTERACTION_OUTCOME_ACCEPTED = 1;
+  INTERACTION_OUTCOME_DECLINED = 2;
+  INTERACTION_OUTCOME_CANCELLED = 3;
+  INTERACTION_OUTCOME_ANSWERED = 4;
+  INTERACTION_OUTCOME_STALE = 5;
+  INTERACTION_OUTCOME_METHOD_NOT_FOUND = 6;
+}
+
+enum InteractionDecision {
+  INTERACTION_DECISION_UNSPECIFIED = 0;
+  INTERACTION_DECISION_ACCEPT_ONCE = 1;
+  INTERACTION_DECISION_DECLINE = 2;
+  INTERACTION_DECISION_CANCEL = 3;
+}
+
+enum FileChangeKind {
+  FILE_CHANGE_KIND_UNSPECIFIED = 0;
+  FILE_CHANGE_KIND_ADD = 1;
+  FILE_CHANGE_KIND_UPDATE = 2;
+  FILE_CHANGE_KIND_DELETE = 3;
+}
+
+enum UnsupportedInteractionReason {
+  UNSUPPORTED_INTERACTION_REASON_UNSPECIFIED = 0;
+  UNSUPPORTED_INTERACTION_REASON_RECOGNIZED_UNSUPPORTED = 1;
+  UNSUPPORTED_INTERACTION_REASON_UNAVAILABLE = 2;
+}
+
+message CommandApprovalInteraction {
+  string title = 1;
+  string message = 2;
+  repeated string command = 3;
+  PathProjection cwd = 4;
+  optional string reason = 5;
+}
+
+message FileChangeProjection {
+  PathProjection path = 1;
+  FileChangeKind kind = 2;
+  string unified_diff = 3;
+  optional PathProjection move_path = 4;
+}
+
+message InlineFileChanges {
+  repeated FileChangeProjection items = 1;
+}
+
+message FileChangeApprovalInteraction {
+  string title = 1;
+  string message = 2;
+  optional string reason = 3;
+  string snapshot_sha256 = 4;
+  uint64 snapshot_revision = 5;
+  oneof representation {
+    InlineFileChanges inline_changes = 6;
+    ArtifactRef change_artifact = 7;
+  }
+}
+
+message InteractionOption {
+  string label = 1;
+  string description = 2;
+}
+
+message InteractionOptions {
+  repeated InteractionOption items = 1;
+}
+
+message InteractionQuestion {
+  string id = 1;
+  string header = 2;
+  string question = 3;
+  bool allows_other = 4;
+  bool is_secret = 5;
+  optional InteractionOptions options = 6;
+}
+
+message UserInputInteraction {
+  bool is_blocking = 1;
+  repeated InteractionQuestion questions = 2;
+}
+
+message UnsupportedInteraction {
+  InteractionKind original_kind = 1;
+  UnsupportedInteractionReason reason = 2;
+}
+
+message InteractionOpenedEvent {
+  string interaction_id = 1;
+  InteractionKind kind = 2;
+}
+
+message InteractionResolvedEvent {
+  string interaction_id = 1;
+  InteractionOutcome outcome = 2;
+}
+
+message WriterStateChangedEvent {
+  WriterAuthorityState previous = 1;
+  WriterAuthorityState current = 2;
+  optional string writer_run_id = 3;
+  uint64 writer_generation = 4;
+}
+
+message RecoveryRequiredEvent { string safe_reason = 1; }
+message RuntimeErrorOccurred { string error_code = 1; string safe_message = 2; }
+message UsageReported { uint64 input_tokens = 1; uint64 output_tokens = 2; }
+message WorkspaceChanges { repeated PathProjection paths = 1; bool truncated = 2; }
+message CommandStarted { repeated string safe_command = 1; }
+message CommandCompleted { repeated string safe_command = 1; optional int32 exit_status = 2; }
+message DiagnosticReported { string safe_message = 1; }
+message GenerationChanged { uint64 run_generation = 1; uint64 server_epoch = 2; }
+message ReasoningSuppressed {
+  string method = 1;
+  uint64 byte_length = 2;
+  string sha256 = 3;
+  string safe_reason = 4;
+}
+
+message DurableRunEvent {
+  string cursor = 1;
+  string event_id = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+  string workspace_id = 4;
+  string run_id = 5;
+  optional string thread_id = 6;
+  optional string turn_id = 7;
+  string server_key = 8;
+  uint64 server_epoch = 9;
+  bool replay = 10;
+  ProjectionProfile projection = 11;
+  uint32 projection_version = 12;
+  ProjectionStamp stamp = 13;
+  oneof event {
+    RunStateChanged run_state_changed = 20;
+    TurnStateChanged turn_state_changed = 21;
+    FinalResponseAvailable final_response_available = 22;
+    InteractionOpenedEvent interaction_opened = 23;
+    InteractionResolvedEvent interaction_resolved = 24;
+    RuntimeErrorOccurred runtime_error_occurred = 25;
+    UsageReported usage_reported = 26;
+    WorkspaceChanges workspace_changes = 27;
+    WriterStateChangedEvent writer_state_changed = 28;
+    RecoveryRequiredEvent recovery_required = 29;
+    CommandStarted command_started = 30;
+    CommandCompleted command_completed = 31;
+    DiagnosticReported diagnostic_reported = 32;
+    GenerationChanged generation_changed = 33;
+    ReasoningSuppressed reasoning_suppressed = 34;
+  }
+}
+
+message RunEventHeartbeat {
+  string run_id = 1;
+  string durable_head_cursor = 2;
+  RunLifecycle lifecycle = 3;
+  google.protobuf.Timestamp emitted_at = 4;
+}
+
+enum StreamEndReason {
+  STREAM_END_REASON_UNSPECIFIED = 0;
+  STREAM_END_REASON_SERVER_SHUTDOWN = 1;
+  STREAM_END_REASON_RUN_TERMINAL = 2;
+}
+
+message RunEventStreamEnd {
+  string run_id = 1;
+  string durable_head_cursor = 2;
+  StreamEndReason reason = 3;
+}
+
+message RunEventEnvelope {
+  oneof item {
+    DurableRunEvent durable_event = 1;
+    RunEventHeartbeat heartbeat = 2;
+    RunEventStreamEnd stream_end = 3;
+  }
+}
+
+enum TimelineItemType {
+  TIMELINE_ITEM_TYPE_UNSPECIFIED = 0;
+  TIMELINE_ITEM_TYPE_USER_INPUT_ACCEPTED = 1;
+  TIMELINE_ITEM_TYPE_ASSISTANT_RESPONSE_FINAL = 2;
+  TIMELINE_ITEM_TYPE_INTERACTION_OPENED = 3;
+  TIMELINE_ITEM_TYPE_INTERACTION_RESOLVED = 4;
+  TIMELINE_ITEM_TYPE_TURN_TERMINAL = 5;
+}
+
+enum TimelineItemStatus {
+  TIMELINE_ITEM_STATUS_UNSPECIFIED = 0;
+  TIMELINE_ITEM_STATUS_ACCEPTED = 1;
+  TIMELINE_ITEM_STATUS_FINAL = 2;
+  TIMELINE_ITEM_STATUS_OPENED = 3;
+  TIMELINE_ITEM_STATUS_RESOLVED = 4;
+  TIMELINE_ITEM_STATUS_COMPLETED = 5;
+  TIMELINE_ITEM_STATUS_FAILED = 6;
+  TIMELINE_ITEM_STATUS_INTERRUPTED = 7;
+  TIMELINE_ITEM_STATUS_OUTCOME_UNKNOWN = 8;
+}
+
+message ImageInputMetadata {
+  uint32 ordinal = 1;
+  ImageDetail detail = 2;
+  string media_type = 3;
+  uint64 byte_length = 4;
+  string sha256 = 5;
+}
+
+message TimelineItem {
+  TimelineItemType type = 1;
+  string cursor = 2;
+  string run_id = 3;
+  string turn_id = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  optional string provider_item_id = 6;
+  optional uint64 provider_order = 7;
+  oneof content {
+    string inline_text = 8;
+    ArtifactRef artifact = 9;
+  }
+  repeated ImageInputMetadata images = 10;
+  optional string interaction_id = 11;
+  optional TimelineItemStatus status = 12;
+  optional InteractionKind interaction_kind = 13;
+  optional InteractionStatus interaction_status = 14;
+  optional string interaction_safe_title = 15;
+}
+
+message ListRunTimelineItemsRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  string after_cursor = 4;
+  uint32 limit = 5;
+  uint32 timeline_version = 6;
+}
+
+message ListRunTimelineItemsResponse {
+  ResponseContext context = 1;
+  repeated TimelineItem items = 2;
+  string captured_head_cursor = 3;
+  optional string next_after_cursor = 4;
+  ProjectionStamp stamp = 5;
+}
+
+message InteractionSummary {
+  string interaction_id = 1;
+  string run_id = 2;
+  InteractionKind kind = 3;
+  InteractionStatus status = 4;
+  string safe_title = 5;
+  ControllerKind controller_kind = 6;
+  bool requires_user_escalation = 7;
+  bool contains_protected_input = 8;
+  google.protobuf.Timestamp created_at = 9;
+  optional google.protobuf.Timestamp expires_at = 10;
+  optional google.protobuf.Timestamp resolved_at = 11;
+  uint64 state_revision = 12;
+}
+
+message ControllerInteraction {
+  InteractionSummary summary = 1;
+  string response_schema_id = 2;
+  ProjectionStamp stamp = 3;
+  oneof payload {
+    CommandApprovalInteraction command_approval = 10;
+    FileChangeApprovalInteraction file_change_approval = 11;
+    UserInputInteraction user_input = 12;
+    UnsupportedInteraction unsupported = 13;
+  }
+  repeated InteractionDecision decisions = 20;
+}
+
+message ListPendingInteractionsRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+}
+
+message ListPendingInteractionsResponse {
+  ResponseContext context = 1;
+  repeated InteractionSummary items = 2;
+  ProjectionStamp stamp = 3;
+}
+
+message GetControllerInteractionRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  string interaction_id = 4;
+}
+
+message GetControllerInteractionResponse {
+  ResponseContext context = 1;
+  ControllerInteraction interaction = 2;
+}
+
+message ResolveInteractionRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  string interaction_id = 4;
+  string idempotency_key = 5;
+  bytes response_json = 6;
+}
+
+message ResolveInteractionResponse {
+  ResponseContext context = 1;
+  string interaction_id = 2;
+  InteractionStatus status = 3;
+  string resolution_receipt = 4;
+}
+
+message GetWorkspaceWriterStatusRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+}
+
+message GetWorkspaceWriterStatusResponse {
+  WriterState writer = 1;
+}
+
+message AcquireWriterRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  uint64 expected_state_revision = 4;
+}
+
+message ReleaseWriterRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+  uint64 expected_state_revision = 4;
+}
+
+message PrepareWriterHandoffRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  string source_run_id = 3;
+  string destination_run_id = 4;
+  ControllerCarrierRef controller = 5;
+  uint64 expected_writer_generation = 6;
+}
+
+message CommitWriterHandoffRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  string handoff_id = 3;
+  ControllerCarrierRef controller = 4;
+  uint64 expected_writer_generation = 5;
+}
+
+message CancelWriterHandoffRequest {
+  RequestContext context = 1;
+  WorkspaceRef workspace = 2;
+  string handoff_id = 3;
+  ControllerCarrierRef controller = 4;
+}
+
+message WriterHandoffResponse {
+  WriterState writer = 1;
+  string handoff_id = 2;
+  WriterAuthorityState status = 3;
+}
+
+message VerifyControllerRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  ControllerCarrierRef controller = 3;
+}
+
+message VerifyControllerResponse {
+  ResponseContext context = 1;
+  string run_id = 2;
+  ControllerProjection controller = 3;
+  google.protobuf.Timestamp verified_at = 4;
+}
+
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_FILE_CHANGE_DIFF = 1;
+  ARTIFACT_KIND_USER_INPUT = 2;
+  ARTIFACT_KIND_FINAL_RESPONSE = 3;
+}
+
+enum ArtifactVisibility {
+  ARTIFACT_VISIBILITY_UNSPECIFIED = 0;
+  ARTIFACT_VISIBILITY_OBSERVER = 1;
+  ARTIFACT_VISIBILITY_CONTROLLER_ONLY = 2;
+}
+
+message ArtifactRef {
+  string artifact_id = 1;
+  ArtifactKind kind = 2;
+  ArtifactVisibility visibility = 3;
+  string media_type = 4;
+  uint64 byte_length = 5;
+  string sha256 = 6;
+}
+
+message GetArtifactRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  string artifact_id = 3;
+  optional ControllerCarrierRef controller = 4;
+}
+
+message GetArtifactResponse {
+  ResponseContext context = 1;
+  ArtifactRef artifact = 2;
+  uint32 maximum_chunk_size = 3;
+}
+
+message ReadArtifactChunkRequest {
+  RequestContext context = 1;
+  RunRef run = 2;
+  string artifact_id = 3;
+  uint64 offset = 4;
+  uint32 length = 5;
+  optional ControllerCarrierRef controller = 6;
+}
+
+message ReadArtifactChunkResponse {
+  ResponseContext context = 1;
+  string artifact_id = 2;
+  uint64 offset = 3;
+  uint32 length = 4;
+  bytes data = 5;
+  bool eof = 6;
+  uint64 total_byte_length = 7;
+  string sha256 = 8;
+}
+
+enum RetryClassification {
+  RETRY_CLASSIFICATION_UNSPECIFIED = 0;
+  RETRY_CLASSIFICATION_FORBIDDEN = 1;
+  RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY = 2;
+  RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT = 3;
+  RETRY_CLASSIFICATION_AFTER_RECONCILE = 4;
+}
+
+enum RecoveryClassification {
+  RECOVERY_CLASSIFICATION_UNSPECIFIED = 0;
+  RECOVERY_CLASSIFICATION_NONE = 1;
+  RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED = 2;
+  RECOVERY_CLASSIFICATION_RECONCILE_REQUIRED = 3;
+  RECOVERY_CLASSIFICATION_OUTCOME_UNKNOWN = 4;
+}
+
+enum RequiredClientAction {
+  REQUIRED_CLIENT_ACTION_UNSPECIFIED = 0;
+  REQUIRED_CLIENT_ACTION_NONE = 1;
+  REQUIRED_CLIENT_ACTION_FIX_REQUEST = 2;
+  REQUIRED_CLIENT_ACTION_REFRESH_CAPABILITIES = 3;
+  REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT = 4;
+  REQUIRED_CLIENT_ACTION_VERIFY_CONTROLLER = 5;
+  REQUIRED_CLIENT_ACTION_USE_COMPATIBLE_CONTROLLER = 6;
+  REQUIRED_CLIENT_ACTION_USE_NEW_SAME_PRINCIPAL_CONTROLLER = 7;
+  REQUIRED_CLIENT_ACTION_USE_SUPPORTED_PROFILE = 8;
+  REQUIRED_CLIENT_ACTION_USE_TERMINAL_SOURCE = 9;
+  REQUIRED_CLIENT_ACTION_SUBMIT_WRITE_TURN = 10;
+  REQUIRED_CLIENT_ACTION_WAIT = 11;
+  REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY = 12;
+  REQUIRED_CLIENT_ACTION_REFETCH_INTERACTION = 13;
+  REQUIRED_CLIENT_ACTION_RECONCILE_RUN = 14;
+  REQUIRED_CLIENT_ACTION_RECOVER_RUN = 15;
+  REQUIRED_CLIENT_ACTION_RECONNECT_FROM_COMMITTED_CURSOR = 16;
+  REQUIRED_CLIENT_ACTION_RESTART_GATEWAY = 17;
+  REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR = 18;
+  REQUIRED_CLIENT_ACTION_ABORT = 19;
+  REQUIRED_CLIENT_ACTION_FIX_SOCKET_PATH = 20;
+  REQUIRED_CLIENT_ACTION_CREATE_WRITE_CONTINUATION = 21;
+}
+
+message DolgoraeErrorDetail {
+  uint32 detail_version = 1;
+  string dolgorae_error_code = 2;
+  RequiredClientAction action = 3;
+  optional string run_id = 4;
+  optional string turn_id = 5;
+  optional string interaction_id = 6;
+  optional string operation_id = 7;
+  optional string idempotency_key = 8;
+  RetryClassification retry_classification = 9;
+  RecoveryClassification recovery_classification = 10;
+  optional string safe_resume_cursor = 11;
+}
