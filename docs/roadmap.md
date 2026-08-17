@@ -430,8 +430,10 @@ profile-specific interaction/capability snapshots, and pre-allocation rejection
 of missing required capabilities. Bare doctor remains offline; launch behavior
 is tested only by explicit `--launch-probe`. TASK-005 owns the selected 0.147.0
 native feature policy: reject raw global `multi_agent` arguments, inject exactly
-one profile-owned `--enable multi_agent` or `--disable multi_agent` pair, default
-to enabled, advertise enabled-but-incomplete observation as `unverified`, and
+one profile-owned `--enable multi_agent` pair, treat absence as enabled, reject
+explicit public disable with `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE`, retain the
+disable launch only for diagnostic probes, advertise enabled-but-incomplete
+observation as `unverified`, and
 make active or unverified native state block every quiescence-dependent
 transition. A policy change requires a new server key and operator-authorized
 profile migration with no silent hot reload. Dedicated-lane campaigns prove
@@ -528,6 +530,10 @@ pathnames, held-fd/path and historical-inode splits, linked-worktree Git writabl
 roots, access-policy mappings, explicit unsupported-transition refusal, a fresh
 lineage-linked dedicated successor Run for shared-readonly to writer, and verified incumbent retirement
 before write-to-read authority release.
+Successor tests must prove fixed workspace/profile/control mode, a new
+same-principal destination Controller, non-decreasing assurance, capability
+union and revalidation, supported model/effort overrides, recomposed instruction
+prefixes, and non-inheritance of source Controller instructions or hidden history.
 Also cover `F_SETLKWTIMEOUT`, spawn-image versus final-image identity, and
 fail-closed byte-1 control timeout without any activity-derived signal.
 Add deterministic interleavings for the normative lock matrix and every
@@ -629,7 +635,8 @@ independently inspectable.
 
 Status: `PLANNED`
 
-Implement workspace-scoped run listing, full same-uid observer status,
+Implement workspace-scoped run listing, same-uid observer status and strict
+interaction summaries, controller-authorized full interaction retrieval,
 minimal/operational client-safe event queries/following, a separate profile
 diagnostic query/event cursor, stable cursors, bounded artifact show/read/export,
 final-response inline/artifact/unavailable envelopes, effort
@@ -647,7 +654,8 @@ replay/live deduplication,
 minimal-versus-operational fields, reasoning suppression/non-retention, path
 truncation, Git/non-Git algorithms, and every command `data` variant. Test
 1-MiB chunks, 8/32/256-MiB quotas, digest/range failures, conditional thread/turn
-identity, profile redaction/authorization, and pre-ready failures that create no Run.
+identity, observer/controller interaction and artifact denial matrices, profile
+redaction/authorization, and pre-ready failures that create no Run.
 
 ### TASK-011: Verify, Export, and Confirmed Delete
 

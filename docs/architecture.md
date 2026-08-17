@@ -218,8 +218,9 @@ resume.
 are controlled by a human CLI or interactive client and default to dedicated.
 Managed Runs are controlled by an orchestrator or automation broker and must
 state purpose, lane, and assurance. Purpose and its optional creation label are
-immutable. Only the Controller sees and resolves full normalized
-interactions; observers receive redacted projections. No Controller capability
+immutable. Only the Controller sees and resolves full normalized interactions
+through `run interaction get`; observers receive strict summaries without
+payload, response-schema, artifact, thread, turn, item, or server identity. No Controller capability
 enters LLM-visible data.
 
 Instruction composition is immutable and versioned as common safety prefix,
@@ -231,22 +232,32 @@ shared server records command items and an aggregate process census, but cannot
 attribute or clean descendants per Run; only profile stop owns aggregate
 cleanup. Dedicated lanes retain exact per-generation census ownership.
 
-`run create-successor` is separate from history fork. It validates the source's
-current terminal Turn and same Controller, records immutable lineage and a
-bounded handoff digest, and publishes a new dedicated logical lane with no
-thread or physical generation. First input starts the destination generation;
-the source remains permanently shared and never transfers writer authority.
+`run create-successor` is separate from history fork. The source Controller
+authorizes a current-terminal-Turn transition, while a new same-principal
+credential binds the destination. Workspace, profile, and control mode are
+fixed; model/effort, purpose, capability additions, and non-decreasing assurance
+are validated before allocation. Common/mode/purpose instructions are
+recomposed and only explicit bounded destination instructions are appended.
+The operation records immutable lineage and a bounded handoff digest, then
+publishes a dedicated logical lane with no thread or physical generation. First
+input starts the destination generation; the source remains permanently shared
+and never transfers writer authority or hidden history.
 
-Codex 0.147.0 achieved only `best_effort_personal_alpha`. Same-home operation,
+Codex 0.147.0 achieved only `best_effort_personal_alpha`. Basic same-home
+coexistence and bounded storage integrity passed under the tested configuration;
+long-duration/high-contention behavior and forced authentication refresh remain
+unverified, and no production-grade storage guarantee is claimed. Sticky
+policy transitions,
 sticky policy transitions, different-workspace concurrent writers, and
 closed-generation history resume passed. Cross-server same-thread migration
 failed and background-terminal discovery failed. Dolgorae's live process census
 and exact cleanup subsequently passed, including unrelated-process exclusion.
 The retained native-subagent parser omitted exact wire item names and its
 no-child conclusion is withdrawn. The corrected 0.147.0 enabled campaign proved
-the complete parent/child lifecycle and restart history, so the default profile
-advertises Codex-native subagents as `supported`. The disabled diagnostic also
-created a child and therefore remains `unverified`. Polling and persisted child history fence
+the complete parent/child lifecycle and restart history, so the public profile
+advertises supported lifecycle observation and quiescence tracking. Disable
+enforcement is unavailable: a `disabled` public profile is rejected, while the
+diagnostic disabled result remains `unverified`. Polling and persisted child history fence
 pause, generation replacement, profile stop, and shutdown when native state is
 active or unknown. Polling remains
 process-census authority and cannot claim strong containment.
@@ -336,8 +347,10 @@ The run-private artifact store is a bounded projection adjunct, not an event
 authority. It accepts only exact file-change diffs and final responses, writes
 create-exclusive mode-0600 files, records byte length and SHA-256, and enforces
 8-MiB/file, 32-MiB/final-response, and 256-MiB/run quotas. Public reads use
-opaque artifact IDs and verified base64 chunks of at most 1 MiB; internal paths
-and reasoning content never cross the machine boundary.
+opaque artifact IDs and verified base64 chunks of at most 1 MiB. Artifact
+metadata carries `observer` or `controller_only` visibility; interaction-derived
+artifacts are controller-only. Internal paths and reasoning content never cross
+the machine boundary.
 
 The manifest stores controller metadata, a domain-separated capability digest,
 controller generation, opaque purpose/parent metadata, and required/validated
@@ -657,9 +670,11 @@ worker reloads state, reads the bounded secret, compares its digest and all
 revision operands, zeroizes it, and applies the transition. No CLI-only check or
 `already_validated` claim crosses the serialization boundary.
 
-Read paths validate same uid and project/runtime path safety but require no
-controller credential. Their output always passes through the client-safe
-projection boundary. A controller mismatch deliberately has one error shape so
+Observer read paths validate same uid and project/runtime path safety but
+require no controller credential. Their output always passes through the
+client-safe projection boundary and cannot return full interactions or
+controller-only artifacts. Controller read and mutation paths validate the
+credential at the serialization point. A controller mismatch deliberately has one error shape so
 run existence, controller-ID mismatch, and capability mismatch reveal no
 additional credential facts beyond information already available to local
 observers.

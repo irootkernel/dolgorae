@@ -23,7 +23,7 @@
         "profile.membership.verify", "profile.membership.tombstone_orphan", "profile.state.reset",
         "profile.diagnostics.list", "profile.events",
         "run.start", "run.list", "run.status", "run.send",
-        "run.submit", "run.wait", "run.events", "run.pending", "run.respond",
+        "run.submit", "run.wait", "run.events", "run.pending", "run.interaction.get", "run.respond",
         "run.interrupt", "run.set_effort", "run.acquire_write", "run.release_write",
         "run.pause", "run.resume", "run.recover", "run.reconcile", "run.fork", "run.create_successor",
         "run.close", "run.delete", "run.verify", "run.export", "run.controller.reset",
@@ -35,15 +35,17 @@
         "INVALID_ARGUMENT", "WORKSPACE_NOT_INITIALIZED", "CONFIG_INVALID",
         "PROFILE_CONFIG_INVALID", "PROFILE_NOT_FOUND", "RUN_NOT_FOUND",
         "THREAD_NOT_FOUND", "TURN_NOT_FOUND", "INTERACTION_NOT_FOUND",
+        "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER", "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER", "OBSERVER_MUTATION_FORBIDDEN",
         "PROFILE_ALREADY_EXISTS", "PROFILE_SERVER_BUSY", "PROFILE_LAUNCH_CONFLICT",
         "PROFILE_MIGRATION_REQUIRED", "PROFILE_MEMBERSHIP_INCOMPLETE", "PROFILE_SERVER_EPOCH_MISMATCH", "WORKSPACE_INITIALIZATION_CONFLICT",
         "RUN_STATE_CONFLICT", "RUN_STATE_INVARIANT_VIOLATION", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY",
         "WRITER_HANDOFF_NOT_ALLOWED", "CROSS_CONTROLLER_RELEASE_REQUIRED", "STALE_WRITER_GENERATION",
         "CONTROLLER_MISMATCH", "CONTROLLER_RESET_NOT_ALLOWED", "OPERATOR_MISMATCH",
         "CONTROL_MODE_REQUIRED", "CONTROL_MODE_CONTROLLER_MISMATCH", "PURPOSE_REQUIRED", "EXECUTION_LANE_REQUIRED",
-        "CAPABILITY_UNSUPPORTED", "ACCESS_TRANSITION_UNSUPPORTED", "BACKGROUND_EXECUTION_UNVERIFIED",
+        "CAPABILITY_UNSUPPORTED", "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE", "ACCESS_TRANSITION_UNSUPPORTED", "BACKGROUND_EXECUTION_UNVERIFIED",
         "EXECUTION_LANE_UNSUPPORTED", "EXECUTION_LANE_IMMUTABLE", "SHARED_RUN_WRITE_FORBIDDEN",
         "SUCCESSOR_SOURCE_NOT_TERMINAL", "SUCCESSOR_LINEAGE_INVALID", "SUCCESSOR_CONTROLLER_INVALID",
+        "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN", "SUCCESSOR_MODEL_UNSUPPORTED",
         "THREAD_RESIDENCY_CONFLICT", "SAME_HOME_MULTI_SERVER_UNSAFE", "ASSURANCE_LEVEL_UNAVAILABLE",
         "DEDICATED_HISTORY_BARRIER_FAILED", "PROFILE_LANE_MIGRATION_REQUIRED", "DEDICATED_SERVER_START_FAILED",
         "IDEMPOTENCY_CONFLICT", "INTERACTION_ALREADY_RESOLVED", "INTERACTION_STALE",
@@ -227,7 +229,7 @@
     },
     "run": {
       "type": "object",
-      "x-semanticValidator": "validate_run_projection_v1",
+      "x-semanticValidator": "tools/validators/validate_run_projection_v1.py#validate_run_projection_v1",
       "additionalProperties": false,
       "required": ["workspace_id", "run_id", "state", "state_variant", "control_mode", "purpose", "execution_lane", "effective_policy", "writer_authority", "server_lane", "workload_background_state", "requested_assurance", "achieved_assurance", "instruction_contract", "lineage", "server_epoch", "run_generation", "control_socket_epoch", "profile", "thread_id", "active_turn_id", "controller", "parent_ref", "required_capabilities", "model", "effort", "event_cursor", "pending_count", "identity_verdict", "recovery", "last_terminal"],
       "properties": {
@@ -346,6 +348,7 @@
       }
     },
     "interaction": { "$ref": "https://dolgorae.local/schema/interaction/v1" },
+    "interaction_summary": { "$ref": "https://dolgorae.local/schema/interaction-summary/v1" },
     "writer_status": {
       "type": "object", "additionalProperties": false,
       "required": ["workspace_id", "authority_state", "writer_run_id", "controller_id", "controller_generation", "writer_generation", "worker_generation", "profile_server_key", "profile_server_epoch", "thread_id", "active_turn_id", "lifecycle_state", "pending_interaction_count", "last_event_cursor", "recovery_state", "execution_lane", "dedicated_lane", "workload_background_state", "handoff"],
@@ -434,7 +437,7 @@
         "run_generation": { "type": "integer", "minimum": 0 },
         "kind": {
           "enum": [
-            "workspace_initialized", "run_created", "turn_intent",
+            "workspace_initialized", "run_created", "successor_created", "turn_intent",
             "thread_bound", "turn_started", "turn_terminal",
             "lifecycle_transition", "run_generation_started",
             "run_generation_stopped", "app_server_request",
@@ -487,7 +490,7 @@
       "oneOf": [
         { "$ref": "#/$defs/workspace" }, { "$ref": "#/$defs/profile" },
         { "$ref": "#/$defs/run" }, { "$ref": "#/$defs/turn" },
-        { "$ref": "#/$defs/interaction" }, { "$ref": "#/$defs/verification" },
+        { "$ref": "#/$defs/interaction" }, { "$ref": "#/$defs/interaction_summary" }, { "$ref": "#/$defs/verification" },
         { "$ref": "#/$defs/membership_verification" },
         { "$ref": "#/$defs/writer_status" }, { "$ref": "#/$defs/handoff" },
         { "$ref": "#/$defs/controller_credential_created" }, { "$ref": "#/$defs/operator_credential_created" },
@@ -536,7 +539,8 @@
         { "if": { "properties": { "command": { "const": "run.list" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/run" } } } } } } },
         { "if": { "properties": { "command": { "enum": ["run.send", "run.submit", "run.wait"] } } }, "then": { "properties": { "data": { "$ref": "#/$defs/turn" } } } },
         { "if": { "properties": { "command": { "const": "run.events" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/event_data" } } } },
-        { "if": { "properties": { "command": { "const": "run.pending" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/interaction" } } } } } } },
+        { "if": { "properties": { "command": { "const": "run.pending" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/interaction_summary" } } } } } } },
+        { "if": { "properties": { "command": { "const": "run.interaction.get" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/interaction" } } } },
         { "if": { "properties": { "command": { "const": "run.verify" } } }, "then": { "properties": { "data": { "$ref": "#/$defs/verification" } } } },
         { "if": { "properties": { "command": { "const": "run.export" } } }, "then": { "properties": { "data": { "type": "object", "additionalProperties": false, "required": ["output_path", "bundle_schema_version", "files", "verification"], "properties": { "output_path": { "$ref": "#/$defs/path" }, "bundle_schema_version": { "const": 1 }, "files": { "type": "array", "items": { "type": "string" } }, "verification": { "$ref": "#/$defs/verification" } } } } } },
         { "if": { "properties": { "command": { "const": "run.artifact.show" } } }, "then": { "properties": { "data": { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata" } } } },

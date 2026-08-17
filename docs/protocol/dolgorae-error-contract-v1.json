@@ -4,330 +4,2939 @@
   "title": "Dolgorae error contract v1",
   "x-exit-status": {
     "INVALID_ARGUMENT": 2,
-    "WORKSPACE_NOT_INITIALIZED": 3, "CONFIG_INVALID": 3,
-    "PROFILE_CONFIG_INVALID": 3, "PROFILE_NOT_FOUND": 3,
-    "RUN_NOT_FOUND": 3, "THREAD_NOT_FOUND": 3, "TURN_NOT_FOUND": 3,
+    "WORKSPACE_NOT_INITIALIZED": 3,
+    "CONFIG_INVALID": 3,
+    "PROFILE_CONFIG_INVALID": 3,
+    "PROFILE_NOT_FOUND": 3,
+    "RUN_NOT_FOUND": 3,
+    "THREAD_NOT_FOUND": 3,
+    "TURN_NOT_FOUND": 3,
     "INTERACTION_NOT_FOUND": 3,
-    "PROFILE_ALREADY_EXISTS": 4, "PROFILE_SERVER_BUSY": 4,
-    "PROFILE_LAUNCH_CONFLICT": 4, "PROFILE_MIGRATION_REQUIRED": 4,
+    "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER": 4,
+    "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER": 4,
+    "OBSERVER_MUTATION_FORBIDDEN": 4,
+    "PROFILE_ALREADY_EXISTS": 4,
+    "PROFILE_SERVER_BUSY": 4,
+    "PROFILE_LAUNCH_CONFLICT": 4,
+    "PROFILE_MIGRATION_REQUIRED": 4,
     "PROFILE_MEMBERSHIP_INCOMPLETE": 4,
     "PROFILE_SERVER_EPOCH_MISMATCH": 4,
     "WORKSPACE_INITIALIZATION_CONFLICT": 4,
-    "RUN_STATE_CONFLICT": 4, "RUN_STATE_INVARIANT_VIOLATION": 8, "POLICY_REJECTED": 4, "RUN_BUSY": 4,
-    "WRITER_BUSY": 4, "WRITER_HANDOFF_NOT_ALLOWED": 4,
-    "CROSS_CONTROLLER_RELEASE_REQUIRED": 4, "STALE_WRITER_GENERATION": 4,
-    "CONTROLLER_MISMATCH": 4, "CONTROLLER_RESET_NOT_ALLOWED": 4,
-    "OPERATOR_MISMATCH": 4, "CONTROL_MODE_REQUIRED": 2,
-    "CONTROL_MODE_CONTROLLER_MISMATCH": 4, "PURPOSE_REQUIRED": 2,
-    "EXECUTION_LANE_REQUIRED": 2, "CAPABILITY_UNSUPPORTED": 4,
-    "ACCESS_TRANSITION_UNSUPPORTED": 4, "BACKGROUND_EXECUTION_UNVERIFIED": 4, "IDEMPOTENCY_CONFLICT": 4,
-    "EXECUTION_LANE_UNSUPPORTED": 4, "EXECUTION_LANE_IMMUTABLE": 4,
-    "SHARED_RUN_WRITE_FORBIDDEN": 4, "SUCCESSOR_SOURCE_NOT_TERMINAL": 4,
-    "SUCCESSOR_LINEAGE_INVALID": 4, "SUCCESSOR_CONTROLLER_INVALID": 4,
+    "RUN_STATE_CONFLICT": 4,
+    "RUN_STATE_INVARIANT_VIOLATION": 8,
+    "POLICY_REJECTED": 4,
+    "RUN_BUSY": 4,
+    "WRITER_BUSY": 4,
+    "WRITER_HANDOFF_NOT_ALLOWED": 4,
+    "CROSS_CONTROLLER_RELEASE_REQUIRED": 4,
+    "STALE_WRITER_GENERATION": 4,
+    "CONTROLLER_MISMATCH": 4,
+    "CONTROLLER_RESET_NOT_ALLOWED": 4,
+    "OPERATOR_MISMATCH": 4,
+    "CONTROL_MODE_REQUIRED": 2,
+    "CONTROL_MODE_CONTROLLER_MISMATCH": 4,
+    "PURPOSE_REQUIRED": 2,
+    "EXECUTION_LANE_REQUIRED": 2,
+    "CAPABILITY_UNSUPPORTED": 4,
+    "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE": 4,
+    "ACCESS_TRANSITION_UNSUPPORTED": 4,
+    "BACKGROUND_EXECUTION_UNVERIFIED": 4,
+    "IDEMPOTENCY_CONFLICT": 4,
+    "EXECUTION_LANE_UNSUPPORTED": 4,
+    "EXECUTION_LANE_IMMUTABLE": 4,
+    "SHARED_RUN_WRITE_FORBIDDEN": 4,
+    "SUCCESSOR_SOURCE_NOT_TERMINAL": 4,
+    "SUCCESSOR_LINEAGE_INVALID": 4,
+    "SUCCESSOR_CONTROLLER_INVALID": 4,
+    "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN": 4,
+    "SUCCESSOR_MODEL_UNSUPPORTED": 4,
     "THREAD_RESIDENCY_CONFLICT": 4,
-    "SAME_HOME_MULTI_SERVER_UNSAFE": 5, "ASSURANCE_LEVEL_UNAVAILABLE": 4,
-    "DEDICATED_HISTORY_BARRIER_FAILED": 4, "PROFILE_LANE_MIGRATION_REQUIRED": 4,
+    "SAME_HOME_MULTI_SERVER_UNSAFE": 5,
+    "ASSURANCE_LEVEL_UNAVAILABLE": 4,
+    "DEDICATED_HISTORY_BARRIER_FAILED": 4,
+    "PROFILE_LANE_MIGRATION_REQUIRED": 4,
     "DEDICATED_SERVER_START_FAILED": 6,
-    "INTERACTION_ALREADY_RESOLVED": 4, "INTERACTION_STALE": 4,
-    "INTERACTION_RESPONSE_INVALID": 4, "FILE_CHANGE_ARTIFACT_UNAVAILABLE": 4,
-    "ARTIFACT_NOT_FOUND": 3, "ARTIFACT_RANGE_INVALID": 2, "ARTIFACT_INTEGRITY_FAILURE": 8,
+    "INTERACTION_ALREADY_RESOLVED": 4,
+    "INTERACTION_STALE": 4,
+    "INTERACTION_RESPONSE_INVALID": 4,
+    "FILE_CHANGE_ARTIFACT_UNAVAILABLE": 4,
+    "ARTIFACT_NOT_FOUND": 3,
+    "ARTIFACT_RANGE_INVALID": 2,
+    "ARTIFACT_INTEGRITY_FAILURE": 8,
     "PROJECTION_PROFILE_UNSUPPORTED": 4,
-    "OUTCOME_UNKNOWN": 4, "RECOVERY_REQUIRED": 4,
-    "PROFILE_MISMATCH": 5, "COMPATIBILITY_REJECTED": 5,
-    "DOLGORAE_PROTOCOL_MISMATCH": 5, "PROTOCOL_VERSION_UNSUPPORTED": 5,
-    "TRANSPORT_FAILURE": 6, "OPERATION_TIMEOUT": 6, "PROTOCOL_FRAME_TOO_LARGE": 6,
-    "RUNTIME_PATH_INVALID": 6, "RUNTIME_PATH_COLLISION": 6,
-    "REDACTION_FAILURE": 6, "INTERNAL_ERROR": 6,
-    "TURN_FAILED": 7, "TURN_INTERRUPTED": 7,
+    "OUTCOME_UNKNOWN": 4,
+    "RECOVERY_REQUIRED": 4,
+    "PROFILE_MISMATCH": 5,
+    "COMPATIBILITY_REJECTED": 5,
+    "DOLGORAE_PROTOCOL_MISMATCH": 5,
+    "PROTOCOL_VERSION_UNSUPPORTED": 5,
+    "TRANSPORT_FAILURE": 6,
+    "OPERATION_TIMEOUT": 6,
+    "PROTOCOL_FRAME_TOO_LARGE": 6,
+    "RUNTIME_PATH_INVALID": 6,
+    "RUNTIME_PATH_COLLISION": 6,
+    "REDACTION_FAILURE": 6,
+    "INTERNAL_ERROR": 6,
+    "TURN_FAILED": 7,
+    "TURN_INTERRUPTED": 7,
     "AUDIT_INTEGRITY_FAILURE": 8
   },
   "type": "object",
   "additionalProperties": false,
-  "required": ["code", "message", "retryable", "details"],
+  "required": [
+    "code",
+    "message",
+    "retryable",
+    "details"
+  ],
   "properties": {
-    "code": { "$ref": "#/$defs/error_code" },
-    "message": { "type": "string" },
-    "retryable": { "type": "boolean" },
-    "details": { "type": "object" }
+    "code": {
+      "$ref": "#/$defs/error_code"
+    },
+    "message": {
+      "type": "string"
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "details": {
+      "type": "object"
+    }
   },
   "oneOf": [
-    { "$ref": "#/$defs/invalid_argument" },
-    { "$ref": "#/$defs/workspace_not_initialized" },
-    { "$ref": "#/$defs/config_invalid" },
-    { "$ref": "#/$defs/profile_config_invalid" },
-    { "$ref": "#/$defs/profile_not_found" },
-    { "$ref": "#/$defs/run_not_found" },
-    { "$ref": "#/$defs/thread_not_found" },
-    { "$ref": "#/$defs/turn_not_found" },
-    { "$ref": "#/$defs/interaction_not_found" },
-    { "$ref": "#/$defs/profile_already_exists" },
-    { "$ref": "#/$defs/profile_server_busy" },
-    { "$ref": "#/$defs/profile_launch_conflict" },
-    { "$ref": "#/$defs/profile_migration_required" },
-    { "$ref": "#/$defs/profile_membership_incomplete" },
-    { "$ref": "#/$defs/profile_server_epoch_mismatch" },
-    { "$ref": "#/$defs/workspace_initialization_conflict" },
-    { "$ref": "#/$defs/run_state_conflict" },
-    { "$ref": "#/$defs/run_state_invariant_violation" },
-    { "$ref": "#/$defs/policy_rejected" },
-    { "$ref": "#/$defs/run_busy" },
-    { "$ref": "#/$defs/writer_busy" },
-    { "$ref": "#/$defs/writer_handoff_not_allowed" },
-    { "$ref": "#/$defs/cross_controller_release_required" },
-    { "$ref": "#/$defs/stale_writer_generation" },
-    { "$ref": "#/$defs/controller_mismatch" },
-    { "$ref": "#/$defs/controller_reset_not_allowed" },
-    { "$ref": "#/$defs/operator_mismatch" },
-    { "$ref": "#/$defs/control_mode_required" },
-    { "$ref": "#/$defs/control_mode_controller_mismatch" },
-    { "$ref": "#/$defs/purpose_required" },
-    { "$ref": "#/$defs/execution_lane_required" },
-    { "$ref": "#/$defs/capability_unsupported" },
-    { "$ref": "#/$defs/access_transition_unsupported" },
-    { "$ref": "#/$defs/background_execution_unverified" },
-    { "$ref": "#/$defs/execution_lane_unsupported" },
-    { "$ref": "#/$defs/execution_lane_immutable" },
-    { "$ref": "#/$defs/shared_run_write_forbidden" },
-    { "$ref": "#/$defs/successor_source_not_terminal" },
-    { "$ref": "#/$defs/successor_lineage_invalid" },
-    { "$ref": "#/$defs/successor_controller_invalid" },
-    { "$ref": "#/$defs/thread_residency_conflict" },
-    { "$ref": "#/$defs/same_home_multi_server_unsafe" },
-    { "$ref": "#/$defs/assurance_level_unavailable" },
-    { "$ref": "#/$defs/dedicated_history_barrier_failed" },
-    { "$ref": "#/$defs/profile_lane_migration_required" },
-    { "$ref": "#/$defs/dedicated_server_start_failed" },
-    { "$ref": "#/$defs/idempotency_conflict" },
-    { "$ref": "#/$defs/interaction_already_resolved" },
-    { "$ref": "#/$defs/interaction_stale" },
-    { "$ref": "#/$defs/interaction_response_invalid" },
-    { "$ref": "#/$defs/file_change_artifact_unavailable" },
-    { "$ref": "#/$defs/artifact_not_found" },
-    { "$ref": "#/$defs/artifact_range_invalid" },
-    { "$ref": "#/$defs/artifact_integrity_failure" },
-    { "$ref": "#/$defs/projection_profile_unsupported" },
-    { "$ref": "#/$defs/outcome_unknown" },
-    { "$ref": "#/$defs/recovery_required" },
-    { "$ref": "#/$defs/profile_mismatch" },
-    { "$ref": "#/$defs/compatibility_rejected" },
-    { "$ref": "#/$defs/dolgorae_protocol_mismatch" },
-    { "$ref": "#/$defs/protocol_version_unsupported" },
-    { "$ref": "#/$defs/transport_retryable" },
-    { "$ref": "#/$defs/transport_not_retryable" },
-    { "$ref": "#/$defs/operation_timeout" },
-    { "$ref": "#/$defs/protocol_frame_too_large" },
-    { "$ref": "#/$defs/runtime_path_invalid" },
-    { "$ref": "#/$defs/runtime_path_collision" },
-    { "$ref": "#/$defs/redaction_failure" },
-    { "$ref": "#/$defs/internal_error" },
-    { "$ref": "#/$defs/turn_failed" },
-    { "$ref": "#/$defs/turn_interrupted" },
-    { "$ref": "#/$defs/audit_integrity_failure" }
+    {
+      "$ref": "#/$defs/invalid_argument"
+    },
+    {
+      "$ref": "#/$defs/workspace_not_initialized"
+    },
+    {
+      "$ref": "#/$defs/config_invalid"
+    },
+    {
+      "$ref": "#/$defs/profile_config_invalid"
+    },
+    {
+      "$ref": "#/$defs/profile_not_found"
+    },
+    {
+      "$ref": "#/$defs/run_not_found"
+    },
+    {
+      "$ref": "#/$defs/thread_not_found"
+    },
+    {
+      "$ref": "#/$defs/turn_not_found"
+    },
+    {
+      "$ref": "#/$defs/interaction_not_found"
+    },
+    {
+      "$ref": "#/$defs/interaction_full_payload_requires_controller"
+    },
+    {
+      "$ref": "#/$defs/interaction_artifact_requires_controller"
+    },
+    {
+      "$ref": "#/$defs/observer_mutation_forbidden"
+    },
+    {
+      "$ref": "#/$defs/profile_already_exists"
+    },
+    {
+      "$ref": "#/$defs/profile_server_busy"
+    },
+    {
+      "$ref": "#/$defs/profile_launch_conflict"
+    },
+    {
+      "$ref": "#/$defs/profile_migration_required"
+    },
+    {
+      "$ref": "#/$defs/profile_membership_incomplete"
+    },
+    {
+      "$ref": "#/$defs/profile_server_epoch_mismatch"
+    },
+    {
+      "$ref": "#/$defs/workspace_initialization_conflict"
+    },
+    {
+      "$ref": "#/$defs/run_state_conflict"
+    },
+    {
+      "$ref": "#/$defs/run_state_invariant_violation"
+    },
+    {
+      "$ref": "#/$defs/policy_rejected"
+    },
+    {
+      "$ref": "#/$defs/run_busy"
+    },
+    {
+      "$ref": "#/$defs/writer_busy"
+    },
+    {
+      "$ref": "#/$defs/writer_handoff_not_allowed"
+    },
+    {
+      "$ref": "#/$defs/cross_controller_release_required"
+    },
+    {
+      "$ref": "#/$defs/stale_writer_generation"
+    },
+    {
+      "$ref": "#/$defs/controller_mismatch"
+    },
+    {
+      "$ref": "#/$defs/controller_reset_not_allowed"
+    },
+    {
+      "$ref": "#/$defs/operator_mismatch"
+    },
+    {
+      "$ref": "#/$defs/control_mode_required"
+    },
+    {
+      "$ref": "#/$defs/control_mode_controller_mismatch"
+    },
+    {
+      "$ref": "#/$defs/purpose_required"
+    },
+    {
+      "$ref": "#/$defs/execution_lane_required"
+    },
+    {
+      "$ref": "#/$defs/capability_unsupported"
+    },
+    {
+      "$ref": "#/$defs/native_subagent_disable_unavailable"
+    },
+    {
+      "$ref": "#/$defs/access_transition_unsupported"
+    },
+    {
+      "$ref": "#/$defs/background_execution_unverified"
+    },
+    {
+      "$ref": "#/$defs/execution_lane_unsupported"
+    },
+    {
+      "$ref": "#/$defs/execution_lane_immutable"
+    },
+    {
+      "$ref": "#/$defs/shared_run_write_forbidden"
+    },
+    {
+      "$ref": "#/$defs/successor_source_not_terminal"
+    },
+    {
+      "$ref": "#/$defs/successor_lineage_invalid"
+    },
+    {
+      "$ref": "#/$defs/successor_controller_invalid"
+    },
+    {
+      "$ref": "#/$defs/successor_profile_override_forbidden"
+    },
+    {
+      "$ref": "#/$defs/successor_model_unsupported"
+    },
+    {
+      "$ref": "#/$defs/thread_residency_conflict"
+    },
+    {
+      "$ref": "#/$defs/same_home_multi_server_unsafe"
+    },
+    {
+      "$ref": "#/$defs/assurance_level_unavailable"
+    },
+    {
+      "$ref": "#/$defs/dedicated_history_barrier_failed"
+    },
+    {
+      "$ref": "#/$defs/profile_lane_migration_required"
+    },
+    {
+      "$ref": "#/$defs/dedicated_server_start_failed"
+    },
+    {
+      "$ref": "#/$defs/idempotency_conflict"
+    },
+    {
+      "$ref": "#/$defs/interaction_already_resolved"
+    },
+    {
+      "$ref": "#/$defs/interaction_stale"
+    },
+    {
+      "$ref": "#/$defs/interaction_response_invalid"
+    },
+    {
+      "$ref": "#/$defs/file_change_artifact_unavailable"
+    },
+    {
+      "$ref": "#/$defs/artifact_not_found"
+    },
+    {
+      "$ref": "#/$defs/artifact_range_invalid"
+    },
+    {
+      "$ref": "#/$defs/artifact_integrity_failure"
+    },
+    {
+      "$ref": "#/$defs/projection_profile_unsupported"
+    },
+    {
+      "$ref": "#/$defs/outcome_unknown"
+    },
+    {
+      "$ref": "#/$defs/recovery_required"
+    },
+    {
+      "$ref": "#/$defs/profile_mismatch"
+    },
+    {
+      "$ref": "#/$defs/compatibility_rejected"
+    },
+    {
+      "$ref": "#/$defs/dolgorae_protocol_mismatch"
+    },
+    {
+      "$ref": "#/$defs/protocol_version_unsupported"
+    },
+    {
+      "$ref": "#/$defs/transport_retryable"
+    },
+    {
+      "$ref": "#/$defs/transport_not_retryable"
+    },
+    {
+      "$ref": "#/$defs/operation_timeout"
+    },
+    {
+      "$ref": "#/$defs/protocol_frame_too_large"
+    },
+    {
+      "$ref": "#/$defs/runtime_path_invalid"
+    },
+    {
+      "$ref": "#/$defs/runtime_path_collision"
+    },
+    {
+      "$ref": "#/$defs/redaction_failure"
+    },
+    {
+      "$ref": "#/$defs/internal_error"
+    },
+    {
+      "$ref": "#/$defs/turn_failed"
+    },
+    {
+      "$ref": "#/$defs/turn_interrupted"
+    },
+    {
+      "$ref": "#/$defs/audit_integrity_failure"
+    }
   ],
   "$defs": {
-    "error_code": { "enum": ["INVALID_ARGUMENT", "WORKSPACE_NOT_INITIALIZED", "CONFIG_INVALID", "PROFILE_CONFIG_INVALID", "PROFILE_NOT_FOUND", "RUN_NOT_FOUND", "THREAD_NOT_FOUND", "TURN_NOT_FOUND", "INTERACTION_NOT_FOUND", "PROFILE_ALREADY_EXISTS", "PROFILE_SERVER_BUSY", "PROFILE_LAUNCH_CONFLICT", "PROFILE_MIGRATION_REQUIRED", "PROFILE_MEMBERSHIP_INCOMPLETE", "PROFILE_SERVER_EPOCH_MISMATCH", "WORKSPACE_INITIALIZATION_CONFLICT", "RUN_STATE_CONFLICT", "RUN_STATE_INVARIANT_VIOLATION", "POLICY_REJECTED", "RUN_BUSY", "WRITER_BUSY", "WRITER_HANDOFF_NOT_ALLOWED", "CROSS_CONTROLLER_RELEASE_REQUIRED", "STALE_WRITER_GENERATION", "CONTROLLER_MISMATCH", "CONTROLLER_RESET_NOT_ALLOWED", "OPERATOR_MISMATCH", "CONTROL_MODE_REQUIRED", "CONTROL_MODE_CONTROLLER_MISMATCH", "PURPOSE_REQUIRED", "EXECUTION_LANE_REQUIRED", "CAPABILITY_UNSUPPORTED", "ACCESS_TRANSITION_UNSUPPORTED", "BACKGROUND_EXECUTION_UNVERIFIED", "EXECUTION_LANE_UNSUPPORTED", "EXECUTION_LANE_IMMUTABLE", "SHARED_RUN_WRITE_FORBIDDEN", "SUCCESSOR_SOURCE_NOT_TERMINAL", "SUCCESSOR_LINEAGE_INVALID", "SUCCESSOR_CONTROLLER_INVALID", "THREAD_RESIDENCY_CONFLICT", "SAME_HOME_MULTI_SERVER_UNSAFE", "ASSURANCE_LEVEL_UNAVAILABLE", "DEDICATED_HISTORY_BARRIER_FAILED", "PROFILE_LANE_MIGRATION_REQUIRED", "DEDICATED_SERVER_START_FAILED", "IDEMPOTENCY_CONFLICT", "INTERACTION_ALREADY_RESOLVED", "INTERACTION_STALE", "INTERACTION_RESPONSE_INVALID", "FILE_CHANGE_ARTIFACT_UNAVAILABLE", "ARTIFACT_NOT_FOUND", "ARTIFACT_RANGE_INVALID", "ARTIFACT_INTEGRITY_FAILURE", "PROJECTION_PROFILE_UNSUPPORTED", "OUTCOME_UNKNOWN", "RECOVERY_REQUIRED", "PROFILE_MISMATCH", "COMPATIBILITY_REJECTED", "DOLGORAE_PROTOCOL_MISMATCH", "PROTOCOL_VERSION_UNSUPPORTED", "TRANSPORT_FAILURE", "OPERATION_TIMEOUT", "PROTOCOL_FRAME_TOO_LARGE", "RUNTIME_PATH_INVALID", "RUNTIME_PATH_COLLISION", "REDACTION_FAILURE", "INTERNAL_ERROR", "TURN_FAILED", "TURN_INTERRUPTED", "AUDIT_INTEGRITY_FAILURE"] },
-    "string": { "type": "string" },
-    "nullable_string": { "type": ["string", "null"] },
-    "integer": { "type": "integer", "minimum": 0 },
-    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
-    "nullable_uuid": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
-    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "path": { "oneOf": [{ "type": "string" }, { "type": "object", "additionalProperties": false, "required": ["$dolgorae_path_bytes"], "properties": { "$dolgorae_path_bytes": { "type": "string", "contentEncoding": "base64", "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$" } } }] },
+    "error_code": {
+      "enum": [
+        "INVALID_ARGUMENT",
+        "WORKSPACE_NOT_INITIALIZED",
+        "CONFIG_INVALID",
+        "PROFILE_CONFIG_INVALID",
+        "PROFILE_NOT_FOUND",
+        "RUN_NOT_FOUND",
+        "THREAD_NOT_FOUND",
+        "TURN_NOT_FOUND",
+        "INTERACTION_NOT_FOUND",
+        "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER",
+        "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER",
+        "OBSERVER_MUTATION_FORBIDDEN",
+        "PROFILE_ALREADY_EXISTS",
+        "PROFILE_SERVER_BUSY",
+        "PROFILE_LAUNCH_CONFLICT",
+        "PROFILE_MIGRATION_REQUIRED",
+        "PROFILE_MEMBERSHIP_INCOMPLETE",
+        "PROFILE_SERVER_EPOCH_MISMATCH",
+        "WORKSPACE_INITIALIZATION_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "RUN_STATE_INVARIANT_VIOLATION",
+        "POLICY_REJECTED",
+        "RUN_BUSY",
+        "WRITER_BUSY",
+        "WRITER_HANDOFF_NOT_ALLOWED",
+        "CROSS_CONTROLLER_RELEASE_REQUIRED",
+        "STALE_WRITER_GENERATION",
+        "CONTROLLER_MISMATCH",
+        "CONTROLLER_RESET_NOT_ALLOWED",
+        "OPERATOR_MISMATCH",
+        "CONTROL_MODE_REQUIRED",
+        "CONTROL_MODE_CONTROLLER_MISMATCH",
+        "PURPOSE_REQUIRED",
+        "EXECUTION_LANE_REQUIRED",
+        "CAPABILITY_UNSUPPORTED",
+        "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE",
+        "ACCESS_TRANSITION_UNSUPPORTED",
+        "BACKGROUND_EXECUTION_UNVERIFIED",
+        "EXECUTION_LANE_UNSUPPORTED",
+        "EXECUTION_LANE_IMMUTABLE",
+        "SHARED_RUN_WRITE_FORBIDDEN",
+        "SUCCESSOR_SOURCE_NOT_TERMINAL",
+        "SUCCESSOR_LINEAGE_INVALID",
+        "SUCCESSOR_CONTROLLER_INVALID",
+        "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN",
+        "SUCCESSOR_MODEL_UNSUPPORTED",
+        "THREAD_RESIDENCY_CONFLICT",
+        "SAME_HOME_MULTI_SERVER_UNSAFE",
+        "ASSURANCE_LEVEL_UNAVAILABLE",
+        "DEDICATED_HISTORY_BARRIER_FAILED",
+        "PROFILE_LANE_MIGRATION_REQUIRED",
+        "DEDICATED_SERVER_START_FAILED",
+        "IDEMPOTENCY_CONFLICT",
+        "INTERACTION_ALREADY_RESOLVED",
+        "INTERACTION_STALE",
+        "INTERACTION_RESPONSE_INVALID",
+        "FILE_CHANGE_ARTIFACT_UNAVAILABLE",
+        "ARTIFACT_NOT_FOUND",
+        "ARTIFACT_RANGE_INVALID",
+        "ARTIFACT_INTEGRITY_FAILURE",
+        "PROJECTION_PROFILE_UNSUPPORTED",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "PROFILE_MISMATCH",
+        "COMPATIBILITY_REJECTED",
+        "DOLGORAE_PROTOCOL_MISMATCH",
+        "PROTOCOL_VERSION_UNSUPPORTED",
+        "TRANSPORT_FAILURE",
+        "OPERATION_TIMEOUT",
+        "PROTOCOL_FRAME_TOO_LARGE",
+        "RUNTIME_PATH_INVALID",
+        "RUNTIME_PATH_COLLISION",
+        "REDACTION_FAILURE",
+        "INTERNAL_ERROR",
+        "TURN_FAILED",
+        "TURN_INTERRUPTED",
+        "AUDIT_INTEGRITY_FAILURE"
+      ]
+    },
+    "string": {
+      "type": "string"
+    },
+    "nullable_string": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "integer": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "nullable_uuid": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "$dolgorae_path_bytes"
+          ],
+          "properties": {
+            "$dolgorae_path_bytes": {
+              "type": "string",
+              "contentEncoding": "base64",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          }
+        }
+      ]
+    },
     "json_value": {},
-    "identity": { "enum": ["Absent", "Mismatch", "Match", "Unverifiable"] },
-    "lifecycle": { "enum": ["starting", "idle", "running", "waiting_interaction", "reconciliation_required", "paused", "closed", "start_failed", "outcome_unknown"] },
-    "turn_status": { "enum": ["reserved", "accepted", "running", "waiting_interaction", "interrupting", "completed", "failed", "interrupted", "outcome_unknown"] },
-    "invalid_argument": { "$ref": "#/$defs/v_INVALID_ARGUMENT_false_argument_reason" },
-    "workspace_not_initialized": { "$ref": "#/$defs/v_WORKSPACE_NOT_INITIALIZED_false_workspace_path" },
-    "config_invalid": { "$ref": "#/$defs/v_CONFIG_INVALID_false_path_reason" },
-    "profile_config_invalid": { "$ref": "#/$defs/v_PROFILE_CONFIG_INVALID_false_path_reason" },
-    "profile_not_found": { "$ref": "#/$defs/v_PROFILE_NOT_FOUND_false_profile" },
-    "run_not_found": { "$ref": "#/$defs/v_RUN_NOT_FOUND_false_run_id" },
-    "thread_not_found": { "$ref": "#/$defs/v_THREAD_NOT_FOUND_false_run_id_thread_id" },
-    "turn_not_found": { "$ref": "#/$defs/v_TURN_NOT_FOUND_false_run_id_turn_id" },
-    "interaction_not_found": { "$ref": "#/$defs/v_INTERACTION_NOT_FOUND_false_run_id_request_id" },
-    "profile_already_exists": { "$ref": "#/$defs/v_PROFILE_ALREADY_EXISTS_false_profile" },
-    "profile_server_busy": { "$ref": "#/$defs/v_PROFILE_SERVER_BUSY_true_profile_server_key_reason" },
-    "profile_launch_conflict": { "$ref": "#/$defs/v_PROFILE_LAUNCH_CONFLICT_false_profile_server_key_reason" },
-    "profile_migration_required": { "$ref": "#/$defs/v_PROFILE_MIGRATION_REQUIRED_false_profile_migration" },
-    "profile_membership_incomplete": { "$ref": "#/$defs/v_PROFILE_MEMBERSHIP_INCOMPLETE_false_profile_server_key_reason" },
-    "profile_server_epoch_mismatch": { "$ref": "#/$defs/v_PROFILE_SERVER_EPOCH_MISMATCH_false_server_epoch" },
-    "workspace_initialization_conflict": { "$ref": "#/$defs/v_WORKSPACE_INITIALIZATION_CONFLICT_false_workspace_path_reason" },
-    "run_state_conflict": { "$ref": "#/$defs/v_RUN_STATE_CONFLICT_false_run_id_state_operation" },
-    "run_state_invariant_violation": { "$ref": "#/$defs/v_RUN_STATE_INVARIANT_VIOLATION_false_run_state_invariant" },
-    "policy_rejected": { "$ref": "#/$defs/v_POLICY_REJECTED_false_policy_operation" },
-    "run_busy": { "$ref": "#/$defs/v_RUN_BUSY_true_run_id_owner_kind" },
-    "writer_busy": { "$ref": "#/$defs/v_WRITER_BUSY_true_workspace_id_holder_takeover" },
-    "writer_handoff_not_allowed": { "$ref": "#/$defs/v_WRITER_HANDOFF_NOT_ALLOWED_false_handoff" },
-    "cross_controller_release_required": { "$ref": "#/$defs/v_CROSS_CONTROLLER_RELEASE_REQUIRED_false_handoff" },
-    "stale_writer_generation": { "$ref": "#/$defs/v_STALE_WRITER_GENERATION_false_handoff" },
-    "controller_mismatch": { "$ref": "#/$defs/v_CONTROLLER_MISMATCH_false_controller" },
-    "controller_reset_not_allowed": { "$ref": "#/$defs/v_CONTROLLER_RESET_NOT_ALLOWED_false_controller_reset" },
-    "operator_mismatch": { "$ref": "#/$defs/v_OPERATOR_MISMATCH_false_operator" },
-    "control_mode_required": { "$ref": "#/$defs/v_CONTROL_MODE_REQUIRED_false_argument_reason" },
-    "control_mode_controller_mismatch": { "$ref": "#/$defs/v_CONTROL_MODE_CONTROLLER_MISMATCH_false_control_mode" },
-    "purpose_required": { "$ref": "#/$defs/v_PURPOSE_REQUIRED_false_argument_reason" },
-    "execution_lane_required": { "$ref": "#/$defs/v_EXECUTION_LANE_REQUIRED_false_argument_reason" },
-    "capability_unsupported": { "$ref": "#/$defs/v_CAPABILITY_UNSUPPORTED_false_capability" },
-    "access_transition_unsupported": { "$ref": "#/$defs/v_ACCESS_TRANSITION_UNSUPPORTED_false_access_transition" },
-    "background_execution_unverified": { "$ref": "#/$defs/v_BACKGROUND_EXECUTION_UNVERIFIED_false_background" },
-    "execution_lane_unsupported": { "$ref": "#/$defs/v_EXECUTION_LANE_UNSUPPORTED_false_lane" },
-    "execution_lane_immutable": { "$ref": "#/$defs/v_EXECUTION_LANE_IMMUTABLE_false_lane" },
-    "shared_run_write_forbidden": { "$ref": "#/$defs/v_SHARED_RUN_WRITE_FORBIDDEN_false_lane" },
-    "successor_source_not_terminal": { "$ref": "#/$defs/v_SUCCESSOR_SOURCE_NOT_TERMINAL_false_successor" },
-    "successor_lineage_invalid": { "$ref": "#/$defs/v_SUCCESSOR_LINEAGE_INVALID_false_successor" },
-    "successor_controller_invalid": { "$ref": "#/$defs/v_SUCCESSOR_CONTROLLER_INVALID_false_successor" },
-    "thread_residency_conflict": { "$ref": "#/$defs/v_THREAD_RESIDENCY_CONFLICT_false_lane" },
-    "same_home_multi_server_unsafe": { "$ref": "#/$defs/v_SAME_HOME_MULTI_SERVER_UNSAFE_false_lane" },
-    "assurance_level_unavailable": { "$ref": "#/$defs/v_ASSURANCE_LEVEL_UNAVAILABLE_false_lane" },
-    "dedicated_history_barrier_failed": { "$ref": "#/$defs/v_DEDICATED_HISTORY_BARRIER_FAILED_false_lane" },
-    "profile_lane_migration_required": { "$ref": "#/$defs/v_PROFILE_LANE_MIGRATION_REQUIRED_false_lane" },
-    "dedicated_server_start_failed": { "$ref": "#/$defs/v_DEDICATED_SERVER_START_FAILED_true_lane" },
-    "idempotency_conflict": { "$ref": "#/$defs/v_IDEMPOTENCY_CONFLICT_false_run_id_recorded_input_digest_observed_input_digest" },
-    "interaction_already_resolved": { "$ref": "#/$defs/v_INTERACTION_ALREADY_RESOLVED_false_interaction" },
-    "interaction_stale": { "$ref": "#/$defs/v_INTERACTION_STALE_false_stale_interaction" },
-    "interaction_response_invalid": { "$ref": "#/$defs/v_INTERACTION_RESPONSE_INVALID_false_interaction_response" },
-    "file_change_artifact_unavailable": { "$ref": "#/$defs/v_FILE_CHANGE_ARTIFACT_UNAVAILABLE_false_file_artifact" },
-    "artifact_not_found": { "$ref": "#/$defs/v_ARTIFACT_NOT_FOUND_false_artifact" },
-    "artifact_range_invalid": { "$ref": "#/$defs/v_ARTIFACT_RANGE_INVALID_false_artifact_range" },
-    "artifact_integrity_failure": { "$ref": "#/$defs/v_ARTIFACT_INTEGRITY_FAILURE_false_artifact_integrity" },
-    "projection_profile_unsupported": { "$ref": "#/$defs/v_PROJECTION_PROFILE_UNSUPPORTED_false_projection" },
-    "outcome_unknown": { "$ref": "#/$defs/v_OUTCOME_UNKNOWN_false_run_id_thread_id_turn_id" },
-    "recovery_required": { "$ref": "#/$defs/v_RECOVERY_REQUIRED_false_run_id_generation_identity_verdict_reason" },
-    "profile_mismatch": { "$ref": "#/$defs/v_PROFILE_MISMATCH_false_profile_field_expected_actual" },
-    "compatibility_rejected": { "$ref": "#/$defs/v_COMPATIBILITY_REJECTED_false_profile_check_expected_actual" },
-    "dolgorae_protocol_mismatch": { "$ref": "#/$defs/v_DOLGORAE_PROTOCOL_MISMATCH_false_expected_protocol_actual_protocol_control_v1_available" },
-    "protocol_version_unsupported": { "$ref": "#/$defs/v_PROTOCOL_VERSION_UNSUPPORTED_false_protocol_version" },
-    "protocol_frame_too_large": { "$ref": "#/$defs/v_PROTOCOL_FRAME_TOO_LARGE_false_channel_observed_bytes_limit_bytes" },
-    "runtime_path_invalid": { "$ref": "#/$defs/v_RUNTIME_PATH_INVALID_false_path_reason" },
-    "runtime_path_collision": { "$ref": "#/$defs/v_RUNTIME_PATH_COLLISION_false_path_expected_identity_observed_identity" },
-    "redaction_failure": { "$ref": "#/$defs/v_REDACTION_FAILURE_false_source_kind_json_pointer_reason" },
-    "internal_error": { "$ref": "#/$defs/v_INTERNAL_ERROR_false_invariant" },
-    "turn_failed": { "$ref": "#/$defs/v_TURN_FAILED_false_run_id_turn_id_status" },
-    "turn_interrupted": { "$ref": "#/$defs/v_TURN_INTERRUPTED_false_run_id_turn_id_status" },
-    "audit_integrity_failure": { "$ref": "#/$defs/v_AUDIT_INTEGRITY_FAILURE_false_run_id_sequence_reason" },
-    "transport_retryable": { "properties": { "code": { "const": "TRANSPORT_FAILURE" }, "retryable": { "const": true }, "details": { "$ref": "#/$defs/d_transport_retryable" } } },
-    "transport_not_retryable": { "properties": { "code": { "const": "TRANSPORT_FAILURE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_transport_not_retryable" } } },
-    "operation_timeout": { "properties": { "code": { "const": "OPERATION_TIMEOUT" }, "retryable": { "const": true }, "details": { "$ref": "#/$defs/d_operation_timeout" } } },
-    "d_transport_retryable": { "type": "object", "additionalProperties": false, "required": ["stage", "acceptance", "request_id"], "properties": { "stage": { "enum": ["connect", "write", "read", "decode", "correlate", "shutdown"] }, "acceptance": { "enum": ["not_written", "not_accepted"] }, "request_id": { "$ref": "#/$defs/nullable_string" } } },
-    "d_transport_not_retryable": { "type": "object", "additionalProperties": false, "required": ["stage", "acceptance", "request_id"], "properties": { "stage": { "enum": ["connect", "write", "read", "decode", "correlate", "shutdown"] }, "acceptance": { "enum": ["accepted", "uncertain"] }, "request_id": { "$ref": "#/$defs/nullable_string" } } },
-    "v_INVALID_ARGUMENT_false_argument_reason": { "properties": { "code": { "const": "INVALID_ARGUMENT" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_argument_reason" } } },
-    "v_WORKSPACE_NOT_INITIALIZED_false_workspace_path": { "properties": { "code": { "const": "WORKSPACE_NOT_INITIALIZED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_workspace_path" } } },
-    "v_CONFIG_INVALID_false_path_reason": { "properties": { "code": { "const": "CONFIG_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_path_reason" } } },
-    "v_PROFILE_CONFIG_INVALID_false_path_reason": { "properties": { "code": { "const": "PROFILE_CONFIG_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_path_reason" } } },
-    "v_PROFILE_NOT_FOUND_false_profile": { "properties": { "code": { "const": "PROFILE_NOT_FOUND" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_profile" } } },
-    "v_RUN_NOT_FOUND_false_run_id": { "properties": { "code": { "const": "RUN_NOT_FOUND" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_run_id" } } },
-    "v_THREAD_NOT_FOUND_false_run_id_thread_id": { "properties": { "code": { "const": "THREAD_NOT_FOUND" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_run_id_thread_id" } } },
-    "v_TURN_NOT_FOUND_false_run_id_turn_id": { "properties": { "code": { "const": "TURN_NOT_FOUND" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_run_id_turn_id" } } },
-    "v_INTERACTION_NOT_FOUND_false_run_id_request_id": { "properties": { "code": { "const": "INTERACTION_NOT_FOUND" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_run_id_request_id" } } },
-    "v_PROFILE_ALREADY_EXISTS_false_profile": { "properties": { "code": { "const": "PROFILE_ALREADY_EXISTS" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_profile" } } },
-    "v_PROFILE_SERVER_BUSY_true_profile_server_key_reason": { "properties": { "code": { "const": "PROFILE_SERVER_BUSY" }, "retryable": { "const": true }, "details": { "$ref": "#/$defs/d_profile_server" } } },
-    "v_PROFILE_LAUNCH_CONFLICT_false_profile_server_key_reason": { "properties": { "code": { "const": "PROFILE_LAUNCH_CONFLICT" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_profile_server" } } },
-    "v_PROFILE_MIGRATION_REQUIRED_false_profile_migration": { "properties": { "code": { "const": "PROFILE_MIGRATION_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_profile_migration" } } },
-    "v_PROFILE_MEMBERSHIP_INCOMPLETE_false_profile_server_key_reason": { "properties": { "code": { "const": "PROFILE_MEMBERSHIP_INCOMPLETE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_profile_server" } } },
-    "v_PROFILE_SERVER_EPOCH_MISMATCH_false_server_epoch": { "properties": { "code": { "const": "PROFILE_SERVER_EPOCH_MISMATCH" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_server_epoch" } } },
-    "v_WORKSPACE_INITIALIZATION_CONFLICT_false_workspace_path_reason": { "properties": { "code": { "const": "WORKSPACE_INITIALIZATION_CONFLICT" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_workspace_path_reason" } } },
-    "v_RUN_STATE_CONFLICT_false_run_id_state_operation": { "properties": { "code": { "const": "RUN_STATE_CONFLICT" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_run_state_operation" } } },
-    "v_RUN_STATE_INVARIANT_VIOLATION_false_run_state_invariant": { "properties": { "code": { "const": "RUN_STATE_INVARIANT_VIOLATION" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_run_state_invariant" } } },
-    "v_POLICY_REJECTED_false_policy_operation": { "properties": { "code": { "const": "POLICY_REJECTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_policy_operation" } } },
-    "v_RUN_BUSY_true_run_id_owner_kind": { "properties": { "code": { "const": "RUN_BUSY" }, "retryable": { "const": true }, "details": { "$ref": "#/$defs/d_run_owner" } } },
-    "v_WRITER_BUSY_true_workspace_id_holder_takeover": { "properties": { "code": { "const": "WRITER_BUSY" }, "retryable": { "const": true }, "details": { "$ref": "#/$defs/d_writer" } } },
-    "v_WRITER_HANDOFF_NOT_ALLOWED_false_handoff": { "properties": { "code": { "const": "WRITER_HANDOFF_NOT_ALLOWED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_handoff" } } },
-    "v_CROSS_CONTROLLER_RELEASE_REQUIRED_false_handoff": { "properties": { "code": { "const": "CROSS_CONTROLLER_RELEASE_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_handoff" } } },
-    "v_STALE_WRITER_GENERATION_false_handoff": { "properties": { "code": { "const": "STALE_WRITER_GENERATION" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_handoff" } } },
-    "v_CONTROLLER_MISMATCH_false_controller": { "properties": { "code": { "const": "CONTROLLER_MISMATCH" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_controller" } } },
-    "v_CONTROLLER_RESET_NOT_ALLOWED_false_controller_reset": { "properties": { "code": { "const": "CONTROLLER_RESET_NOT_ALLOWED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_controller_reset" } } },
-    "v_OPERATOR_MISMATCH_false_operator": { "properties": { "code": { "const": "OPERATOR_MISMATCH" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_operator" } } },
-    "v_CONTROL_MODE_REQUIRED_false_argument_reason": { "properties": { "code": { "const": "CONTROL_MODE_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_argument_reason" } } },
-    "v_CONTROL_MODE_CONTROLLER_MISMATCH_false_control_mode": { "properties": { "code": { "const": "CONTROL_MODE_CONTROLLER_MISMATCH" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_control_mode" } } },
-    "v_PURPOSE_REQUIRED_false_argument_reason": { "properties": { "code": { "const": "PURPOSE_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_argument_reason" } } },
-    "v_EXECUTION_LANE_REQUIRED_false_argument_reason": { "properties": { "code": { "const": "EXECUTION_LANE_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_argument_reason" } } },
-    "v_CAPABILITY_UNSUPPORTED_false_capability": { "properties": { "code": { "const": "CAPABILITY_UNSUPPORTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_capability" } } },
-    "v_ACCESS_TRANSITION_UNSUPPORTED_false_access_transition": { "properties": { "code": { "const": "ACCESS_TRANSITION_UNSUPPORTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_access_transition" } } },
-    "v_BACKGROUND_EXECUTION_UNVERIFIED_false_background": { "properties": { "code": { "const": "BACKGROUND_EXECUTION_UNVERIFIED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_background" } } },
-    "v_EXECUTION_LANE_UNSUPPORTED_false_lane": { "properties": { "code": { "const": "EXECUTION_LANE_UNSUPPORTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_EXECUTION_LANE_IMMUTABLE_false_lane": { "properties": { "code": { "const": "EXECUTION_LANE_IMMUTABLE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_SHARED_RUN_WRITE_FORBIDDEN_false_lane": { "properties": { "code": { "const": "SHARED_RUN_WRITE_FORBIDDEN" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_SUCCESSOR_SOURCE_NOT_TERMINAL_false_successor": { "properties": { "code": { "const": "SUCCESSOR_SOURCE_NOT_TERMINAL" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_successor" } } },
-    "v_SUCCESSOR_LINEAGE_INVALID_false_successor": { "properties": { "code": { "const": "SUCCESSOR_LINEAGE_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_successor" } } },
-    "v_SUCCESSOR_CONTROLLER_INVALID_false_successor": { "properties": { "code": { "const": "SUCCESSOR_CONTROLLER_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_successor" } } },
-    "v_THREAD_RESIDENCY_CONFLICT_false_lane": { "properties": { "code": { "const": "THREAD_RESIDENCY_CONFLICT" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_SAME_HOME_MULTI_SERVER_UNSAFE_false_lane": { "properties": { "code": { "const": "SAME_HOME_MULTI_SERVER_UNSAFE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_ASSURANCE_LEVEL_UNAVAILABLE_false_lane": { "properties": { "code": { "const": "ASSURANCE_LEVEL_UNAVAILABLE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_DEDICATED_HISTORY_BARRIER_FAILED_false_lane": { "properties": { "code": { "const": "DEDICATED_HISTORY_BARRIER_FAILED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_PROFILE_LANE_MIGRATION_REQUIRED_false_lane": { "properties": { "code": { "const": "PROFILE_LANE_MIGRATION_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_DEDICATED_SERVER_START_FAILED_true_lane": { "properties": { "code": { "const": "DEDICATED_SERVER_START_FAILED" }, "retryable": { "const": true }, "details": { "$ref": "#/$defs/d_lane" } } },
-    "v_IDEMPOTENCY_CONFLICT_false_run_id_recorded_input_digest_observed_input_digest": { "properties": { "code": { "const": "IDEMPOTENCY_CONFLICT" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_idempotency" } } },
-    "v_INTERACTION_ALREADY_RESOLVED_false_interaction": { "properties": { "code": { "const": "INTERACTION_ALREADY_RESOLVED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_interaction" } } },
-    "v_INTERACTION_STALE_false_stale_interaction": { "properties": { "code": { "const": "INTERACTION_STALE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_stale_interaction" } } },
-    "v_INTERACTION_RESPONSE_INVALID_false_interaction_response": { "properties": { "code": { "const": "INTERACTION_RESPONSE_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_interaction_response" } } },
-    "v_FILE_CHANGE_ARTIFACT_UNAVAILABLE_false_file_artifact": { "properties": { "code": { "const": "FILE_CHANGE_ARTIFACT_UNAVAILABLE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_file_artifact" } } },
-    "v_ARTIFACT_NOT_FOUND_false_artifact": { "properties": { "code": { "const": "ARTIFACT_NOT_FOUND" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_artifact" } } },
-    "v_ARTIFACT_RANGE_INVALID_false_artifact_range": { "properties": { "code": { "const": "ARTIFACT_RANGE_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_artifact_range" } } },
-    "v_ARTIFACT_INTEGRITY_FAILURE_false_artifact_integrity": { "properties": { "code": { "const": "ARTIFACT_INTEGRITY_FAILURE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_artifact_integrity" } } },
-    "v_PROJECTION_PROFILE_UNSUPPORTED_false_projection": { "properties": { "code": { "const": "PROJECTION_PROFILE_UNSUPPORTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_projection" } } },
-    "v_OUTCOME_UNKNOWN_false_run_id_thread_id_turn_id": { "properties": { "code": { "const": "OUTCOME_UNKNOWN" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_outcome_unknown" } } },
-    "v_RECOVERY_REQUIRED_false_run_id_generation_identity_verdict_reason": { "properties": { "code": { "const": "RECOVERY_REQUIRED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_recovery" } } },
-    "v_PROFILE_MISMATCH_false_profile_field_expected_actual": { "properties": { "code": { "const": "PROFILE_MISMATCH" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_profile_comparison" } } },
-    "v_COMPATIBILITY_REJECTED_false_profile_check_expected_actual": { "properties": { "code": { "const": "COMPATIBILITY_REJECTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_compatibility" } } },
-    "v_DOLGORAE_PROTOCOL_MISMATCH_false_expected_protocol_actual_protocol_control_v1_available": { "properties": { "code": { "const": "DOLGORAE_PROTOCOL_MISMATCH" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_protocol" } } },
-    "v_PROTOCOL_VERSION_UNSUPPORTED_false_protocol_version": { "properties": { "code": { "const": "PROTOCOL_VERSION_UNSUPPORTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_protocol_version" } } },
-    "v_PROTOCOL_FRAME_TOO_LARGE_false_channel_observed_bytes_limit_bytes": { "properties": { "code": { "const": "PROTOCOL_FRAME_TOO_LARGE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_frame" } } },
-    "v_RUNTIME_PATH_INVALID_false_path_reason": { "properties": { "code": { "const": "RUNTIME_PATH_INVALID" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_path_reason" } } },
-    "v_RUNTIME_PATH_COLLISION_false_path_expected_identity_observed_identity": { "properties": { "code": { "const": "RUNTIME_PATH_COLLISION" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_path_collision" } } },
-    "v_REDACTION_FAILURE_false_source_kind_json_pointer_reason": { "properties": { "code": { "const": "REDACTION_FAILURE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_redaction" } } },
-    "v_INTERNAL_ERROR_false_invariant": { "properties": { "code": { "const": "INTERNAL_ERROR" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_invariant" } } },
-    "v_TURN_FAILED_false_run_id_turn_id_status": { "properties": { "code": { "const": "TURN_FAILED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_turn_status" } } },
-    "v_TURN_INTERRUPTED_false_run_id_turn_id_status": { "properties": { "code": { "const": "TURN_INTERRUPTED" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_turn_status" } } },
-    "v_AUDIT_INTEGRITY_FAILURE_false_run_id_sequence_reason": { "properties": { "code": { "const": "AUDIT_INTEGRITY_FAILURE" }, "retryable": { "const": false }, "details": { "$ref": "#/$defs/d_audit" } } },
-    "d_argument_reason": { "type": "object", "additionalProperties": false, "required": ["argument", "reason"], "properties": { "argument": { "$ref": "#/$defs/string" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_workspace_path": { "type": "object", "additionalProperties": false, "required": ["workspace_path"], "properties": { "workspace_path": { "$ref": "#/$defs/path" } } },
-    "d_path_reason": { "type": "object", "additionalProperties": false, "required": ["path", "reason"], "properties": { "path": { "$ref": "#/$defs/path" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_profile": { "type": "object", "additionalProperties": false, "required": ["profile"], "properties": { "profile": { "$ref": "#/$defs/string" } } },
-    "d_profile_server": { "type": "object", "additionalProperties": false, "required": ["profile", "server_key", "reason"], "properties": { "profile": { "$ref": "#/$defs/string" }, "server_key": { "$ref": "#/$defs/sha256" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_profile_migration": { "type": "object", "additionalProperties": false, "required": ["profile", "previous_server_key", "new_server_key", "drift_fields", "required_action"], "properties": { "profile": { "$ref": "#/$defs/string" }, "previous_server_key": { "$ref": "#/$defs/sha256" }, "new_server_key": { "$ref": "#/$defs/sha256" }, "drift_fields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/string" } }, "required_action": { "const": "profile_server_migrate_with_operator" } } },
-    "d_server_epoch": { "type": "object", "additionalProperties": false, "required": ["server_key", "expected_epoch", "observed_epoch"], "properties": { "server_key": { "$ref": "#/$defs/sha256" }, "expected_epoch": { "$ref": "#/$defs/integer" }, "observed_epoch": { "$ref": "#/$defs/integer" } } },
-    "d_run_id": { "type": "object", "additionalProperties": false, "required": ["run_id"], "properties": { "run_id": { "$ref": "#/$defs/uuid" } } },
-    "d_run_id_thread_id": { "type": "object", "additionalProperties": false, "required": ["run_id", "thread_id"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "thread_id": { "$ref": "#/$defs/string" } } },
-    "d_run_id_turn_id": { "type": "object", "additionalProperties": false, "required": ["run_id", "turn_id"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "turn_id": { "$ref": "#/$defs/string" } } },
-    "d_run_id_request_id": { "type": "object", "additionalProperties": false, "required": ["run_id", "request_id"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "request_id": { "$ref": "#/$defs/string" } } },
-    "d_workspace_path_reason": { "type": "object", "additionalProperties": false, "required": ["workspace_path", "reason"], "properties": { "workspace_path": { "$ref": "#/$defs/path" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_run_state_operation": { "type": "object", "additionalProperties": false, "required": ["run_id", "state", "operation"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "state": { "$ref": "#/$defs/lifecycle" }, "operation": { "$ref": "#/$defs/string" } } },
-    "d_run_state_invariant": { "type": "object", "additionalProperties": false, "required": ["run_id", "reason", "required_action"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "reason": { "enum": ["writer_policy_without_authority", "writer_epoch_mismatch", "writer_generation_mismatch", "assurance_order_invalid", "state_variant_mismatch", "successor_lineage_invalid"] }, "required_action": { "const": "reconcile_run_state" } } },
-    "d_policy_operation": { "type": "object", "additionalProperties": false, "required": ["policy", "operation"], "properties": { "policy": { "$ref": "#/$defs/string" }, "operation": { "$ref": "#/$defs/string" } } },
-    "d_run_owner": { "type": "object", "additionalProperties": false, "required": ["run_id", "owner_kind"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "owner_kind": { "enum": ["turn", "startup", "attachment"] } } },
-    "d_writer": { "type": "object", "additionalProperties": false, "required": ["workspace_id", "holder_run_id", "holder_profile", "holder_state", "holder_controller_kind", "writer_generation", "handoff_eligible"], "properties": { "workspace_id": { "$ref": "#/$defs/sha256" }, "holder_run_id": { "$ref": "#/$defs/nullable_uuid" }, "holder_profile": { "$ref": "#/$defs/nullable_string" }, "holder_state": { "oneOf": [{ "$ref": "#/$defs/lifecycle" }, { "type": "null" }] }, "holder_controller_kind": { "$ref": "#/$defs/nullable_string" }, "writer_generation": { "$ref": "#/$defs/integer" }, "handoff_eligible": { "type": "boolean" } } },
-    "d_handoff": { "type": "object", "additionalProperties": false, "required": ["workspace_id", "handoff_id", "source_run_id", "destination_run_id", "expected_writer_generation", "observed_writer_generation", "blockers"], "properties": { "workspace_id": { "$ref": "#/$defs/sha256" }, "handoff_id": { "$ref": "#/$defs/nullable_uuid" }, "source_run_id": { "$ref": "#/$defs/uuid" }, "destination_run_id": { "$ref": "#/$defs/uuid" }, "expected_writer_generation": { "$ref": "#/$defs/integer" }, "observed_writer_generation": { "$ref": "#/$defs/integer" }, "blockers": { "type": "array", "items": { "$ref": "#/$defs/string" } } } },
-    "d_controller": { "type": "object", "additionalProperties": false, "required": ["run_id", "operation"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "operation": { "$ref": "#/$defs/string" } } },
-    "d_control_mode": { "type": "object", "additionalProperties": false, "required": ["run_id", "requested_control_mode", "controller_kind", "required_action"], "properties": { "run_id": { "$ref": "#/$defs/nullable_uuid" }, "requested_control_mode": { "enum": ["direct_interactive", "managed_agent"] }, "controller_kind": { "enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation"] }, "required_action": { "const": "use_compatible_controller" } } },
-    "d_controller_reset": { "type": "object", "additionalProperties": false, "required": ["run_id", "state", "blockers"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "state": { "$ref": "#/$defs/lifecycle" }, "blockers": { "type": "array", "items": { "$ref": "#/$defs/string" } } } },
-    "d_operator": { "type": "object", "additionalProperties": false, "required": ["operation"], "properties": { "operation": { "$ref": "#/$defs/string" } } },
-    "d_access_transition": { "type": "object", "additionalProperties": false, "required": ["run_id", "from", "to", "required_action"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "from": { "enum": ["read", "write"] }, "to": { "enum": ["read", "write"] }, "required_action": { "enum": ["fork_new_writer_thread", "retire_writer_then_new_reader"] } }, "oneOf": [{ "properties": { "from": { "const": "read" }, "to": { "const": "write" }, "required_action": { "const": "fork_new_writer_thread" } } }, { "properties": { "from": { "const": "write" }, "to": { "const": "read" }, "required_action": { "const": "retire_writer_then_new_reader" } } }] },
-    "d_background": { "type": "object", "additionalProperties": false, "required": ["run_id", "thread_id", "server_epoch", "lane_id", "process_generation", "census_revision", "reason", "required_action"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "thread_id": { "$ref": "#/$defs/string" }, "server_epoch": { "type": "integer", "minimum": 1 }, "lane_id": { "$ref": "#/$defs/uuid" }, "process_generation": { "type": "integer", "minimum": 1 }, "census_revision": { "type": "integer", "minimum": 0 }, "reason": { "$ref": "#/$defs/string" }, "required_action": { "enum": ["retry_census", "reconcile_dedicated_lane", "operator_repair"] } } },
-    "d_lane": { "type": "object", "additionalProperties": false, "required": ["run_id", "execution_lane", "reason", "required_action"], "properties": { "run_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] }, "execution_lane": { "enum": ["shared_readonly", "dedicated"] }, "reason": { "$ref": "#/$defs/string" }, "required_action": { "enum": ["create_dedicated_successor", "retain_original_lane", "reconcile_thread_residency", "use_supported_profile", "lower_required_assurance", "reconcile_history", "migrate_profile_lanes", "retry_dedicated_start", "operator_repair"] } } },
-    "d_successor": { "type": "object", "additionalProperties": false, "required": ["source_run_id", "source_turn_id", "reason", "required_action"], "properties": { "source_run_id": { "$ref": "#/$defs/uuid" }, "source_turn_id": { "$ref": "#/$defs/nullable_string" }, "reason": { "enum": ["source_not_terminal", "lineage_invalid", "controller_invalid"] }, "required_action": { "enum": ["use_terminal_source", "repair_lineage", "use_same_controller"] } } },
-    "d_capability": { "type": "object", "additionalProperties": false, "required": ["profile", "capability_name", "support"], "properties": { "profile": { "$ref": "#/$defs/nullable_string" }, "capability_name": { "$ref": "#/$defs/string" }, "support": { "enum": ["supported", "recognized_unsupported", "unavailable"] } } },
-    "d_idempotency": { "type": "object", "additionalProperties": false, "required": ["run_id", "recorded_input_digest", "observed_input_digest"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "recorded_input_digest": { "$ref": "#/$defs/sha256" }, "observed_input_digest": { "$ref": "#/$defs/sha256" } } },
-    "d_outcome_unknown": { "type": "object", "additionalProperties": false, "required": ["run_id", "thread_id", "turn_id"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "thread_id": { "$ref": "#/$defs/nullable_string" }, "turn_id": { "$ref": "#/$defs/nullable_string" } } },
-    "d_operation_timeout": { "type": "object", "additionalProperties": false, "required": ["operation", "budget_ms"], "properties": { "operation": { "enum": ["replay", "schema_generation", "profile_doctor"] }, "budget_ms": { "$ref": "#/$defs/integer" } } },
-    "d_interaction": { "type": "object", "additionalProperties": false, "required": ["run_id", "request_id", "resolved_at"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "request_id": { "$ref": "#/$defs/string" }, "resolved_at": { "$ref": "#/$defs/string" } } },
-    "d_stale_interaction": { "type": "object", "additionalProperties": false, "required": ["run_id", "request_id", "request_generation", "current_generation"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "request_id": { "$ref": "#/$defs/string" }, "request_generation": { "$ref": "#/$defs/integer" }, "current_generation": { "$ref": "#/$defs/integer" } } },
-    "d_interaction_response": { "type": "object", "additionalProperties": false, "required": ["run_id", "request_id", "response_schema", "reason"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "request_id": { "$ref": "#/$defs/string" }, "response_schema": { "$ref": "#/$defs/string" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_file_artifact": { "type": "object", "additionalProperties": false, "required": ["run_id", "request_id", "item_id", "artifact_id", "reason"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "request_id": { "$ref": "#/$defs/string" }, "item_id": { "$ref": "#/$defs/nullable_string" }, "artifact_id": { "$ref": "#/$defs/nullable_uuid" }, "reason": { "enum": ["uncorrelated", "path_escape", "oversized", "missing", "digest_mismatch", "snapshot_changed"] } } },
-    "d_artifact": { "type": "object", "additionalProperties": false, "required": ["run_id", "artifact_id"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "artifact_id": { "$ref": "#/$defs/uuid" } } },
-    "d_artifact_range": { "type": "object", "additionalProperties": false, "required": ["run_id", "artifact_id", "offset", "length", "total"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "artifact_id": { "$ref": "#/$defs/uuid" }, "offset": { "$ref": "#/$defs/integer" }, "length": { "$ref": "#/$defs/integer" }, "total": { "$ref": "#/$defs/integer" } } },
-    "d_artifact_integrity": { "type": "object", "additionalProperties": false, "required": ["run_id", "artifact_id", "expected_sha256", "observed_sha256"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "artifact_id": { "$ref": "#/$defs/uuid" }, "expected_sha256": { "$ref": "#/$defs/sha256" }, "observed_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] } } },
-    "d_projection": { "type": "object", "additionalProperties": false, "required": ["requested", "supported"], "properties": { "requested": { "$ref": "#/$defs/string" }, "supported": { "type": "array", "items": { "enum": ["minimal", "operational"] } } } },
-    "d_recovery": { "type": "object", "additionalProperties": false, "required": ["run_id", "generation", "identity_verdict", "reason"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "generation": { "$ref": "#/$defs/integer" }, "identity_verdict": { "$ref": "#/$defs/identity" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_profile_comparison": { "type": "object", "additionalProperties": false, "required": ["profile", "field", "expected", "actual"], "properties": { "profile": { "$ref": "#/$defs/string" }, "field": { "$ref": "#/$defs/string" }, "expected": { "$ref": "#/$defs/json_value" }, "actual": { "$ref": "#/$defs/json_value" } } },
-    "d_compatibility": { "type": "object", "additionalProperties": false, "required": ["profile", "check", "expected", "actual"], "properties": { "profile": { "$ref": "#/$defs/string" }, "check": { "$ref": "#/$defs/string" }, "expected": { "$ref": "#/$defs/json_value" }, "actual": { "$ref": "#/$defs/json_value" } } },
-    "d_protocol": { "type": "object", "additionalProperties": false, "required": ["expected_protocol", "actual_protocol", "control_v1_available"], "properties": { "expected_protocol": { "$ref": "#/$defs/integer" }, "actual_protocol": { "$ref": "#/$defs/integer" }, "control_v1_available": { "type": "boolean" } } },
-    "d_protocol_version": { "type": "object", "additionalProperties": false, "required": ["protocol", "requested", "supported"], "properties": { "protocol": { "enum": ["machine", "event"] }, "requested": { "$ref": "#/$defs/integer" }, "supported": { "type": "array", "items": { "$ref": "#/$defs/integer" } } } },
-    "d_frame": { "type": "object", "additionalProperties": false, "required": ["channel", "observed_bytes", "limit_bytes"], "properties": { "channel": { "enum": ["cli_worker", "app_server_websocket_frame", "app_server_websocket_message", "app_server_stderr", "ledger"] }, "observed_bytes": { "$ref": "#/$defs/integer" }, "limit_bytes": { "$ref": "#/$defs/integer" } } },
-    "d_path_collision": { "type": "object", "additionalProperties": false, "required": ["path", "expected_identity", "observed_identity"], "properties": { "path": { "$ref": "#/$defs/path" }, "expected_identity": { "type": "object" }, "observed_identity": { "type": "object" } } },
-    "d_redaction": { "type": "object", "additionalProperties": false, "required": ["source_kind", "json_pointer", "reason"], "properties": { "source_kind": { "$ref": "#/$defs/string" }, "json_pointer": { "$ref": "#/$defs/string" }, "reason": { "$ref": "#/$defs/string" } } },
-    "d_invariant": { "type": "object", "additionalProperties": false, "required": ["invariant"], "properties": { "invariant": { "$ref": "#/$defs/string" } } },
-    "d_turn_status": { "type": "object", "additionalProperties": false, "required": ["run_id", "turn_id", "status"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "turn_id": { "$ref": "#/$defs/string" }, "status": { "$ref": "#/$defs/turn_status" } } },
-    "d_audit": { "type": "object", "additionalProperties": false, "required": ["run_id", "sequence", "reason"], "properties": { "run_id": { "$ref": "#/$defs/uuid" }, "sequence": { "$ref": "#/$defs/integer" }, "reason": { "$ref": "#/$defs/string" } } }
+    "identity": {
+      "enum": [
+        "Absent",
+        "Mismatch",
+        "Match",
+        "Unverifiable"
+      ]
+    },
+    "lifecycle": {
+      "enum": [
+        "starting",
+        "idle",
+        "running",
+        "waiting_interaction",
+        "reconciliation_required",
+        "paused",
+        "closed",
+        "start_failed",
+        "outcome_unknown"
+      ]
+    },
+    "turn_status": {
+      "enum": [
+        "reserved",
+        "accepted",
+        "running",
+        "waiting_interaction",
+        "interrupting",
+        "completed",
+        "failed",
+        "interrupted",
+        "outcome_unknown"
+      ]
+    },
+    "invalid_argument": {
+      "$ref": "#/$defs/v_INVALID_ARGUMENT_false_argument_reason"
+    },
+    "workspace_not_initialized": {
+      "$ref": "#/$defs/v_WORKSPACE_NOT_INITIALIZED_false_workspace_path"
+    },
+    "config_invalid": {
+      "$ref": "#/$defs/v_CONFIG_INVALID_false_path_reason"
+    },
+    "profile_config_invalid": {
+      "$ref": "#/$defs/v_PROFILE_CONFIG_INVALID_false_path_reason"
+    },
+    "profile_not_found": {
+      "$ref": "#/$defs/v_PROFILE_NOT_FOUND_false_profile"
+    },
+    "run_not_found": {
+      "$ref": "#/$defs/v_RUN_NOT_FOUND_false_run_id"
+    },
+    "thread_not_found": {
+      "$ref": "#/$defs/v_THREAD_NOT_FOUND_false_run_id_thread_id"
+    },
+    "turn_not_found": {
+      "$ref": "#/$defs/v_TURN_NOT_FOUND_false_run_id_turn_id"
+    },
+    "interaction_not_found": {
+      "$ref": "#/$defs/v_INTERACTION_NOT_FOUND_false_run_id_request_id"
+    },
+    "interaction_full_payload_requires_controller": {
+      "$ref": "#/$defs/v_INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER_false_controller"
+    },
+    "interaction_artifact_requires_controller": {
+      "$ref": "#/$defs/v_INTERACTION_ARTIFACT_REQUIRES_CONTROLLER_false_artifact"
+    },
+    "observer_mutation_forbidden": {
+      "$ref": "#/$defs/v_OBSERVER_MUTATION_FORBIDDEN_false_controller"
+    },
+    "profile_already_exists": {
+      "$ref": "#/$defs/v_PROFILE_ALREADY_EXISTS_false_profile"
+    },
+    "profile_server_busy": {
+      "$ref": "#/$defs/v_PROFILE_SERVER_BUSY_true_profile_server_key_reason"
+    },
+    "profile_launch_conflict": {
+      "$ref": "#/$defs/v_PROFILE_LAUNCH_CONFLICT_false_profile_server_key_reason"
+    },
+    "profile_migration_required": {
+      "$ref": "#/$defs/v_PROFILE_MIGRATION_REQUIRED_false_profile_migration"
+    },
+    "profile_membership_incomplete": {
+      "$ref": "#/$defs/v_PROFILE_MEMBERSHIP_INCOMPLETE_false_profile_server_key_reason"
+    },
+    "profile_server_epoch_mismatch": {
+      "$ref": "#/$defs/v_PROFILE_SERVER_EPOCH_MISMATCH_false_server_epoch"
+    },
+    "workspace_initialization_conflict": {
+      "$ref": "#/$defs/v_WORKSPACE_INITIALIZATION_CONFLICT_false_workspace_path_reason"
+    },
+    "run_state_conflict": {
+      "$ref": "#/$defs/v_RUN_STATE_CONFLICT_false_run_id_state_operation"
+    },
+    "run_state_invariant_violation": {
+      "$ref": "#/$defs/v_RUN_STATE_INVARIANT_VIOLATION_false_run_state_invariant"
+    },
+    "policy_rejected": {
+      "$ref": "#/$defs/v_POLICY_REJECTED_false_policy_operation"
+    },
+    "run_busy": {
+      "$ref": "#/$defs/v_RUN_BUSY_true_run_id_owner_kind"
+    },
+    "writer_busy": {
+      "$ref": "#/$defs/v_WRITER_BUSY_true_workspace_id_holder_takeover"
+    },
+    "writer_handoff_not_allowed": {
+      "$ref": "#/$defs/v_WRITER_HANDOFF_NOT_ALLOWED_false_handoff"
+    },
+    "cross_controller_release_required": {
+      "$ref": "#/$defs/v_CROSS_CONTROLLER_RELEASE_REQUIRED_false_handoff"
+    },
+    "stale_writer_generation": {
+      "$ref": "#/$defs/v_STALE_WRITER_GENERATION_false_handoff"
+    },
+    "controller_mismatch": {
+      "$ref": "#/$defs/v_CONTROLLER_MISMATCH_false_controller"
+    },
+    "controller_reset_not_allowed": {
+      "$ref": "#/$defs/v_CONTROLLER_RESET_NOT_ALLOWED_false_controller_reset"
+    },
+    "operator_mismatch": {
+      "$ref": "#/$defs/v_OPERATOR_MISMATCH_false_operator"
+    },
+    "control_mode_required": {
+      "$ref": "#/$defs/v_CONTROL_MODE_REQUIRED_false_argument_reason"
+    },
+    "control_mode_controller_mismatch": {
+      "$ref": "#/$defs/v_CONTROL_MODE_CONTROLLER_MISMATCH_false_control_mode"
+    },
+    "purpose_required": {
+      "$ref": "#/$defs/v_PURPOSE_REQUIRED_false_argument_reason"
+    },
+    "execution_lane_required": {
+      "$ref": "#/$defs/v_EXECUTION_LANE_REQUIRED_false_argument_reason"
+    },
+    "capability_unsupported": {
+      "$ref": "#/$defs/v_CAPABILITY_UNSUPPORTED_false_capability"
+    },
+    "native_subagent_disable_unavailable": {
+      "$ref": "#/$defs/v_NATIVE_SUBAGENT_DISABLE_UNAVAILABLE_false_capability"
+    },
+    "access_transition_unsupported": {
+      "$ref": "#/$defs/v_ACCESS_TRANSITION_UNSUPPORTED_false_access_transition"
+    },
+    "background_execution_unverified": {
+      "$ref": "#/$defs/v_BACKGROUND_EXECUTION_UNVERIFIED_false_background"
+    },
+    "execution_lane_unsupported": {
+      "$ref": "#/$defs/v_EXECUTION_LANE_UNSUPPORTED_false_lane"
+    },
+    "execution_lane_immutable": {
+      "$ref": "#/$defs/v_EXECUTION_LANE_IMMUTABLE_false_lane"
+    },
+    "shared_run_write_forbidden": {
+      "$ref": "#/$defs/v_SHARED_RUN_WRITE_FORBIDDEN_false_lane"
+    },
+    "successor_source_not_terminal": {
+      "$ref": "#/$defs/v_SUCCESSOR_SOURCE_NOT_TERMINAL_false_successor"
+    },
+    "successor_lineage_invalid": {
+      "$ref": "#/$defs/v_SUCCESSOR_LINEAGE_INVALID_false_successor"
+    },
+    "successor_controller_invalid": {
+      "$ref": "#/$defs/v_SUCCESSOR_CONTROLLER_INVALID_false_successor"
+    },
+    "successor_profile_override_forbidden": {
+      "$ref": "#/$defs/v_SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN_false_successor"
+    },
+    "successor_model_unsupported": {
+      "$ref": "#/$defs/v_SUCCESSOR_MODEL_UNSUPPORTED_false_successor"
+    },
+    "thread_residency_conflict": {
+      "$ref": "#/$defs/v_THREAD_RESIDENCY_CONFLICT_false_lane"
+    },
+    "same_home_multi_server_unsafe": {
+      "$ref": "#/$defs/v_SAME_HOME_MULTI_SERVER_UNSAFE_false_lane"
+    },
+    "assurance_level_unavailable": {
+      "$ref": "#/$defs/v_ASSURANCE_LEVEL_UNAVAILABLE_false_lane"
+    },
+    "dedicated_history_barrier_failed": {
+      "$ref": "#/$defs/v_DEDICATED_HISTORY_BARRIER_FAILED_false_lane"
+    },
+    "profile_lane_migration_required": {
+      "$ref": "#/$defs/v_PROFILE_LANE_MIGRATION_REQUIRED_false_lane"
+    },
+    "dedicated_server_start_failed": {
+      "$ref": "#/$defs/v_DEDICATED_SERVER_START_FAILED_true_lane"
+    },
+    "idempotency_conflict": {
+      "$ref": "#/$defs/v_IDEMPOTENCY_CONFLICT_false_run_id_recorded_input_digest_observed_input_digest"
+    },
+    "interaction_already_resolved": {
+      "$ref": "#/$defs/v_INTERACTION_ALREADY_RESOLVED_false_interaction"
+    },
+    "interaction_stale": {
+      "$ref": "#/$defs/v_INTERACTION_STALE_false_stale_interaction"
+    },
+    "interaction_response_invalid": {
+      "$ref": "#/$defs/v_INTERACTION_RESPONSE_INVALID_false_interaction_response"
+    },
+    "file_change_artifact_unavailable": {
+      "$ref": "#/$defs/v_FILE_CHANGE_ARTIFACT_UNAVAILABLE_false_file_artifact"
+    },
+    "artifact_not_found": {
+      "$ref": "#/$defs/v_ARTIFACT_NOT_FOUND_false_artifact"
+    },
+    "artifact_range_invalid": {
+      "$ref": "#/$defs/v_ARTIFACT_RANGE_INVALID_false_artifact_range"
+    },
+    "artifact_integrity_failure": {
+      "$ref": "#/$defs/v_ARTIFACT_INTEGRITY_FAILURE_false_artifact_integrity"
+    },
+    "projection_profile_unsupported": {
+      "$ref": "#/$defs/v_PROJECTION_PROFILE_UNSUPPORTED_false_projection"
+    },
+    "outcome_unknown": {
+      "$ref": "#/$defs/v_OUTCOME_UNKNOWN_false_run_id_thread_id_turn_id"
+    },
+    "recovery_required": {
+      "$ref": "#/$defs/v_RECOVERY_REQUIRED_false_run_id_generation_identity_verdict_reason"
+    },
+    "profile_mismatch": {
+      "$ref": "#/$defs/v_PROFILE_MISMATCH_false_profile_field_expected_actual"
+    },
+    "compatibility_rejected": {
+      "$ref": "#/$defs/v_COMPATIBILITY_REJECTED_false_profile_check_expected_actual"
+    },
+    "dolgorae_protocol_mismatch": {
+      "$ref": "#/$defs/v_DOLGORAE_PROTOCOL_MISMATCH_false_expected_protocol_actual_protocol_control_v1_available"
+    },
+    "protocol_version_unsupported": {
+      "$ref": "#/$defs/v_PROTOCOL_VERSION_UNSUPPORTED_false_protocol_version"
+    },
+    "protocol_frame_too_large": {
+      "$ref": "#/$defs/v_PROTOCOL_FRAME_TOO_LARGE_false_channel_observed_bytes_limit_bytes"
+    },
+    "runtime_path_invalid": {
+      "$ref": "#/$defs/v_RUNTIME_PATH_INVALID_false_path_reason"
+    },
+    "runtime_path_collision": {
+      "$ref": "#/$defs/v_RUNTIME_PATH_COLLISION_false_path_expected_identity_observed_identity"
+    },
+    "redaction_failure": {
+      "$ref": "#/$defs/v_REDACTION_FAILURE_false_source_kind_json_pointer_reason"
+    },
+    "internal_error": {
+      "$ref": "#/$defs/v_INTERNAL_ERROR_false_invariant"
+    },
+    "turn_failed": {
+      "$ref": "#/$defs/v_TURN_FAILED_false_run_id_turn_id_status"
+    },
+    "turn_interrupted": {
+      "$ref": "#/$defs/v_TURN_INTERRUPTED_false_run_id_turn_id_status"
+    },
+    "audit_integrity_failure": {
+      "$ref": "#/$defs/v_AUDIT_INTEGRITY_FAILURE_false_run_id_sequence_reason"
+    },
+    "transport_retryable": {
+      "properties": {
+        "code": {
+          "const": "TRANSPORT_FAILURE"
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "$ref": "#/$defs/d_transport_retryable"
+        }
+      }
+    },
+    "transport_not_retryable": {
+      "properties": {
+        "code": {
+          "const": "TRANSPORT_FAILURE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_transport_not_retryable"
+        }
+      }
+    },
+    "operation_timeout": {
+      "properties": {
+        "code": {
+          "const": "OPERATION_TIMEOUT"
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "$ref": "#/$defs/d_operation_timeout"
+        }
+      }
+    },
+    "d_transport_retryable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "acceptance",
+        "request_id"
+      ],
+      "properties": {
+        "stage": {
+          "enum": [
+            "connect",
+            "write",
+            "read",
+            "decode",
+            "correlate",
+            "shutdown"
+          ]
+        },
+        "acceptance": {
+          "enum": [
+            "not_written",
+            "not_accepted"
+          ]
+        },
+        "request_id": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "d_transport_not_retryable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "acceptance",
+        "request_id"
+      ],
+      "properties": {
+        "stage": {
+          "enum": [
+            "connect",
+            "write",
+            "read",
+            "decode",
+            "correlate",
+            "shutdown"
+          ]
+        },
+        "acceptance": {
+          "enum": [
+            "accepted",
+            "uncertain"
+          ]
+        },
+        "request_id": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "v_INVALID_ARGUMENT_false_argument_reason": {
+      "properties": {
+        "code": {
+          "const": "INVALID_ARGUMENT"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_argument_reason"
+        }
+      }
+    },
+    "v_WORKSPACE_NOT_INITIALIZED_false_workspace_path": {
+      "properties": {
+        "code": {
+          "const": "WORKSPACE_NOT_INITIALIZED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_workspace_path"
+        }
+      }
+    },
+    "v_CONFIG_INVALID_false_path_reason": {
+      "properties": {
+        "code": {
+          "const": "CONFIG_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_path_reason"
+        }
+      }
+    },
+    "v_PROFILE_CONFIG_INVALID_false_path_reason": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_CONFIG_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_path_reason"
+        }
+      }
+    },
+    "v_PROFILE_NOT_FOUND_false_profile": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_NOT_FOUND"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile"
+        }
+      }
+    },
+    "v_RUN_NOT_FOUND_false_run_id": {
+      "properties": {
+        "code": {
+          "const": "RUN_NOT_FOUND"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_id"
+        }
+      }
+    },
+    "v_THREAD_NOT_FOUND_false_run_id_thread_id": {
+      "properties": {
+        "code": {
+          "const": "THREAD_NOT_FOUND"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_id_thread_id"
+        }
+      }
+    },
+    "v_TURN_NOT_FOUND_false_run_id_turn_id": {
+      "properties": {
+        "code": {
+          "const": "TURN_NOT_FOUND"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_id_turn_id"
+        }
+      }
+    },
+    "v_INTERACTION_NOT_FOUND_false_run_id_request_id": {
+      "properties": {
+        "code": {
+          "const": "INTERACTION_NOT_FOUND"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_id_request_id"
+        }
+      }
+    },
+    "v_INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER_false_controller": {
+      "properties": {
+        "code": { "const": "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_controller" }
+      }
+    },
+    "v_INTERACTION_ARTIFACT_REQUIRES_CONTROLLER_false_artifact": {
+      "properties": {
+        "code": { "const": "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_artifact" }
+      }
+    },
+    "v_OBSERVER_MUTATION_FORBIDDEN_false_controller": {
+      "properties": {
+        "code": { "const": "OBSERVER_MUTATION_FORBIDDEN" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_controller" }
+      }
+    },
+    "v_PROFILE_ALREADY_EXISTS_false_profile": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_ALREADY_EXISTS"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile"
+        }
+      }
+    },
+    "v_PROFILE_SERVER_BUSY_true_profile_server_key_reason": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_SERVER_BUSY"
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile_server"
+        }
+      }
+    },
+    "v_PROFILE_LAUNCH_CONFLICT_false_profile_server_key_reason": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_LAUNCH_CONFLICT"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile_server"
+        }
+      }
+    },
+    "v_PROFILE_MIGRATION_REQUIRED_false_profile_migration": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_MIGRATION_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile_migration"
+        }
+      }
+    },
+    "v_PROFILE_MEMBERSHIP_INCOMPLETE_false_profile_server_key_reason": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_MEMBERSHIP_INCOMPLETE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile_server"
+        }
+      }
+    },
+    "v_PROFILE_SERVER_EPOCH_MISMATCH_false_server_epoch": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_SERVER_EPOCH_MISMATCH"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_server_epoch"
+        }
+      }
+    },
+    "v_WORKSPACE_INITIALIZATION_CONFLICT_false_workspace_path_reason": {
+      "properties": {
+        "code": {
+          "const": "WORKSPACE_INITIALIZATION_CONFLICT"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_workspace_path_reason"
+        }
+      }
+    },
+    "v_RUN_STATE_CONFLICT_false_run_id_state_operation": {
+      "properties": {
+        "code": {
+          "const": "RUN_STATE_CONFLICT"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_state_operation"
+        }
+      }
+    },
+    "v_RUN_STATE_INVARIANT_VIOLATION_false_run_state_invariant": {
+      "properties": {
+        "code": {
+          "const": "RUN_STATE_INVARIANT_VIOLATION"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_state_invariant"
+        }
+      }
+    },
+    "v_POLICY_REJECTED_false_policy_operation": {
+      "properties": {
+        "code": {
+          "const": "POLICY_REJECTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_policy_operation"
+        }
+      }
+    },
+    "v_RUN_BUSY_true_run_id_owner_kind": {
+      "properties": {
+        "code": {
+          "const": "RUN_BUSY"
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "$ref": "#/$defs/d_run_owner"
+        }
+      }
+    },
+    "v_WRITER_BUSY_true_workspace_id_holder_takeover": {
+      "properties": {
+        "code": {
+          "const": "WRITER_BUSY"
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "$ref": "#/$defs/d_writer"
+        }
+      }
+    },
+    "v_WRITER_HANDOFF_NOT_ALLOWED_false_handoff": {
+      "properties": {
+        "code": {
+          "const": "WRITER_HANDOFF_NOT_ALLOWED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_handoff"
+        }
+      }
+    },
+    "v_CROSS_CONTROLLER_RELEASE_REQUIRED_false_handoff": {
+      "properties": {
+        "code": {
+          "const": "CROSS_CONTROLLER_RELEASE_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_handoff"
+        }
+      }
+    },
+    "v_STALE_WRITER_GENERATION_false_handoff": {
+      "properties": {
+        "code": {
+          "const": "STALE_WRITER_GENERATION"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_handoff"
+        }
+      }
+    },
+    "v_CONTROLLER_MISMATCH_false_controller": {
+      "properties": {
+        "code": {
+          "const": "CONTROLLER_MISMATCH"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_controller"
+        }
+      }
+    },
+    "v_CONTROLLER_RESET_NOT_ALLOWED_false_controller_reset": {
+      "properties": {
+        "code": {
+          "const": "CONTROLLER_RESET_NOT_ALLOWED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_controller_reset"
+        }
+      }
+    },
+    "v_OPERATOR_MISMATCH_false_operator": {
+      "properties": {
+        "code": {
+          "const": "OPERATOR_MISMATCH"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_operator"
+        }
+      }
+    },
+    "v_CONTROL_MODE_REQUIRED_false_argument_reason": {
+      "properties": {
+        "code": {
+          "const": "CONTROL_MODE_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_argument_reason"
+        }
+      }
+    },
+    "v_CONTROL_MODE_CONTROLLER_MISMATCH_false_control_mode": {
+      "properties": {
+        "code": {
+          "const": "CONTROL_MODE_CONTROLLER_MISMATCH"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_control_mode"
+        }
+      }
+    },
+    "v_PURPOSE_REQUIRED_false_argument_reason": {
+      "properties": {
+        "code": {
+          "const": "PURPOSE_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_argument_reason"
+        }
+      }
+    },
+    "v_EXECUTION_LANE_REQUIRED_false_argument_reason": {
+      "properties": {
+        "code": {
+          "const": "EXECUTION_LANE_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_argument_reason"
+        }
+      }
+    },
+    "v_CAPABILITY_UNSUPPORTED_false_capability": {
+      "properties": {
+        "code": {
+          "const": "CAPABILITY_UNSUPPORTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_capability"
+        }
+      }
+    },
+    "v_NATIVE_SUBAGENT_DISABLE_UNAVAILABLE_false_capability": {
+      "properties": {
+        "code": { "const": "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_capability" }
+      }
+    },
+    "v_ACCESS_TRANSITION_UNSUPPORTED_false_access_transition": {
+      "properties": {
+        "code": {
+          "const": "ACCESS_TRANSITION_UNSUPPORTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_access_transition"
+        }
+      }
+    },
+    "v_BACKGROUND_EXECUTION_UNVERIFIED_false_background": {
+      "properties": {
+        "code": {
+          "const": "BACKGROUND_EXECUTION_UNVERIFIED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_background"
+        }
+      }
+    },
+    "v_EXECUTION_LANE_UNSUPPORTED_false_lane": {
+      "properties": {
+        "code": {
+          "const": "EXECUTION_LANE_UNSUPPORTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_EXECUTION_LANE_IMMUTABLE_false_lane": {
+      "properties": {
+        "code": {
+          "const": "EXECUTION_LANE_IMMUTABLE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_SHARED_RUN_WRITE_FORBIDDEN_false_lane": {
+      "properties": {
+        "code": {
+          "const": "SHARED_RUN_WRITE_FORBIDDEN"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_SUCCESSOR_SOURCE_NOT_TERMINAL_false_successor": {
+      "properties": {
+        "code": {
+          "const": "SUCCESSOR_SOURCE_NOT_TERMINAL"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_successor"
+        }
+      }
+    },
+    "v_SUCCESSOR_LINEAGE_INVALID_false_successor": {
+      "properties": {
+        "code": {
+          "const": "SUCCESSOR_LINEAGE_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_successor"
+        }
+      }
+    },
+    "v_SUCCESSOR_CONTROLLER_INVALID_false_successor": {
+      "properties": {
+        "code": {
+          "const": "SUCCESSOR_CONTROLLER_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_successor"
+        }
+      }
+    },
+    "v_SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN_false_successor": {
+      "properties": {
+        "code": { "const": "SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_successor" }
+      }
+    },
+    "v_SUCCESSOR_MODEL_UNSUPPORTED_false_successor": {
+      "properties": {
+        "code": { "const": "SUCCESSOR_MODEL_UNSUPPORTED" },
+        "retryable": { "const": false },
+        "details": { "$ref": "#/$defs/d_successor" }
+      }
+    },
+    "v_THREAD_RESIDENCY_CONFLICT_false_lane": {
+      "properties": {
+        "code": {
+          "const": "THREAD_RESIDENCY_CONFLICT"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_SAME_HOME_MULTI_SERVER_UNSAFE_false_lane": {
+      "properties": {
+        "code": {
+          "const": "SAME_HOME_MULTI_SERVER_UNSAFE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_ASSURANCE_LEVEL_UNAVAILABLE_false_lane": {
+      "properties": {
+        "code": {
+          "const": "ASSURANCE_LEVEL_UNAVAILABLE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_DEDICATED_HISTORY_BARRIER_FAILED_false_lane": {
+      "properties": {
+        "code": {
+          "const": "DEDICATED_HISTORY_BARRIER_FAILED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_PROFILE_LANE_MIGRATION_REQUIRED_false_lane": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_LANE_MIGRATION_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_DEDICATED_SERVER_START_FAILED_true_lane": {
+      "properties": {
+        "code": {
+          "const": "DEDICATED_SERVER_START_FAILED"
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "$ref": "#/$defs/d_lane"
+        }
+      }
+    },
+    "v_IDEMPOTENCY_CONFLICT_false_run_id_recorded_input_digest_observed_input_digest": {
+      "properties": {
+        "code": {
+          "const": "IDEMPOTENCY_CONFLICT"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_idempotency"
+        }
+      }
+    },
+    "v_INTERACTION_ALREADY_RESOLVED_false_interaction": {
+      "properties": {
+        "code": {
+          "const": "INTERACTION_ALREADY_RESOLVED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_interaction"
+        }
+      }
+    },
+    "v_INTERACTION_STALE_false_stale_interaction": {
+      "properties": {
+        "code": {
+          "const": "INTERACTION_STALE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_stale_interaction"
+        }
+      }
+    },
+    "v_INTERACTION_RESPONSE_INVALID_false_interaction_response": {
+      "properties": {
+        "code": {
+          "const": "INTERACTION_RESPONSE_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_interaction_response"
+        }
+      }
+    },
+    "v_FILE_CHANGE_ARTIFACT_UNAVAILABLE_false_file_artifact": {
+      "properties": {
+        "code": {
+          "const": "FILE_CHANGE_ARTIFACT_UNAVAILABLE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_file_artifact"
+        }
+      }
+    },
+    "v_ARTIFACT_NOT_FOUND_false_artifact": {
+      "properties": {
+        "code": {
+          "const": "ARTIFACT_NOT_FOUND"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_artifact"
+        }
+      }
+    },
+    "v_ARTIFACT_RANGE_INVALID_false_artifact_range": {
+      "properties": {
+        "code": {
+          "const": "ARTIFACT_RANGE_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_artifact_range"
+        }
+      }
+    },
+    "v_ARTIFACT_INTEGRITY_FAILURE_false_artifact_integrity": {
+      "properties": {
+        "code": {
+          "const": "ARTIFACT_INTEGRITY_FAILURE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_artifact_integrity"
+        }
+      }
+    },
+    "v_PROJECTION_PROFILE_UNSUPPORTED_false_projection": {
+      "properties": {
+        "code": {
+          "const": "PROJECTION_PROFILE_UNSUPPORTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_projection"
+        }
+      }
+    },
+    "v_OUTCOME_UNKNOWN_false_run_id_thread_id_turn_id": {
+      "properties": {
+        "code": {
+          "const": "OUTCOME_UNKNOWN"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_outcome_unknown"
+        }
+      }
+    },
+    "v_RECOVERY_REQUIRED_false_run_id_generation_identity_verdict_reason": {
+      "properties": {
+        "code": {
+          "const": "RECOVERY_REQUIRED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_recovery"
+        }
+      }
+    },
+    "v_PROFILE_MISMATCH_false_profile_field_expected_actual": {
+      "properties": {
+        "code": {
+          "const": "PROFILE_MISMATCH"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_profile_comparison"
+        }
+      }
+    },
+    "v_COMPATIBILITY_REJECTED_false_profile_check_expected_actual": {
+      "properties": {
+        "code": {
+          "const": "COMPATIBILITY_REJECTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_compatibility"
+        }
+      }
+    },
+    "v_DOLGORAE_PROTOCOL_MISMATCH_false_expected_protocol_actual_protocol_control_v1_available": {
+      "properties": {
+        "code": {
+          "const": "DOLGORAE_PROTOCOL_MISMATCH"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_protocol"
+        }
+      }
+    },
+    "v_PROTOCOL_VERSION_UNSUPPORTED_false_protocol_version": {
+      "properties": {
+        "code": {
+          "const": "PROTOCOL_VERSION_UNSUPPORTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_protocol_version"
+        }
+      }
+    },
+    "v_PROTOCOL_FRAME_TOO_LARGE_false_channel_observed_bytes_limit_bytes": {
+      "properties": {
+        "code": {
+          "const": "PROTOCOL_FRAME_TOO_LARGE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_frame"
+        }
+      }
+    },
+    "v_RUNTIME_PATH_INVALID_false_path_reason": {
+      "properties": {
+        "code": {
+          "const": "RUNTIME_PATH_INVALID"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_path_reason"
+        }
+      }
+    },
+    "v_RUNTIME_PATH_COLLISION_false_path_expected_identity_observed_identity": {
+      "properties": {
+        "code": {
+          "const": "RUNTIME_PATH_COLLISION"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_path_collision"
+        }
+      }
+    },
+    "v_REDACTION_FAILURE_false_source_kind_json_pointer_reason": {
+      "properties": {
+        "code": {
+          "const": "REDACTION_FAILURE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_redaction"
+        }
+      }
+    },
+    "v_INTERNAL_ERROR_false_invariant": {
+      "properties": {
+        "code": {
+          "const": "INTERNAL_ERROR"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_invariant"
+        }
+      }
+    },
+    "v_TURN_FAILED_false_run_id_turn_id_status": {
+      "properties": {
+        "code": {
+          "const": "TURN_FAILED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_turn_status"
+        }
+      }
+    },
+    "v_TURN_INTERRUPTED_false_run_id_turn_id_status": {
+      "properties": {
+        "code": {
+          "const": "TURN_INTERRUPTED"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_turn_status"
+        }
+      }
+    },
+    "v_AUDIT_INTEGRITY_FAILURE_false_run_id_sequence_reason": {
+      "properties": {
+        "code": {
+          "const": "AUDIT_INTEGRITY_FAILURE"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "$ref": "#/$defs/d_audit"
+        }
+      }
+    },
+    "d_argument_reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argument",
+        "reason"
+      ],
+      "properties": {
+        "argument": {
+          "$ref": "#/$defs/string"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_workspace_path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_path"
+      ],
+      "properties": {
+        "workspace_path": {
+          "$ref": "#/$defs/path"
+        }
+      }
+    },
+    "d_path_reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_profile_server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "server_key",
+        "reason"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/string"
+        },
+        "server_key": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_profile_migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "previous_server_key",
+        "new_server_key",
+        "drift_fields",
+        "required_action"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/string"
+        },
+        "previous_server_key": {
+          "$ref": "#/$defs/sha256"
+        },
+        "new_server_key": {
+          "$ref": "#/$defs/sha256"
+        },
+        "drift_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/string"
+          }
+        },
+        "required_action": {
+          "const": "profile_server_migrate_with_operator"
+        }
+      }
+    },
+    "d_server_epoch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "server_key",
+        "expected_epoch",
+        "observed_epoch"
+      ],
+      "properties": {
+        "server_key": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expected_epoch": {
+          "$ref": "#/$defs/integer"
+        },
+        "observed_epoch": {
+          "$ref": "#/$defs/integer"
+        }
+      }
+    },
+    "d_run_id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "d_run_id_thread_id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "thread_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "thread_id": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_run_id_turn_id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "turn_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_run_id_request_id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "request_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "request_id": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_workspace_path_reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_path",
+        "reason"
+      ],
+      "properties": {
+        "workspace_path": {
+          "$ref": "#/$defs/path"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_run_state_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "state",
+        "operation"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "$ref": "#/$defs/lifecycle"
+        },
+        "operation": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_run_state_invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "reason",
+        "required_action"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "reason": {
+          "enum": [
+            "writer_policy_without_authority",
+            "writer_epoch_mismatch",
+            "writer_generation_mismatch",
+            "policy_epoch_mismatch",
+            "selected_server_epoch_mismatch",
+            "shared_server_epoch_mismatch",
+            "assurance_order_invalid",
+            "state_variant_mismatch",
+            "successor_lineage_invalid",
+            "successor_source_missing",
+            "successor_turn_not_terminal",
+            "successor_workspace_mismatch"
+          ]
+        },
+        "required_action": {
+          "const": "reconcile_run_state"
+        }
+      }
+    },
+    "d_policy_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "operation"
+      ],
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/string"
+        },
+        "operation": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_run_owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "owner_kind"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "owner_kind": {
+          "enum": [
+            "turn",
+            "startup",
+            "attachment"
+          ]
+        }
+      }
+    },
+    "d_writer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "holder_run_id",
+        "holder_profile",
+        "holder_state",
+        "holder_controller_kind",
+        "writer_generation",
+        "handoff_eligible"
+      ],
+      "properties": {
+        "workspace_id": {
+          "$ref": "#/$defs/sha256"
+        },
+        "holder_run_id": {
+          "$ref": "#/$defs/nullable_uuid"
+        },
+        "holder_profile": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "holder_state": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/lifecycle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "holder_controller_kind": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "writer_generation": {
+          "$ref": "#/$defs/integer"
+        },
+        "handoff_eligible": {
+          "type": "boolean"
+        }
+      }
+    },
+    "d_handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "handoff_id",
+        "source_run_id",
+        "destination_run_id",
+        "expected_writer_generation",
+        "observed_writer_generation",
+        "blockers"
+      ],
+      "properties": {
+        "workspace_id": {
+          "$ref": "#/$defs/sha256"
+        },
+        "handoff_id": {
+          "$ref": "#/$defs/nullable_uuid"
+        },
+        "source_run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "destination_run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "expected_writer_generation": {
+          "$ref": "#/$defs/integer"
+        },
+        "observed_writer_generation": {
+          "$ref": "#/$defs/integer"
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/string"
+          }
+        }
+      }
+    },
+    "d_controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "operation"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "operation": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_control_mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "requested_control_mode",
+        "controller_kind",
+        "required_action"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/nullable_uuid"
+        },
+        "requested_control_mode": {
+          "enum": [
+            "direct_interactive",
+            "managed_agent"
+          ]
+        },
+        "controller_kind": {
+          "enum": [
+            "human_cli",
+            "interactive_client",
+            "workflow_orchestrator",
+            "automation"
+          ]
+        },
+        "required_action": {
+          "const": "use_compatible_controller"
+        }
+      }
+    },
+    "d_controller_reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "state",
+        "blockers"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "state": {
+          "$ref": "#/$defs/lifecycle"
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/string"
+          }
+        }
+      }
+    },
+    "d_operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation"
+      ],
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_access_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "from",
+        "to",
+        "required_action"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "from": {
+          "enum": [
+            "read",
+            "write"
+          ]
+        },
+        "to": {
+          "enum": [
+            "read",
+            "write"
+          ]
+        },
+        "required_action": {
+          "enum": [
+            "fork_new_writer_thread",
+            "retire_writer_then_new_reader"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "from": {
+              "const": "read"
+            },
+            "to": {
+              "const": "write"
+            },
+            "required_action": {
+              "const": "fork_new_writer_thread"
+            }
+          }
+        },
+        {
+          "properties": {
+            "from": {
+              "const": "write"
+            },
+            "to": {
+              "const": "read"
+            },
+            "required_action": {
+              "const": "retire_writer_then_new_reader"
+            }
+          }
+        }
+      ]
+    },
+    "d_background": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "thread_id",
+        "server_epoch",
+        "lane_id",
+        "process_generation",
+        "census_revision",
+        "reason",
+        "required_action"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "thread_id": {
+          "$ref": "#/$defs/string"
+        },
+        "server_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lane_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "process_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "census_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        },
+        "required_action": {
+          "enum": [
+            "retry_census",
+            "reconcile_dedicated_lane",
+            "operator_repair"
+          ]
+        }
+      }
+    },
+    "d_lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "execution_lane",
+        "reason",
+        "required_action"
+      ],
+      "properties": {
+        "run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_lane": {
+          "enum": [
+            "shared_readonly",
+            "dedicated"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        },
+        "required_action": {
+          "enum": [
+            "create_dedicated_successor",
+            "retain_original_lane",
+            "reconcile_thread_residency",
+            "use_supported_profile",
+            "lower_required_assurance",
+            "reconcile_history",
+            "migrate_profile_lanes",
+            "retry_dedicated_start",
+            "operator_repair"
+          ]
+        }
+      }
+    },
+    "d_successor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_run_id",
+        "source_turn_id",
+        "reason",
+        "required_action"
+      ],
+      "properties": {
+        "source_run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_turn_id": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "reason": {
+          "enum": [
+            "source_not_terminal",
+            "lineage_invalid",
+            "controller_invalid",
+            "profile_override_forbidden",
+            "model_unsupported"
+          ]
+        },
+        "required_action": {
+          "enum": [
+            "use_terminal_source",
+            "repair_lineage",
+            "use_new_same_principal_controller",
+            "inherit_source_profile",
+            "select_supported_model"
+          ]
+        }
+      }
+    },
+    "d_capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "capability_name",
+        "support"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "capability_name": {
+          "$ref": "#/$defs/string"
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "recognized_unsupported",
+            "unavailable"
+          ]
+        }
+      }
+    },
+    "d_idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "recorded_input_digest",
+        "observed_input_digest"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "recorded_input_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observed_input_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "d_outcome_unknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "thread_id",
+        "turn_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "thread_id": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/nullable_string"
+        }
+      }
+    },
+    "d_operation_timeout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "budget_ms"
+      ],
+      "properties": {
+        "operation": {
+          "enum": [
+            "replay",
+            "schema_generation",
+            "profile_doctor"
+          ]
+        },
+        "budget_ms": {
+          "$ref": "#/$defs/integer"
+        }
+      }
+    },
+    "d_interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "request_id",
+        "resolved_at"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "request_id": {
+          "$ref": "#/$defs/string"
+        },
+        "resolved_at": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_stale_interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "request_id",
+        "request_generation",
+        "current_generation"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "request_id": {
+          "$ref": "#/$defs/string"
+        },
+        "request_generation": {
+          "$ref": "#/$defs/integer"
+        },
+        "current_generation": {
+          "$ref": "#/$defs/integer"
+        }
+      }
+    },
+    "d_interaction_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "request_id",
+        "response_schema",
+        "reason"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "request_id": {
+          "$ref": "#/$defs/string"
+        },
+        "response_schema": {
+          "$ref": "#/$defs/string"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_file_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "request_id",
+        "item_id",
+        "artifact_id",
+        "reason"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "request_id": {
+          "$ref": "#/$defs/string"
+        },
+        "item_id": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/nullable_uuid"
+        },
+        "reason": {
+          "enum": [
+            "uncorrelated",
+            "path_escape",
+            "oversized",
+            "missing",
+            "digest_mismatch",
+            "snapshot_changed"
+          ]
+        }
+      }
+    },
+    "d_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "artifact_id"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "d_artifact_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "artifact_id",
+        "offset",
+        "length",
+        "total"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "offset": {
+          "$ref": "#/$defs/integer"
+        },
+        "length": {
+          "$ref": "#/$defs/integer"
+        },
+        "total": {
+          "$ref": "#/$defs/integer"
+        }
+      }
+    },
+    "d_artifact_integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "artifact_id",
+        "expected_sha256",
+        "observed_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "expected_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observed_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "d_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "supported"
+      ],
+      "properties": {
+        "requested": {
+          "$ref": "#/$defs/string"
+        },
+        "supported": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "minimal",
+              "operational"
+            ]
+          }
+        }
+      }
+    },
+    "d_recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "generation",
+        "identity_verdict",
+        "reason"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "generation": {
+          "$ref": "#/$defs/integer"
+        },
+        "identity_verdict": {
+          "$ref": "#/$defs/identity"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_profile_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "field",
+        "expected",
+        "actual"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/string"
+        },
+        "field": {
+          "$ref": "#/$defs/string"
+        },
+        "expected": {
+          "$ref": "#/$defs/json_value"
+        },
+        "actual": {
+          "$ref": "#/$defs/json_value"
+        }
+      }
+    },
+    "d_compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "check",
+        "expected",
+        "actual"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/string"
+        },
+        "check": {
+          "$ref": "#/$defs/string"
+        },
+        "expected": {
+          "$ref": "#/$defs/json_value"
+        },
+        "actual": {
+          "$ref": "#/$defs/json_value"
+        }
+      }
+    },
+    "d_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_protocol",
+        "actual_protocol",
+        "control_v1_available"
+      ],
+      "properties": {
+        "expected_protocol": {
+          "$ref": "#/$defs/integer"
+        },
+        "actual_protocol": {
+          "$ref": "#/$defs/integer"
+        },
+        "control_v1_available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "d_protocol_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "requested",
+        "supported"
+      ],
+      "properties": {
+        "protocol": {
+          "enum": [
+            "machine",
+            "event"
+          ]
+        },
+        "requested": {
+          "$ref": "#/$defs/integer"
+        },
+        "supported": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/integer"
+          }
+        }
+      }
+    },
+    "d_frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "observed_bytes",
+        "limit_bytes"
+      ],
+      "properties": {
+        "channel": {
+          "enum": [
+            "cli_worker",
+            "app_server_websocket_frame",
+            "app_server_websocket_message",
+            "app_server_stderr",
+            "ledger"
+          ]
+        },
+        "observed_bytes": {
+          "$ref": "#/$defs/integer"
+        },
+        "limit_bytes": {
+          "$ref": "#/$defs/integer"
+        }
+      }
+    },
+    "d_path_collision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "expected_identity",
+        "observed_identity"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "expected_identity": {
+          "type": "object"
+        },
+        "observed_identity": {
+          "type": "object"
+        }
+      }
+    },
+    "d_redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "json_pointer",
+        "reason"
+      ],
+      "properties": {
+        "source_kind": {
+          "$ref": "#/$defs/string"
+        },
+        "json_pointer": {
+          "$ref": "#/$defs/string"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invariant"
+      ],
+      "properties": {
+        "invariant": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    },
+    "d_turn_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "turn_id",
+        "status"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/string"
+        },
+        "status": {
+          "$ref": "#/$defs/turn_status"
+        }
+      }
+    },
+    "d_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "sequence",
+        "reason"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "sequence": {
+          "$ref": "#/$defs/integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/string"
+        }
+      }
+    }
   }
 }

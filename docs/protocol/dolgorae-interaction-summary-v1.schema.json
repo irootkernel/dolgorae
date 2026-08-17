@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/interaction-summary/v1",
+  "title": "Dolgorae observer-safe interaction summary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "run_id", "kind", "status", "title", "controller_kind", "user_escalation_required", "protected_input", "created_at", "expires_at", "resolved_at"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "request_id": { "$ref": "#/$defs/uuid7" },
+    "run_id": { "$ref": "#/$defs/uuid7" },
+    "kind": { "enum": ["command_execution_approval", "file_change_approval", "user_input"] },
+    "status": { "enum": ["pending", "resolved", "stale"] },
+    "title": { "type": "string", "pattern": "^[^\\u0000-\\u001f\\u007f]+$", "x-maxUtf8Bytes": 256 },
+    "controller_kind": { "enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation"] },
+    "user_escalation_required": { "type": "boolean" },
+    "protected_input": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "resolved_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "$defs": {
+    "uuid7": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+  }
+}

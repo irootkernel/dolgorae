@@ -13,12 +13,14 @@
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "metadata": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "artifact_id", "run_id", "kind", "media_type", "byte_length", "sha256", "created_at", "retention", "integrity"],
+      "required": ["schema_version", "artifact_id", "run_id", "kind", "visibility", "interaction_request_id", "media_type", "byte_length", "sha256", "created_at", "retention", "integrity"],
       "properties": {
         "schema_version": { "const": 1 },
         "artifact_id": { "$ref": "#/$defs/uuid7" },
         "run_id": { "$ref": "#/$defs/uuid7" },
         "kind": { "enum": ["file_change_diff", "final_response"] },
+        "visibility": { "enum": ["observer", "controller_only"] },
+        "interaction_request_id": { "oneOf": [{ "$ref": "#/$defs/uuid7" }, { "type": "null" }] },
         "media_type": { "enum": ["text/x-diff", "text/markdown"] },
         "byte_length": { "type": "integer", "minimum": 0, "maximum": 33554432 },
         "sha256": { "$ref": "#/$defs/sha256" },
@@ -28,7 +30,8 @@
       },
       "allOf": [
         { "if": { "properties": { "kind": { "const": "file_change_diff" } } }, "then": { "properties": { "media_type": { "const": "text/x-diff" }, "byte_length": { "maximum": 8388608 } } } },
-        { "if": { "properties": { "kind": { "const": "final_response" } } }, "then": { "properties": { "media_type": { "const": "text/markdown" } } } }
+        { "if": { "properties": { "kind": { "const": "final_response" } } }, "then": { "properties": { "media_type": { "const": "text/markdown" }, "visibility": { "const": "observer" }, "interaction_request_id": { "type": "null" } } } },
+        { "if": { "properties": { "interaction_request_id": { "type": "string" } }, "required": ["interaction_request_id"] }, "then": { "properties": { "visibility": { "const": "controller_only" } } } }
       ]
     },
     "read": {

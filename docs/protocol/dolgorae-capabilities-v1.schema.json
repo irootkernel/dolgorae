@@ -30,20 +30,24 @@
       "properties": {
         "shared_readonly": {
           "type": "object", "additionalProperties": false,
-          "required": ["command_execution", "background_control", "writer_support", "codex_mode"],
+          "required": ["command_execution", "background_control", "per_run_process_cleanup", "maximum_assurance", "writer_support", "codex_mode"],
           "properties": {
-            "command_execution": { "const": "plan_mode_readonly" },
+            "command_execution": { "const": "bounded_best_effort" },
             "background_control": { "const": "profile_aggregate_only" },
+            "per_run_process_cleanup": { "const": "unavailable" },
+            "maximum_assurance": { "const": "best_effort_personal_alpha" },
             "writer_support": { "const": false },
             "codex_mode": { "const": "plan" }
           }
         },
         "dedicated": {
           "type": "object", "additionalProperties": false,
-          "required": ["command_execution", "background_control", "writer_support", "physical_start"],
+          "required": ["command_execution", "background_control", "per_run_process_cleanup", "maximum_assurance", "writer_support", "physical_start"],
           "properties": {
             "command_execution": { "const": "supported" },
             "background_control": { "const": "best_effort_personal_alpha" },
+            "per_run_process_cleanup": { "const": "bounded_process_census" },
+            "maximum_assurance": { "const": "best_effort_personal_alpha" },
             "writer_support": { "const": true },
             "physical_start": { "const": "lazy_first_input" }
           }
@@ -99,15 +103,24 @@
         { "if": { "properties": { "support": { "const": "unavailable" } } }, "then": { "properties": { "mechanism": { "const": null } } } }
       ]
     },
-    "native_subagents": { "enum": ["supported", "unavailable", "unverified"] },
-    "native_subagents_policy": { "enum": ["enabled", "disabled"] },
+    "native_subagents": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lifecycle_observation", "disable_enforcement", "quiescence_tracking", "reason"],
+      "properties": {
+        "lifecycle_observation": { "enum": ["supported", "unavailable", "unverified"] },
+        "disable_enforcement": { "const": "unavailable" },
+        "quiescence_tracking": { "enum": ["supported", "unverified"] },
+        "reason": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 512 }
+      }
+    },
+    "native_subagents_policy": { "const": "enabled" },
     "profile": { "type": ["string", "null"] }
   },
   "allOf": [
     { "if": { "properties": { "access_policy_transition": { "const": "supported" } } }, "then": { "properties": { "profile": { "type": "string" } } } },
     { "if": { "properties": { "background_execution_control": { "properties": { "support": { "const": "supported" } } } } }, "then": { "properties": { "profile": { "type": "string" } } } },
-    { "if": { "properties": { "native_subagents": { "const": "supported" } } }, "then": { "properties": { "profile": { "type": "string" } } } },
-    { "if": { "properties": { "profile": { "type": "null" } } }, "then": { "properties": { "access_policy_transition": { "const": "unverified" }, "background_execution_control": { "properties": { "support": { "const": "unverified" }, "mechanism": { "const": "dedicated_lane_process_census" } } }, "native_subagents": { "const": "unverified" } } } }
+    { "if": { "properties": { "native_subagents": { "properties": { "lifecycle_observation": { "const": "supported" }, "quiescence_tracking": { "const": "supported" } } } } }, "then": { "properties": { "profile": { "type": "string" } } } },
+    { "if": { "properties": { "profile": { "type": "null" } } }, "then": { "properties": { "access_policy_transition": { "const": "unverified" }, "background_execution_control": { "properties": { "support": { "const": "unverified" }, "mechanism": { "const": "dedicated_lane_process_census" } } }, "native_subagents": { "properties": { "lifecycle_observation": { "const": "unverified" }, "quiescence_tracking": { "const": "unverified" } } } } } }
   ],
   "$defs": { "support": { "enum": ["supported", "recognized_unsupported", "unavailable"] } }
 }

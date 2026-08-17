@@ -1009,19 +1009,33 @@ from purpose and lane. Direct mode accepts `human_cli` or `interactive_client`
 and defaults to a dedicated lane. Managed mode accepts
 `workflow_orchestrator` or `automation` and requires explicit purpose and lane.
 Controller kind `other` cannot bind a v1 Run. Only the Controller resolves full
-interactions; observers are read-only and redacted. Controller credentials
+interactions and reads interaction-derived artifacts; observers receive strict
+non-sensitive summaries and observer-visible artifacts. Controller credentials
 remain outside every LLM-visible channel.
 
 Advertise only `best_effort_personal_alpha` for Codex 0.147.0. Requested
 assurance is checked before allocation. Polling and exact identity revalidation
 remain the background-work authority, but do not claim adversarial containment.
+Basic same-home coexistence and bounded storage integrity passed only for the
+retained personal-alpha scenario. Long-duration/high-contention operation and
+forced authentication refresh are unverified; production-grade durability is
+not claimed.
 Treat Codex-native `multi_agent` as a profile policy independent of Dolgorae
-Run/worker concurrency. The selected default permits native subagents. The
+Run/worker concurrency. Public profiles permit only the enabled policy; explicit
+disable is rejected because the pinned binary did not enforce it. The
 corrected exact-version campaign proves child identity, parent, terminal
 lifecycle, persisted history, restart continuity, and exact cleanup, so the
-enabled profile reports `supported`. Operations still refuse active or unknown
-native state when they require quiescence. The disabled case produced a child
-and therefore reports `unverified`, not `unavailable`.
+enabled profile reports supported lifecycle observation and quiescence tracking.
+Operations still refuse active or unknown native state when they require
+quiescence. Disable enforcement is unavailable; the disabled case is a
+diagnostic-only unverified observation.
+
+`run create-successor` preserves workspace, profile, and control mode, but may
+apply validated model/effort, purpose, capability additions, and a non-decreasing
+assurance request. The source Controller authorizes creation and a new
+same-principal credential binds the destination. This avoids cloning authority,
+Controller instructions, or hidden history while allowing an orchestrator to
+specialize the successor deliberately.
 
 ### Consequences
 

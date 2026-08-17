@@ -196,13 +196,15 @@ A Runtime Profile contains:
 - an absolute expected `CODEX_HOME`;
 - the symbolic `profile_state_directory_v1` launch-cwd policy;
 - an explicit non-secret environment map.
-- an explicit `native_subagents: enabled|disabled` policy, defaulting to
-  `enabled` for newly defined v1 profiles.
+- an optional `native_subagents: enabled` policy. Absence and `enabled` have the
+  same canonical meaning for a public profile.
 
 `local.yaml` is strict YAML with top-level `schema_version: 1` and a `profiles`
 mapping keyed by name. Each entry contains nonempty `argv: [string, ...]`,
 absolute `codex_home: string`, `environment: {string: string}`, and optional
-`native_subagents: enabled|disabled`. `argv[0]`
+`native_subagents: enabled`. An explicit `disabled` value is rejected with
+`NATIVE_SUBAGENT_DISABLE_UNAVAILABLE`; it is reserved to diagnostic probes and
+is not a supported production profile contract. `argv[0]`
 MUST be an absolute regular Codex executable; v1 rejects shell interpreters,
 arbitrary wrappers, and argv that already contains an app-server subcommand.
 Only the required-subset manifest's `profile_launch.global_arguments` are
@@ -211,14 +213,16 @@ allowed after `argv[0]`. V1 accepts canonical `--profile <name>`, repeatable
 `--strict-config`; it rejects aliases, `--flag=value`, missing values, and every
 other option. Normalization preserves argument and repetition order exactly.
 The `multi_agent` Codex flag is reserved to Dolgorae and MUST NOT appear in raw
-profile argv. Dolgorae injects exactly one canonical `--enable multi_agent` or
-`--disable multi_agent` pair from `native_subagents`. The corrected exact-version
+profile argv. Dolgorae injects exactly one canonical `--enable multi_agent`
+pair. The `--disable multi_agent` form is diagnostic-only because the pinned
+campaign observed that it did not prevent child creation. The corrected exact-version
 campaign for an enabled 0.147.0 profile proved child identity, parent
 relationship, active/terminal lifecycle, persisted history, restart continuity,
-and cleanup, so it advertises `native_subagents:supported`. Active or unknown
+and cleanup, so it advertises lifecycle observation and quiescence tracking as
+`supported`, while disable enforcement remains `unavailable`. Active or unknown
 native state still blocks pause, physical-generation replacement, profile stop,
-and shutdown. The disabled case also produced a child, so an explicitly disabled
-0.147.0 profile advertises `unverified`, not `unavailable`.
+and shutdown. A disabled diagnostic result is recorded as `unverified`; it can
+never be published as a usable profile capability.
 For the 0.147.0 production profile, initialize MUST send
 `optOutNotificationMethods:[]`. It MUST NOT suppress `item/started`,
 `item/completed`, `thread/started`, turn lifecycle, or correlation methods.
@@ -580,6 +584,7 @@ dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] submit 
 dolgorae [--human] run wait <run-id> <turn-id> [--workspace <path>] [--timeout <duration>]
 dolgorae [--human] run events <run-id> [--workspace <path>] [--after <cursor>] [--follow] [--projection <minimal|operational>]
 dolgorae [--human] run pending <run-id> [--workspace <path>]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] interaction get <run-id> <request-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] respond <run-id> --request-id <id> --idempotency-key <key> [--workspace <path>] [--response-fd <fd>]
 dolgorae [--human] run artifact show <run-id> <artifact-id> [--workspace <path>]
 dolgorae [--human] run artifact read <run-id> <artifact-id> --offset <n> --length <n> [--workspace <path>]
@@ -593,7 +598,7 @@ dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] resume 
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] recover <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] reconcile <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] fork --from <run-id> [--workspace <path>] [--fresh] [--model <model>]
-dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] create-successor --from <run-id> --from-turn <turn-id> --control-mode <direct-interactive|managed-agent> --purpose <purpose> [--purpose-label <label>] --required-assurance <level> [--handoff-summary-fd <fd>] [--artifact-ref <artifact-id>]... --idempotency-key <key> [--workspace <path>]
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] create-successor --from <run-id> --from-turn <turn-id> --purpose <purpose> [--purpose-label <label>] [--model <model>] [--effort <effort>] [--required-assurance <level>] [--require-capability <name>]... [--instructions-fd <fd>] [--handoff-summary-fd <fd>] [--artifact-ref <artifact-id>]... --idempotency-key <key> [--workspace <path>] (--new-controller-file <path> | --new-controller-fd <fd>)
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] close <run-id> [--workspace <path>] [--interrupt]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] delete <run-id> --confirm [--workspace <path>]
 dolgorae [--human] run verify <run-id> [--workspace <path>]
@@ -647,15 +652,25 @@ not fabricate a Turn or change lanes.
 
 `run create-successor` requires a `shared_readonly` source, its exact current
 terminal Turn, no active Turn, and no unresolved interaction. It creates a new
-Run ID and dedicated lane under the same Controller ID/generation/digest. It
+Run ID and dedicated lane. Workspace, profile, and control mode are inherited
+and cannot be overridden. Model and effort may be overridden only when the
+selected profile supports them. Required assurance defaults to the source and
+may be retained or raised, never lowered; required capabilities are the union
+of the source set and additions and are revalidated before allocation. The
+source Controller authorizes creation, but the destination is bound to a new
+same-principal per-Run Controller credential supplied through exactly one new
+controller descriptor. Possession of the source secret does not authorize the
+successor after publication. It
 never mutates the source lane, copies hidden reasoning, or inherits writer
 authority. The immutable lineage records source Run/thread/terminal-Turn IDs,
 creation reason, source/destination Controller kinds, timestamp, workspace
 baseline, at most 64 artifact references, and the SHA-256 of an optional UTF-8
 handoff summary of at most 65,536 bytes. The successor remains threadless and
 physically absent until first input; its first instruction composition may
-include the bounded summary and selected artifact references. Cross-controller
-successors are rejected in v1.
+include the bounded summary, selected artifact references, and bounded
+destination instructions read from `--instructions-fd`. Common, mode, and
+purpose prefixes are recomposed; source Controller instructions and hidden
+history are never copied. A different principal is rejected in v1.
 
 In JSON mode `--help` and `--version` emit ordinary success envelopes with
 commands `help` and `version`; `--human` selects presentation-only text. A
@@ -929,6 +944,9 @@ normative:
 | `THREAD_NOT_FOUND` | 3 | `run resume/send/submit/wait/recover/reconcile` and history-copying `run fork` | the pinned Codex history required by the operation is absent; never emitted by `fork --fresh` |
 | `TURN_NOT_FOUND` | 3 | `run wait` | the turn ID is absent from both ledger and Codex history |
 | `INTERACTION_NOT_FOUND` | 3 | `run respond` | the interaction ID is absent |
+| `INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER` | 4 | `run interaction get` | an observer attempted to fetch the full normalized interaction |
+| `INTERACTION_ARTIFACT_REQUIRES_CONTROLLER` | 4 | artifact show/read | an observer attempted to fetch a controller-only interaction artifact |
+| `OBSERVER_MUTATION_FORBIDDEN` | 4 | state-changing run commands | an observer attempted a Controller mutation without presenting the bound credential |
 | `PROFILE_ALREADY_EXISTS` | 4 | `profile add` | the name already exists; replacement is never implicit |
 | `PROFILE_SERVER_BUSY` | 4 | profile lifecycle and run connect/recovery | another serialized profile operation or active-member condition temporarily blocks the command |
 | `PROFILE_LAUNCH_CONFLICT` | 4 | `profile doctor/server start`, `run start/resume/recover/fork` | the canonical `CODEX_HOME` already has a different active launch contract |
@@ -947,12 +965,15 @@ normative:
 | `CONTROLLER_RESET_NOT_ALLOWED` | 4 | `run controller reset` | active work, a pending interaction, handoff, or unverifiable writer state blocks reset |
 | `OPERATOR_MISMATCH` | 4 | operator credential rotation, profile stop/restart, controller reset | the supplied separate local operator capability is absent, stale, or invalid |
 | `CAPABILITY_UNSUPPORTED` | 4 | `run start`, projection and interaction commands | a required Dolgorae or profile feature is unavailable |
+| `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE` | 4 | profile add/update/doctor | the public profile requests disable enforcement that pinned Codex 0.147.0 did not provide |
 | `ACCESS_TRANSITION_UNSUPPORTED` | 4 | write acquire/release and handoff | the tested profile cannot safely apply the requested policy to the existing thread; fork a new run/thread |
 | `BACKGROUND_EXECUTION_UNVERIFIED` | 4 | writer release/handoff/close and recovery | the Dedicated lane-generation census or exact cleanup cannot prove the supported process scope empty |
-| `IDEMPOTENCY_CONFLICT` | 4 | `run send/submit/respond` | a run-scoped key was reused with different normalized input |
+| `IDEMPOTENCY_CONFLICT` | 4 | `run send/submit/respond/create-successor` | a run-scoped key was reused with different normalized input |
 | `INTERACTION_ALREADY_RESOLVED` | 4 | `run respond` | another valid response already won |
 | `INTERACTION_STALE` | 4 | `run respond` | the interaction belongs to an older or cleared generation |
 | `INTERACTION_RESPONSE_INVALID` | 4 | `run respond` | the response does not satisfy the recorded normalized schema |
+| `SUCCESSOR_PROFILE_OVERRIDE_FORBIDDEN` | 4 | `run create-successor` | the request attempts to change inherited workspace, profile, or control mode |
+| `SUCCESSOR_MODEL_UNSUPPORTED` | 4 | `run create-successor` | the requested destination model or effort is not supported by the inherited profile snapshot |
 | `FILE_CHANGE_ARTIFACT_UNAVAILABLE` | 4 | `run pending/respond` | the exact correlated proposed change cannot be represented or its artifact is missing, oversized, or digest-stale |
 | `ARTIFACT_NOT_FOUND` | 3 | artifact show/read/export | the artifact ID is absent or does not belong to the addressed Run |
 | `ARTIFACT_RANGE_INVALID` | 2 | artifact read | offset/length is outside the artifact or the 1-MiB call bound |
@@ -961,7 +982,7 @@ normative:
 | `OUTCOME_UNKNOWN` | 4 | state-changing run commands | the run is quarantined; this code takes precedence over `RUN_STATE_CONFLICT` |
 | `RECOVERY_REQUIRED` | 4 | writer acquire/release and lifecycle/recovery commands | prior same-run identity or a `blocked_unknown` workspace writer generation cannot be proved safe; new reader runs and projection-only commands are excluded and the code is never generically retryable |
 | `PROFILE_MISMATCH` | 5 | all commands that start or reconnect a worker/app-server | executable, `CODEX_HOME`, account, or immutable profile identity differs from the manifest |
-| `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
+| `COMPATIBILITY_REJECTED` | 5 | `profile doctor`, `run start/send/submit/set-effort/resume/recover/reconcile/fork/create-successor` | version, model, effort, schema, login, sandbox, or app-server capability validation fails |
 | `DOLGORAE_PROTOCOL_MISMATCH` | 5 | every ordinary command connecting to an existing worker | workspace/run/generation identity or mutation protocol differs, or Dolgorae version/binary digest differs; retry `hello`, bounded `status`, or `shutdown` through control protocol v1 |
 | `PROTOCOL_VERSION_UNSUPPORTED` | 5 | machine commands | the caller requests an unsupported machine or event schema version |
 | `TRANSPORT_FAILURE` | 6 | every command that contacts a worker or singleton | Unix socket, WebSocket, or protocol transport fails |
@@ -1078,7 +1099,8 @@ accepts `turn/start` and Dolgorae fsyncs the permanent thread binding and turn I
 `wait` requires both run and turn
 IDs. Waiting and caller-timeout returns use exit 0.
 
-An idempotency key is REQUIRED for `send`, `submit`, and `respond` and is unique
+An idempotency key is REQUIRED for `send`, `submit`, `respond`, and
+`create-successor` and is unique
 for the run's lifetime within its operation class. Reusing a key with
 the same normalized message, image paths/details/byte digests, and turn options resolves to
 the original turn. Reusing it with different input returns
@@ -1136,10 +1158,14 @@ per Run are at most 256 MiB. Retention equals Run lifetime; an unresolved
 interaction's artifact cannot be removed. `artifact show` returns metadata only.
 `artifact read` uses raw-byte offsets, requires `1 <= length <= 1048576`, returns
 base64 content plus actual range and EOF, and verifies the full artifact digest
-before first access in an invocation. `artifact export` is controller-authorized,
+before first access in an invocation. Each artifact is durably classified as
+`observer` or `controller_only`; interaction-derived artifacts are always
+`controller_only` and carry their request ID. `artifact export` is controller-authorized,
 uses safe create-exclusive destination handling and streaming verification.
-Same-uid observers may show/read only artifacts referenced by their client-safe
-Run projection; no command exposes the internal artifact path.
+Same-uid observers may show/read only `observer` artifacts referenced by their
+client-safe Run projection. A controller-only artifact returns
+`INTERACTION_ARTIFACT_REQUIRES_CONTROLLER` before metadata or bytes are exposed;
+no command exposes the internal artifact path.
 
 Observed paths are populated only when `measured` is true and describe workspace
 changes during the terminal turn interval. In Git mode
@@ -1672,9 +1698,14 @@ maps stable server requests as follows:
 
 Supported requests are represented by the discriminator-bound interaction
 kinds `command_execution_approval`, `file_change_approval`, and `user_input`.
-`run pending` returns the generation-qualified request ID,
-run/thread/turn/item IDs, server epoch, status, exact kind-bound payload,
-decisions, response-schema ID, timestamps, and resolution. Approval responses
+`run pending` is an observer-safe operation and returns only strict
+`dolgorae-interaction-summary/v1` records: request and Run IDs, kind, status,
+generic title, Controller kind, whether user escalation is required, whether
+the request contains protected input, and timestamps. It never returns command
+text, cwd, questions/options, response schema, decision tokens, artifact IDs,
+thread/turn/item IDs, or server epoch. `run interaction get` is
+Controller-authorized and returns the full discriminator-bound interaction
+needed to resolve that request. Approval responses
 contain only `decision`. User-input responses contain an `answers` map keyed by
 question ID, each with a nonempty string array; Dolgorae validates IDs, option
 membership, and `isOther` semantics before translating to the pinned Codex
@@ -1777,7 +1808,7 @@ ordinary tampering; it is not a signature and does not defend against a hostile
 same-user attacker.
 
 The v1 audit-kind enum is closed:
-`workspace_initialized`, `run_created`, `turn_intent`, `thread_bound`,
+`workspace_initialized`, `run_created`, `successor_created`, `turn_intent`, `thread_bound`,
 `turn_started`, `turn_terminal`, `lifecycle_transition`,
 `run_generation_started`, `run_generation_stopped`, `app_server_request`,
 `app_server_response`, `app_server_notification`, `approval_requested`,
@@ -2038,14 +2069,16 @@ closed-generation history, identity census, cleanup, and unrelated-process
 non-signalling pass live probes. Codex 0.147.0 uses
 `dedicated_lane_process_census`; a future pinned, complete native terminal API
 may upgrade the mechanism to `hybrid` but is not a release prerequisite.
-It also exposes profile-specific `native_subagents` as `supported`,
-`unavailable`, or `unverified`. A feature flag or successful root turn alone
-MUST NOT produce `supported`; the pinned probe must observe child identity,
-parent relationship, active/terminal lifecycle, and restart behavior. A binary-
-level query without a profile returns `unverified`. The exact 0.147.0 enabled
-probe passed that complete gate and reports `supported`. The disabled diagnostic
-also produced a persisted child, so it reports `unverified` rather than
-`unavailable`. A later pin must rerun the same gate; a policy change still
+It also exposes profile-specific `native_subagents` as a closed object containing
+`lifecycle_observation`, `disable_enforcement`, `quiescence_tracking`, and a
+bounded reason. A feature flag or successful root turn alone MUST NOT produce
+supported lifecycle or quiescence; the pinned probe must observe the two exact
+native item families, child identity, parent relationship, ordered
+active-to-terminal lifecycle, persisted history, restart behavior, and cleanup.
+A binary-level query without a profile reports lifecycle and quiescence as
+`unverified`. The exact 0.147.0 enabled probe passed that complete gate. Disable
+enforcement is `unavailable` because the diagnostic disabled case still created
+a child. A later pin must rerun the same gate; a policy change still
 requires operator-authorized profile migration. Binary-level support
 does not override a rejected or incapable profile. A run declaring a required
 capability MUST fail before allocation when that profile does not provide it.
@@ -2129,6 +2162,7 @@ token never restores a prior assumption or creates two authorities.
 | Writer release | Writer, run mutation | None |
 | Handoff prepare/commit | Handoff, writer, source/destination run locks in UUID order | None |
 | Handoff cancel | Handoff, then affected run locks in UUID order | None |
+| Successor creation | Source/destination run locks in UUID order | None; allocation and capability delivery occur after PREPARE |
 | Controller reset, non-writer | Operator, run startup/mutation | None when external work is needed |
 | Controller reset, writer | Operator, writer, run startup/mutation | None |
 | Run deletion | Writer when named by authority, then run startup/mutation | None |
@@ -2212,8 +2246,11 @@ redacted projections and MUST NOT resolve an interaction. V1 has no single-use
 observer delegation.
 
 Every persisted Run state and every machine-readable Run projection MUST pass
-both `dolgorae-run-state-v1.schema.json` and the normative
-`run_state_semantic_validator_v1` after extracting the shared state fields.
+both `dolgorae-run-state-v1.schema.json` and the executable normative validator
+`tools/validators/run_state_semantic_validator_v1.py` after extracting the
+shared state fields. Machine projections additionally pass
+`tools/validators/validate_run_projection_v1.py` with authoritative policy,
+selected-server, shared-server, and lineage context.
 Schema-only acceptance is insufficient; persistence and projection fail closed
 when the validator rejects any cross-field invariant.
 
@@ -2298,10 +2335,13 @@ still reported the thread loaded after two seconds, and a second server rejected
 resume as an active writer. `THREAD_RESIDENCY_CONFLICT` therefore fails closed;
 a shared Run needing write uses a fresh dedicated successor. The public
 `run create-successor` operation requires the source's current terminal Turn,
-no active Turn or pending interaction, the same Controller binding, and an
-idempotency key. It records immutable lineage and creates a threadless,
-physically absent dedicated Run. Cross-controller successors are unsupported in
-v1; ordinary `run fork` remains a separate history-copy operation.
+no active Turn or pending interaction, source-Controller authorization, a new
+same-principal destination Controller credential, and an idempotency key. It
+records immutable lineage and creates a threadless, physically absent dedicated
+Run. Profile/workspace/control-mode overrides and assurance downgrades are
+forbidden; validated model, effort, capability additions, assurance raises,
+purpose, and bounded destination instructions are allowed. Ordinary `run fork`
+remains a separate history-copy operation.
 
 Lane-specific errors are used only for distinct recovery semantics.
 `EXECUTION_LANE_UNSUPPORTED` rejects a profile that cannot host the selected
