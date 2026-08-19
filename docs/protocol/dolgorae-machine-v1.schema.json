@@ -285,7 +285,7 @@
       "allOf": [
         { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/semantic_constraints" },
         { "if": { "properties": { "state_variant": { "const": "dedicated_unstarted" } }, "required": ["state_variant"] }, "then": { "properties": { "thread_id": { "type": "null" } } } },
-        { "if": { "properties": { "state_variant": { "enum": ["dedicated_reader", "dedicated_writer_reserved", "dedicated_writer_active", "dedicated_releasing"] } }, "required": ["state_variant"] }, "then": { "properties": { "thread_id": { "type": "string", "minLength": 1 } } } },
+        { "if": { "properties": { "state_variant": { "enum": ["dedicated_reader", "dedicated_writer_reserved", "dedicated_writer_active", "dedicated_releasing", "dedicated_blocked_unknown"] } }, "required": ["state_variant"] }, "then": { "properties": { "thread_id": { "type": "string", "minLength": 1 } } } },
         {
           "if": { "properties": { "writer_authority": { "properties": { "state": { "const": "active" } } } } },
           "then": { "properties": { "execution_lane": { "const": "dedicated" }, "effective_policy": { "properties": { "access": { "const": "write" }, "verification": { "const": "verified" } } }, "server_lane": { "properties": { "kind": { "const": "dedicated" }, "state": { "const": "ready" } } } } }
