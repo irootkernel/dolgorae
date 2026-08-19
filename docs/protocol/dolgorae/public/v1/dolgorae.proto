@@ -101,11 +101,6 @@ enum PublicTransport {
   PUBLIC_TRANSPORT_LOCAL_GRPC = 2;
 }
 
-enum AppServerTransport {
-  APP_SERVER_TRANSPORT_UNSPECIFIED = 0;
-  APP_SERVER_TRANSPORT_DIRECT_WEBSOCKET_UNIX = 1;
-}
-
 enum ProfileLaunchMode {
   PROFILE_LAUNCH_MODE_UNSPECIFIED = 0;
   PROFILE_LAUNCH_MODE_DOLGORAE_OWNED_DIRECT_EXECUTABLE = 1;
@@ -651,6 +646,9 @@ message IndependentRunConcurrencyCapabilities {
 }
 
 message GetCapabilitiesResponse {
+  reserved 18;
+  reserved "app_server_transport";
+
   ResponseContext context = 1;
   string dolgorae_version = 2;
   ProtocolCapabilities protocol = 3;
@@ -668,7 +666,6 @@ message GetCapabilitiesResponse {
   BackgroundExecutionCapabilities background_execution = 15;
   repeated PublicTransport supported_transports = 16;
   IndependentRunConcurrencyCapabilities independent_run_concurrency = 17;
-  AppServerTransport app_server_transport = 18;
   ProfileLaunchMode profile_launch_mode = 19;
   NativeSubagentPolicy native_subagent_policy = 20;
 }

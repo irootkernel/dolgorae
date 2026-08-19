@@ -444,9 +444,10 @@ may add bounded redacted detail. A Run directory, ID, and audit genesis are
 published only after profile state commits a ready non-null server epoch.
 
 The run-private artifact store is a bounded projection adjunct, not an event
-authority. It accepts only exact file-change diffs and final responses, writes
-create-exclusive mode-0600 files, records byte length and SHA-256, and enforces
-8-MiB/file, 32-MiB/final-response, and 256-MiB/run quotas. Public reads use
+authority. It accepts only exact file-change diffs, bounded `user_input`
+payload artifacts, and final responses; writes create-exclusive mode-0600
+files; records byte length and SHA-256; and enforces 8-MiB/file-change or
+user-input, 32-MiB/final-response, and 256-MiB/run quotas. Public reads use
 opaque artifact IDs and verified base64 chunks of at most 1 MiB. Inline final
 responses are at most 1 MiB. Client presentation and download limits may be
 stricter but never enlarge provider bounds; complete downloads verify both

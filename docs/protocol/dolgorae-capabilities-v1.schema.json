@@ -15,7 +15,7 @@
     "grpc_error_detail_version": { "const": 1 },
     "minimum_rpc_client_version": { "const": 1 },
     "maximum_rpc_client_version": { "const": 1 },
-    "rpc_descriptor_sha256": { "const": "95e49ed4280762e14d43ae4e1157ea79f2d2505ce35bda288ea51b09eefe1956" },
+    "rpc_descriptor_sha256": { "const": "22e605dddc26c145ab6c682955fa4bfcf078b8356d38e94982e118b948965318" },
     "grpc_methods": { "type": "array", "const": ["ArtifactService.GetArtifact", "ArtifactService.ReadArtifactChunk", "ControllerService.VerifyController", "InteractionService.GetControllerInteraction", "InteractionService.ListPendingInteractions", "InteractionService.ResolveInteraction", "ObservationService.ListRunTimelineItems", "ObservationService.WatchRunEvents", "RunService.CloseRun", "RunService.CreateWriteContinuation", "RunService.DeleteRun", "RunService.ForkRun", "RunService.GetRun", "RunService.InterruptTurn", "RunService.ListRuns", "RunService.PauseRun", "RunService.ReconcileRun", "RunService.RecoverRun", "RunService.ResumeRun", "RunService.SetDefaultEffort", "RunService.StartRun", "RunService.SubmitTurn", "RunService.VerifyRun", "RuntimeService.GetCapabilities", "RuntimeService.GetProfile", "RuntimeService.InspectWorkspace", "RuntimeService.ListProfileDiagnostics", "RuntimeService.ListProfiles", "WriterService.AcquireWriter", "WriterService.CancelWriterHandoff", "WriterService.CommitWriterHandoff", "WriterService.GetWorkspaceWriterStatus", "WriterService.PrepareWriterHandoff", "WriterService.ReleaseWriter"] },
     "controller_carrier_root": { "const": "application_support/Dolgorae/controller-carriers" },
     "controller_credential": {

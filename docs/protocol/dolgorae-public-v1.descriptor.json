@@ -5,9 +5,9 @@
   "minimum_client_protocol_version": 1,
   "maximum_client_protocol_version": 1,
   "source": "dolgorae/public/v1/dolgorae.proto",
-  "source_sha256": "e50b13fde04360535a84ae49afa209afdbd3b11e6c97fec1966b80c4ee57a344",
+  "source_sha256": "bdb9916026f82725c1f0592a4d00a280dca43ef8fc968e3503cbf61059d09163",
   "descriptor": "dolgorae-public-v1.descriptor.pb",
-  "descriptor_sha256": "95e49ed4280762e14d43ae4e1157ea79f2d2505ce35bda288ea51b09eefe1956",
+  "descriptor_sha256": "22e605dddc26c145ab6c682955fa4bfcf078b8356d38e94982e118b948965318",
   "include_imports": true,
   "include_source_info": true,
   "buf_breaking": {

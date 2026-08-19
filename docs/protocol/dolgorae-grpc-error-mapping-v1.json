@@ -6,6 +6,113 @@
   "required_action_type": "dolgorae.public.v1.RequiredClientAction",
   "default_status": "FAILED_PRECONDITION",
   "default_required_action": "REQUIRED_CLIENT_ACTION_ABORT",
+  "default_retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+  "default_recovery_classification": "RECOVERY_CLASSIFICATION_NONE",
+  "retry_classification_overrides": {
+    "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY": ["DEDICATED_SERVER_START_FAILED"],
+    "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT": ["SLOW_CONSUMER", "SERVER_SHUTDOWN", "TRANSPORT_FAILURE"],
+    "RETRY_CLASSIFICATION_AFTER_RECONCILE": ["BACKGROUND_EXECUTION_UNVERIFIED", "THREAD_RESIDENCY_CONFLICT", "DEDICATED_HISTORY_BARRIER_FAILED", "INTERACTION_OUTCOME_UNKNOWN", "OUTCOME_UNKNOWN", "RECOVERY_REQUIRED"]
+  },
+  "recovery_classification_overrides": {
+    "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED": ["RUN_STATE_CONFLICT", "STALE_WRITER_GENERATION", "INTERACTION_NOT_FOUND", "INTERACTION_ALREADY_RESOLVED", "INTERACTION_STALE", "SLOW_CONSUMER", "SERVER_SHUTDOWN", "TRANSPORT_FAILURE"],
+    "RECOVERY_CLASSIFICATION_RECONCILE_REQUIRED": ["BACKGROUND_EXECUTION_UNVERIFIED", "THREAD_RESIDENCY_CONFLICT", "DEDICATED_HISTORY_BARRIER_FAILED", "RECOVERY_REQUIRED"],
+    "RECOVERY_CLASSIFICATION_OUTCOME_UNKNOWN": ["INTERACTION_OUTCOME_UNKNOWN", "OUTCOME_UNKNOWN"]
+  },
+  "method_overrides": {
+    "ControllerService.VerifyController": {
+      "CONTROLLER_MISMATCH": {
+        "required_action": "REQUIRED_CLIENT_ACTION_ABORT",
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_NONE"
+      }
+    },
+    "RunService.ResumeRun": {
+      "DEDICATED_SERVER_START_FAILED": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      }
+    },
+    "RunService.SubmitTurn": {
+      "DEDICATED_SERVER_START_FAILED": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY",
+        "retry_classification": "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_NONE"
+      },
+      "SERVER_SHUTDOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      },
+      "TRANSPORT_FAILURE": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      }
+    },
+    "InteractionService.ResolveInteraction": {
+      "SERVER_SHUTDOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFETCH_INTERACTION",
+        "retry_classification": "RETRY_CLASSIFICATION_AFTER_RECONCILE",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_OUTCOME_UNKNOWN"
+      },
+      "TRANSPORT_FAILURE": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFETCH_INTERACTION",
+        "retry_classification": "RETRY_CLASSIFICATION_AFTER_RECONCILE",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_OUTCOME_UNKNOWN"
+      }
+    }
+  },
+  "method_class_overrides": {
+    "server_stream": {
+      "SERVER_SHUTDOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RECONNECT_FROM_COMMITTED_CURSOR",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      },
+      "TRANSPORT_FAILURE": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RECONNECT_FROM_COMMITTED_CURSOR",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      }
+    },
+    "idempotent_mutation": {
+      "SERVER_SHUTDOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY",
+        "retry_classification": "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_NONE"
+      },
+      "TRANSPORT_FAILURE": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY",
+        "retry_classification": "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_NONE"
+      }
+    },
+    "tokenless_mutation": {
+      "SERVER_SHUTDOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      },
+      "TRANSPORT_FAILURE": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      }
+    },
+    "unary_read": {
+      "SERVER_SHUTDOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      },
+      "TRANSPORT_FAILURE": {
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_TOKENLESS_AFTER_SNAPSHOT",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
+      }
+    }
+  },
   "required_action_overrides": {
     "REQUIRED_CLIENT_ACTION_FIX_REQUEST": ["INVALID_ARGUMENT", "CONTROL_MODE_REQUIRED", "PURPOSE_REQUIRED", "EXECUTION_LANE_REQUIRED", "ARTIFACT_RANGE_INVALID", "EVENT_CURSOR_INVALID", "INTERACTION_RESPONSE_INVALID", "INTERACTION_RESPONSE_TOO_LARGE"],
     "REQUIRED_CLIENT_ACTION_REFRESH_CAPABILITIES": ["CAPABILITY_UNSUPPORTED", "EXECUTION_LANE_UNSUPPORTED", "ASSURANCE_LEVEL_UNAVAILABLE", "PROJECTION_PROFILE_UNSUPPORTED", "PROTOCOL_VERSION_UNSUPPORTED", "UNSUPPORTED_SCHEMA_VERSION", "COMPATIBILITY_REJECTED"],

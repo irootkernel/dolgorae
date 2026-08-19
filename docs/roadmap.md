@@ -295,7 +295,7 @@ inferred from the superseded state.
 
 ### TASK-000-F: Public Local gRPC SOT and Protocol Contract
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Rebaseline the unreleased public v1 contract around two adapters sharing one
 semantic service, with a supervised local gRPC gateway suitable for Gul and

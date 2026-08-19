@@ -39,8 +39,26 @@
     {"id": "start_run_allocation_replay", "owner": "TASK-010-A", "required_evidence": "allocation_loss_conflict_and_tombstone_e2e"},
     {"id": "interaction_size_and_secret_barrier", "owner": "TASK-010-A", "required_evidence": "preparse_bound_and_no_secret_replay_e2e"},
     {"id": "event_revision_action_barrier", "owner": "TASK-010-A", "required_evidence": "stale_aggregate_action_e2e"},
-    {"id": "lossless_non_utf8_path", "owner": "TASK-013", "required_evidence": "opaque_path_cross_adapter_e2e"}
+    {"id": "lossless_non_utf8_path", "owner": "TASK-013", "required_evidence": "opaque_path_cross_adapter_e2e"},
+    {"id": "threadless_first_write_runtime", "owner": "TASK-010-A", "required_evidence": "threadless_submit_writer_activation_e2e"}
   ],
+  "freeze_policy": {
+    "status": "blocked_runtime_evidence",
+    "required_runtime_cases": [
+      "slow_consumer_isolation",
+      "protected_interaction_lost_response",
+      "gateway_restart",
+      "socket_ownership",
+      "private_boundary",
+      "run_configuration_restart",
+      "start_run_allocation_replay",
+      "interaction_size_and_secret_barrier",
+      "event_revision_action_barrier",
+      "lossless_non_utf8_path",
+      "threadless_first_write_runtime"
+    ],
+    "runtime_evidence": []
+  },
   "adapter_parity_fixtures": [
     {
       "id": "workspace_projection",

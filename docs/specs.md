@@ -2873,6 +2873,26 @@ The checked gRPC error map owns the exhaustive mapping. Secret values, secret
 digests, raw carrier contents, mismatch subreason, internal paths, and hidden
 payloads are forbidden in status details.
 
+The map expands every error code to exactly one status, required action, retry
+classification, and recovery classification. Method-specific overrides may
+only narrow that result. In particular, `ControllerService.VerifyController` returns
+`CONTROLLER_MISMATCH` with `ABORT`, `FORBIDDEN`, and `NONE` after a failed
+side-effect-free verification; it MUST NOT direct the caller back into
+`VerifyController` and MUST NOT reveal a mismatch subreason.
+
+Shutdown and transport-loss details are selected by RPC semantics, not by error
+code alone. `WatchRunEvents` reconnects from the committed cursor. A lost
+`StartRun` may repeat its exact key because allocation replay is durable;
+`SubmitTurn` first refreshes the Run snapshot and may repeat only its exact key;
+`ResolveInteraction` refetches the Interaction and never replays protected
+input. Other tokenless mutations and unary reads refresh their authoritative
+snapshot before a retry. `DEDICATED_SERVER_START_FAILED` on `SubmitTurn` uses
+the exact request key, while the same code on tokenless `ResumeRun` refreshes
+the Run and retries the logical lane without inventing a key. The checked map
+partitions every public RPC into server-stream, idempotent-mutation,
+tokenless-mutation, or unary-read semantics and emits concrete typed details
+after applying the narrower method override.
+
 Writer recovery actions are exact: a threadless dedicated Run maps
 `THREADLESS_REQUIRES_WRITE_TURN` to `SUBMIT_WRITE_TURN`; a shared read-only Run
 maps `SHARED_RUN_WRITE_FORBIDDEN` to `CREATE_WRITE_CONTINUATION`; and an
@@ -2912,6 +2932,27 @@ attach to or support multiple independently supervised gateways.
 replaces the private parent/path and starts a fresh gateway attempt. It MUST NOT
 blindly restart with the same unsafe pathname and MUST NOT unlink a provider
 socket.
+
+Public-v1 freeze is gated by this normative runtime inventory. The checked
+conformance registry may mirror these rows but may not add, remove, rename, or
+reassign one. A closure artifact is valid only when its listed verifier exists,
+its SHA-256 is recorded, and executing that verifier with
+`--verify-evidence <artifact>` returns `ok:true` for the same case ID, owner,
+evidence kind, and source revision.
+
+| Runtime case ID | Owner | Required evidence | Evidence verifier |
+|---|---|---|---|
+| `slow_consumer_isolation` | `TASK-010-A` | `multi_run_pressure_e2e` | `tools/probes/verify_slow_consumer_isolation.py` |
+| `protected_interaction_lost_response` | `TASK-010-A` | `secret_canary_and_fault_barrier` | `tools/probes/verify_protected_interaction_lost_response.py` |
+| `gateway_restart` | `TASK-010-A` | `active_run_restart_e2e` | `tools/probes/verify_gateway_restart.py` |
+| `socket_ownership` | `TASK-010-A` | `macos_uds_attack_matrix` | `tools/probes/verify_socket_ownership.py` |
+| `private_boundary` | `TASK-015` | `real_gul_harness` | `tools/probes/verify_private_boundary.py` |
+| `run_configuration_restart` | `TASK-010-A` | `accepted_configuration_restart_e2e` | `tools/probes/verify_run_configuration_restart.py` |
+| `start_run_allocation_replay` | `TASK-010-A` | `allocation_loss_conflict_and_tombstone_e2e` | `tools/probes/verify_start_run_allocation_replay.py` |
+| `interaction_size_and_secret_barrier` | `TASK-010-A` | `preparse_bound_and_no_secret_replay_e2e` | `tools/probes/verify_interaction_size_and_secret_barrier.py` |
+| `event_revision_action_barrier` | `TASK-010-A` | `stale_aggregate_action_e2e` | `tools/probes/verify_event_revision_action_barrier.py` |
+| `lossless_non_utf8_path` | `TASK-013` | `opaque_path_cross_adapter_e2e` | `tools/probes/verify_lossless_non_utf8_path.py` |
+| `threadless_first_write_runtime` | `TASK-010-A` | `threadless_submit_writer_activation_e2e` | `tools/probes/verify_threadless_first_write_runtime.py` |
 
 ## External Protocol References
 
