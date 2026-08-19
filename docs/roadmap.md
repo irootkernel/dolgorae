@@ -1,11 +1,10 @@
 # Dolgorae Roadmap
 
-Status: Ordered implementation roadmap. Historical `TASK-000` and stabilization
-Tasks `TASK-000-A`, `TASK-000-B`, and `TASK-000-C` are complete. External-runtime
-contract stabilization `TASK-000-D` is complete after its fourth consistency pass.
-CLI-first broker stabilization `TASK-000-E` is superseded by the active local
-gRPC contract stabilization `TASK-000-F`; no production
-implementation Task is active.
+Status: Ordered implementation roadmap. `EPIC-000` is active while its local
+gRPC contract stabilization Task `TASK-000-F` completes. Historical `TASK-000`
+and stabilization Tasks `TASK-000-A` through `TASK-000-D` are complete.
+CLI-first broker stabilization `TASK-000-E` is superseded by `TASK-000-F`; no
+production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -65,7 +64,7 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `COMPLETE`
+Status: `ACTIVE`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
@@ -95,17 +94,9 @@ evidence with an adversarial concurrency/recovery pass. If crash history lacks t
 that recovery converges to `outcome_unknown` and fork rather than weakening the
 no-replay rule.
 
-Epic acceptance: all blocking pre-implementation findings are resolved, probe
+Task acceptance: all blocking pre-implementation findings are resolved, probe
 results and limitations are durable, the Task completion gate passes, and no
 production source has been introduced. Only then may `TASK-001` become active.
-
-## EPIC-000-A: Round-4 Contract Stabilization
-
-Status: `COMPLETE`
-
-Goal: Close the Codex wire, machine-output, workspace-identity, durability,
-process-recovery, and verification-plan gaps found after TASK-000 without
-starting production implementation.
 
 ### TASK-000-A: Round-4 Contract and Probe Closure
 
@@ -124,16 +115,9 @@ spawn attributes; an independent reviewer spends at least 40 stated adversarial
 scenarios across wire, audit, identity, locking, cleanup, and traceability and
 returns no unresolved findings.
 
-Epic acceptance: NOTE-002 links the immutable-input and implementation commits,
+Task acceptance: NOTE-002 links the immutable-input and implementation commits,
 every Round-4 row has a disposition and evidence, no production source exists,
 and TASK-001 remains planned until this Task is complete.
-
-## EPIC-000-B: Round-5 End-to-End Stabilization
-
-Status: `COMPLETE`
-
-Goal: Reconcile Round 5's end-to-end lifecycle, OS-substrate, checked-artifact,
-machine-contract, and closure-integrity findings without production code.
 
 ### TASK-000-B: Round-5 Contract, Traceability, and Probe Closure
 
@@ -159,24 +143,23 @@ inspection, at least 40 recorded counter-searches, and target-platform empirical
 checks. Live Codex observations and local performance measurements are recorded
 as bounded secret-free evidence.
 
-Epic acceptance: every Round-5 row is individually verified or rejected with
+Task acceptance: every Round-5 row is individually verified or rejected with
 evidence, no fix exists only in disposition prose, all required live/offline
 gates pass, NOTE-003 links task-scoped commits, no production source exists, and
 TASK-001 remains planned. These conditions were independently confirmed at
-`aacb1b2`; TASK-000-B and EPIC-000-B are complete.
+`aacb1b2`; TASK-000-B is complete.
 
-## EPIC-000-C: Singleton, Local-State, and Writer Contract Stabilization
-
-Status: `SUPERSEDED` by EPIC-000-D
-
-Goal: Replace the pre-implementation per-run server and target vocabulary with
-profile-scoped singleton, project-local state, and cross-profile lazy-writer
-contracts before production TASK-001 begins. This Epic changes documentation
-and checked protocol artifacts only.
-
-### TASK-000-C1: Named Profiles and App-Server Singleton
+### TASK-000-C: Singleton, Local-State, and Writer Contract Stabilization
 
 Status: `COMPLETE`
+
+Replace the pre-implementation per-run server and target vocabulary with
+profile-scoped singleton, project-local state, and cross-profile lazy-writer
+contracts before production TASK-001 begins. This Task changes documentation
+and checked protocol artifacts only. Its completed scope comprises the three
+phases below.
+
+#### Named Profiles and App-Server Singleton
 
 Define generic named profiles, one compatible app-server singleton per canonical
 `CODEX_HOME`, exclusive per-run connections, profile-wide lifecycle and
@@ -187,40 +170,32 @@ official/installed app-server capability comparison, protocol JSON/schema
 checks, requirement ownership, Markdown links, offline regression gate, and
 Git whitespace/scope checks.
 
-### TASK-000-C2: Project-Local Configuration and Runtime Layout
-
-Status: `COMPLETE`
+#### Project-Local Configuration and Runtime Layout
 
 Move portable and machine-local configuration, run/runtime state, locks, and
 evidence beneath `.dolgorae/`, retaining only the documented singleton and short
 Unix-socket exceptions.
 
-### TASK-000-C3: Lazy Cross-Profile Writer Handoff
-
-Status: `COMPLETE`
+#### Lazy Cross-Profile Writer Handoff
 
 Replace startup-selected access with explicit lazy writer acquisition, release,
 and user-confirmed idle takeover shared by all profiles in one canonical
-workspace. EPIC-000-D supersedes its process-held lease mechanism with durable
+workspace. TASK-000-D supersedes its process-held lease mechanism with durable
 writer authority while preserving the product goal.
 
-Epic acceptance: every C1-C3 contract is internally consistent, checked schemas
+Task acceptance: every completed phase is internally consistent, checked schemas
 match the SOT, NOTE-004 records bounded evidence and goal commits, no production
 or probe code changes, and TASK-001 remains planned.
-
-## EPIC-000-D: External Runtime Contract Stabilization
-
-Status: `COMPLETE`
-
-Goal: Rebaseline the unreleased v1 contract so interactive clients and workflow
-orchestrators share launch-contract coordination while selecting either the
-shared-read-only server or a Run-owned dedicated lane generation, with common
-controller authorization, workspace writer authority, normalized interactions,
-and client-safe replay.
 
 ### TASK-000-D: Controller, Projection, and Integration Contract
 
 Status: `COMPLETE`
+
+Rebaseline the unreleased v1 contract so interactive clients and workflow
+orchestrators share launch-contract coordination while selecting either the
+shared-read-only server or a Run-owned dedicated lane generation, with common
+controller authorization, workspace writer authority, normalized interactions,
+and client-safe replay.
 
 Treat the repository-root `prompt.md` as user-owned, ignored, non-normative
 input; preserve only its digest and disposition in tracked review records. Record its
@@ -281,25 +256,20 @@ whitespace checks. At the third-follow-up historical checkpoint TASK-000-D was
 complete, but the fourth follow-up reopened the gate for corrected contracts,
 fresh live campaigns, a reproducible evidence package, and independent review.
 
-Epic acceptance: the input disposition, SOT, architecture, ADRs, checked
+Task acceptance: the input disposition, SOT, architecture, ADRs, checked
 schemas, roadmap ownership, and verification fixtures agree; an independent
 read-only review has no unresolved blocking finding; an implementation note
 links task-scoped commits; no production source exists; TASK-001 remains
 planned until this gate is complete. This architecture gate is complete;
 TASK-001 remains `PLANNED` as the next implementation task.
 
-## EPIC-000-E: Brokered Independent-Subagent Contract Stabilization
-
-Status: `SUPERSEDED` by `EPIC-000-F`
-
-Goal: Make the existing machine CLI a complete, discoverable foundation for a
-future trusted host adapter that lets ordinary Codex and Gul-hosted direct
-sessions request Independent Dolgorae Runs as subagents without receiving Run
-authority.
-
 ### TASK-000-E: CLI-First Brokered Subagent Contract
 
 Status: `SUPERSEDED` by `TASK-000-F`
+
+Make the existing machine CLI a complete, discoverable foundation for a future
+trusted host adapter that lets ordinary Codex and Gul-hosted direct sessions
+request Independent Dolgorae Runs as subagents without receiving Run authority.
 
 Add the brokered hub-and-spoke use case to SPEC-012, ADR-010/020, architecture,
 runtime capabilities, writer semantics, and downstream verification ownership.
@@ -323,18 +293,14 @@ hub-and-spoke orchestration, bounded result, and writer-conflict requirements
 are carried into `TASK-000-F`; no completion or independent-review evidence is
 inferred from the superseded state.
 
-## EPIC-000-F: Gul Local gRPC Contract Stabilization
-
-Status: `ACTIVE`
-
-Goal: Rebaseline the unreleased public v1 contract around two adapters sharing
-one semantic service, with a supervised local gRPC gateway suitable for Gul and
-without weakening Controller, writer, recovery, event, audit, or private-
-transport boundaries.
-
 ### TASK-000-F: Public Local gRPC SOT and Protocol Contract
 
 Status: `ACTIVE`
+
+Rebaseline the unreleased public v1 contract around two adapters sharing one
+semantic service, with a supervised local gRPC gateway suitable for Gul and
+without weakening Controller, writer, recovery, event, audit, or private-
+transport boundaries.
 
 Amend ADR-001, add ADR-021 and SPEC-015, revise architecture/security/lifecycle,
 and publish `dolgorae.public.v1` Protobuf source plus deterministic descriptor,
@@ -370,12 +336,21 @@ compare normalized Machine/gRPC projections, preserve all Interaction support
 states, reject invalid profile default-model catalogs, and report production
 runtime cases separately rather than hardcoding completion.
 
-Epic acceptance: all 30 acceptance rows in the local-gRPC implementation memo
+Task acceptance: all 30 acceptance rows in the local-gRPC implementation memo
 resolve to active authorities and deterministic verification; one independent
 read-only review reports no unresolved blocking finding; an implementation note
 and review index record the completed evidence and task-scoped commit; no
 production source exists; and `TASK-001` remains `PLANNED` until this gate is
 complete.
+
+Epic acceptance: `TASK-000` and `TASK-000-A` through `TASK-000-D` remain
+complete, `TASK-000-E` remains superseded by a completed `TASK-000-F`, and all
+Task completion evidence remains indexed and reproducible. An Epic-level
+hardening pass must confirm the combined product, architecture, protocol,
+security, lifecycle, and roadmap contracts have no unresolved blocking finding,
+that checked artifacts remain synchronized, and that no production source has
+been introduced. Only then may `EPIC-000` become complete and `TASK-001` become
+eligible for activation.
 
 ## EPIC-001: Foundation and Durable State
 
