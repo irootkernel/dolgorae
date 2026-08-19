@@ -1,10 +1,10 @@
 # Dolgorae Roadmap
 
-Status: Ordered implementation roadmap. `EPIC-000` is active while its local
-gRPC contract stabilization Task `TASK-000-F` completes. Historical `TASK-000`
-and stabilization Tasks `TASK-000-A` through `TASK-000-D` are complete.
-CLI-first broker stabilization `TASK-000-E` is superseded by `TASK-000-F`; no
-production implementation Task is active.
+Status: Ordered implementation roadmap. `EPIC-000` remains active only for its
+Epic-level cold-validation and hardening gate. `TASK-000`, stabilization Tasks
+`TASK-000-A` through `TASK-000-D`, and local gRPC stabilization Task
+`TASK-000-F` are complete. CLI-first broker stabilization `TASK-000-E` is
+superseded by `TASK-000-F`; no production implementation Task is active.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -356,6 +356,13 @@ read-only review reports no unresolved blocking finding; an implementation note
 and review index record the completed evidence and task-scoped commit; no
 production source exists; and `TASK-001` remains `PLANNED` until this gate is
 complete.
+
+Cold-validation remediation: NOTE-011 now records its completion date, exact
+task commit, and independent reviewer identity; active verification ownership
+names the completed carry-forward TASK-000-F rather than superseded TASK-000-E,
+and the consistency lint rejects future superseded owners. The isolated result
+is reviewed under the planned subject `[TASK-000-F] Close carry-forward
+evidence gaps` without changing this successful lifecycle state.
 
 Epic acceptance: `TASK-000` and `TASK-000-A` through `TASK-000-D` remain
 complete, `TASK-000-E` remains superseded by a completed `TASK-000-F`, and all
