@@ -87,7 +87,7 @@
       "then": { "properties": {
         "execution_lane": { "const": "dedicated" },
         "effective_policy": { "properties": { "access": { "enum": ["write", "transitioning", "unknown"] } } },
-        "writer_authority": { "properties": { "state": { "const": "releasing" }, "writer_generation": { "type": "integer", "minimum": 1 }, "transaction_id": { "$ref": "#/$defs/uuid" } } }
+        "writer_authority": { "properties": { "state": { "enum": ["handoff_prepared", "releasing"] }, "writer_generation": { "type": "integer", "minimum": 1 }, "transaction_id": { "$ref": "#/$defs/uuid" } } }
       } }
     },
     {
@@ -130,7 +130,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["state", "writer_generation", "transaction_id", "reconciliation_action"],
       "properties": {
-        "state": { "enum": ["none", "reserved", "active", "releasing", "blocked_unknown"] },
+        "state": { "enum": ["none", "reserved", "active", "handoff_prepared", "releasing", "blocked_unknown"] },
         "writer_generation": { "type": "integer", "minimum": 0 },
         "transaction_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
         "reconciliation_action": { "type": ["string", "null"], "enum": ["retry_census", "reconcile_dedicated_lane", "operator_repair", "reverify_writer_policy", null] }

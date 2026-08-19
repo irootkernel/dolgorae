@@ -1474,6 +1474,12 @@ restart the shared Profile Server. If live policy probes cannot prove an existin
 changes sandbox/approval/writable-root/network policy, the operation returns
 `ACCESS_TRANSITION_UNSUPPORTED` and requires a new lineage-linked run/thread.
 
+While the workspace authority record is `handoff_prepared`, the source Run
+projection remains `dedicated_releasing`; its writer-authority projection uses
+`handoff_prepared`, retains the handoff transaction ID and writer generation,
+and never presents effective write access as newly granted. This is the sole
+Run-state projection pairing for `handoff_prepared` in v1.
+
 Writer and startup lock files are permanent after create-exclusive creation;
 normal operation never unlinks or recreates either pathname. Every writer
 transaction compares the held fd's `(st_dev, st_ino)` with a root-fd-relative
