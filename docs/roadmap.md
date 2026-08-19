@@ -1,10 +1,11 @@
 # Dolgorae Roadmap
 
-Status: Ordered implementation roadmap. `EPIC-000` remains active only for its
+Status: Ordered implementation roadmap. `EPIC-000` is complete after its
 Epic-level cold-validation and hardening gate. `TASK-000`, stabilization Tasks
 `TASK-000-A` through `TASK-000-D`, and local gRPC stabilization Task
 `TASK-000-F` are complete. CLI-first broker stabilization `TASK-000-E` is
-superseded by `TASK-000-F`; no production implementation Task is active.
+superseded by `TASK-000-F`. No Task is active; `TASK-001` is eligible for a
+separately authorized activation.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -64,7 +65,7 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
@@ -367,11 +368,24 @@ evidence gaps` without changing this successful lifecycle state.
 Epic acceptance: `TASK-000` and `TASK-000-A` through `TASK-000-D` remain
 complete, `TASK-000-E` remains superseded by a completed `TASK-000-F`, and all
 Task completion evidence remains indexed and reproducible. An Epic-level
-hardening pass must confirm the combined product, architecture, protocol,
-security, lifecycle, and roadmap contracts have no unresolved blocking finding,
+hardening pass confirmed the combined product, architecture, protocol,
+security, lifecycle, and roadmap contracts have no unresolved valid finding,
 that checked artifacts remain synchronized, and that no production source has
-been introduced. Only then may `EPIC-000` become complete and `TASK-001` become
-eligible for activation.
+been introduced. `EPIC-000` is complete and `TASK-001` is eligible for a
+separately authorized activation.
+
+Validation record (2026-08-20): task hierarchy normalization is `d83f2cf`;
+TASK-000-F closure is `9b8a712`; cold-validation task remediations are
+`49c4422`, `5e7cea6`, and `2730c4f`; Epic hardening commits are `b61678c`,
+`ddbb5a9`, `d1c2cb9`, `eff0b3d`, and `6c65628`. Final whole-workspace review
+`r_01a01b5d-e074-78a5-859a-40c5a76d232a` and exact committed correction delta
+`r_01a01b74-34cf-7c66-acbf-eedbadb69899` have complete six-role coverage,
+passing CI decisions, committed publication, and zero unresolved valid
+findings. Four Gaori gates, the exact Codex 0.147.0 retained aggregate, Buf,
+Ruff F, compileall, JSON, and whitespace checks pass. DF-001 and DF-002 retain
+two informational future-environment triggers; neither changes current Epic
+acceptance. The commit containing this record performs the final lifecycle
+transition without activating `TASK-001` or freezing public v1.
 
 ## EPIC-001: Foundation and Durable State
 
