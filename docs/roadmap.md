@@ -270,6 +270,13 @@ links task-scoped commits; no production source exists; TASK-001 remains
 planned until this gate is complete. This architecture gate is complete;
 TASK-001 remains `PLANNED` as the next implementation task.
 
+Cold-validation remediation: the fourth-follow-up closure checks and aggregate
+evidence matrix now derive their verdicts from checked authorities and executed
+probe results, NOTE-010 carries the required completion metadata and commit
+links, and the corrected evidence is independently reviewed under the planned
+subject `[TASK-000-D] Harden closure evidence integrity`. TASK-000-D remains in
+its successful lifecycle state.
+
 ### TASK-000-E: CLI-First Brokered Subagent Contract
 
 Status: `SUPERSEDED` by `TASK-000-F`
