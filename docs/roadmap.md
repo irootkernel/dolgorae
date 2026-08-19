@@ -187,6 +187,13 @@ Task acceptance: every completed phase is internally consistent, checked schemas
 match the SOT, NOTE-004 records bounded evidence and goal commits, no production
 or probe code changes, and TASK-001 remains planned.
 
+Cold-validation remediation: the original NOTE-004 waiver of the ordinary
+independent-review gate was invalid. The current TASK-000-C contract and
+evidence received a targeted independent hardening review, the corrected
+record is indexed, and the remediation is committed under the planned subject
+`[TASK-000-C] Restore independent review evidence` without changing this
+successful lifecycle state.
+
 ### TASK-000-D: Controller, Projection, and Integration Contract
 
 Status: `COMPLETE`
