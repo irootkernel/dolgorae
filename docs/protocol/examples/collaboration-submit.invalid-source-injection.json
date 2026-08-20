@@ -1,0 +1,19 @@
+{
+  "operation": "submit_consultation",
+  "target": {
+    "role_ref": "tester"
+  },
+  "objective": "Reproduce the refresh-token race and report the failure boundary.",
+  "context_refs": [
+    "018f0000-0000-7000-8000-00000000000b",
+    "018f0000-0000-7000-8000-00000000000c"
+  ],
+  "expected_output": [
+    "reproduction steps",
+    "relevant logs",
+    "likely failure boundary"
+  ],
+  "blocking": false,
+  "deadline_seconds": 300,
+  "source_run_id": "018f0000-0000-7000-8000-000000000002"
+}

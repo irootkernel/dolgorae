@@ -1,0 +1,11 @@
+{
+  "operation": "request_specialist",
+  "role_ref": "independent-code-reviewer",
+  "objective": "Review the authentication changes and identify correctness risks.",
+  "expected_output": [
+    "findings ordered by severity",
+    "evidence references"
+  ],
+  "requested_access": "read_only",
+  "deadline_seconds": 900
+}

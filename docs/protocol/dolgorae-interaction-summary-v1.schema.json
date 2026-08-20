@@ -4,31 +4,168 @@
   "title": "Dolgorae observer-safe interaction summary v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "request_id", "run_id", "kind", "status", "title", "controller_kind", "user_escalation_required", "protected_input", "created_at", "expires_at", "resolved_at"],
+  "required": [
+    "schema_version",
+    "request_id",
+    "run_id",
+    "kind",
+    "status",
+    "title",
+    "controller_kind",
+    "user_escalation_required",
+    "protected_input",
+    "created_at",
+    "expires_at",
+    "resolved_at"
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "request_id": { "$ref": "#/$defs/uuid7" },
-    "run_id": { "$ref": "#/$defs/uuid7" },
-    "kind": { "enum": ["command_execution_approval", "file_change_approval", "user_input"] },
-    "status": { "enum": ["pending", "resolved", "stale"] },
-    "title": { "enum": ["Command approval requested", "File change approval requested", "User input requested", "Protected input requested", "Interaction resolved", "Interaction stale"] },
-    "controller_kind": { "enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation"] },
-    "user_escalation_required": { "type": "boolean" },
-    "protected_input": { "type": "boolean" },
-    "created_at": { "type": "string", "format": "date-time" },
-    "expires_at": { "type": ["string", "null"], "format": "date-time" },
-    "resolved_at": { "type": ["string", "null"], "format": "date-time" }
+    "schema_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/uuid7"
+    },
+    "run_id": {
+      "$ref": "#/$defs/uuid7"
+    },
+    "kind": {
+      "enum": [
+        "command_execution_approval",
+        "file_change_approval",
+        "user_input"
+      ]
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "resolved",
+        "stale"
+      ]
+    },
+    "title": {
+      "enum": [
+        "Command approval requested",
+        "File change approval requested",
+        "User input requested",
+        "Protected input requested",
+        "Interaction resolved",
+        "Interaction stale"
+      ]
+    },
+    "controller_kind": {
+      "enum": [
+        "human_cli",
+        "interactive_client",
+        "workflow_orchestrator",
+        "automation"
+      ]
+    },
+    "user_escalation_required": {
+      "type": "boolean"
+    },
+    "protected_input": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "resolved_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
   },
   "allOf": [
-    { "if": { "properties": { "status": { "const": "pending" } } }, "then": { "properties": { "resolved_at": { "const": null } } } },
-    { "if": { "properties": { "status": { "const": "resolved" } } }, "then": { "properties": { "title": { "const": "Interaction resolved" }, "resolved_at": { "type": "string" } } } },
-    { "if": { "properties": { "status": { "const": "stale" } } }, "then": { "properties": { "title": { "const": "Interaction stale" }, "resolved_at": { "type": "string", "format": "date-time" } } } },
-    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "command_execution_approval" } } }, "then": { "properties": { "title": { "const": "Command approval requested" }, "protected_input": { "const": false } } } },
-    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "file_change_approval" } } }, "then": { "properties": { "title": { "const": "File change approval requested" }, "protected_input": { "const": false } } } },
-    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "user_input" }, "protected_input": { "const": true } } }, "then": { "properties": { "title": { "const": "Protected input requested" } } } },
-    { "if": { "properties": { "status": { "const": "pending" }, "kind": { "const": "user_input" }, "protected_input": { "const": false } } }, "then": { "properties": { "title": { "const": "User input requested" } } } }
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pending"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "resolved_at": {
+            "const": null
+          },
+          "user_escalation_required": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "resolved"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "title": {
+            "const": "Interaction resolved"
+          },
+          "resolved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user_escalation_required": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "stale"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "title": {
+            "const": "Interaction stale"
+          },
+          "resolved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user_escalation_required": {
+            "const": false
+          }
+        }
+      }
+    }
   ],
   "$defs": {
-    "uuid7": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
   }
 }

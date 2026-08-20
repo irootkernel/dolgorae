@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "runtime_profile": "codex-default",
+  "model": null,
+  "default_effort": "high",
+  "purpose": "review",
+  "purpose_label": null,
+  "required_capabilities": [],
+  "instructions": "Act as an independent code reviewer. Return evidence-backed findings and do not modify the canonical workspace.",
+  "execution_lane": "shared_readonly",
+  "required_assurance": "best_effort_personal_alpha",
+  "native_subagent_policy": "enabled"
+}

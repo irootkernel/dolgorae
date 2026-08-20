@@ -1,0 +1,19 @@
+{
+  "contract_id": "dolgorae.grpc-validation-coverage/v1",
+  "schema_version": 1,
+  "required_sections": [
+    "acceptance_matrix",
+    "controller_credential_digest",
+    "descriptor_digest_provenance",
+    "descriptor_method_shape",
+    "freeze_branch",
+    "mutation_policy",
+    "projection_parity_semantic_fixtures",
+    "rpc_stream_policy",
+    "staged_capabilities",
+    "typed_error_mapping"
+  ],
+  "required_acceptance_rows": 30,
+  "required_bh1_methods": 24,
+  "required_pa1_methods": 34
+}

@@ -1,0 +1,6 @@
+{
+  "operation": "collect_external_specialist_results",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002",
+  "limit": 16,
+  "after_sequence": 0
+}

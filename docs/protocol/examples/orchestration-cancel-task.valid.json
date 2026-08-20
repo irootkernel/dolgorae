@@ -1,0 +1,5 @@
+{
+  "operation": "cancel_specialist_task",
+  "task_id": "018f0000-0000-7000-8000-000000000004",
+  "reason": "The parent task was cancelled."
+}

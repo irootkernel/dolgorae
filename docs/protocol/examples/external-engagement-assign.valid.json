@@ -1,0 +1,20 @@
+{
+  "operation": "assign_external_specialist_task",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002",
+  "specialist_run_id": "018f0000-0000-7000-8000-000000003003",
+  "external_request_ref": {
+    "namespace": "codex",
+    "kind": "tool-call",
+    "id": "call-77"
+  },
+  "objective": "Review the authentication changes for race conditions.",
+  "context_refs": [],
+  "expected_output": [
+    "findings",
+    "evidence",
+    "recommended fixes"
+  ],
+  "execution_intent": "read_only",
+  "deadline_seconds": 900,
+  "idempotency_key": "session-42/reviewer/task-1"
+}

@@ -2,45 +2,306 @@
   "contract_id": "dolgorae.grpc-conformance/v1",
   "schema_version": 1,
   "semantic_oracle": "shared_semantic_service",
-  "wire_adapters": ["machine_cli", "local_grpc"],
+  "wire_adapters": [
+    "machine_cli",
+    "local_grpc"
+  ],
   "contract_cases": [
-    {"id": "workspace_bootstrap", "fixtures": ["workspace_projection", "workspace_opaque_path_projection"], "assertions": ["inspect_workspace_path_only_bootstrap", "workspace_identity_response", "opaque_canonical_root"]},
-    {"id": "protocol_zero_handshake", "verification": "descriptor_and_spec", "assertions": ["protocol_zero_negotiation", "accepted_client_range"]},
-    {"id": "capability_semantic_parity", "fixtures": ["interaction_support_projection", "credential_carrier_projection"], "assertions": ["interaction_support_state", "credential_root_locator", "credential_closed_rules"]},
-    {"id": "profile_action_derivation", "fixtures": ["profile_projection"], "assertions": ["profile_model_efforts", "profile_single_default_negative"]},
-    {"id": "run_projection_parity", "fixtures": ["run_projection"], "assertions": ["run_typed_policy_writer_recovery"]},
-    {"id": "writer_projection_parity", "fixtures": ["writer_projection"], "assertions": ["writer_fail_closed_state"]},
-    {"id": "threadless_first_write", "fixtures": ["submit_turn_accepted"], "assertions": ["threadless_submit_activates_writer"]},
-    {"id": "typed_event_round_trip", "fixtures": ["run_event_projection"], "assertions": ["event_oneof_round_trip"]},
-    {"id": "cursor_resume_and_sparse_projection", "verification": "event_contract", "assertions": ["exclusive_after_cursor", "sparse_cursor_valid", "slow_consumer_resume"]},
-    {"id": "interaction_summary", "fixtures": ["interaction_summary_projection", "timeline_interaction_projection"], "assertions": ["interaction_summary_timestamp_expiry", "timeline_interaction_safe_projection"]},
-    {"id": "continuation_exact_replay", "fixtures": ["continuation_projection"], "assertions": ["continuation_lineage_destination", "continuation_exact_replay"]},
-    {"id": "continuation_principal_rejection", "verification": "run_state_negative_fixtures", "assertions": ["continuation_principal_mismatch_rejected"]},
-    {"id": "controller_adoption", "fixtures": ["controller_verification_projection"], "assertions": ["controller_side_effect_free_verification"]},
-    {"id": "artifact_reconnect", "fixtures": ["artifact_projection"], "assertions": ["artifact_length_digest_chunk_bound"]},
-    {"id": "typed_error_parity", "fixtures": ["typed_error_projection", "shared_write_error_projection", "transition_error_projection", "rpc_socket_error_projection"], "assertions": ["threadless_typed_action", "write_continuation_typed_action", "unsafe_socket_fix_path_action"]},
-    {"id": "typed_controller_interaction", "fixtures": ["controller_interaction_command_projection", "controller_interaction_file_projection", "controller_interaction_projection", "controller_interaction_unsupported_projection"], "assertions": ["interaction_payload_oneof", "typed_decisions", "response_schema_is_response_only"]},
-    {"id": "run_configuration_projection", "fixtures": ["run_projection"], "assertions": ["accepted_profile_model_purpose_effort", "instruction_identity"]},
-    {"id": "start_run_exact_replay", "fixtures": ["start_run_replay_projection"], "assertions": ["same_key_returns_original", "controller_filter_secondary_reconciliation", "deleted_run_tombstone"]},
-    {"id": "interaction_and_artifact_bounds", "verification": "capability_schema_and_spec", "assertions": ["raw_response_preparse_limit", "typed_payload_wire_limit", "provider_client_artifact_limits"]},
-    {"id": "aggregate_revision_barrier", "fixtures": ["run_event_projection"], "assertions": ["projection_stamp_round_trip", "event_invalidation_matrix"]},
-    {"id": "lossless_path_projection", "fixtures": ["opaque_path_projection"], "assertions": ["opaque_posix_bytes_round_trip", "no_lossy_replacement"]},
-    {"id": "closed_capability_blocker", "fixtures": ["capability_blocker_projection"], "assertions": ["blocker_enum_no_diagnostic_parsing"]},
-    {"id": "stream_end_semantics", "verification": "spec_and_client_policy", "assertions": ["terminal_no_loop", "shutdown_resume", "slow_consumer_typed_error", "transport_not_run_failure"]},
-    {"id": "public_enum_unknown_behavior", "verification": "descriptor_semantic_oracle", "assertions": ["all_input_enums_reject_unknown", "all_output_enums_refresh_fail_closed"]}
+    {
+      "id": "workspace_bootstrap",
+      "fixtures": [
+        "workspace_projection",
+        "workspace_opaque_path_projection"
+      ],
+      "assertions": [
+        "inspect_workspace_path_only_bootstrap",
+        "workspace_identity_response",
+        "opaque_canonical_root"
+      ]
+    },
+    {
+      "id": "protocol_zero_handshake",
+      "verification": "descriptor_and_spec",
+      "assertions": [
+        "protocol_zero_negotiation",
+        "accepted_client_range"
+      ]
+    },
+    {
+      "id": "capability_semantic_parity",
+      "fixtures": [
+        "interaction_support_projection",
+        "credential_carrier_projection"
+      ],
+      "assertions": [
+        "interaction_support_state",
+        "credential_root_locator",
+        "credential_closed_rules"
+      ]
+    },
+    {
+      "id": "profile_action_derivation",
+      "fixtures": [
+        "profile_projection"
+      ],
+      "assertions": [
+        "profile_model_efforts",
+        "profile_single_default_negative"
+      ]
+    },
+    {
+      "id": "run_projection_parity",
+      "fixtures": [
+        "run_projection"
+      ],
+      "assertions": [
+        "run_typed_policy_writer_recovery"
+      ]
+    },
+    {
+      "id": "writer_projection_parity",
+      "fixtures": [
+        "writer_projection"
+      ],
+      "assertions": [
+        "writer_fail_closed_state"
+      ]
+    },
+    {
+      "id": "threadless_first_write",
+      "fixtures": [
+        "submit_turn_accepted"
+      ],
+      "assertions": [
+        "threadless_submit_activates_writer"
+      ]
+    },
+    {
+      "id": "typed_event_round_trip",
+      "fixtures": [
+        "run_event_projection"
+      ],
+      "assertions": [
+        "event_oneof_round_trip"
+      ]
+    },
+    {
+      "id": "cursor_resume_and_sparse_projection",
+      "verification": "event_contract",
+      "assertions": [
+        "exclusive_after_cursor",
+        "sparse_cursor_valid",
+        "slow_consumer_resume"
+      ]
+    },
+    {
+      "id": "interaction_summary",
+      "fixtures": [
+        "interaction_summary_projection",
+        "timeline_interaction_projection"
+      ],
+      "assertions": [
+        "interaction_summary_timestamp_expiry",
+        "timeline_interaction_safe_projection"
+      ]
+    },
+    {
+      "id": "continuation_exact_replay",
+      "fixtures": [
+        "continuation_projection"
+      ],
+      "assertions": [
+        "continuation_lineage_destination",
+        "continuation_exact_replay"
+      ]
+    },
+    {
+      "id": "continuation_principal_rejection",
+      "verification": "run_state_negative_fixtures",
+      "assertions": [
+        "continuation_principal_mismatch_rejected"
+      ]
+    },
+    {
+      "id": "controller_adoption",
+      "fixtures": [
+        "controller_verification_projection"
+      ],
+      "assertions": [
+        "controller_side_effect_free_verification"
+      ]
+    },
+    {
+      "id": "artifact_reconnect",
+      "fixtures": [
+        "artifact_projection"
+      ],
+      "assertions": [
+        "artifact_length_digest_chunk_bound"
+      ]
+    },
+    {
+      "id": "typed_error_parity",
+      "fixtures": [
+        "typed_error_projection",
+        "shared_write_error_projection",
+        "transition_error_projection",
+        "rpc_socket_error_projection"
+      ],
+      "assertions": [
+        "threadless_typed_action",
+        "write_continuation_typed_action",
+        "unsafe_socket_fix_path_action"
+      ]
+    },
+    {
+      "id": "typed_controller_interaction",
+      "fixtures": [
+        "controller_interaction_command_projection",
+        "controller_interaction_file_projection",
+        "controller_interaction_projection",
+        "controller_interaction_unsupported_projection"
+      ],
+      "assertions": [
+        "interaction_payload_oneof",
+        "typed_decisions",
+        "response_schema_is_response_only"
+      ]
+    },
+    {
+      "id": "run_configuration_projection",
+      "fixtures": [
+        "run_projection"
+      ],
+      "assertions": [
+        "accepted_profile_model_purpose_effort",
+        "instruction_identity"
+      ]
+    },
+    {
+      "id": "start_run_exact_replay",
+      "fixtures": [
+        "start_run_replay_projection"
+      ],
+      "assertions": [
+        "same_key_returns_original",
+        "controller_filter_secondary_reconciliation",
+        "deleted_run_tombstone"
+      ]
+    },
+    {
+      "id": "interaction_and_artifact_bounds",
+      "verification": "capability_schema_and_spec",
+      "assertions": [
+        "raw_response_preparse_limit",
+        "typed_payload_wire_limit",
+        "provider_client_artifact_limits"
+      ]
+    },
+    {
+      "id": "aggregate_revision_barrier",
+      "fixtures": [
+        "run_event_projection"
+      ],
+      "assertions": [
+        "projection_stamp_round_trip",
+        "event_invalidation_matrix"
+      ]
+    },
+    {
+      "id": "lossless_path_projection",
+      "fixtures": [
+        "opaque_path_projection"
+      ],
+      "assertions": [
+        "opaque_posix_bytes_round_trip",
+        "no_lossy_replacement"
+      ]
+    },
+    {
+      "id": "closed_capability_blocker",
+      "fixtures": [
+        "capability_blocker_projection"
+      ],
+      "assertions": [
+        "blocker_enum_no_diagnostic_parsing"
+      ]
+    },
+    {
+      "id": "stream_end_semantics",
+      "verification": "spec_and_client_policy",
+      "assertions": [
+        "terminal_no_loop",
+        "shutdown_resume",
+        "slow_consumer_typed_error",
+        "transport_not_run_failure"
+      ]
+    },
+    {
+      "id": "public_enum_unknown_behavior",
+      "verification": "descriptor_semantic_oracle",
+      "assertions": [
+        "all_input_enums_reject_unknown",
+        "all_output_enums_refresh_fail_closed"
+      ]
+    }
   ],
   "runtime_pending": [
-    {"id": "slow_consumer_isolation", "owner": "TASK-010-A", "required_evidence": "multi_run_pressure_e2e"},
-    {"id": "protected_interaction_lost_response", "owner": "TASK-010-A", "required_evidence": "secret_canary_and_fault_barrier"},
-    {"id": "gateway_restart", "owner": "TASK-010-A", "required_evidence": "active_run_restart_e2e"},
-    {"id": "socket_ownership", "owner": "TASK-010-A", "required_evidence": "macos_uds_attack_matrix"},
-    {"id": "private_boundary", "owner": "TASK-015", "required_evidence": "real_gul_harness"},
-    {"id": "run_configuration_restart", "owner": "TASK-010-A", "required_evidence": "accepted_configuration_restart_e2e"},
-    {"id": "start_run_allocation_replay", "owner": "TASK-010-A", "required_evidence": "allocation_loss_conflict_and_tombstone_e2e"},
-    {"id": "interaction_size_and_secret_barrier", "owner": "TASK-010-A", "required_evidence": "preparse_bound_and_no_secret_replay_e2e"},
-    {"id": "event_revision_action_barrier", "owner": "TASK-010-A", "required_evidence": "stale_aggregate_action_e2e"},
-    {"id": "lossless_non_utf8_path", "owner": "TASK-013", "required_evidence": "opaque_path_cross_adapter_e2e"},
-    {"id": "threadless_first_write_runtime", "owner": "TASK-010-A", "required_evidence": "threadless_submit_writer_activation_e2e"}
+    {
+      "id": "slow_consumer_isolation",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "multi_run_pressure_e2e"
+    },
+    {
+      "id": "protected_interaction_lost_response",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "secret_canary_and_fault_barrier"
+    },
+    {
+      "id": "gateway_restart",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "active_run_restart_e2e"
+    },
+    {
+      "id": "socket_ownership",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "macos_uds_attack_matrix"
+    },
+    {
+      "id": "private_boundary",
+      "owner": "TASK-009-E1",
+      "required_evidence": "real_gul_harness"
+    },
+    {
+      "id": "run_configuration_restart",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "accepted_configuration_restart_e2e"
+    },
+    {
+      "id": "start_run_allocation_replay",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "allocation_loss_conflict_and_tombstone_e2e"
+    },
+    {
+      "id": "interaction_size_and_secret_barrier",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "preparse_bound_and_no_secret_replay_e2e"
+    },
+    {
+      "id": "event_revision_action_barrier",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "stale_aggregate_action_e2e"
+    },
+    {
+      "id": "lossless_non_utf8_path",
+      "owner": "TASK-013",
+      "required_evidence": "opaque_path_cross_adapter_e2e"
+    },
+    {
+      "id": "threadless_first_write_runtime",
+      "owner": "TASK-009-D1A",
+      "required_evidence": "threadless_submit_writer_activation_e2e"
+    }
   ],
   "freeze_policy": {
     "status": "blocked_runtime_evidence",
@@ -64,335 +325,1452 @@
       "id": "workspace_projection",
       "machine_command": "workspace.inspect",
       "grpc_message": "dolgorae.public.v1.InspectWorkspaceResponse",
-      "machine_projection": {"workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "canonical_path": "/private/work", "mode": "git"},
-      "grpc_json": {"workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "canonicalPath": {"utf8Path": "/private/work"}, "mode": "WORKSPACE_MODE_GIT", "status": "WORKSPACE_INSPECTION_STATUS_COMPATIBLE"},
+      "machine_projection": {
+        "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "canonical_path": "/private/work",
+        "mode": "git"
+      },
+      "grpc_json": {
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "canonicalPath": {
+          "utf8Path": "/private/work"
+        },
+        "mode": "WORKSPACE_MODE_GIT",
+        "status": "WORKSPACE_INSPECTION_STATUS_COMPATIBLE"
+      },
       "comparisons": [
-        {"machine_path": "workspace_id", "grpc_path": "workspace_id", "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        {"machine_path": "canonical_path", "grpc_path": "canonical_path.utf8_path", "expected": "/private/work"},
-        {"machine_path": "mode", "grpc_path": "mode", "grpc_prefix": "WORKSPACE_MODE_", "expected": "git"}
+        {
+          "machine_path": "workspace_id",
+          "grpc_path": "workspace_id",
+          "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "machine_path": "canonical_path",
+          "grpc_path": "canonical_path.utf8_path",
+          "expected": "/private/work"
+        },
+        {
+          "machine_path": "mode",
+          "grpc_path": "mode",
+          "grpc_prefix": "WORKSPACE_MODE_",
+          "expected": "git"
+        }
       ]
     },
     {
       "id": "workspace_opaque_path_projection",
       "machine_command": "workspace.inspect",
       "grpc_message": "dolgorae.public.v1.InspectWorkspaceResponse",
-      "machine_projection": {"workspace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "canonical_path": {"$dolgorae_path_bytes": "/wA="}, "mode": "non_git"},
-      "grpc_json": {"workspaceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "canonicalPath": {"opaquePath": "/wA="}, "mode": "WORKSPACE_MODE_NON_GIT", "status": "WORKSPACE_INSPECTION_STATUS_COMPATIBLE"},
+      "machine_projection": {
+        "workspace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "canonical_path": {
+          "$dolgorae_path_bytes": "/wA="
+        },
+        "mode": "non_git"
+      },
+      "grpc_json": {
+        "workspaceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "canonicalPath": {
+          "opaquePath": "/wA="
+        },
+        "mode": "WORKSPACE_MODE_NON_GIT",
+        "status": "WORKSPACE_INSPECTION_STATUS_COMPATIBLE"
+      },
       "comparisons": [
-        {"machine_path": "workspace_id", "grpc_path": "workspace_id", "expected": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-        {"machine_path": "canonical_path.$dolgorae_path_bytes", "grpc_path": "canonical_path.opaque_path", "expected": "/wA="},
-        {"machine_path": "mode", "grpc_path": "mode", "grpc_prefix": "WORKSPACE_MODE_", "expected": "non_git"}
+        {
+          "machine_path": "workspace_id",
+          "grpc_path": "workspace_id",
+          "expected": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        {
+          "machine_path": "canonical_path.$dolgorae_path_bytes",
+          "grpc_path": "canonical_path.opaque_path",
+          "expected": "/wA="
+        },
+        {
+          "machine_path": "mode",
+          "grpc_path": "mode",
+          "grpc_prefix": "WORKSPACE_MODE_",
+          "expected": "non_git"
+        }
       ]
     },
     {
       "id": "interaction_support_projection",
       "machine_command": "runtime.capabilities",
       "grpc_message": "dolgorae.public.v1.GetCapabilitiesResponse",
-      "machine_projection": {"interactions": {"permission_request": "recognized_unsupported", "maximum_response_bytes": 1048576, "maximum_safe_payload_bytes": 8388608}, "artifact_bounds": {"maximum_inline_response_bytes": 1048576, "maximum_artifact_bytes": 33554432, "maximum_chunk_bytes": 1048576}},
-      "grpc_json": {"interactions": {"knownKinds": ["INTERACTION_KIND_PERMISSION_REQUEST"], "items": [{"kind": "INTERACTION_KIND_PERMISSION_REQUEST", "support": "INTERACTION_SUPPORT_RECOGNIZED_UNSUPPORTED"}], "maximumResponseBytes": 1048576, "maximumSafePayloadBytes": 8388608}, "artifacts": {"maximumArtifactSize": "33554432", "maximumChunkSize": 1048576, "maximumInlineResponseBytes": 1048576}},
+      "machine_projection": {
+        "interactions": {
+          "permission_request": "recognized_unsupported",
+          "maximum_response_bytes": 1048576,
+          "maximum_safe_payload_bytes": 8388608
+        },
+        "artifact_bounds": {
+          "maximum_inline_response_bytes": 1048576,
+          "maximum_artifact_bytes": 33554432,
+          "maximum_chunk_bytes": 1048576
+        }
+      },
+      "grpc_json": {
+        "interactions": {
+          "knownKinds": [
+            "INTERACTION_KIND_PERMISSION_REQUEST"
+          ],
+          "items": [
+            {
+              "kind": "INTERACTION_KIND_PERMISSION_REQUEST",
+              "support": "INTERACTION_SUPPORT_RECOGNIZED_UNSUPPORTED"
+            }
+          ],
+          "maximumResponseBytes": 1048576,
+          "maximumSafePayloadBytes": 8388608
+        },
+        "artifacts": {
+          "maximumArtifactSize": "33554432",
+          "maximumChunkSize": 1048576,
+          "maximumInlineResponseBytes": 1048576
+        }
+      },
       "comparisons": [
-        {"machine_path": "interactions.permission_request", "grpc_path": "interactions.items.0.support", "grpc_prefix": "INTERACTION_SUPPORT_", "expected": "recognized_unsupported"},
-        {"machine_path": "interactions.maximum_response_bytes", "grpc_path": "interactions.maximum_response_bytes", "expected": 1048576},
-        {"machine_path": "interactions.maximum_safe_payload_bytes", "grpc_path": "interactions.maximum_safe_payload_bytes", "expected": 8388608},
-        {"machine_path": "artifact_bounds.maximum_inline_response_bytes", "grpc_path": "artifacts.maximum_inline_response_bytes", "expected": 1048576},
-        {"machine_path": "artifact_bounds.maximum_artifact_bytes", "grpc_path": "artifacts.maximum_artifact_size", "coerce": "integer", "expected": 33554432},
-        {"machine_path": "artifact_bounds.maximum_chunk_bytes", "grpc_path": "artifacts.maximum_chunk_size", "expected": 1048576}
+        {
+          "machine_path": "interactions.permission_request",
+          "grpc_path": "interactions.items.0.support",
+          "grpc_prefix": "INTERACTION_SUPPORT_",
+          "expected": "recognized_unsupported"
+        },
+        {
+          "machine_path": "interactions.maximum_response_bytes",
+          "grpc_path": "interactions.maximum_response_bytes",
+          "expected": 1048576
+        },
+        {
+          "machine_path": "interactions.maximum_safe_payload_bytes",
+          "grpc_path": "interactions.maximum_safe_payload_bytes",
+          "expected": 8388608
+        },
+        {
+          "machine_path": "artifact_bounds.maximum_inline_response_bytes",
+          "grpc_path": "artifacts.maximum_inline_response_bytes",
+          "expected": 1048576
+        },
+        {
+          "machine_path": "artifact_bounds.maximum_artifact_bytes",
+          "grpc_path": "artifacts.maximum_artifact_size",
+          "coerce": "integer",
+          "expected": 33554432
+        },
+        {
+          "machine_path": "artifact_bounds.maximum_chunk_bytes",
+          "grpc_path": "artifacts.maximum_chunk_size",
+          "expected": 1048576
+        }
       ]
     },
     {
       "id": "credential_carrier_projection",
       "machine_command": "runtime.capabilities",
       "grpc_message": "dolgorae.public.v1.GetCapabilitiesResponse",
-      "machine_projection": {"controller_carrier_root": "application_support/Dolgorae/controller-carriers", "controller_credential": {"capability_encoding": "base64url_no_padding", "normalized_principal": "kind+subject_id_else_kind+instance_id"}},
-      "grpc_json": {"controllerCarrier": {"schemaId": "https://dolgorae.local/schema/controller-credential/v1", "schemaVersion": 1, "schemaSha256": "51d143825b7649880b219836606ce6bd025c0a80d365c2157642eb89c409fb0c", "carrierRootLocator": "application_support/Dolgorae/controller-carriers", "carrierRootPolicy": "CONTROLLER_CARRIER_ROOT_POLICY_DOLGORAE_OWNED_APPLICATION_SUPPORT", "acceptedControllerKinds": ["CONTROLLER_KIND_INTERACTIVE_CLIENT"], "capabilityByteLength": 32, "capabilityEncoding": "CONTROLLER_CAPABILITY_ENCODING_BASE64URL_NO_PADDING", "parentDirectoryMode": 448, "credentialFileMode": 384, "sameUidRequired": true, "regularFileRequired": true, "symlinksForbidden": true, "createExclusiveRequired": true, "maximumFileBytes": "4096", "clientDescendantPattern": "<client>/<installation-id>/", "normalizedPrincipalRule": "CONTROLLER_PRINCIPAL_RULE_KIND_SUBJECT_ID_ELSE_KIND_INSTANCE_ID", "initialGeneration": "1"}},
+      "machine_projection": {
+        "controller_carrier_root": "application_support/Dolgorae/controller-carriers",
+        "controller_credential": {
+          "capability_encoding": "base64url_no_padding",
+          "normalized_principal": "kind+subject_id_else_kind+instance_id"
+        }
+      },
+      "grpc_json": {
+        "controllerCarrier": {
+          "schemaId": "https://dolgorae.local/schema/controller-credential/v1",
+          "schemaVersion": 1,
+          "schemaSha256": "01b3d8b24b8cb7ecb2664ff10625e1d313890fd67259ae672b3842622ea5076c",
+          "carrierRootLocator": "application_support/Dolgorae/controller-carriers",
+          "carrierRootPolicy": "CONTROLLER_CARRIER_ROOT_POLICY_DOLGORAE_OWNED_APPLICATION_SUPPORT",
+          "acceptedControllerKinds": [
+            "CONTROLLER_KIND_INTERACTIVE_CLIENT"
+          ],
+          "capabilityByteLength": 32,
+          "capabilityEncoding": "CONTROLLER_CAPABILITY_ENCODING_BASE64URL_NO_PADDING",
+          "parentDirectoryMode": 448,
+          "credentialFileMode": 384,
+          "sameUidRequired": true,
+          "regularFileRequired": true,
+          "symlinksForbidden": true,
+          "createExclusiveRequired": true,
+          "maximumFileBytes": "4096",
+          "clientDescendantPattern": "<client>/<installation-id>/",
+          "normalizedPrincipalRule": "CONTROLLER_PRINCIPAL_RULE_KIND_SUBJECT_ID_ELSE_KIND_INSTANCE_ID",
+          "initialGeneration": "1"
+        }
+      },
       "comparisons": [
-        {"machine_path": "controller_carrier_root", "grpc_path": "controller_carrier.carrier_root_locator", "expected": "application_support/Dolgorae/controller-carriers"},
-        {"machine_path": "controller_credential.capability_encoding", "grpc_path": "controller_carrier.capability_encoding", "grpc_prefix": "CONTROLLER_CAPABILITY_ENCODING_", "expected": "base64url_no_padding"},
-        {"machine_path": "controller_credential.normalized_principal", "grpc_path": "controller_carrier.normalized_principal_rule", "grpc_prefix": "CONTROLLER_PRINCIPAL_RULE_", "grpc_value_map": {"kind_subject_id_else_kind_instance_id": "kind+subject_id_else_kind+instance_id"}, "expected": "kind+subject_id_else_kind+instance_id"}
+        {
+          "machine_path": "controller_carrier_root",
+          "grpc_path": "controller_carrier.carrier_root_locator",
+          "expected": "application_support/Dolgorae/controller-carriers"
+        },
+        {
+          "machine_path": "controller_credential.capability_encoding",
+          "grpc_path": "controller_carrier.capability_encoding",
+          "grpc_prefix": "CONTROLLER_CAPABILITY_ENCODING_",
+          "expected": "base64url_no_padding"
+        },
+        {
+          "machine_path": "controller_credential.normalized_principal",
+          "grpc_path": "controller_carrier.normalized_principal_rule",
+          "grpc_prefix": "CONTROLLER_PRINCIPAL_RULE_",
+          "grpc_value_map": {
+            "kind_subject_id_else_kind_instance_id": "kind+subject_id_else_kind+instance_id"
+          },
+          "expected": "kind+subject_id_else_kind+instance_id"
+        }
       ]
     },
     {
       "id": "profile_projection",
       "machine_command": "profile.show",
       "grpc_message": "dolgorae.public.v1.ProfileProjection",
-      "machine_projection": {"models": [{"model": "gpt-test", "is_default": true, "supported_reasoning_efforts": ["medium"]}]},
-      "grpc_json": {"name": "default", "serverKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "compatibility": "PROFILE_COMPATIBILITY_COMPATIBLE", "models": [{"modelId": "gpt-test", "isDefault": true, "supportedEfforts": ["medium"]}], "maximumAssurance": "ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA", "accessPolicyTransition": "SUPPORT_STATE_UNVERIFIED"},
+      "machine_projection": {
+        "models": [
+          {
+            "model": "gpt-test",
+            "is_default": true,
+            "supported_reasoning_efforts": [
+              "medium"
+            ]
+          }
+        ]
+      },
+      "grpc_json": {
+        "name": "default",
+        "serverKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "compatibility": "PROFILE_COMPATIBILITY_COMPATIBLE",
+        "models": [
+          {
+            "modelId": "gpt-test",
+            "isDefault": true,
+            "supportedEfforts": [
+              "medium"
+            ]
+          }
+        ],
+        "maximumAssurance": "ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA",
+        "accessPolicyTransition": "SUPPORT_STATE_UNVERIFIED"
+      },
       "comparisons": [
-        {"machine_path": "models.0.model", "grpc_path": "models.0.model_id", "expected": "gpt-test"},
-        {"machine_path": "models.0.is_default", "grpc_path": "models.0.is_default", "expected": true},
-        {"machine_path": "models.0.supported_reasoning_efforts.0", "grpc_path": "models.0.supported_efforts.0", "expected": "medium"}
+        {
+          "machine_path": "models.0.model",
+          "grpc_path": "models.0.model_id",
+          "expected": "gpt-test"
+        },
+        {
+          "machine_path": "models.0.is_default",
+          "grpc_path": "models.0.is_default",
+          "expected": true
+        },
+        {
+          "machine_path": "models.0.supported_reasoning_efforts.0",
+          "grpc_path": "models.0.supported_efforts.0",
+          "expected": "medium"
+        }
       ]
     },
     {
       "id": "run_projection",
       "machine_command": "run.status",
       "grpc_message": "dolgorae.public.v1.RunProjection",
-      "machine_projection": {"run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "state": "idle", "execution_lane": "dedicated", "effective_access": "read", "writer_state": "none", "profile": "default", "purpose": {"kind": "interactive"}, "model": "gpt-test", "effort": "medium"},
-      "grpc_json": {"workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "lifecycle": "RUN_LIFECYCLE_IDLE", "executionLane": "EXECUTION_LANE_DEDICATED", "effectivePolicy": {"access": "EFFECTIVE_ACCESS_READ", "verification": "POLICY_VERIFICATION_VERIFIED"}, "writerAuthority": {"state": "WRITER_AUTHORITY_STATE_NONE", "reconciliationAction": "RECONCILIATION_ACTION_NONE"}, "configuration": {"profileName": "default", "purpose": "PURPOSE_KIND_INTERACTIVE", "modelId": "gpt-test", "defaultEffort": "medium", "instructionContract": {"schemaId": "dolgorae.instructions/v1", "commonPrefixVersion": 1, "modePrefixVersion": 1, "purposePrefixVersion": 1}, "controllerInstructionsSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, "stamp": {"capturedHeadCursor": "7", "runStateRevision": "3", "writerStateRevision": "2", "interactionStateRevision": "1"}},
+      "machine_projection": {
+        "run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "state": "idle",
+        "execution_lane": "dedicated",
+        "effective_access": "read",
+        "writer_state": "none",
+        "profile": "default",
+        "purpose": {
+          "kind": "interactive"
+        },
+        "model": "gpt-test",
+        "effort": "medium"
+      },
+      "grpc_json": {
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "lifecycle": "RUN_LIFECYCLE_IDLE",
+        "executionLane": "EXECUTION_LANE_DEDICATED",
+        "effectivePolicy": {
+          "access": "EFFECTIVE_ACCESS_READ",
+          "verification": "POLICY_VERIFICATION_VERIFIED"
+        },
+        "writerAuthority": {
+          "state": "WRITER_AUTHORITY_STATE_NONE",
+          "reconciliationAction": "RECONCILIATION_ACTION_NONE"
+        },
+        "configuration": {
+          "profileName": "default",
+          "purpose": "PURPOSE_KIND_INTERACTIVE",
+          "modelId": "gpt-test",
+          "defaultEffort": "medium",
+          "instructionContract": {
+            "schemaId": "dolgorae.instructions/v1",
+            "commonPrefixVersion": 1,
+            "modePrefixVersion": 1,
+            "purposePrefixVersion": 1
+          },
+          "controllerInstructionsSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stamp": {
+          "capturedHeadCursor": "7",
+          "runStateRevision": "3",
+          "writerStateRevision": "2",
+          "interactionStateRevision": "1"
+        }
+      },
       "comparisons": [
-        {"machine_path": "run_id", "grpc_path": "run_id", "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"},
-        {"machine_path": "state", "grpc_path": "lifecycle", "grpc_prefix": "RUN_LIFECYCLE_", "expected": "idle"},
-        {"machine_path": "execution_lane", "grpc_path": "execution_lane", "grpc_prefix": "EXECUTION_LANE_", "expected": "dedicated"},
-        {"machine_path": "effective_access", "grpc_path": "effective_policy.access", "grpc_prefix": "EFFECTIVE_ACCESS_", "expected": "read"},
-        {"machine_path": "writer_state", "grpc_path": "writer_authority.state", "grpc_prefix": "WRITER_AUTHORITY_STATE_", "expected": "none"},
-        {"machine_path": "profile", "grpc_path": "configuration.profile_name", "expected": "default"},
-        {"machine_path": "purpose.kind", "grpc_path": "configuration.purpose", "grpc_prefix": "PURPOSE_KIND_", "expected": "interactive"},
-        {"machine_path": "model", "grpc_path": "configuration.model_id", "expected": "gpt-test"},
-        {"machine_path": "effort", "grpc_path": "configuration.default_effort", "expected": "medium"}
+        {
+          "machine_path": "run_id",
+          "grpc_path": "run_id",
+          "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"
+        },
+        {
+          "machine_path": "state",
+          "grpc_path": "lifecycle",
+          "grpc_prefix": "RUN_LIFECYCLE_",
+          "expected": "idle"
+        },
+        {
+          "machine_path": "execution_lane",
+          "grpc_path": "execution_lane",
+          "grpc_prefix": "EXECUTION_LANE_",
+          "expected": "dedicated"
+        },
+        {
+          "machine_path": "effective_access",
+          "grpc_path": "effective_policy.access",
+          "grpc_prefix": "EFFECTIVE_ACCESS_",
+          "expected": "read"
+        },
+        {
+          "machine_path": "writer_state",
+          "grpc_path": "writer_authority.state",
+          "grpc_prefix": "WRITER_AUTHORITY_STATE_",
+          "expected": "none"
+        },
+        {
+          "machine_path": "profile",
+          "grpc_path": "configuration.profile_name",
+          "expected": "default"
+        },
+        {
+          "machine_path": "purpose.kind",
+          "grpc_path": "configuration.purpose",
+          "grpc_prefix": "PURPOSE_KIND_",
+          "expected": "interactive"
+        },
+        {
+          "machine_path": "model",
+          "grpc_path": "configuration.model_id",
+          "expected": "gpt-test"
+        },
+        {
+          "machine_path": "effort",
+          "grpc_path": "configuration.default_effort",
+          "expected": "medium"
+        }
       ]
     },
     {
       "id": "writer_projection",
       "machine_command": "workspace.writer.status",
       "grpc_message": "dolgorae.public.v1.WriterState",
-      "machine_projection": {"workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "state": "active", "writer_generation": 3},
-      "grpc_json": {"workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "authorityState": "WRITER_AUTHORITY_STATE_ACTIVE", "writerGeneration": "3", "effectiveAccess": "EFFECTIVE_ACCESS_WRITE", "policyVerification": "POLICY_VERIFICATION_VERIFIED", "executionLane": "EXECUTION_LANE_DEDICATED", "requestedAssurance": "ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA", "achievedAssurance": "ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA", "reconciliationAction": "RECONCILIATION_ACTION_NONE"},
+      "machine_projection": {
+        "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "active",
+        "writer_generation": 3
+      },
+      "grpc_json": {
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authorityState": "WRITER_AUTHORITY_STATE_ACTIVE",
+        "writerGeneration": "3",
+        "effectiveAccess": "EFFECTIVE_ACCESS_WRITE",
+        "policyVerification": "POLICY_VERIFICATION_VERIFIED",
+        "executionLane": "EXECUTION_LANE_DEDICATED",
+        "requestedAssurance": "ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA",
+        "achievedAssurance": "ASSURANCE_LEVEL_BEST_EFFORT_PERSONAL_ALPHA",
+        "reconciliationAction": "RECONCILIATION_ACTION_NONE"
+      },
       "comparisons": [
-        {"machine_path": "workspace_id", "grpc_path": "workspace_id", "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        {"machine_path": "state", "grpc_path": "authority_state", "grpc_prefix": "WRITER_AUTHORITY_STATE_", "expected": "active"},
-        {"machine_path": "writer_generation", "grpc_path": "writer_generation", "coerce": "integer", "expected": 3}
+        {
+          "machine_path": "workspace_id",
+          "grpc_path": "workspace_id",
+          "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "machine_path": "state",
+          "grpc_path": "authority_state",
+          "grpc_prefix": "WRITER_AUTHORITY_STATE_",
+          "expected": "active"
+        },
+        {
+          "machine_path": "writer_generation",
+          "grpc_path": "writer_generation",
+          "coerce": "integer",
+          "expected": 3
+        }
       ]
     },
     {
       "id": "submit_turn_accepted",
       "machine_command": "run.submit",
       "grpc_message": "dolgorae.public.v1.SubmitTurnAccepted",
-      "machine_projection": {"turn_status": "accepted", "run_state": "running", "writer_state": "active"},
-      "grpc_json": {"acceptedTurn": {"runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "threadId": "thread-1", "turnId": "turn-1", "status": "TURN_STATUS_ACCEPTED", "cursor": "1"}, "run": {"runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "lifecycle": "RUN_LIFECYCLE_RUNNING"}, "writer": {"authorityState": "WRITER_AUTHORITY_STATE_ACTIVE"}, "idempotencyKey": "submit-1", "correlationId": "corr-1"},
+      "machine_projection": {
+        "turn_status": "accepted",
+        "run_state": "running",
+        "writer_state": "active"
+      },
+      "grpc_json": {
+        "acceptedTurn": {
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "threadId": "thread-1",
+          "turnId": "turn-1",
+          "status": "TURN_STATUS_ACCEPTED",
+          "cursor": "1"
+        },
+        "run": {
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "lifecycle": "RUN_LIFECYCLE_RUNNING"
+        },
+        "writer": {
+          "authorityState": "WRITER_AUTHORITY_STATE_ACTIVE"
+        },
+        "idempotencyKey": "submit-1",
+        "correlationId": "corr-1"
+      },
       "comparisons": [
-        {"machine_path": "turn_status", "grpc_path": "accepted_turn.status", "grpc_prefix": "TURN_STATUS_", "expected": "accepted"},
-        {"machine_path": "run_state", "grpc_path": "run.lifecycle", "grpc_prefix": "RUN_LIFECYCLE_", "expected": "running"},
-        {"machine_path": "writer_state", "grpc_path": "writer.authority_state", "grpc_prefix": "WRITER_AUTHORITY_STATE_", "expected": "active"}
+        {
+          "machine_path": "turn_status",
+          "grpc_path": "accepted_turn.status",
+          "grpc_prefix": "TURN_STATUS_",
+          "expected": "accepted"
+        },
+        {
+          "machine_path": "run_state",
+          "grpc_path": "run.lifecycle",
+          "grpc_prefix": "RUN_LIFECYCLE_",
+          "expected": "running"
+        },
+        {
+          "machine_path": "writer_state",
+          "grpc_path": "writer.authority_state",
+          "grpc_prefix": "WRITER_AUTHORITY_STATE_",
+          "expected": "active"
+        }
       ]
     },
     {
       "id": "run_event_projection",
       "machine_command": "run.events",
       "grpc_message": "dolgorae.public.v1.DurableRunEvent",
-      "machine_projection": {"cursor": "7", "type": "run.state_changed", "current": "idle", "run_state_revision": 3},
-      "grpc_json": {"cursor": "7", "eventId": "018f47b2-6f4a-7cc1-9a2b-123456789abd", "occurredAt": "2026-08-19T00:00:00Z", "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "serverKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "serverEpoch": "1", "projection": "PROJECTION_PROFILE_MINIMAL", "projectionVersion": 1, "stamp": {"capturedHeadCursor": "7", "runStateRevision": "3", "writerStateRevision": "2", "interactionStateRevision": "1"}, "runStateChanged": {"current": "RUN_LIFECYCLE_IDLE"}},
-      "grpc_oneof": {"name": "event", "selected": "run_state_changed"},
+      "machine_projection": {
+        "cursor": "7",
+        "type": "run.state_changed",
+        "current": "idle",
+        "run_state_revision": 3
+      },
+      "grpc_json": {
+        "cursor": "7",
+        "eventId": "018f47b2-6f4a-7cc1-9a2b-123456789abd",
+        "occurredAt": "2026-08-19T00:00:00Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "serverKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "serverEpoch": "1",
+        "projection": "PROJECTION_PROFILE_MINIMAL",
+        "projectionVersion": 1,
+        "stamp": {
+          "capturedHeadCursor": "7",
+          "runStateRevision": "3",
+          "writerStateRevision": "2",
+          "interactionStateRevision": "1"
+        },
+        "runStateChanged": {
+          "current": "RUN_LIFECYCLE_IDLE"
+        }
+      },
+      "grpc_oneof": {
+        "name": "event",
+        "selected": "run_state_changed"
+      },
       "comparisons": [
-        {"machine_path": "cursor", "grpc_path": "cursor", "expected": "7"},
-        {"machine_path": "current", "grpc_path": "run_state_changed.current", "grpc_prefix": "RUN_LIFECYCLE_", "expected": "idle"},
-        {"machine_path": "run_state_revision", "grpc_path": "stamp.run_state_revision", "coerce": "integer", "expected": 3}
+        {
+          "machine_path": "cursor",
+          "grpc_path": "cursor",
+          "expected": "7"
+        },
+        {
+          "machine_path": "current",
+          "grpc_path": "run_state_changed.current",
+          "grpc_prefix": "RUN_LIFECYCLE_",
+          "expected": "idle"
+        },
+        {
+          "machine_path": "run_state_revision",
+          "grpc_path": "stamp.run_state_revision",
+          "coerce": "integer",
+          "expected": 3
+        }
       ]
     },
     {
       "id": "interaction_summary_projection",
       "machine_command": "run.pending",
       "grpc_message": "dolgorae.public.v1.InteractionSummary",
-      "machine_projection": {"kind": "user_input", "status": "pending", "controller_kind": "interactive_client", "created_at": "2026-08-19T00:00:00Z", "expires_at": "2026-08-19T00:05:00Z"},
-      "grpc_json": {"interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "kind": "INTERACTION_KIND_USER_INPUT", "status": "INTERACTION_STATUS_PENDING", "safeTitle": "User input requested", "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "createdAt": "2026-08-19T00:00:00Z", "expiresAt": "2026-08-19T00:05:00Z", "stateRevision": "4"},
+      "machine_projection": {
+        "kind": "user_input",
+        "status": "pending",
+        "controller_kind": "interactive_client",
+        "created_at": "2026-08-19T00:00:00Z",
+        "expires_at": "2026-08-19T00:05:00Z"
+      },
+      "grpc_json": {
+        "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe",
+        "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "kind": "INTERACTION_KIND_USER_INPUT",
+        "status": "INTERACTION_STATUS_PENDING",
+        "safeTitle": "User input requested",
+        "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+        "createdAt": "2026-08-19T00:00:00Z",
+        "expiresAt": "2026-08-19T00:05:00Z",
+        "stateRevision": "4"
+      },
       "comparisons": [
-        {"machine_path": "kind", "grpc_path": "kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "user_input"},
-        {"machine_path": "status", "grpc_path": "status", "grpc_prefix": "INTERACTION_STATUS_", "expected": "pending"},
-        {"machine_path": "controller_kind", "grpc_path": "controller_kind", "grpc_prefix": "CONTROLLER_KIND_", "expected": "interactive_client"},
-        {"machine_path": "created_at", "grpc_path": "created_at", "expected": "2026-08-19T00:00:00Z"},
-        {"machine_path": "expires_at", "grpc_path": "expires_at", "expected": "2026-08-19T00:05:00Z"}
+        {
+          "machine_path": "kind",
+          "grpc_path": "kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "user_input"
+        },
+        {
+          "machine_path": "status",
+          "grpc_path": "status",
+          "grpc_prefix": "INTERACTION_STATUS_",
+          "expected": "pending"
+        },
+        {
+          "machine_path": "controller_kind",
+          "grpc_path": "controller_kind",
+          "grpc_prefix": "CONTROLLER_KIND_",
+          "expected": "interactive_client"
+        },
+        {
+          "machine_path": "created_at",
+          "grpc_path": "created_at",
+          "expected": "2026-08-19T00:00:00Z"
+        },
+        {
+          "machine_path": "expires_at",
+          "grpc_path": "expires_at",
+          "expected": "2026-08-19T00:05:00Z"
+        }
       ]
     },
     {
       "id": "timeline_interaction_projection",
       "machine_command": "run.timeline",
       "grpc_message": "dolgorae.public.v1.TimelineItem",
-      "machine_projection": {"type": "interaction.opened", "kind": "user_input", "status": "pending", "safe_title": "User input requested"},
-      "grpc_json": {"type": "TIMELINE_ITEM_TYPE_INTERACTION_OPENED", "cursor": "9", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "turnId": "turn-1", "occurredAt": "2026-08-19T00:00:00Z", "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe", "status": "TIMELINE_ITEM_STATUS_OPENED", "interactionKind": "INTERACTION_KIND_USER_INPUT", "interactionStatus": "INTERACTION_STATUS_PENDING", "interactionSafeTitle": "User input requested"},
+      "machine_projection": {
+        "type": "interaction.opened",
+        "kind": "user_input",
+        "status": "pending",
+        "safe_title": "User input requested"
+      },
+      "grpc_json": {
+        "type": "TIMELINE_ITEM_TYPE_INTERACTION_OPENED",
+        "cursor": "9",
+        "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "turnId": "turn-1",
+        "occurredAt": "2026-08-19T00:00:00Z",
+        "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe",
+        "status": "TIMELINE_ITEM_STATUS_OPENED",
+        "interactionKind": "INTERACTION_KIND_USER_INPUT",
+        "interactionStatus": "INTERACTION_STATUS_PENDING",
+        "interactionSafeTitle": "User input requested"
+      },
       "comparisons": [
-        {"machine_path": "type", "grpc_path": "type", "machine_value_map": {"interaction.opened": "interaction_opened"}, "grpc_prefix": "TIMELINE_ITEM_TYPE_", "expected": "interaction_opened"},
-        {"machine_path": "kind", "grpc_path": "interaction_kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "user_input"},
-        {"machine_path": "status", "grpc_path": "interaction_status", "grpc_prefix": "INTERACTION_STATUS_", "expected": "pending"},
-        {"machine_path": "safe_title", "grpc_path": "interaction_safe_title", "expected": "User input requested"}
+        {
+          "machine_path": "type",
+          "grpc_path": "type",
+          "machine_value_map": {
+            "interaction.opened": "interaction_opened"
+          },
+          "grpc_prefix": "TIMELINE_ITEM_TYPE_",
+          "expected": "interaction_opened"
+        },
+        {
+          "machine_path": "kind",
+          "grpc_path": "interaction_kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "user_input"
+        },
+        {
+          "machine_path": "status",
+          "grpc_path": "interaction_status",
+          "grpc_prefix": "INTERACTION_STATUS_",
+          "expected": "pending"
+        },
+        {
+          "machine_path": "safe_title",
+          "grpc_path": "interaction_safe_title",
+          "expected": "User input requested"
+        }
       ]
     },
     {
       "id": "continuation_projection",
       "machine_command": "run.create_write_continuation",
       "grpc_message": "dolgorae.public.v1.CreateWriteContinuationResponse",
-      "machine_projection": {"destination_run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abf", "source_run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "reason": "shared_readonly_source", "exact_replay": true},
-      "grpc_json": {"destinationRun": {"runId": "018f47b2-6f4a-7cc1-9a2b-123456789abf", "executionLane": "EXECUTION_LANE_DEDICATED", "stateVariant": "RUN_STATE_VARIANT_DEDICATED_UNSTARTED"}, "lineage": {"sourceRunId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "sourceTurnId": "turn-terminal", "sourceThreadId": "thread-source", "creationReason": "WRITE_CONTINUATION_REASON_SHARED_READONLY_SOURCE", "createdAt": "2026-08-19T00:00:00Z", "immutable": true}, "destinationController": {"controllerId": "018f47b2-6f4a-7cc1-9a2b-123456789ac0", "generation": "1", "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "instanceId": "gul"}, "idempotencyKey": "continuation-1", "sourceReceipt": {"runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "terminalTurnId": "turn-terminal", "writerAuthorityUnchanged": true}, "exactReplay": true},
+      "machine_projection": {
+        "destination_run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abf",
+        "source_run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "reason": "shared_readonly_source",
+        "exact_replay": true
+      },
+      "grpc_json": {
+        "destinationRun": {
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abf",
+          "executionLane": "EXECUTION_LANE_DEDICATED",
+          "stateVariant": "RUN_STATE_VARIANT_DEDICATED_UNSTARTED"
+        },
+        "lineage": {
+          "sourceRunId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "sourceTurnId": "turn-terminal",
+          "sourceThreadId": "thread-source",
+          "creationReason": "WRITE_CONTINUATION_REASON_SHARED_READONLY_SOURCE",
+          "createdAt": "2026-08-19T00:00:00Z",
+          "immutable": true
+        },
+        "destinationController": {
+          "controllerId": "018f47b2-6f4a-7cc1-9a2b-123456789ac0",
+          "generation": "1",
+          "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+          "instanceId": "gul"
+        },
+        "idempotencyKey": "continuation-1",
+        "sourceReceipt": {
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "terminalTurnId": "turn-terminal",
+          "writerAuthorityUnchanged": true
+        },
+        "exactReplay": true
+      },
       "comparisons": [
-        {"machine_path": "destination_run_id", "grpc_path": "destination_run.run_id", "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abf"},
-        {"machine_path": "source_run_id", "grpc_path": "lineage.source_run_id", "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"},
-        {"machine_path": "reason", "grpc_path": "lineage.creation_reason", "grpc_prefix": "WRITE_CONTINUATION_REASON_", "expected": "shared_readonly_source"},
-        {"machine_path": "exact_replay", "grpc_path": "exact_replay", "expected": true}
+        {
+          "machine_path": "destination_run_id",
+          "grpc_path": "destination_run.run_id",
+          "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abf"
+        },
+        {
+          "machine_path": "source_run_id",
+          "grpc_path": "lineage.source_run_id",
+          "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"
+        },
+        {
+          "machine_path": "reason",
+          "grpc_path": "lineage.creation_reason",
+          "grpc_prefix": "WRITE_CONTINUATION_REASON_",
+          "expected": "shared_readonly_source"
+        },
+        {
+          "machine_path": "exact_replay",
+          "grpc_path": "exact_replay",
+          "expected": true
+        }
       ]
     },
     {
       "id": "controller_verification_projection",
       "machine_command": "run.controller.verify",
       "grpc_message": "dolgorae.public.v1.VerifyControllerResponse",
-      "machine_projection": {"run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "controller_kind": "interactive_client", "generation": 1},
-      "grpc_json": {"runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "controller": {"controllerId": "018f47b2-6f4a-7cc1-9a2b-123456789ac0", "generation": "1", "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "instanceId": "gul"}, "verifiedAt": "2026-08-19T00:00:00Z"},
+      "machine_projection": {
+        "run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "controller_kind": "interactive_client",
+        "generation": 1
+      },
+      "grpc_json": {
+        "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "controller": {
+          "controllerId": "018f47b2-6f4a-7cc1-9a2b-123456789ac0",
+          "generation": "1",
+          "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+          "instanceId": "gul"
+        },
+        "verifiedAt": "2026-08-19T00:00:00Z"
+      },
       "comparisons": [
-        {"machine_path": "run_id", "grpc_path": "run_id", "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"},
-        {"machine_path": "controller_kind", "grpc_path": "controller.kind", "grpc_prefix": "CONTROLLER_KIND_", "expected": "interactive_client"},
-        {"machine_path": "generation", "grpc_path": "controller.generation", "coerce": "integer", "expected": 1}
+        {
+          "machine_path": "run_id",
+          "grpc_path": "run_id",
+          "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"
+        },
+        {
+          "machine_path": "controller_kind",
+          "grpc_path": "controller.kind",
+          "grpc_prefix": "CONTROLLER_KIND_",
+          "expected": "interactive_client"
+        },
+        {
+          "machine_path": "generation",
+          "grpc_path": "controller.generation",
+          "coerce": "integer",
+          "expected": 1
+        }
       ]
     },
     {
       "id": "artifact_projection",
       "machine_command": "run.artifact.show",
       "grpc_message": "dolgorae.public.v1.GetArtifactResponse",
-      "machine_projection": {"artifact_id": "018f47b2-6f4a-7cc1-9a2b-123456789ac1", "kind": "final_response", "visibility": "observer", "byte_length": 4},
-      "grpc_json": {"artifact": {"artifactId": "018f47b2-6f4a-7cc1-9a2b-123456789ac1", "kind": "ARTIFACT_KIND_FINAL_RESPONSE", "visibility": "ARTIFACT_VISIBILITY_OBSERVER", "mediaType": "text/plain", "byteLength": "4", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, "maximumChunkSize": 1048576},
+      "machine_projection": {
+        "artifact_id": "018f47b2-6f4a-7cc1-9a2b-123456789ac1",
+        "kind": "final_response",
+        "visibility": "observer",
+        "byte_length": 4
+      },
+      "grpc_json": {
+        "artifact": {
+          "artifactId": "018f47b2-6f4a-7cc1-9a2b-123456789ac1",
+          "kind": "ARTIFACT_KIND_FINAL_RESPONSE",
+          "visibility": "ARTIFACT_VISIBILITY_OBSERVER",
+          "mediaType": "text/plain",
+          "byteLength": "4",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "maximumChunkSize": 1048576
+      },
       "comparisons": [
-        {"machine_path": "artifact_id", "grpc_path": "artifact.artifact_id", "expected": "018f47b2-6f4a-7cc1-9a2b-123456789ac1"},
-        {"machine_path": "kind", "grpc_path": "artifact.kind", "grpc_prefix": "ARTIFACT_KIND_", "expected": "final_response"},
-        {"machine_path": "visibility", "grpc_path": "artifact.visibility", "grpc_prefix": "ARTIFACT_VISIBILITY_", "expected": "observer"},
-        {"machine_path": "byte_length", "grpc_path": "artifact.byte_length", "coerce": "integer", "expected": 4}
+        {
+          "machine_path": "artifact_id",
+          "grpc_path": "artifact.artifact_id",
+          "expected": "018f47b2-6f4a-7cc1-9a2b-123456789ac1"
+        },
+        {
+          "machine_path": "kind",
+          "grpc_path": "artifact.kind",
+          "grpc_prefix": "ARTIFACT_KIND_",
+          "expected": "final_response"
+        },
+        {
+          "machine_path": "visibility",
+          "grpc_path": "artifact.visibility",
+          "grpc_prefix": "ARTIFACT_VISIBILITY_",
+          "expected": "observer"
+        },
+        {
+          "machine_path": "byte_length",
+          "grpc_path": "artifact.byte_length",
+          "coerce": "integer",
+          "expected": 4
+        }
       ]
     },
     {
       "id": "typed_error_projection",
       "machine_command": "run.acquire_write",
       "grpc_message": "dolgorae.public.v1.DolgoraeErrorDetail",
-      "machine_projection": {"code": "THREADLESS_REQUIRES_WRITE_TURN", "action": "submit_write_turn", "retry": "forbidden"},
-      "grpc_json": {"detailVersion": 1, "dolgoraeErrorCode": "THREADLESS_REQUIRES_WRITE_TURN", "action": "REQUIRED_CLIENT_ACTION_SUBMIT_WRITE_TURN", "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN", "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"},
+      "machine_projection": {
+        "code": "THREADLESS_REQUIRES_WRITE_TURN",
+        "action": "submit_write_turn",
+        "retry": "forbidden"
+      },
+      "grpc_json": {
+        "detailVersion": 1,
+        "dolgoraeErrorCode": "THREADLESS_REQUIRES_WRITE_TURN",
+        "action": "REQUIRED_CLIENT_ACTION_SUBMIT_WRITE_TURN",
+        "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"
+      },
       "comparisons": [
-        {"machine_path": "code", "grpc_path": "dolgorae_error_code", "expected": "THREADLESS_REQUIRES_WRITE_TURN"},
-        {"machine_path": "action", "grpc_path": "action", "grpc_prefix": "REQUIRED_CLIENT_ACTION_", "expected": "submit_write_turn"},
-        {"machine_path": "retry", "grpc_path": "retry_classification", "grpc_prefix": "RETRY_CLASSIFICATION_", "expected": "forbidden"}
+        {
+          "machine_path": "code",
+          "grpc_path": "dolgorae_error_code",
+          "expected": "THREADLESS_REQUIRES_WRITE_TURN"
+        },
+        {
+          "machine_path": "action",
+          "grpc_path": "action",
+          "grpc_prefix": "REQUIRED_CLIENT_ACTION_",
+          "expected": "submit_write_turn"
+        },
+        {
+          "machine_path": "retry",
+          "grpc_path": "retry_classification",
+          "grpc_prefix": "RETRY_CLASSIFICATION_",
+          "expected": "forbidden"
+        }
       ]
     },
     {
       "id": "rpc_socket_error_projection",
       "machine_command": "serve",
       "grpc_message": "dolgorae.public.v1.DolgoraeErrorDetail",
-      "machine_projection": {"code": "RPC_SOCKET_UNSAFE", "action": "fix_socket_path", "retry": "forbidden"},
-      "grpc_json": {"detailVersion": 1, "dolgoraeErrorCode": "RPC_SOCKET_UNSAFE", "action": "REQUIRED_CLIENT_ACTION_FIX_SOCKET_PATH", "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN", "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"},
+      "machine_projection": {
+        "code": "RPC_SOCKET_UNSAFE",
+        "action": "fix_socket_path",
+        "retry": "forbidden"
+      },
+      "grpc_json": {
+        "detailVersion": 1,
+        "dolgoraeErrorCode": "RPC_SOCKET_UNSAFE",
+        "action": "REQUIRED_CLIENT_ACTION_FIX_SOCKET_PATH",
+        "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"
+      },
       "comparisons": [
-        {"machine_path": "code", "grpc_path": "dolgorae_error_code", "expected": "RPC_SOCKET_UNSAFE"},
-        {"machine_path": "action", "grpc_path": "action", "grpc_prefix": "REQUIRED_CLIENT_ACTION_", "expected": "fix_socket_path"},
-        {"machine_path": "retry", "grpc_path": "retry_classification", "grpc_prefix": "RETRY_CLASSIFICATION_", "expected": "forbidden"}
+        {
+          "machine_path": "code",
+          "grpc_path": "dolgorae_error_code",
+          "expected": "RPC_SOCKET_UNSAFE"
+        },
+        {
+          "machine_path": "action",
+          "grpc_path": "action",
+          "grpc_prefix": "REQUIRED_CLIENT_ACTION_",
+          "expected": "fix_socket_path"
+        },
+        {
+          "machine_path": "retry",
+          "grpc_path": "retry_classification",
+          "grpc_prefix": "RETRY_CLASSIFICATION_",
+          "expected": "forbidden"
+        }
       ]
     },
     {
       "id": "shared_write_error_projection",
       "machine_command": "run.submit",
       "grpc_message": "dolgorae.public.v1.DolgoraeErrorDetail",
-      "machine_projection": {"code": "SHARED_RUN_WRITE_FORBIDDEN", "action": "create_write_continuation"},
-      "grpc_json": {"detailVersion": 1, "dolgoraeErrorCode": "SHARED_RUN_WRITE_FORBIDDEN", "action": "REQUIRED_CLIENT_ACTION_CREATE_WRITE_CONTINUATION", "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN", "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"},
+      "machine_projection": {
+        "code": "SHARED_RUN_WRITE_FORBIDDEN",
+        "action": "create_write_continuation"
+      },
+      "grpc_json": {
+        "detailVersion": 1,
+        "dolgoraeErrorCode": "SHARED_RUN_WRITE_FORBIDDEN",
+        "action": "REQUIRED_CLIENT_ACTION_CREATE_WRITE_CONTINUATION",
+        "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"
+      },
       "comparisons": [
-        {"machine_path": "code", "grpc_path": "dolgorae_error_code", "expected": "SHARED_RUN_WRITE_FORBIDDEN"},
-        {"machine_path": "action", "grpc_path": "action", "grpc_prefix": "REQUIRED_CLIENT_ACTION_", "expected": "create_write_continuation"}
+        {
+          "machine_path": "code",
+          "grpc_path": "dolgorae_error_code",
+          "expected": "SHARED_RUN_WRITE_FORBIDDEN"
+        },
+        {
+          "machine_path": "action",
+          "grpc_path": "action",
+          "grpc_prefix": "REQUIRED_CLIENT_ACTION_",
+          "expected": "create_write_continuation"
+        }
       ]
     },
     {
       "id": "transition_error_projection",
       "machine_command": "run.acquire_write",
       "grpc_message": "dolgorae.public.v1.DolgoraeErrorDetail",
-      "machine_projection": {"code": "ACCESS_TRANSITION_UNSUPPORTED", "action": "create_write_continuation"},
-      "grpc_json": {"detailVersion": 1, "dolgoraeErrorCode": "ACCESS_TRANSITION_UNSUPPORTED", "action": "REQUIRED_CLIENT_ACTION_CREATE_WRITE_CONTINUATION", "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN", "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"},
+      "machine_projection": {
+        "code": "ACCESS_TRANSITION_UNSUPPORTED",
+        "action": "create_write_continuation"
+      },
+      "grpc_json": {
+        "detailVersion": 1,
+        "dolgoraeErrorCode": "ACCESS_TRANSITION_UNSUPPORTED",
+        "action": "REQUIRED_CLIENT_ACTION_CREATE_WRITE_CONTINUATION",
+        "retryClassification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE"
+      },
       "comparisons": [
-        {"machine_path": "code", "grpc_path": "dolgorae_error_code", "expected": "ACCESS_TRANSITION_UNSUPPORTED"},
-        {"machine_path": "action", "grpc_path": "action", "grpc_prefix": "REQUIRED_CLIENT_ACTION_", "expected": "create_write_continuation"}
+        {
+          "machine_path": "code",
+          "grpc_path": "dolgorae_error_code",
+          "expected": "ACCESS_TRANSITION_UNSUPPORTED"
+        },
+        {
+          "machine_path": "action",
+          "grpc_path": "action",
+          "grpc_prefix": "REQUIRED_CLIENT_ACTION_",
+          "expected": "create_write_continuation"
+        }
       ]
     },
     {
       "id": "controller_interaction_command_projection",
       "machine_command": "run.interaction.get",
       "grpc_message": "dolgorae.public.v1.ControllerInteraction",
-      "machine_projection": {"kind": "command_execution_approval", "command": "git", "decision": "accept_once"},
-      "grpc_json": {"summary": {"interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "kind": "INTERACTION_KIND_COMMAND_EXECUTION_APPROVAL", "status": "INTERACTION_STATUS_PENDING", "safeTitle": "Command approval requested", "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "createdAt": "2026-08-19T00:00:00Z", "stateRevision": "4"}, "responseSchemaId": "dolgorae.interaction.command-approval/v1", "stamp": {"capturedHeadCursor": "9", "runStateRevision": "3", "writerStateRevision": "2", "interactionStateRevision": "4"}, "commandApproval": {"title": "Command approval", "message": "Run command", "command": ["git", "status"], "cwd": {"utf8Path": "/private/work"}}, "decisions": ["INTERACTION_DECISION_ACCEPT_ONCE", "INTERACTION_DECISION_DECLINE", "INTERACTION_DECISION_CANCEL"]},
-      "grpc_oneof": {"name": "payload", "selected": "command_approval"},
+      "machine_projection": {
+        "kind": "command_execution_approval",
+        "command": "git",
+        "decision": "accept_once"
+      },
+      "grpc_json": {
+        "summary": {
+          "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe",
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "kind": "INTERACTION_KIND_COMMAND_EXECUTION_APPROVAL",
+          "status": "INTERACTION_STATUS_PENDING",
+          "safeTitle": "Command approval requested",
+          "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+          "createdAt": "2026-08-19T00:00:00Z",
+          "stateRevision": "4"
+        },
+        "responseSchemaId": "dolgorae.interaction.command-approval/v1",
+        "stamp": {
+          "capturedHeadCursor": "9",
+          "runStateRevision": "3",
+          "writerStateRevision": "2",
+          "interactionStateRevision": "4"
+        },
+        "commandApproval": {
+          "title": "Command approval",
+          "message": "Run command",
+          "command": [
+            "git",
+            "status"
+          ],
+          "cwd": {
+            "utf8Path": "/private/work"
+          }
+        },
+        "decisions": [
+          "INTERACTION_DECISION_ACCEPT_ONCE",
+          "INTERACTION_DECISION_DECLINE",
+          "INTERACTION_DECISION_CANCEL"
+        ]
+      },
+      "grpc_oneof": {
+        "name": "payload",
+        "selected": "command_approval"
+      },
       "comparisons": [
-        {"machine_path": "kind", "grpc_path": "summary.kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "command_execution_approval"},
-        {"machine_path": "command", "grpc_path": "command_approval.command.0", "expected": "git"},
-        {"machine_path": "decision", "grpc_path": "decisions.0", "grpc_prefix": "INTERACTION_DECISION_", "expected": "accept_once"}
+        {
+          "machine_path": "kind",
+          "grpc_path": "summary.kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "command_execution_approval"
+        },
+        {
+          "machine_path": "command",
+          "grpc_path": "command_approval.command.0",
+          "expected": "git"
+        },
+        {
+          "machine_path": "decision",
+          "grpc_path": "decisions.0",
+          "grpc_prefix": "INTERACTION_DECISION_",
+          "expected": "accept_once"
+        }
       ]
     },
     {
       "id": "controller_interaction_file_projection",
       "machine_command": "run.interaction.get",
       "grpc_message": "dolgorae.public.v1.ControllerInteraction",
-      "machine_projection": {"kind": "file_change_approval", "snapshot_revision": 2, "change_kind": "update"},
-      "grpc_json": {"summary": {"interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "kind": "INTERACTION_KIND_FILE_CHANGE_APPROVAL", "status": "INTERACTION_STATUS_PENDING", "safeTitle": "File change approval requested", "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "createdAt": "2026-08-19T00:00:00Z", "stateRevision": "4"}, "responseSchemaId": "dolgorae.interaction.file-change-approval/v1", "stamp": {"capturedHeadCursor": "9", "runStateRevision": "3", "writerStateRevision": "2", "interactionStateRevision": "4"}, "fileChangeApproval": {"title": "File change approval", "message": "Apply change", "snapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "snapshotRevision": "2", "inlineChanges": {"items": [{"path": {"utf8Path": "README.md"}, "kind": "FILE_CHANGE_KIND_UPDATE", "unifiedDiff": "@@ -1 +1 @@"}]}}, "decisions": ["INTERACTION_DECISION_ACCEPT_ONCE", "INTERACTION_DECISION_DECLINE", "INTERACTION_DECISION_CANCEL"]},
-      "grpc_oneof": {"name": "payload", "selected": "file_change_approval"},
+      "machine_projection": {
+        "kind": "file_change_approval",
+        "snapshot_revision": 2,
+        "change_kind": "update"
+      },
+      "grpc_json": {
+        "summary": {
+          "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe",
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "kind": "INTERACTION_KIND_FILE_CHANGE_APPROVAL",
+          "status": "INTERACTION_STATUS_PENDING",
+          "safeTitle": "File change approval requested",
+          "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+          "createdAt": "2026-08-19T00:00:00Z",
+          "stateRevision": "4"
+        },
+        "responseSchemaId": "dolgorae.interaction.file-change-approval/v1",
+        "stamp": {
+          "capturedHeadCursor": "9",
+          "runStateRevision": "3",
+          "writerStateRevision": "2",
+          "interactionStateRevision": "4"
+        },
+        "fileChangeApproval": {
+          "title": "File change approval",
+          "message": "Apply change",
+          "snapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshotRevision": "2",
+          "inlineChanges": {
+            "items": [
+              {
+                "path": {
+                  "utf8Path": "README.md"
+                },
+                "kind": "FILE_CHANGE_KIND_UPDATE",
+                "unifiedDiff": "@@ -1 +1 @@"
+              }
+            ]
+          }
+        },
+        "decisions": [
+          "INTERACTION_DECISION_ACCEPT_ONCE",
+          "INTERACTION_DECISION_DECLINE",
+          "INTERACTION_DECISION_CANCEL"
+        ]
+      },
+      "grpc_oneof": {
+        "name": "payload",
+        "selected": "file_change_approval"
+      },
       "comparisons": [
-        {"machine_path": "kind", "grpc_path": "summary.kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "file_change_approval"},
-        {"machine_path": "snapshot_revision", "grpc_path": "file_change_approval.snapshot_revision", "coerce": "integer", "expected": 2},
-        {"machine_path": "change_kind", "grpc_path": "file_change_approval.inline_changes.items.0.kind", "grpc_prefix": "FILE_CHANGE_KIND_", "expected": "update"}
+        {
+          "machine_path": "kind",
+          "grpc_path": "summary.kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "file_change_approval"
+        },
+        {
+          "machine_path": "snapshot_revision",
+          "grpc_path": "file_change_approval.snapshot_revision",
+          "coerce": "integer",
+          "expected": 2
+        },
+        {
+          "machine_path": "change_kind",
+          "grpc_path": "file_change_approval.inline_changes.items.0.kind",
+          "grpc_prefix": "FILE_CHANGE_KIND_",
+          "expected": "update"
+        }
       ]
     },
     {
       "id": "controller_interaction_projection",
       "machine_command": "run.interaction.get",
       "grpc_message": "dolgorae.public.v1.ControllerInteraction",
-      "machine_projection": {"kind": "user_input", "is_blocking": true},
-      "grpc_json": {"summary": {"interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "kind": "INTERACTION_KIND_USER_INPUT", "status": "INTERACTION_STATUS_PENDING", "safeTitle": "User input requested", "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "createdAt": "2026-08-19T00:00:00Z", "stateRevision": "4"}, "responseSchemaId": "dolgorae.interaction.user-input/v1", "stamp": {"capturedHeadCursor": "9", "runStateRevision": "3", "writerStateRevision": "2", "interactionStateRevision": "4"}, "userInput": {"isBlocking": true, "questions": [{"id": "q1", "header": "Choice", "question": "Continue?", "options": {"items": [{"label": "Yes", "description": "Continue"}]}}]}},
-      "grpc_oneof": {"name": "payload", "selected": "user_input"},
+      "machine_projection": {
+        "kind": "user_input",
+        "is_blocking": true
+      },
+      "grpc_json": {
+        "summary": {
+          "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe",
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "kind": "INTERACTION_KIND_USER_INPUT",
+          "status": "INTERACTION_STATUS_PENDING",
+          "safeTitle": "User input requested",
+          "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+          "createdAt": "2026-08-19T00:00:00Z",
+          "stateRevision": "4"
+        },
+        "responseSchemaId": "dolgorae.interaction.user-input/v1",
+        "stamp": {
+          "capturedHeadCursor": "9",
+          "runStateRevision": "3",
+          "writerStateRevision": "2",
+          "interactionStateRevision": "4"
+        },
+        "userInput": {
+          "isBlocking": true,
+          "questions": [
+            {
+              "id": "q1",
+              "header": "Choice",
+              "question": "Continue?",
+              "options": {
+                "items": [
+                  {
+                    "label": "Yes",
+                    "description": "Continue"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "grpc_oneof": {
+        "name": "payload",
+        "selected": "user_input"
+      },
       "comparisons": [
-        {"machine_path": "kind", "grpc_path": "summary.kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "user_input"},
-        {"machine_path": "is_blocking", "grpc_path": "user_input.is_blocking", "expected": true}
+        {
+          "machine_path": "kind",
+          "grpc_path": "summary.kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "user_input"
+        },
+        {
+          "machine_path": "is_blocking",
+          "grpc_path": "user_input.is_blocking",
+          "expected": true
+        }
       ]
     },
     {
       "id": "controller_interaction_unsupported_projection",
       "machine_command": "run.interaction.get",
       "grpc_message": "dolgorae.public.v1.ControllerInteraction",
-      "machine_projection": {"kind": "unsupported_request", "original_kind": "permission_request", "reason": "recognized_unsupported"},
-      "grpc_json": {"summary": {"interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe", "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "kind": "INTERACTION_KIND_UNSUPPORTED_REQUEST", "status": "INTERACTION_STATUS_RESOLVED", "safeTitle": "Interaction resolved", "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT", "createdAt": "2026-08-19T00:00:00Z", "resolvedAt": "2026-08-19T00:00:01Z", "stateRevision": "4"}, "responseSchemaId": "dolgorae.interaction.unsupported/v1", "stamp": {"capturedHeadCursor": "9", "runStateRevision": "3", "writerStateRevision": "2", "interactionStateRevision": "4"}, "unsupported": {"originalKind": "INTERACTION_KIND_PERMISSION_REQUEST", "reason": "UNSUPPORTED_INTERACTION_REASON_RECOGNIZED_UNSUPPORTED"}},
-      "grpc_oneof": {"name": "payload", "selected": "unsupported"},
+      "machine_projection": {
+        "kind": "unsupported_request",
+        "original_kind": "permission_request",
+        "reason": "recognized_unsupported"
+      },
+      "grpc_json": {
+        "summary": {
+          "interactionId": "018f47b2-6f4a-7cc1-9a2b-123456789abe",
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "kind": "INTERACTION_KIND_UNSUPPORTED_REQUEST",
+          "status": "INTERACTION_STATUS_RESOLVED",
+          "safeTitle": "Interaction resolved",
+          "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+          "createdAt": "2026-08-19T00:00:00Z",
+          "resolvedAt": "2026-08-19T00:00:01Z",
+          "stateRevision": "4"
+        },
+        "responseSchemaId": "dolgorae.interaction.unsupported/v1",
+        "stamp": {
+          "capturedHeadCursor": "9",
+          "runStateRevision": "3",
+          "writerStateRevision": "2",
+          "interactionStateRevision": "4"
+        },
+        "unsupported": {
+          "originalKind": "INTERACTION_KIND_PERMISSION_REQUEST",
+          "reason": "UNSUPPORTED_INTERACTION_REASON_RECOGNIZED_UNSUPPORTED"
+        }
+      },
+      "grpc_oneof": {
+        "name": "payload",
+        "selected": "unsupported"
+      },
       "comparisons": [
-        {"machine_path": "kind", "grpc_path": "summary.kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "unsupported_request"},
-        {"machine_path": "original_kind", "grpc_path": "unsupported.original_kind", "grpc_prefix": "INTERACTION_KIND_", "expected": "permission_request"},
-        {"machine_path": "reason", "grpc_path": "unsupported.reason", "grpc_prefix": "UNSUPPORTED_INTERACTION_REASON_", "expected": "recognized_unsupported"}
+        {
+          "machine_path": "kind",
+          "grpc_path": "summary.kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "unsupported_request"
+        },
+        {
+          "machine_path": "original_kind",
+          "grpc_path": "unsupported.original_kind",
+          "grpc_prefix": "INTERACTION_KIND_",
+          "expected": "permission_request"
+        },
+        {
+          "machine_path": "reason",
+          "grpc_path": "unsupported.reason",
+          "grpc_prefix": "UNSUPPORTED_INTERACTION_REASON_",
+          "expected": "recognized_unsupported"
+        }
       ]
     },
     {
       "id": "start_run_replay_projection",
       "machine_command": "run.start",
       "grpc_message": "dolgorae.public.v1.StartRunResponse",
-      "machine_projection": {"run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc", "exact_replay": true},
-      "grpc_json": {"run": {"runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc"}, "idempotencyKey": "start-1", "exactReplay": true},
+      "machine_projection": {
+        "run_id": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+        "exact_replay": true
+      },
+      "grpc_json": {
+        "run": {
+          "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc"
+        },
+        "idempotencyKey": "start-1",
+        "exactReplay": true
+      },
       "comparisons": [
-        {"machine_path": "run_id", "grpc_path": "run.run_id", "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"},
-        {"machine_path": "exact_replay", "grpc_path": "exact_replay", "expected": true}
+        {
+          "machine_path": "run_id",
+          "grpc_path": "run.run_id",
+          "expected": "018f47b2-6f4a-7cc1-9a2b-123456789abc"
+        },
+        {
+          "machine_path": "exact_replay",
+          "grpc_path": "exact_replay",
+          "expected": true
+        }
       ]
     },
     {
       "id": "opaque_path_projection",
       "machine_command": "run.events",
       "grpc_message": "dolgorae.public.v1.PathProjection",
-      "machine_projection": {"opaque_path": "/wA="},
-      "grpc_json": {"opaquePath": "/wA="},
-      "grpc_oneof": {"name": "value", "selected": "opaque_path"},
+      "machine_projection": {
+        "opaque_path": "/wA="
+      },
+      "grpc_json": {
+        "opaquePath": "/wA="
+      },
+      "grpc_oneof": {
+        "name": "value",
+        "selected": "opaque_path"
+      },
       "comparisons": [
-        {"machine_path": "opaque_path", "grpc_path": "opaque_path", "expected": "/wA="}
+        {
+          "machine_path": "opaque_path",
+          "grpc_path": "opaque_path",
+          "expected": "/wA="
+        }
       ]
     },
     {
       "id": "capability_blocker_projection",
       "machine_command": "workspace.inspect",
       "grpc_message": "dolgorae.public.v1.CapabilityBlocker",
-      "machine_projection": {"code": "workspace_path_unsafe"},
-      "grpc_json": {"code": "CAPABILITY_BLOCKER_CODE_WORKSPACE_PATH_UNSAFE", "safeMessage": "Workspace path is unsafe"},
+      "machine_projection": {
+        "code": "workspace_path_unsafe"
+      },
+      "grpc_json": {
+        "code": "CAPABILITY_BLOCKER_CODE_WORKSPACE_PATH_UNSAFE",
+        "safeMessage": "Workspace path is unsafe"
+      },
       "comparisons": [
-        {"machine_path": "code", "grpc_path": "code", "grpc_prefix": "CAPABILITY_BLOCKER_CODE_", "expected": "workspace_path_unsafe"}
+        {
+          "machine_path": "code",
+          "grpc_path": "code",
+          "grpc_prefix": "CAPABILITY_BLOCKER_CODE_",
+          "expected": "workspace_path_unsafe"
+        }
       ]
     }
   ],
   "negative_fixtures": [
-    {"id": "profile_default_missing", "models": [{"model": "a", "is_default": false, "efforts": ["medium"]}], "error": "profile_default_count_invalid"},
-    {"id": "profile_default_duplicate", "models": [{"model": "a", "is_default": true, "efforts": ["medium"]}, {"model": "b", "is_default": true, "efforts": ["medium"]}], "error": "profile_default_count_invalid"},
-    {"id": "profile_model_empty", "models": [{"model": "", "is_default": true, "efforts": ["medium"]}], "error": "profile_model_id_invalid"},
-    {"id": "profile_model_duplicate", "models": [{"model": "a", "is_default": true, "efforts": ["medium"]}, {"model": "a", "is_default": false, "efforts": ["high"]}], "error": "profile_model_id_duplicate"},
-    {"id": "profile_effort_empty", "models": [{"model": "a", "is_default": true, "efforts": []}], "error": "profile_effort_invalid"},
-    {"id": "profile_effort_duplicate", "models": [{"model": "a", "is_default": true, "efforts": ["medium", "medium"]}], "error": "profile_effort_duplicate"}
+    {
+      "id": "profile_default_missing",
+      "models": [
+        {
+          "model": "a",
+          "is_default": false,
+          "efforts": [
+            "medium"
+          ]
+        }
+      ],
+      "error": "profile_default_count_invalid"
+    },
+    {
+      "id": "profile_default_duplicate",
+      "models": [
+        {
+          "model": "a",
+          "is_default": true,
+          "efforts": [
+            "medium"
+          ]
+        },
+        {
+          "model": "b",
+          "is_default": true,
+          "efforts": [
+            "medium"
+          ]
+        }
+      ],
+      "error": "profile_default_count_invalid"
+    },
+    {
+      "id": "profile_model_empty",
+      "models": [
+        {
+          "model": "",
+          "is_default": true,
+          "efforts": [
+            "medium"
+          ]
+        }
+      ],
+      "error": "profile_model_id_invalid"
+    },
+    {
+      "id": "profile_model_duplicate",
+      "models": [
+        {
+          "model": "a",
+          "is_default": true,
+          "efforts": [
+            "medium"
+          ]
+        },
+        {
+          "model": "a",
+          "is_default": false,
+          "efforts": [
+            "high"
+          ]
+        }
+      ],
+      "error": "profile_model_id_duplicate"
+    },
+    {
+      "id": "profile_effort_empty",
+      "models": [
+        {
+          "model": "a",
+          "is_default": true,
+          "efforts": []
+        }
+      ],
+      "error": "profile_effort_invalid"
+    },
+    {
+      "id": "profile_effort_duplicate",
+      "models": [
+        {
+          "model": "a",
+          "is_default": true,
+          "efforts": [
+            "medium",
+            "medium"
+          ]
+        }
+      ],
+      "error": "profile_effort_duplicate"
+    }
   ],
   "contract_negative_fixtures": [
-    {"id": "interaction_kind_payload_mismatch", "expected": "reject_before_projection"},
-    {"id": "interaction_unknown_payload_variant", "expected": "refresh_capabilities_fail_closed"},
-    {"id": "interaction_unknown_fixed_field", "expected": "reject_unknown_field"},
-    {"id": "interaction_response_1048577_bytes", "expected": "INTERACTION_RESPONSE_TOO_LARGE"},
-    {"id": "interaction_payload_8388609_bytes", "expected": "INTERACTION_PAYLOAD_TOO_LARGE"},
-    {"id": "start_run_same_key_different_controller", "expected": "IDEMPOTENCY_CONFLICT"},
-    {"id": "start_run_same_key_different_identity", "expected": "IDEMPOTENCY_CONFLICT"},
-    {"id": "stale_projection_stamp_enables_mutation", "expected": "reject_action_until_refresh"},
-    {"id": "capability_blocker_unspecified", "expected": "refresh_capabilities_fail_closed"},
-    {"id": "lossy_non_utf8_replacement", "expected": "reject_projection"},
-    {"id": "public_enum_unknown_input", "expected": "UNSUPPORTED_SCHEMA_VERSION"},
-    {"id": "public_enum_unknown_output", "expected": "refresh_capabilities_fail_closed"}
-  ]
+    {
+      "id": "interaction_kind_payload_mismatch",
+      "expected": "reject_before_projection"
+    },
+    {
+      "id": "interaction_unknown_payload_variant",
+      "expected": "refresh_capabilities_fail_closed"
+    },
+    {
+      "id": "interaction_unknown_fixed_field",
+      "expected": "reject_unknown_field"
+    },
+    {
+      "id": "interaction_response_1048577_bytes",
+      "expected": "INTERACTION_RESPONSE_TOO_LARGE"
+    },
+    {
+      "id": "interaction_payload_8388609_bytes",
+      "expected": "INTERACTION_PAYLOAD_TOO_LARGE"
+    },
+    {
+      "id": "start_run_same_key_different_controller",
+      "expected": "IDEMPOTENCY_CONFLICT"
+    },
+    {
+      "id": "start_run_same_key_different_identity",
+      "expected": "IDEMPOTENCY_CONFLICT"
+    },
+    {
+      "id": "stale_projection_stamp_enables_mutation",
+      "expected": "reject_action_until_refresh"
+    },
+    {
+      "id": "capability_blocker_unspecified",
+      "expected": "refresh_capabilities_fail_closed"
+    },
+    {
+      "id": "lossy_non_utf8_replacement",
+      "expected": "reject_projection"
+    },
+    {
+      "id": "public_enum_unknown_input",
+      "expected": "UNSUPPORTED_SCHEMA_VERSION"
+    },
+    {
+      "id": "public_enum_unknown_output",
+      "expected": "refresh_capabilities_fail_closed"
+    }
+  ],
+  "delivery_stages": {
+    "MILESTONE-BH1": {
+      "owner": "TASK-009-D1A",
+      "required_methods": [
+        "ArtifactService.GetArtifact",
+        "ArtifactService.ReadArtifactChunk",
+        "ControllerService.VerifyController",
+        "InteractionService.GetControllerInteraction",
+        "InteractionService.ListPendingInteractions",
+        "InteractionService.ResolveInteraction",
+        "ObservationService.WatchRunEvents",
+        "RunService.CloseRun",
+        "RunService.GetRun",
+        "RunService.InterruptTurn",
+        "RunService.ListRuns",
+        "RunService.PauseRun",
+        "RunService.ReconcileRun",
+        "RunService.RecoverRun",
+        "RunService.ResumeRun",
+        "RunService.StartRun",
+        "RunService.SubmitTurn",
+        "RuntimeService.GetCapabilities",
+        "RuntimeService.GetProfile",
+        "RuntimeService.InspectWorkspace",
+        "RuntimeService.ListProfiles",
+        "WriterService.AcquireWriter",
+        "WriterService.GetWorkspaceWriterStatus",
+        "WriterService.ReleaseWriter"
+      ],
+      "artifact_acceptance": {
+        "minimum_result_bytes": 1048577,
+        "maximum_chunk_bytes": 1048576,
+        "required_methods": [
+          "ArtifactService.GetArtifact",
+          "ArtifactService.ReadArtifactChunk"
+        ],
+        "required_error_codes": [
+          "ARTIFACT_INTEGRITY_FAILURE",
+          "ARTIFACT_NOT_FOUND",
+          "ARTIFACT_RANGE_INVALID",
+          "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER"
+        ],
+        "required_redactions": [
+          "controller_credentials",
+          "database_paths",
+          "hidden_reasoning",
+          "private_socket_paths",
+          "raw_private_frames"
+        ],
+        "verify_total_byte_length": true,
+        "verify_sha256": true
+      },
+      "description": "Twenty-four-method frozen public-v1 path required for a live Gul Orchestrated Session and Brokered Hierarchy, including artifact metadata and bounded chunk retrieval."
+    },
+    "MILESTONE-PA1": {
+      "owner": "TASK-010-A",
+      "required_methods": [
+        "ArtifactService.GetArtifact",
+        "ArtifactService.ReadArtifactChunk",
+        "ControllerService.VerifyController",
+        "InteractionService.GetControllerInteraction",
+        "InteractionService.ListPendingInteractions",
+        "InteractionService.ResolveInteraction",
+        "ObservationService.ListRunTimelineItems",
+        "ObservationService.WatchRunEvents",
+        "RunService.CloseRun",
+        "RunService.CreateWriteContinuation",
+        "RunService.DeleteRun",
+        "RunService.ForkRun",
+        "RunService.GetRun",
+        "RunService.InterruptTurn",
+        "RunService.ListRuns",
+        "RunService.PauseRun",
+        "RunService.ReconcileRun",
+        "RunService.RecoverRun",
+        "RunService.ResumeRun",
+        "RunService.SetDefaultEffort",
+        "RunService.StartRun",
+        "RunService.SubmitTurn",
+        "RunService.VerifyRun",
+        "RuntimeService.GetCapabilities",
+        "RuntimeService.GetProfile",
+        "RuntimeService.InspectWorkspace",
+        "RuntimeService.ListProfileDiagnostics",
+        "RuntimeService.ListProfiles",
+        "WriterService.AcquireWriter",
+        "WriterService.CancelWriterHandoff",
+        "WriterService.CommitWriterHandoff",
+        "WriterService.GetWorkspaceWriterStatus",
+        "WriterService.PrepareWriterHandoff",
+        "WriterService.ReleaseWriter"
+      ],
+      "description": "Complete public-v1 method surface and extended observation/operator-safe behavior."
+    }
+  }
 }

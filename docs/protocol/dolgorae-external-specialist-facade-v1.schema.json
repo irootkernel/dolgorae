@@ -1,0 +1,880 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/external-specialist-facade/v1",
+  "title": "Dolgorae External Specialist Engagement facade v1",
+  "description": "Private Machine CLI or trusted MCP facade payloads for an external AI that remains the semantic control plane. open_external_engagement explicitly creates the durable boundary. Every call is authorized by the same out-of-band aggregate-owner Controller credential and canonical workspace; external_controller_ref is immutable semantic provenance, not an authorization credential. Each hired Specialist is an independent managed-agent Run with a separately supplied per-Run Controller credential.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/open_request"
+    },
+    {
+      "$ref": "#/$defs/open_result"
+    },
+    {
+      "$ref": "#/$defs/get_request"
+    },
+    {
+      "$ref": "#/$defs/get_result"
+    },
+    {
+      "$ref": "#/$defs/hire_request"
+    },
+    {
+      "$ref": "#/$defs/hire_result"
+    },
+    {
+      "$ref": "#/$defs/assign_request"
+    },
+    {
+      "$ref": "#/$defs/assign_result"
+    },
+    {
+      "$ref": "#/$defs/await_request"
+    },
+    {
+      "$ref": "#/$defs/await_result"
+    },
+    {
+      "$ref": "#/$defs/collect_request"
+    },
+    {
+      "$ref": "#/$defs/collect_result"
+    },
+    {
+      "$ref": "#/$defs/cancel_request"
+    },
+    {
+      "$ref": "#/$defs/cancel_result"
+    },
+    {
+      "$ref": "#/$defs/release_request"
+    },
+    {
+      "$ref": "#/$defs/release_result"
+    },
+    {
+      "$ref": "#/$defs/close_request"
+    },
+    {
+      "$ref": "#/$defs/close_result"
+    },
+    {
+      "$ref": "#/$defs/error_result"
+    }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "x-maxUtf8Bytes": 256
+    },
+    "opaque_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+          "x-maxUtf8Bytes": 256
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+          "x-maxUtf8Bytes": 256
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 512
+        }
+      }
+    },
+    "hire_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "role_ref",
+        "agent_configuration",
+        "objective",
+        "requested_access",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {
+          "const": "hire_external_specialist"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/role_ref"
+        },
+        "agent_configuration": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v1"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "requested_access": {
+          "enum": [
+            "read_only",
+            "isolated_write",
+            "canonical_workspace_write"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "x-transportRequirements": [
+        "engagement_id identifies an existing nonterminal engagement in the same canonical workspace",
+        "the aggregate-owner Controller credential matches the immutable binding established by open",
+        "external_controller_ref is checked as immutable provenance but is not authorization",
+        "a fresh per-Run Controller credential carrier is supplied out of band for the newly allocated Specialist Run",
+        "the external host remains semantic owner and cannot infer engagement membership from raw Runs"
+      ]
+    },
+    "hire_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "hire_operation_id",
+        "specialist_run_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "hire_external_specialist_result"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "hire_operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "specialist_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "requested",
+            "provisioning",
+            "ready",
+            "recovery_required"
+          ]
+        }
+      }
+    },
+    "assign_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "specialist_run_id",
+        "external_request_ref",
+        "objective",
+        "context_refs",
+        "expected_output",
+        "execution_intent",
+        "deadline_seconds",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {
+          "const": "assign_external_specialist_task"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "specialist_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "external_request_ref": {
+          "$ref": "#/$defs/opaque_ref"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "context_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "expected_output": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 512
+          }
+        },
+        "execution_intent": {
+          "enum": [
+            "read_only",
+            "isolated_write",
+            "canonical_workspace_write"
+          ]
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "assign_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "assign_external_specialist_task_result"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "queued",
+            "claimed",
+            "dispatching",
+            "running"
+          ]
+        }
+      }
+    },
+    "task_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "state",
+        "result_artifact_ref",
+        "safe_error_code"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "completed_not_delivered",
+            "delivered",
+            "failed",
+            "interrupted_unknown",
+            "cancelled",
+            "expired"
+          ]
+        },
+        "result_artifact_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "await_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "task_ids",
+        "return_when",
+        "transport_wait_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_external_specialist_tasks"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "task_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "return_when": {
+          "enum": [
+            "any",
+            "all"
+          ]
+        },
+        "transport_wait_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "await_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "pending"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_external_specialist_tasks_result"
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/task_summary"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        }
+      }
+    },
+    "collect_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "after_sequence",
+        "limit"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_external_specialist_results"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "after_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "collect_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "next_after_sequence"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_external_specialist_results_result"
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/task_summary"
+          }
+        },
+        "next_after_sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cancel_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "task_id",
+        "reason",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {
+          "const": "cancel_external_specialist_task"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "cancel_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "cancel_external_specialist_task_result"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "cancelled",
+            "interrupt_requested",
+            "interrupted_unknown",
+            "already_terminal"
+          ]
+        }
+      }
+    },
+    "release_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "specialist_run_id",
+        "reason",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {
+          "const": "release_external_specialist"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "specialist_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "release_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "specialist_run_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "release_external_specialist_result"
+        },
+        "specialist_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "releasing",
+            "released",
+            "rejected"
+          ]
+        }
+      }
+    },
+    "close_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "mode",
+        "reason",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {
+          "const": "close_external_engagement"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "mode": {
+          "enum": [
+            "complete",
+            "abort"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "close_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "close_external_engagement_result"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "completing",
+            "aborting",
+            "completed",
+            "aborted",
+            "recovery_required"
+          ]
+        }
+      }
+    },
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "operation": {
+          "const": "external_specialist_error"
+        },
+        "code": {
+          "enum": [
+            "ENGAGEMENT_NOT_FOUND",
+            "ENGAGEMENT_TERMINAL",
+            "ENGAGEMENT_IDEMPOTENCY_CONFLICT",
+            "CONTROLLER_PRINCIPAL_MISMATCH",
+            "EXTERNAL_PROVENANCE_MISMATCH",
+            "SPECIALIST_ROLE_UNAVAILABLE",
+            "SPECIALIST_NOT_MEMBER",
+            "SPECIALIST_POLICY_DENIED",
+            "SPECIALIST_TASK_NOT_FOUND",
+            "SPECIALIST_TASK_NOT_CANCELLABLE",
+            "SPECIALIST_WRITER_CONFLICT",
+            "TARGET_RUN_TERMINAL",
+            "INTERRUPTED_UNKNOWN"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "role_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "specialist_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "specialist_run_id",
+        "role_ref",
+        "membership_state",
+        "actor_residency",
+        "pending_task_count"
+      ],
+      "properties": {
+        "specialist_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/role_ref"
+        },
+        "membership_state": {
+          "enum": [
+            "provisioning",
+            "active",
+            "degraded",
+            "releasing",
+            "released"
+          ]
+        },
+        "actor_residency": {
+          "enum": [
+            "unstarted",
+            "resident",
+            "passivating",
+            "passivated",
+            "activating",
+            "recovering",
+            "unavailable",
+            "terminal"
+          ]
+        },
+        "pending_task_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "get_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id"
+      ],
+      "properties": {
+        "operation": {
+          "const": "get_external_engagement"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        }
+      },
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential matches the immutable binding established by open"
+      ]
+    },
+    "get_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "state",
+        "external_controller_ref",
+        "revision",
+        "specialists"
+      ],
+      "properties": {
+        "operation": {
+          "const": "get_external_engagement_result"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "degraded",
+            "recovering",
+            "completing",
+            "aborting",
+            "completed",
+            "aborted"
+          ]
+        },
+        "external_controller_ref": {
+          "$ref": "#/$defs/opaque_ref"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "specialists": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/specialist_summary"
+          }
+        }
+      }
+    },
+    "open_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "external_controller_ref",
+        "label",
+        "idempotency_key"
+      ],
+      "properties": {
+        "operation": {
+          "const": "open_external_engagement"
+        },
+        "external_controller_ref": {
+          "$ref": "#/$defs/opaque_ref"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-maxUtf8Bytes": 256
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "x-adapterBoundFields": [
+        "canonical_workspace_id",
+        "aggregate_owner_controller_credential"
+      ],
+      "x-transportRequirements": [
+        "the aggregate-owner Controller credential kind is workflow_orchestrator or automation",
+        "Dolgorae snapshots controller_id, generation 1, kind, normalized-principal digest, and capability digest as the immutable aggregate Controller binding",
+        "raw capability bytes are zeroized after validation and never persisted"
+      ]
+    },
+    "open_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "open_external_engagement_result"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "const": "active"
+        }
+      }
+    }
+  },
+  "x-invariants": [
+    "open_external_engagement atomically commits the bootstrap operation and an empty active engagement before returning its Dolgorae-generated identifier",
+    "open replay with the same canonical workspace, aggregate-owner Controller binding, external provenance, idempotency key, and request digest returns the original engagement identity",
+    "hire_external_specialist never creates an engagement and reserves the hire operation, member, and child Run identity before process creation",
+    "all calls require the same aggregate-owner Controller credential binding established by open; external_controller_ref never grants authority",
+    "a fresh per-Run Controller credential carrier is additionally required only when a new Specialist Run is hired",
+    "the external host retains semantic planning and never receives another Run credential or lifecycle authority",
+    "External Specialist Engagements cannot use Brokered Specialist Collaboration in v1",
+    "v1 does not support in-place aggregate-owner Controller transfer or rotation"
+  ],
+  "x-adapterBoundFields": [
+    "canonical_workspace_id",
+    "aggregate_owner_controller_credential",
+    "new_specialist_controller_credential_for_hire"
+  ],
+  "x-transportRequirements": [
+    "every request is accompanied out of band by exactly one protected aggregate-owner Controller credential carrier",
+    "the adapter validates controller_id, kind, normalized principal, and capability digest against the persisted aggregate Controller binding before observation or mutation",
+    "workflow_orchestrator and automation are the only aggregate-owner Controller kinds",
+    "raw capability bytes and carrier paths are never exposed to the external AI, payload result, audit, event, log, or error detail",
+    "only hire_external_specialist accepts a second protected carrier for the new Specialist Run Controller"
+  ]
+}

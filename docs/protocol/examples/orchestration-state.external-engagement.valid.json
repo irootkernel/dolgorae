@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "workspace_id": "1111111111111111111111111111111111111111111111111111111111111111",
+  "revision": 5,
+  "head_sequence": 5,
+  "head_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "aggregate_operations": [
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000003001",
+      "operation_kind": "open_external_engagement",
+      "aggregate_kind": "external_specialist_engagement",
+      "aggregate_id": "018f0000-0000-7000-8000-000000003002",
+      "idempotency_key": "external-host/session-42/engagement",
+      "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "root_run_id": null,
+      "external_controller_ref": {
+        "namespace": "external-ai",
+        "kind": "session",
+        "id": "session-42"
+      },
+      "state": "ready",
+      "safe_error_code": null,
+      "requested_at": "2026-08-20T01:00:00Z",
+      "provisioning_started_at": "2026-08-20T01:00:00Z",
+      "ready_at": "2026-08-20T01:00:04Z",
+      "finished_at": "2026-08-20T01:00:04Z",
+      "controller_binding": {
+        "controller_id": "018f0000-0000-7000-8000-00000000e001",
+        "generation": 1,
+        "kind": "workflow_orchestrator",
+        "principal_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "capability_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    }
+  ],
+  "orchestrated_sessions": [],
+  "external_engagements": [
+    {
+      "aggregate_kind": "external_specialist_engagement",
+      "semantic_owner": "external_controller",
+      "engagement_id": "018f0000-0000-7000-8000-000000003002",
+      "bootstrap_operation_id": "018f0000-0000-7000-8000-000000003001",
+      "external_controller_ref": {
+        "namespace": "external-ai",
+        "kind": "session",
+        "id": "session-42"
+      },
+      "label": "External review session",
+      "status": "active",
+      "revision": 2,
+      "members": [
+        {
+          "run_id": "018f0000-0000-7000-8000-000000003003",
+          "origin": "external_hire",
+          "runtime_owner": "dolgorae",
+          "semantic_owner": "external_controller",
+          "role_ref": "independent-code-reviewer",
+          "role_snapshot_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "agent_configuration_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "hire_operation_id": "018f0000-0000-7000-8000-000000003004",
+          "membership_state": "active",
+          "actor_residency": "resident",
+          "activation_policy": "on_external_request",
+          "current_activation_operation_id": null,
+          "joined_at": "2026-08-20T01:00:04Z",
+          "released_at": null
+        }
+      ],
+      "created_at": "2026-08-20T01:00:00Z",
+      "updated_at": "2026-08-20T01:00:04Z",
+      "controller_binding": {
+        "controller_id": "018f0000-0000-7000-8000-00000000e001",
+        "generation": 1,
+        "kind": "workflow_orchestrator",
+        "principal_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "capability_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    }
+  ],
+  "spawn_operations": [
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000003004",
+      "aggregate_kind": "external_specialist_engagement",
+      "aggregate_id": "018f0000-0000-7000-8000-000000003002",
+      "idempotency_key": "external-host/session-42/reviewer-1",
+      "parent_run_id": null,
+      "child_run_id": "018f0000-0000-7000-8000-000000003003",
+      "requested_spec_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "state": "ready",
+      "safe_error_code": null,
+      "requested_at": "2026-08-20T01:00:00Z",
+      "provisioning_started_at": "2026-08-20T01:00:01Z",
+      "ready_at": "2026-08-20T01:00:04Z",
+      "finished_at": "2026-08-20T01:00:04Z",
+      "approval_request_id": null
+    }
+  ],
+  "specialist_tasks": [],
+  "activation_operations": [],
+  "collaboration_exchanges": [],
+  "mailbox_items": []
+}

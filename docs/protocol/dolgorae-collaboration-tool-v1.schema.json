@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/collaboration-tool/v1",
+  "title": "Dolgorae private run-bound Brokered Specialist Collaboration tool v1",
+  "description": "Private MCP payloads. Source Run, Turn, tool-call identity, and idempotency are bound out of band and are deliberately absent.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/submit_request"
+    },
+    {
+      "$ref": "#/$defs/submit_result"
+    },
+    {
+      "$ref": "#/$defs/await_request"
+    },
+    {
+      "$ref": "#/$defs/await_result"
+    },
+    {
+      "$ref": "#/$defs/collect_request"
+    },
+    {
+      "$ref": "#/$defs/collect_result"
+    },
+    {
+      "$ref": "#/$defs/error_result"
+    }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "x-maxUtf8Bytes": 256
+    },
+    "target_selector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/uuid7"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role_ref"
+          ],
+          "properties": {
+            "role_ref": {
+              "$ref": "#/$defs/bounded_text"
+            }
+          }
+        }
+      ]
+    },
+    "submit_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "target",
+        "objective",
+        "context_refs",
+        "expected_output",
+        "blocking",
+        "deadline_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "submit_consultation"
+        },
+        "target": {
+          "$ref": "#/$defs/target_selector"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "context_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "expected_output": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 512
+          }
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    },
+    "submit_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "exchange_id",
+        "state",
+        "target_run_id"
+      ],
+      "properties": {
+        "operation": {
+          "const": "submit_consultation_result"
+        },
+        "exchange_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "claimed",
+            "dispatching",
+            "running"
+          ]
+        },
+        "target_run_id": {
+          "$ref": "#/$defs/uuid7"
+        }
+      }
+    },
+    "await_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "exchange_ids",
+        "return_when",
+        "transport_wait_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_consultations"
+        },
+        "exchange_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "return_when": {
+          "enum": [
+            "any",
+            "all"
+          ]
+        },
+        "transport_wait_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "exchange_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exchange_id",
+        "execution_state",
+        "delivery_state",
+        "result_artifact_ref",
+        "safe_error_code"
+      ],
+      "properties": {
+        "exchange_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "execution_state": {
+          "enum": [
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted_unknown",
+            "expired"
+          ]
+        },
+        "delivery_state": {
+          "enum": [
+            "none",
+            "pending",
+            "acknowledged",
+            "abandoned"
+          ]
+        },
+        "result_artifact_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_error_code": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "await_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "completed",
+        "pending"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_consultations_result"
+        },
+        "completed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/exchange_result"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        }
+      }
+    },
+    "collect_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "limit"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_collaboration_results"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "collect_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "results"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_collaboration_results_result"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/exchange_result"
+          }
+        }
+      }
+    },
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "code",
+        "retryable",
+        "message"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collaboration_error"
+        },
+        "code": {
+          "enum": [
+            "COLLABORATION_NOT_ALLOWED",
+            "COLLABORATION_TRANSPORT_UNAVAILABLE",
+            "COLLABORATION_IDEMPOTENCY_CONFLICT",
+            "COLLABORATION_MAILBOX_FULL",
+            "COLLABORATION_WAIT_CYCLE",
+            "COLLABORATION_DEPTH_EXCEEDED",
+            "COLLABORATION_WRITER_HELD",
+            "SPECIALIST_ROLE_UNAVAILABLE",
+            "TARGET_RUN_NOT_ACTIVE",
+            "TARGET_RUN_TERMINAL",
+            "ACTIVATION_FAILED",
+            "INTERRUPTED_UNKNOWN"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      }
+    }
+  },
+  "x-privateTransport": "run-bound MCP bridge; not part of dolgorae.public.v1"
+}

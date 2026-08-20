@@ -1,0 +1,11 @@
+{
+  "operation": "open_external_engagement",
+  "external_controller_ref": {
+    "namespace": "external-ai",
+    "kind": "session",
+    "id": "session-42"
+  },
+  "label": "External review session",
+  "idempotency_key": "external-host/session-42/open",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002"
+}

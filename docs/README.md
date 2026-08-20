@@ -18,10 +18,22 @@ files are derived views and MUST NOT silently redefine their owner.
 | Accepted choices, rationale, and rejected alternatives | [architecture-decisions.md](architecture-decisions.md) | Historical review and disposition records |
 | Delivery order, task state, task scope, and completion gates | [roadmap.md](roadmap.md) | Implementation-note summaries and review closure statements |
 | Serialized machine, Protobuf/RPC, event, timeline, credential, artifact, and persisted-state shapes | [`protocol/`](protocol/) | Examples, generated snapshots, probe fixtures |
-| Cross-field run-state and projection validity | [`tools/validators/`](../tools/validators/) | JSON Schemas and validator fixtures |
+| Cross-field SOT, CLI/machine, comprehensive gRPC semantics, staged-method, run-state, and projection validity | archive-root [`tools/validators/`](../tools/validators/), checked [`dolgorae-grpc-validation-coverage-v1.json`](protocol/dolgorae-grpc-validation-coverage-v1.json), and checked [`protocol/validators/`](protocol/validators/) | JSON Schemas, fixtures, and full-repository validators |
 | Requirement-to-verification ownership | [verification-index-v1.json](protocol/verification-index-v1.json) | Roadmap verification prose and probe reports |
 | Completed-task implementation and verification evidence | [implementation-notes.md](implementation-notes.md) | Probe results and review closure artifacts |
-| Derived implementation design for the public local RPC gateway | [local-grpc-implementation-memo.md](local-grpc-implementation-memo.md) | SPEC-015, architecture, ADR-021, roadmap tasks, checked Protobuf artifacts |
+| Derived implementation design for the staged public local RPC gateway | [local-grpc-implementation-memo.md](local-grpc-implementation-memo.md) | SPEC-015, architecture, ADR-021, ADR-030, TASK-009-D1A, TASK-010-A, checked Protobuf artifacts |
+| Derived product-use-case and topology terminology guide | [agent-topology-terminology.md](agent-topology-terminology.md) | Canonical definitions in SPEC, structural mappings in architecture, rationale in ADR-023 |
+| Derived External Read-Only Specialist Review Preview design | [specialist-review-preview.md](specialist-review-preview.md) | SPEC-012 one-shot adapter, architecture Review Coordinator, ADR-029, EPIC-002A, checked review tool schema |
+| Derived Brokered Specialist Collaboration implementation design | [brokered-specialist-collaboration.md](brokered-specialist-collaboration.md) | SPEC-012, architecture Collaboration Plane, ADR-027, TASK-009-E0, TASK-009-E2, checked private protocol and orchestration-state artifacts |
+| Durable orchestration, mailbox, activation, collaboration, and engagement state shapes and cross-object validity | [`dolgorae-orchestration-state-v1.schema.json`](protocol/dolgorae-orchestration-state-v1.schema.json), [`validate_orchestration_state_v1.py`](protocol/validators/validate_orchestration_state_v1.py) | SPEC-012, architecture store model, ADR-023, ADR-027, positive and negative fixtures |
+| Controller credential and explicit Orchestration Launch Intent shape and semantic validity | [`dolgorae-controller-credential-v1.schema.json`](protocol/dolgorae-controller-credential-v1.schema.json), [`validate_controller_credential_v1.py`](protocol/validators/validate_controller_credential_v1.py) | SPEC-005, SPEC-012, Use-Case Compiler, ADR-028, TASK-000-H |
+| Private run-bound Primary orchestration tool payload shape | [`dolgorae-orchestration-tool-v1.schema.json`](protocol/dolgorae-orchestration-tool-v1.schema.json) | SPEC-012, Primary Orchestration Service, ADR-028, TASK-009-D2, TASK-009-E0, TASK-009-E1 |
+| Private External Specialist Engagement facade payload shape and aggregate-owner Controller authorization contract | [`dolgorae-external-specialist-facade-v1.schema.json`](protocol/dolgorae-external-specialist-facade-v1.schema.json), [`dolgorae-controller-credential-v1.schema.json`](protocol/dolgorae-controller-credential-v1.schema.json), [`validate_private_tool_examples_v1.py`](protocol/validators/validate_private_tool_examples_v1.py) | SPEC-005, SPEC-012, External Specialist Facade, ADR-028, TASK-006-C, TASK-009-D1 |
+| One-shot Specialist Review CLI, external MCP payload, and per-request identity shape | [`dolgorae-specialist-review-tool-v1.schema.json`](protocol/dolgorae-specialist-review-tool-v1.schema.json), [`dolgorae-specialist-review-mcp-meta-v1.schema.json`](protocol/dolgorae-specialist-review-mcp-meta-v1.schema.json), [`dolgorae-machine-v1.schema.json`](protocol/dolgorae-machine-v1.schema.json), [`validate_private_tool_examples_v1.py`](protocol/validators/validate_private_tool_examples_v1.py) | SPEC-012 one-shot adapter, Review Coordinator, ADR-029, ADR-031, TASK-006-D, TASK-006-E0, TASK-006-E1, TASK-006-F |
+| Immutable Specialist Policy snapshot shape and semantic validity | [`dolgorae-specialist-policy-v1.schema.json`](protocol/dolgorae-specialist-policy-v1.schema.json), [`validate_specialist_policy_v1.py`](protocol/validators/validate_specialist_policy_v1.py) | SPEC-012, Orchestration Broker, ADR-028, TASK-009-D2 |
+| Immutable Agent Configuration shape | [`dolgorae-agent-configuration-v1.schema.json`](protocol/dolgorae-agent-configuration-v1.schema.json), [`validate_agent_configuration_v1.py`](protocol/validators/validate_agent_configuration_v1.py) | SPEC-003, Specialist Policy, Run manifest |
+| Private run-bound collaboration tool payload shape | [`dolgorae-collaboration-tool-v1.schema.json`](protocol/dolgorae-collaboration-tool-v1.schema.json) | SPEC-012, architecture Collaboration Plane, ADR-027, TASK-009-E0, TASK-009-E2 |
+| Development-team implementation handoff and start gate | [development-handoff.md](development-handoff.md) | Roadmap, SOT, schemas, validators, and review state |
 | Deferred, explicitly non-blocking review findings | [deferred-feedback.md](deferred-feedback.md) | Review dispositions |
 | Uncommitted future ideas | [todo.md](todo.md) | None; candidates grant no implementation authority |
 | Preserved review chronology and historical findings | [reviews/README.md](reviews/README.md) | Review inputs, dispositions, closure reports, packages |
@@ -40,8 +52,10 @@ The active contract consists of:
 - [specs.md](specs.md), [architecture.md](architecture.md), and accepted ADRs in
   [architecture-decisions.md](architecture-decisions.md);
 - the current checked artifacts under [`protocol/`](protocol/);
-- the executable semantic validators under
-  [`tools/validators/`](../tools/validators/); and
+- the executable archive-local validators under [`../tools/validators/`](../tools/validators/),
+  the reproducible entry point [`../tools/validate_sot.sh`](../tools/validate_sot.sh),
+  checked validators under [`protocol/validators/`](protocol/validators/), and
+  any stricter repository-root validators in the full source tree; and
 - task status and acceptance ownership in [roadmap.md](roadmap.md).
 
 The following are not independent contract authorities:
@@ -56,7 +70,16 @@ The following are not independent contract authorities:
 - `implementation-notes.md`, which records completed evidence without creating
   requirements;
 - `local-grpc-implementation-memo.md`, which is a decision-complete handoff but
-  cannot override SPEC, architecture, ADR, protocol, or roadmap owners; and
+  cannot override SPEC, architecture, ADR, protocol, or roadmap owners;
+- `agent-topology-terminology.md`, which is a derived communication guide and
+  cannot override the two canonical use cases, aggregate ownership, or internal
+  Run terminology owned by the active SOT;
+- `specialist-review-preview.md`, which is a decision-complete derived
+  implementation memo for the first usable milestone but cannot override SPEC,
+  architecture, ADR, protocol, or roadmap owners;
+- `brokered-specialist-collaboration.md`, which is a decision-complete derived
+  implementation memo but cannot override SPEC, architecture, ADR, protocol, or
+  roadmap owners; and
 - `todo.md`, whose candidates are neither scheduled nor approved.
 
 A measured upstream behavior becomes a Dolgorae dependency only after the
@@ -74,8 +97,18 @@ Before implementing a task:
 4. Read the corresponding architecture sections and accepted ADRs.
 5. Read the checked protocol artifacts and semantic validators the task must
    implement.
-6. Read the linked verification-index entries and historical evidence only as
-   needed to understand the acceptance boundary.
+6. For work involving the Gul-facing control plane, external AI integrations,
+   Primary Runs, Specialists, Brokered Hierarchies, or native subagents, read
+   [agent-topology-terminology.md](agent-topology-terminology.md).
+7. For `EPIC-002A`, the one-shot review command, or the external Codex CLI MCP
+   adapter, read [specialist-review-preview.md](specialist-review-preview.md).
+8. For Brokered Specialist Collaboration, mailbox scheduling, passivation, or
+   activation, read
+   [brokered-specialist-collaboration.md](brokered-specialist-collaboration.md).
+9. For a new implementation handoff, read
+   [development-handoff.md](development-handoff.md) and obey its start gate.
+10. Read the linked verification-index entries and historical evidence only as
+    needed to understand the acceptance boundary.
 
 Do not begin a later task because a review or implementation note sounds
 complete. Only the task's status in `roadmap.md` authorizes its position in the
@@ -98,9 +131,12 @@ applicable steps below are satisfied in the same change set:
    sufficient for cross-field rules.
 5. Update `verification-index-v1.json` and the owning roadmap verification text
    when a requirement, error, command, or compatibility dependency changes.
-6. Run JSON parsing, schema/semantic validation, Markdown link checks,
-   repository consistency scans, and `git diff --check`. Run the task's bounded
-   live probes when it depends on OS or upstream Codex behavior.
+6. Create the validation environment with `python3 -m venv .venv`, install
+   [`../tools/validation/requirements.txt`](../tools/validation/requirements.txt),
+   run `PYTHON_BIN=.venv/bin/python tools/validate_sot.sh` from the package root,
+   then run Markdown link checks, full-repository consistency scans, and
+   `git diff --check`. Run the task's bounded live probes when it depends on OS
+   or upstream Codex behavior.
 7. Obtain an independent read-only review for the final snapshot under the
    completion gate in [roadmap.md](roadmap.md).
 8. Record completed evidence in [implementation-notes.md](implementation-notes.md)
@@ -111,7 +147,9 @@ completion never grants either permission.
 
 ## Terminology and Normative Language
 
-Canonical terms are defined in [specs.md](specs.md). New synonyms SHOULD NOT be
+Canonical terms are defined in [specs.md](specs.md). The derived
+[use-case and topology terminology guide](agent-topology-terminology.md)
+provides the approved communication map without owning behavior. New synonyms SHOULD NOT be
 introduced in architecture, schemas, or task text. In normative Markdown, only
 uppercase **MUST**, **MUST NOT**, **SHOULD**, and **MAY** carry requirement
 force. The product specification owns the normative status of checked schemas

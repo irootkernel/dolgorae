@@ -1,17 +1,43 @@
 # Dolgorae Roadmap
 
-Status: Ordered implementation roadmap. `EPIC-000` is complete after its
-Epic-level cold-validation and hardening gate. `TASK-000`, stabilization Tasks
-`TASK-000-A` through `TASK-000-D`, and local gRPC stabilization Task
-`TASK-000-F` are complete. CLI-first broker stabilization `TASK-000-E` is
-superseded by `TASK-000-F`. No Task is active; `TASK-001` is eligible for a
-separately authorized activation.
+Status: Ordered implementation roadmap. `EPIC-000` remains in
+`IN_REVIEW` for `TASK-000-H`. `EPIC-002A` is the first user-usable product
+slice. Completing it unlocks `MILESTONE-SR1`, which guarantees the one-shot
+Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
+tool. The narrow external MCP adapter is included only when the pinned host
+passes the explicit per-request identity probe; connection or stdio-process
+identity is never treated as retry continuity. This milestone does not wait for
+writer authority, the Dolgorae Primary control plane, Brokered Hierarchy, or
+Specialist-to-Specialist collaboration.
+
+After `MILESTONE-SR1`, the roadmap deliberately proceeds in four layers:
+external Specialist hardening, the minimum supervised Gul Run gateway, the
+transport-independent Dolgorae orchestration core and Brokered Hierarchy, live
+Primary control-plane integration, and finally the durable Collaboration Plane. `TASK-009-E0` remains the live run-bound
+transport probe and occurs only after the Brokered Hierarchy core is complete.
+`TASK-000-G` remains superseded because its terminology-only boundary no longer
+matches the accepted product contract. `TASK-001` remains `PLANNED` and is not
+eligible for activation until `TASK-000-H` completes.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
 them.
 Document roles and the required synchronization procedure are defined by the
 [documentation authority map](README.md).
+
+## Product Milestones
+
+| Milestone | Owning Epic | User-visible capability unlocked |
+| --- | --- | --- |
+| `MILESTONE-SR1` | `EPIC-002A` | Codex CLI can request one independent read-only working-tree review through `dolgorae specialist review`. The `dolgorae_review` MCP tool is additionally available only when its per-request identity carrier passes TASK-006-E0/E1. |
+| `MILESTONE-ES1` | `EPIC-003A` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
+| `MILESTONE-BH1` | `EPIC-003C` | Gul can use Dolgorae as the live Primary control plane and operate a durable Brokered Hierarchy. |
+| `MILESTONE-BC1` | `EPIC-003D` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
+| `MILESTONE-PA1` | `EPIC-005` | The complete Personal Alpha acceptance campaign passes. |
+
+Milestones are cumulative. An earlier milestone remains usable while later
+Epics are implemented. A milestone does not waive its own Task completion gate
+or any safety limitation stated in its owning Epic.
 
 ## Status Model
 
@@ -65,7 +91,7 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `COMPLETE`
+Status: `IN_REVIEW`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
@@ -365,14 +391,14 @@ and the consistency lint rejects future superseded owners. The isolated result
 is reviewed under the planned subject `[TASK-000-F] Close carry-forward
 evidence gaps` without changing this successful lifecycle state.
 
-Epic acceptance: `TASK-000` and `TASK-000-A` through `TASK-000-D` remain
-complete, `TASK-000-E` remains superseded by a completed `TASK-000-F`, and all
-Task completion evidence remains indexed and reproducible. An Epic-level
-hardening pass confirmed the combined product, architecture, protocol,
-security, lifecycle, and roadmap contracts have no unresolved valid finding,
-that checked artifacts remain synchronized, and that no production source has
-been introduced. `EPIC-000` is complete and `TASK-001` is eligible for a
-separately authorized activation.
+TASK-000-F closure status: at that checkpoint, `TASK-000` and
+`TASK-000-A` through `TASK-000-D` were complete, `TASK-000-E` was superseded by
+a completed `TASK-000-F`, and the Epic-level hardening pass found no unresolved
+valid finding. `TASK-000-G` subsequently reopened a terminology-only gate and was then
+superseded by `TASK-000-H` when the accepted two-use-case model introduced
+durable internal orchestration state and related contract changes. Earlier
+completion evidence remains valid for its reviewed snapshot, but `TASK-001` is
+not eligible until `TASK-000-H` closes.
 
 Validation record (2026-08-20): task hierarchy normalization is `d83f2cf`;
 TASK-000-F closure is `9b8a712`; cold-validation task remediations are
@@ -387,6 +413,97 @@ two informational future-environment triggers; neither changes current Epic
 acceptance. The commit containing this record performs the final lifecycle
 transition without activating `TASK-001` or freezing public v1.
 
+### TASK-000-G: Agent Topology Terminology Alignment
+
+Status: `SUPERSEDED`
+
+This Task introduced useful distinctions among Primary Runs, Independent
+Specialist Runs, and Codex-native subagents, but treated three topologies as
+user-selected composition modes and prohibited durable hierarchy ownership.
+The accepted two-use-case model and internal Brokered Hierarchy recovery state
+change actual product and persistence contracts. `TASK-000-H` owns the active
+reconciliation and review. No completion or independent-review evidence is
+inferred from this superseded state.
+
+### TASK-000-H: User-Case and Internal Contract Reconciliation
+
+Status: `IN_REVIEW`
+
+Reconcile the active SOT around exactly two user-facing use cases:
+Dolgorae-Orchestrated Session and External Specialist Engagement. Preserve
+independent Run identity and the checked public v1 Protobuf shape while adding
+an internal Orchestration Broker and durable aggregate state for
+Dolgorae-created Specialists.
+
+The Task owns:
+
+- canonical use-case and terminology updates;
+- first-class Orchestration Session, External Specialist Engagement, Aggregate
+  Bootstrap Operation, membership, write-ahead spawn or hire, Specialist task,
+  and result-delivery contracts;
+- Runtime Profile and Agent Configuration separation;
+- explicit `control_mode`, lane, assurance, purpose, and native policy at the
+  semantic boundary;
+- Dedicated in-place policy transitions with `policy_epoch`, while
+  `run_generation` remains Worker and connection lifetime only;
+- generation-immutable instruction and Turn-scoped access-context separation;
+- relocation of mutable profiles, Run, writer, lock, orchestration, evidence,
+  and cache authority to Application Support;
+- explicit release, verify, acquire for cross-Controller hierarchy writer
+  movement;
+- enforced-invariant versus agent-behavior-policy separation;
+- offline shell policy and external side-effect caveats;
+- deterministic interaction escalation and Controller-authorized whole-Run
+  export;
+- `user_input` artifact reconciliation;
+- the checked `dolgorae-orchestration-state-v1.schema.json`, semantic validator,
+  and fixtures;
+- deterministic Orchestrated Session bootstrap behind the unchanged public root
+  `StartRun`, including prepared cross-store recovery;
+- explicit External Specialist Engagement open and private hire facade, with raw
+  `managed_agent` Runs excluded from aggregate inference;
+- the immutable Specialist Policy snapshot contract;
+- the private Primary orchestration tool payload contract, including task
+  cancellation; and
+- the private External Specialist Facade payload contract, complete open/get/
+  hire/assign/await/collect/cancel/release/close operation set, and Machine CLI
+  carrier;
+- the Specialist-review-first delivery sequence, `EPIC-002A`, and cumulative
+  product milestone boundaries; and
+- the checked one-shot Specialist Review CLI and external MCP payload contract,
+  examples, validator ownership, and recursion-prevention boundary.
+
+This Task MUST NOT change the checked `dolgorae.public.v1` Protobuf source or
+descriptor. Existing Run RPCs remain the low-level Gul contract and shared
+semantic execution core. External AI integrations use the checked private
+External Specialist Facade rather than inferring an engagement from raw Runs. A
+future additive aggregate-query surface is outside this Task. Gul v1 uses the
+existing Run list, parent projection, Run events, and Controller Interaction
+surface only as a safe operational view; none of those projections replaces the
+internal aggregate registry as recovery authority.
+
+Verification: parse and meta-validate every JSON artifact; validate positive and
+negative orchestration-state, Specialist Policy, Primary orchestration tool,
+External Specialist Facade, and one-shot Specialist Review fixtures; prove
+write-ahead aggregate bootstrap and
+child identity, aggregate membership, and idempotency invariants; scan active SOT
+for obsolete
+external-only hierarchy ownership, hidden interactive defaults, project-local
+mutable authority, access-policy-driven Run generations, and immutable
+current-access wording; byte-compare the public Protobuf source and descriptor
+against the TASK-000-F snapshot; check local Markdown links and code fences;
+and obtain an independent read-only review focused on crash recovery, authority
+ownership, duplicate Specialist creation, unknown task replay, writer races,
+accidental Gul wire changes, and the supplemental Specialist-review-first
+roadmap input under `docs/reviews/`.
+
+Task acceptance: active SPEC, architecture, ADR, roadmap, TODO, guide, and
+checked artifacts contain no contradictory ownership or state-machine rule;
+all TASK-000-H fixtures and static gates pass; public wire bytes are unchanged;
+one independent review reports no unresolved blocking finding; a task-scoped
+commit and implementation note are recorded; and `TASK-001` remains `PLANNED`
+until this gate completes.
+
 ## EPIC-001: Foundation and Durable State
 
 Status: `PLANNED`
@@ -399,8 +516,8 @@ and audit-first run storage on which every process operation depends.
 Status: `PLANNED`
 
 Implement the Rust 2024 binary skeleton, command parser, UUIDv7 identities,
-stable JSON success/error envelopes, exit-status mapping, typed lifecycle,
-control-mode, purpose, execution-lane, assurance, and access enums,
+stable JSON success/error envelopes, exit-status mapping, typed lifecycle, aggregate, control-mode, purpose, execution-lane,
+assurance, policy-epoch, and access enums,
 external-runtime commands and controller/capability types, including the
 `brokered_independent_subagent_runs` discovery flag,
 the adapter-independent semantic-service interface, shared domain DTOs,
@@ -424,9 +541,9 @@ Status: `PLANNED`
 Implement Git and explicit non-Git initialization, per-worktree canonical
 workspace identity, upward `.dolgorae` discovery, minimal policy files, generated
 local ignore policy, dirty-worktree baseline capture, and safe permission
-creation. Establish project-local `.dolgorae/runtime/locks/`, mandatory
-local-APFS workspace checks with no override, and strict shared/local YAML
-config/profile schemas.
+creation. Establish the Application Support per-workspace mutable state root, its
+`runtime/locks/` and `orchestration/` authorities, mandatory local-APFS checks
+with no override, and strict portable-policy and machine-local profile schemas.
 
 Verification: tests for subdirectory discovery, symlink normalization, Git
 worktrees, dirty/untracked preservation, non-Git opt-in, repeated initialization,
@@ -513,7 +630,7 @@ survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unli
 
 Status: `PLANNED`
 
-Implement project-local `local.yaml` profile CRUD, direct executable, normalized
+Implement per-workspace Application Support `local.yaml` profile CRUD, direct executable, normalized
 global argv, absolute `CODEX_HOME`, and explicit environment-map validation;
 deterministic environment preparation; schema generation into temporary storage; required
 stable-subset comparison, app-server handshake, `codexHome` matching,
@@ -572,10 +689,6 @@ Also test PREPARE-before-effect idempotency, phase-marked/phase-null/commentary-
 events, two simultaneous connections/turns, disconnect isolation, approvals,
 user input, native descendants, and profile-global notifications.
 
-Epic acceptance: an initialized workspace can run a multi-turn read-only session
-through a fake app-server while preserving one thread and reconnecting CLI
-callers.
-
 ### TASK-006-A: External Controller and Observer Boundary
 
 Status: `PLANNED`
@@ -597,21 +710,229 @@ states; failure before binding change; controller generation and audit proof;
 and a broker-owned automation credential whose non-secret child identity may be
 shown to a parent without granting mutation authority.
 
+Epic acceptance: an initialized workspace can run a multi-turn read-only session
+through a fake app-server while preserving one thread, reconnecting CLI callers,
+and enforcing the external Controller and observer boundary.
+
+## EPIC-002A: External Read-Only Specialist Review Preview
+
+Status: `PLANNED`
+
+Goal: Deliver the first user-usable Dolgorae product slice as early as the
+independent Run core permits. An external Codex CLI remains the semantic control
+plane and invokes exactly one independent read-only Reviewer Specialist for a
+bounded working-tree review.
+
+This Epic owns `MILESTONE-SR1`. It uses the final External Specialist
+Engagement model and shared semantic Run core rather than a disposable preview
+implementation, but deliberately restricts the first slice to one-shot,
+read-only review.
+
+### TASK-006-B: Read-Only Specialist Runtime Baseline
+
+Status: `PLANNED`
+
+Build on the EPIC-002 read-only Run path and add the minimum production contract
+for an Independent Specialist Reviewer. Resolve one immutable Reviewer Agent
+Configuration, compile it to a `managed_agent` Run, enforce canonical-workspace
+read-only sandboxing and `networkAccess:false`, and prevent writer acquisition,
+approval-based file or command mutation, nested first-class Specialist hiring,
+and access to any Controller credential or peer Run address.
+
+The Reviewer Runtime Profile MUST NOT register the external
+`dolgorae_review` MCP tool, so a Reviewer cannot recursively hire another
+Reviewer through the host integration. The Reviewer receives only the explicit
+review objective, current working-tree context, and bounded role instructions.
+It returns a final response and checked structured findings without hidden
+reasoning or raw protocol projection.
+
+Verification: prove filesystem writes are denied for tracked, untracked, Git
+metadata, and linked-worktree paths; shell network is denied; the role and
+Agent Configuration snapshot are immutable; the external-review MCP server is
+absent from the Reviewer profile; direct CLI attempts to hire or control another
+Run are denied; final findings validate against the checked review result
+schema; and no Controller capability, carrier path, Worker socket, database
+path, or raw App Server frame appears in prompts, output, events, or logs.
+
+### TASK-006-C: Durable External Review Engagement Core
+
+Status: `PLANNED`
+
+Implement the minimal External Specialist Engagement production path required
+by a one-shot review, using the existing checked External Specialist Facade and
+the Application Support SQLite WAL authority. Implement explicit open, safe
+get, write-ahead Reviewer hire, one read-only task assignment, bounded await,
+result collection, cancellation, release, and close. Reserve engagement,
+operation, member, child Run, and task identities before runtime side effects;
+derive and persist idempotency receipts; and store successful results as
+immutable artifacts before reporting completion.
+
+The preview boundary is intentionally narrow: one active Reviewer member, one
+active review task, `read_only` access only, no task queue, no Specialist reuse
+after the one-shot adapter closes the engagement, no Brokered Hierarchy, and no
+Specialist-to-Specialist collaboration. A busy or terminal Reviewer fails with
+a typed result instead of preemption or implicit replacement. If Turn
+acceptance or outcome is not authoritative, record `interrupted_unknown` and do
+not replay automatically. Full cross-restart continuation, reusable members,
+multiple Specialists, and isolated-write operation belong to `EPIC-003A`.
+
+Verification: crash before and after each SQLite commit, child Run reservation,
+Worker publication, thread creation, task acceptance, result artifact commit,
+delivery receipt, release, and close; exact same-key replay; different-payload
+idempotency conflict; duplicate and orphan prevention; raw `managed_agent` Run
+exclusion; read-only access enforcement; successful result collection; Ctrl-C
+cancellation; and fail-closed `interrupted_unknown` without task replay.
+
+### TASK-006-D: One-Shot Specialist Review CLI and Checked Result Contract
+
+Status: `PLANNED`
+
+Implement the user-facing convenience operation:
+
+```text
+dolgorae specialist review \
+  --workspace <absolute-or-discoverable-workspace> \
+  --profile <reviewer-runtime-profile> \
+  --scope working-tree \
+  --format json
+```
+
+The command is an adapter composition, not a third use case. It performs open,
+hire, assign, await, collect, release, and close against the shared External
+Specialist Engagement service. Add the checked
+`dolgorae-specialist-review-tool-v1.schema.json` request, success, finding, and
+error shapes. Register `specialist.review` in the checked machine-output schema
+and place the successful checked review result in the envelope's `data` field.
+JSON is the canonical machine result; human output is a rendering of that
+result. The command MUST report failure when the Reviewer fails,
+times out, is interrupted with unknown outcome, produces invalid structured
+output, or appears to mutate the workspace.
+
+The preview supports only `working-tree` scope. Later scope expansion is
+additive and must not reinterpret the preview command. The adapter owns all
+aggregate and per-Run Controller carriers, external provenance, idempotency
+keys, engagement cleanup, and bounded result-artifact retrieval outside the
+model-visible payload.
+
+Verification: successful no-finding and multi-finding reviews; deterministic
+severity ordering; malformed Reviewer output; timeout; Ctrl-C during startup and
+active Turn; failure between each composed operation; no leaked temporary
+carrier; no orphaned active engagement after a clean command; exact JSON Schema
+validation; and repeated invocation against the same workspace without hidden
+state reuse.
+
+### TASK-006-E0: External MCP Per-Request Identity Probe
+
+Status: `PLANNED`
+
+Depends on `TASK-006-D`. Validate the pinned Codex CLI against the MCP
+2026-07-28 stateless request model before claiming reconnect-safe review
+idempotency. A connection, JSON-RPC request ID, or stdio process lifetime MUST
+NOT be used as conversation or logical-request continuity. Probe whether the
+host can generate one UUIDv7 per logical tool invocation and preserve it on
+every attempt in the checked vendor metadata key
+`xyz.rootkernel.dolgorae/externalRequestRef` under `tools/call params._meta`.
+The reference is host-controlled and is never a model argument.
+
+The probe selects exactly one disposition:
+
+1. `replay_safe_meta`: custom `_meta` survives the supported retry and reconnect
+   paths. Same reference and same normalized request return the original review;
+   same reference with different input returns `IDEMPOTENCY_CONFLICT` without
+   allocating another Reviewer Run.
+2. `mcp_unavailable`: replay-safe metadata preservation is not proven. The MCP adapter is not
+   advertised for `MILESTONE-SR1`; Codex CLI uses the one-shot Machine CLI
+   command through its shell tool instead.
+
+Verification: exact custom `_meta` capture before model-controlled arguments are
+processed; same-reference retry; changed-input conflict; client reconnect;
+server restart; concurrent calls; response loss before and after durable result
+commit; proof that connection/process identity is ignored; proof that failure to
+preserve metadata selects `mcp_unavailable`; and a checked disposition artifact.
+
+### TASK-006-E1: Narrow Codex CLI MCP Review Adapter
+
+Status: `PLANNED`
+
+Depends on `TASK-006-E0`. Implement a private stdio MCP server entry point for
+external AI hosts and expose exactly one model-facing tool named
+`dolgorae_review` only under the disposition selected by TASK-006-E0. The tool
+accepts the checked review request shape and invokes the same one-shot semantic
+service as TASK-006-D. Canonical workspace, Runtime Profile, aggregate-owner
+Controller, per-Run Controller, external provenance, request identity, and
+idempotency are adapter-bound and MUST NOT be model arguments.
+
+In `replay_safe_meta` mode, every call requires the checked
+`params._meta` external request reference and derives idempotency only from that
+reference plus the normalized adapter-bound request. Missing metadata is a typed
+failure. Same-reference input drift returns `IDEMPOTENCY_CONFLICT`,
+`retryable:false`, and `fix_host_request_carrier` without allocating another
+Reviewer Run. In `mcp_unavailable` disposition, the
+server does not register the tool and the CLI carrier remains the supported SR1
+path. The adapter does not require a Dolgorae source Run or source Turn and does
+not depend on the later run-bound `TASK-009-E0` probe.
+
+Verification: MCP initialize/list/call lifecycle for the selected disposition;
+concurrent client calls with independent one-shot engagements; exact replay only
+with the same trusted external request reference; no duplicate Reviewer Run;
+connection loss; cancellation; malformed and oversized payloads; adapter-bound
+workspace and profile enforcement; recursion prevention in the Reviewer
+profile; and secret, socket, database-path, raw-frame, and hidden-reasoning
+canaries.
+
+### TASK-006-F: Codex CLI Specialist Review Preview Acceptance
+
+Status: `PLANNED`
+
+Run an opt-in live acceptance campaign against the pinned Codex CLI and one
+prepared Reviewer Runtime Profile. The host Codex CLI performs a nontrivial
+working-tree change, invokes the mandatory Machine CLI Specialist Review path,
+receives independent structured findings from a separate Reviewer Run and Codex
+thread, addresses at least one concrete finding, and may invoke a second clean
+Machine CLI review.
+
+The campaign MUST prove that the Reviewer cannot modify the canonical
+workspace, does not receive the host Codex hidden context, cannot invoke the
+review adapter recursively, returns stable machine-readable findings, leaves no
+credential or private endpoint in observable output, and cleans up or records a
+safe non-success state after cancellation or failure. The Machine CLI path is
+mandatory. If and only if TASK-006-E0 selected `replay_safe_meta` and TASK-006-E1
+implemented the adapter, the campaign additionally executes the equivalent MCP
+path. Otherwise acceptance records the checked `mcp_unavailable` disposition
+and no MCP tool is advertised. Preserve bounded command,
+environment, event, and result evidence without credentials or unbounded model
+output.
+
+Verification: deterministic fake-adapter tests plus the opt-in live Codex CLI
+campaign; one independent read-only review of the Epic implementation; schema,
+link, formatting, and secret scans; and task-scoped commits for every Task.
+
+Epic acceptance: mark `EPIC-002A` complete only when every Task above passes the
+ordinary completion gate and the live acceptance campaign succeeds. Completion
+unlocks `MILESTONE-SR1`: the owner may immediately use Dolgorae from Codex CLI
+for one-shot independent read-only Specialist review through the Machine CLI.
+The MCP tool is part of the milestone only when TASK-006-E0 selected
+`replay_safe_meta` and TASK-006-E1 proved the adapter. The milestone remains a
+preview and does not claim reusable Specialist pools, canonical workspace
+writes, Dolgorae Primary orchestration, Brokered Hierarchy, lateral
+collaboration, or Personal Alpha readiness.
+
 ## EPIC-003: Access, Interaction, and Recovery Safety
 
 Status: `PLANNED`
 
 Goal: Enforce Dolgorae's one-durable-writer-authority-per-worktree scope,
-master-controlled interaction, and conservative failure semantics.
+Controller-authorized interaction, and conservative failure semantics.
 
 ### TASK-007: Durable Writer Authority and Cross-Profile Handoff
 
 Status: `PLANNED`
 
+Build on TASK-006-B's read-only Specialist and ordinary reader baseline.
 Implement the per-worktree durable writer authority state machine, with BSD
 `flock(2)` used only as a short transaction serializer, close-on-exec descriptor
-hygiene, project-local permanent lock validation,
-read-default sandbox selection, explicit `--write`/acquire/release, idle-only
+hygiene, Application Support permanent-lock validation, explicit
+`--write`/acquire/release, idle-only
 cross-profile same-controller prepare/commit/cancel handoff, and fail-closed
 background-execution uncertainty before activating or releasing authority.
 Persist `effective_policy` and `writer_authority` independently and implement
@@ -740,15 +1061,277 @@ source identity unavailable; fresh escape without source thread/ledger mutation;
 transient early-ID timeout/malformed/oversize; proof that no unknown input is
 replayed.
 
-Epic acceptance: failures cannot create two Dolgorae writer proxies, signal an
-unverified process, resume an ambiguously owned thread, silently replay a turn,
-cross account boundaries, or falsely claim known outcomes.
+Epic acceptance: durable writer authority, Controller-authorized interaction,
+pause and close, process identity, and outcome-unknown reconciliation are safe
+and independently reviewed. These safety mechanisms harden the already usable
+read-only Specialist Review Preview without delaying `MILESTONE-SR1`.
+
+## EPIC-003A: External Specialist Engagement Hardening
+
+Status: `PLANNED`
+
+Goal: Generalize the one-shot read-only Specialist Review Preview into a durable,
+reusable external Specialist service while the external AI remains the only
+semantic control plane.
+
+### TASK-009-D1: Reusable External Specialist Engagements
+
+Status: `PLANNED`
+
+Depends on `TASK-009-C` and builds directly on `EPIC-002A`. Remove the preview's
+one-shot lifecycle restriction while preserving its trusted facade and
+aggregate model. Support multiple independently hired Specialists in one
+engagement, long-lived members, repeated sequential tasks per Specialist,
+explicit get, cancel, release, complete, and abort, safe host reconnect,
+completed-result redelivery, and exact aggregate-scoped idempotency across
+Dolgorae restarts. Reconcile every accepted task through the TASK-009-A through
+TASK-009-C lifecycle and outcome rules.
+
+Retain one active Turn per Specialist and no implicit preemption. The external
+control plane explicitly waits, retries, hires another member, or releases the
+member. Add `isolated_write` only through a separate isolated workspace or
+worktree policy. Canonical workspace writes require the external host to
+quiesce its own writer and participate in TASK-007 writer authority. External
+Specialists still cannot use the Brokered Collaboration Plane or hire nested
+first-class Specialists.
+
+Verification: engagement and member recovery across every restart boundary;
+multiple roles and members; repeated tasks without context or idempotency
+confusion; completed-not-delivered redelivery without target Turn replay;
+ambiguous accepted or running task to `interrupted_unknown`; durable cancel,
+release, complete, and abort; host disconnect and reconnect; isolated-write
+artifact production; canonical writer conflict; nested-hire and collaboration
+denial; and no external task-graph inference.
+
+Epic acceptance: completion unlocks `MILESTONE-ES1`. External AI hosts may keep,
+reuse, recover, and explicitly coordinate durable Specialist Engagements beyond
+the one-shot review preview.
+
+## EPIC-003B: Dolgorae Orchestration Control Plane and Brokered Hierarchy Core
+
+Status: `PLANNED`
+
+Goal: Add Dolgorae's own Primary orchestration authority and durable Brokered
+Hierarchy over the hardened independent Run and Specialist foundations.
+
+### TASK-009-D1A: Supervised Control-Plane Runtime and Minimum Gul Run Gateway
+
+Status: `PLANNED`
+
+Depends on `TASK-009-D1`. Implement the production host required before any
+live Gul Orchestrated Session is claimed: foreground `dolgorae serve`, the
+single-instance gateway record and lock, private Unix-socket lifecycle,
+peer-UID validation, pinned tonic/prost generation, and one reconstructable
+`ControlPlaneRuntime` per foreground process. SQLite remains durable authority;
+the runtime owns only reconstructable schedulers, dirty sets, activation leases,
+stream queues, and in-flight adapter state.
+
+Implement the 24-method frozen public-v1 minimum path listed under
+`MILESTONE-BH1` in the checked capabilities and gRPC conformance artifacts:
+capability/workspace/profile bootstrap, Primary Run start/get/list/submit and
+basic lifecycle recovery, Run event streaming, Controller interaction handling,
+basic writer acquire/release/status, Controller verification, artifact metadata,
+and bounded artifact chunk retrieval. Route every
+implemented RPC into the same semantic service used by the Machine CLI. The
+runtime MUST advertise only actually implemented methods. Timeline, profile
+diagnostics, advanced Run operations, writer handoff, deletion,
+verification, and the full operator-facing conformance surface remain in
+`TASK-010-A`.
+
+This Task does not yet create a Dolgorae Primary or Brokered Hierarchy. It makes
+the real Gul transport and runtime ownership available to the following
+transport-independent aggregate implementation and later live Primary tool.
+
+Verification: protocol-zero handshake; exact BH1 method advertisement; unknown
+or unavailable method fail-closed behavior; private socket path, symlink,
+permission, peer UID, singleton, readiness, graceful shutdown, and crash restart;
+Machine CLI/gRPC semantic parity for every minimum method; StartRun response
+loss; protected interaction response loss; event replay; artifact metadata,
+bounded chunk, authorization, range, retention, and digest failures; basic writer
+recovery; Controller carrier TOCTOU and secret canaries; and reconstruction of the
+ControlPlaneRuntime without treating memory as durable authority.
+
+Task acceptance: Gul can launch `dolgorae serve`, negotiate public v1, create and
+operate ordinary low-level Runs through the minimum frozen Run path, and survive
+a controlled gateway restart. No Brokered Hierarchy milestone is claimed until
+TASK-009-D2, TASK-009-E0, and TASK-009-E1 also complete.
+
+### TASK-009-D2: Durable Orchestration Session and Brokered Hierarchy Core
+
+Status: `PLANNED`
+
+Depends on `TASK-009-D1A`. Implement the first-class `Dolgorae-Orchestrated Session` aggregate over the
+independent Run core and the hardened Specialist execution path. Implement
+prepared Aggregate Bootstrap Operations coupled to a parentless Primary
+`StartRun` with checked Orchestration Launch Intent, the machine-local
+Specialist Policy Registry, explicit approval policy and immutable Specialist
+Policy snapshot, one-active-aggregate membership, immutable role and Agent
+Configuration snapshots, preallocated child Run identity, write-ahead spawn
+operations, aggregate-scoped idempotency, accepted Specialist tasks,
+completed-not-delivered result retention, safe redelivery, owned-member
+completion and abort, degraded Primary recovery, and fail-closed
+`interrupted_unknown` handling.
+
+The internal Orchestration Broker holds a separate non-model-visible Controller
+capability for every brokered Specialist. Implement the transport-independent
+Primary Orchestration Service, tool-dispatch interface, and bounded fake
+handlers against the checked schema. Support request, approval wait, list,
+assign, await, collect, cancel, and graceful release under both
+`user_approval_required` and `fully_delegated`. Implement explicit release,
+verify-writer-none, and acquire sequencing for cross-Controller writer movement
+without claiming atomic handoff. Do not add or change a public v1 Protobuf field
+or RPC. Do not implement live run-bound model transport or lateral Specialist
+collaboration in this Task.
+
+Verification: crash at every boundary before and after Orchestration Session
+SQLite commit, Primary Run intent fsync and publication, event append, child Run
+reservation, Worker publication, thread creation, task dispatch, result append,
+and delivery receipt; same-key replay and different-input conflict; duplicate
+and orphan prevention; invalid parent, role conversion, reparenting, and
+use-case transfer; Primary failure with retained Specialists; completed-result
+redelivery without target Turn replay; user-approval-required and
+fully-delegated paths; Specialist allowlist denial; raw managed-Run and forged
+reserved-parent denial; cross-Controller writer race with `WRITER_BUSY`; schema
+and semantic-validator fixtures; capability and secret canaries; and
+byte-identical public Protobuf source and descriptor.
+
+Epic acceptance: the complete Orchestration Session and Brokered Hierarchy state
+machine is implemented and proven through transport-independent fake adapters.
+No live Primary model tool is claimed until `EPIC-003C` completes.
+
+## EPIC-003C: Live Dolgorae Control Plane and Brokered Hierarchy
+
+Status: `PLANNED`
+
+Goal: Select and integrate the live run-bound Primary tool transport so Gul can
+use Dolgorae as the active semantic control plane with a durable Brokered
+Hierarchy.
+
+### TASK-009-E0: Run-Bound Internal Tool Transport Probe
+
+Status: `PLANNED`
+
+Depends on `TASK-009-D1A` and `TASK-009-D2`. Validate and close the live transport boundary for the
+private Primary orchestration tool and the later Brokered Specialist
+Collaboration tool. Prove that the pinned Codex App Server can provide a private
+run-bound MCP bridge whose source Run, source Turn, tool-call identity,
+cancellation, and bounded wait behavior are known without exposing a Controller
+credential or allowing model-controlled source identity.
+
+This Task owns registration and source binding for both checked run-bound tool
+schemas, source identity and idempotency derivation outside model arguments,
+Dedicated Lane fallback when shared-profile invocation identity is ambiguous,
+bounded await, cancellation, bridge restart, connection-loss behavior, and
+credential, private-socket, database-path, and source-identity canaries. The
+external `dolgorae_review` MCP adapter from `EPIC-002A` is a separate external
+control-plane adapter and is not blocked or redesigned by this probe.
+
+The durable aggregate broker, Primary Orchestration Service, tool-dispatch
+interfaces, and fake handlers are implemented and unit-tested in
+`TASK-009-D2`. This Task selects the supported live model-facing transport.
+Mailbox, Scheduler, Activation Manager, and collaboration outbox implementation
+remain in `TASK-009-E2`.
+
+Verification: live pinned transport probes for both run-bound tool surfaces,
+source Run and Turn correlation, concurrent calls, bounded wait timeout,
+cancellation, bridge restart, connection loss, and credential canaries;
+ambiguous shared identity selects the Dedicated Lane fallback; public Protobuf
+source and descriptor remain byte-identical.
+
+Task acceptance: ADR-027, ADR-028, SPEC-012, architecture, both run-bound private
+tool schemas, fixtures, verification index, and implementation memos agree; the
+probe selects a supported bridge or explicitly blocks `TASK-009-E1` and
+`TASK-009-E2`; and an independent read-only review reports no unresolved
+blocking finding.
+
+### TASK-009-E1: Live Primary Orchestration Tool and Brokered Hierarchy Acceptance
+
+Status: `PLANNED`
+
+Depends on `TASK-009-D1A`, `TASK-009-E0`, and `TASK-009-D2`. Integrate only the checked Primary
+orchestration tool through the transport selected by the probe. Bind session,
+Primary Run, source Turn, tool-call ID, inherited root priority, Controller
+authority, and idempotency outside model arguments. Allow the Primary Agent to
+request, await approval for, list, assign, await, collect, cancel, and release
+policy-admitted Specialists without receiving a child Controller credential or
+mutating another Run directly.
+
+Run one live integration with the actual supported Gul client against the
+TASK-009-D1A local gRPC gateway. Create an Orchestrated Session in Standalone
+Primary composition, transition it to Brokered Hierarchy by provisioning a
+Reviewer, execute and collect one bounded Specialist task, return at least one
+Primary or Specialist result above the inline bound through an artifact
+reference, retrieve its metadata and one or more bounded chunks, verify total
+length and SHA-256, recover the hierarchy after a controlled Dolgorae restart,
+and return to a clean completed or active state. A mock, fake adapter, or merely Gul-shaped harness cannot satisfy this
+acceptance step. Specialist
+messages still route through Primary task operations in this Task; lateral
+Specialist collaboration is deferred to `EPIC-003D`.
+
+Verification: actual Gul client private-boundary integration;
+user-approval-required and fully-delegated live paths; exact tool retry; source
+identity canaries; Primary restart; Specialist task result
+redelivery; missing, unauthorized, run-lifetime-expired, malformed, oversized,
+out-of-range, and integrity-failed artifact reads with their documented typed
+errors; Primary degradation and recovery; release and abort; writer
+conflict; no credential exposure; no direct peer control; unchanged public Gul
+wire; and independent review of the live hierarchy path.
+
+Epic acceptance: completion unlocks `MILESTONE-BH1` only together with the
+minimum supervised Gul gateway completed in TASK-009-D1A. Gul can use the real
+local gRPC path to operate Dolgorae as the live Primary control plane, and
+Dolgorae can create, persist, recover, and operate a Brokered Hierarchy. Lateral Specialist collaboration is not yet part
+of this milestone.
+
+## EPIC-003D: Brokered Specialist Collaboration
+
+Status: `PLANNED`
+
+Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
+Brokered Hierarchy without making the Primary Agent a message relay.
+
+### TASK-009-E2: Durable Mailbox, Virtual Actor, and Collaboration Plane
+
+Status: `PLANNED`
+
+Depends on `TASK-009-D1A`, `TASK-009-E0`, `TASK-009-E1`, and `TASK-009-D2`. Integrate the checked
+Specialist collaboration tool through the selected run-bound transport. Add the
+Collaboration Service, SQLite Collaboration Exchange and mailbox tables,
+transactional result outbox, dirty-set Mailbox Scheduler, Activation Manager,
+actor passivation, activation leases, deterministic role selection, inherited
+priority, aging, fairness, deadlines, queue limits, backpressure, blocking wait
+graph, and result collection.
+
+Keep one active target Turn per Run, queue a busy target without preemption,
+wake an `on_mail` passivated target without per-actor polling, retain mail across
+activation failure, reject paused or terminal targets according to policy, and
+never allow collaboration to mutate peer lifecycle, writer, role, Controller,
+or aggregate membership. External Specialist Engagements cannot use this plane
+in v1.
+
+Verification: resident idle request-response; busy-target queueing; exact
+priority and FIFO tie breaks; aging and source fairness; role-selector
+repeatability; fan-out plus `any` and `all` await; one activation under
+concurrent mail; startup recovery after commit-before-wake crash; expired
+pre-dispatch claim; ambiguous Turn acceptance to `interrupted_unknown`;
+transactional result redelivery without replay; source restart and deferred
+collection; cross-session, external-engagement, cycle, depth, writer-held
+blocking wait, terminal target, queue overflow, and implicit-hire rejection; no
+credential, private socket, database path, raw protocol frame, or hidden
+reasoning leakage; and byte-identical public Protobuf source and descriptor.
+
+Epic acceptance: completion unlocks `MILESTONE-BC1`. Failures cannot duplicate
+or orphan a broker-owned Specialist, create two Dolgorae writer proxies, signal
+an unverified process, silently replay a user or Specialist task, cross account
+or aggregate ownership boundaries, or falsely claim known outcomes. Specialists
+in one Brokered Hierarchy may now collaborate laterally through durable bounded
+mailboxes without Primary message relay.
 
 ## EPIC-004: Operator and Audit Interfaces
 
 Status: `PLANNED`
 
-Goal: Complete the master-facing operational surface and make every durable run
+Goal: Complete the Controller-facing operational surface and make every durable Run
 independently inspectable.
 
 ### TASK-010: Status, Events, Results, and Change Observation
@@ -777,29 +1360,34 @@ truncation, Git/non-Git algorithms, and every command `data` variant. Test
 identity, observer/controller interaction and artifact denial matrices, profile
 redaction/authorization, and pre-ready failures that create no Run.
 
-### TASK-010-A: Supervised Local gRPC Gateway and Gul Contract
+### TASK-010-A: Complete Gul gRPC Surface and Extended Operational Conformance
 
 Status: `PLANNED`
 
-Implement `dolgorae serve`, the single-instance gateway record/lock, strict
-private Unix-socket lifecycle, peer-UID validation, pinned tonic/prost codegen,
-and every Gul-scope service in `dolgorae.public.v1`. Route every method into the
-shared semantic service. Add bounded independent Run streams, Controller
-carrier-file revalidation, side-effect-free verification, Controller timeline
-pagination, raw-byte artifact chunks, typed `google.rpc.Status` details, and
-graceful shutdown/restart behavior. Do not expose Operator methods, TCP,
-client-streaming, bidirectional streaming, worker sockets, or App Server
-transports.
+Depends on `TASK-009-D1A`. Extend the already operational foreground
+`dolgorae serve` gateway from the 24-method BH1 set to all 34 methods in the
+frozen `dolgorae.public.v1` descriptor. Add the ten deferred RPCs covering
+profile diagnostics, Controller timeline, default-effort, fork,
+verification, deletion, write continuation, writer handoff, and their complete
+safe projections. Complete bounded independent Run streams, exhaustive typed
+`google.rpc.Status` details, advanced cancellation behavior, and all remaining
+operator-safe conformance without adding Operator RPCs, TCP, client-streaming,
+bidirectional streaming, worker sockets, or App Server transports.
 
-Verification: deterministic fake-semantic-service tests for every unary and
-stream method; method-kind/descriptor golden tests; unsafe path, symlink,
-permission, stale inode, peer UID, concurrent serve, readiness, graceful and
-crash restart cases; 32-envelope/4-MiB/5-second pressure boundaries; independent
-Run streams on one channel; cancellation; Controller carrier TOCTOU and secret
-canaries; snapshot-plus-replay; accepted-only SubmitTurn; allocation response
-loss; threadless first write; continuation lineage; timeline redaction and image
-metadata; artifact cancellation/digest/range; and exhaustive typed error map.
-All timing uses injectable clocks and no test binds TCP.
+The task MUST preserve the TASK-009-D1A process, socket, peer-UID,
+ControlPlaneRuntime, and semantic-service ownership model. `GetCapabilities`
+continues to advertise only implemented methods until this Task completes, then
+advertises the complete public-v1 descriptor method set required by
+`MILESTONE-PA1`.
+
+Verification: deterministic fake-semantic-service tests for every remaining
+unary and stream method; full method-kind/descriptor golden tests;
+32-envelope/4-MiB/5-second pressure boundaries; independent Run streams on one
+channel; continuation lineage; timeline redaction and image metadata; artifact
+regression coverage; advanced writer handoff; deletion and verification;
+and the exhaustive typed error map. Re-run the TASK-009-D1A socket, restart,
+carrier TOCTOU, allocation-loss, Interaction-loss, and secret-canary tests as
+regressions. All timing uses injectable clocks and no test binds TCP.
 
 ### TASK-011: Verify, Export, and Confirmed Delete
 
@@ -821,17 +1409,22 @@ prefix, and regenerate bundled projections from it.
 Status: `PLANNED`
 
 Implement bounded versioned direct-interactive and managed-agent instruction
-prefixes, subordinate run instructions, `.dolgorae` reservation, access-aware mutation policy, explicit Git
-and background-process rules, advisory managed-run context, broker-requested
-independent Run composition with broker-only control, manager-owned bounded singleton shutdown, and cleanup
+prefixes, role-aware Primary Agent and Independent Specialist Agent wording,
+subordinate Run instructions, `.dolgorae` reservation, access-aware mutation
+policy, explicit Git and background-process rules, advisory managed-Run
+context, both user-facing use cases, Standalone Primary and Brokered Hierarchy
+composition, Orchestration-Broker-only Specialist control, external-AI
+Specialist boundaries, manager-owned bounded singleton shutdown, and cleanup
 audit records.
 
-Verification: mode-specific prompt-composition snapshots, controller-kind
-compatibility, observer interaction denial, capability non-disclosure, and conflicting run-instruction tests
-are separate from sandbox-policy enforcement tests; also cover self-read-only
-and attempted cross-run CLI control, marker-removal limitation reporting,
+Verification: control-mode and aggregate-role prompt-composition snapshots,
+Controller-kind compatibility, observer interaction denial, capability
+non-disclosure, and conflicting Run-instruction tests are separate from
+sandbox-policy enforcement tests; also cover Dolgorae-Orchestrated Session and External Specialist Engagement
+mappings, Standalone Primary and Brokered Hierarchy composition, self-read-only
+and attempted cross-Run CLI control, marker-removal limitation reporting,
 malformed/foreign/nonexistent managed markers, non-exec MCP marker absence,
-write-heavy native-subagent delegation language, brokered-child result routing
+write-heavy Native Delegation language, Independent Specialist result routing
 without Controller disclosure,
 detached-worker signal/stdout behavior, five-second graceful/forced cleanup, and
 escaped-process limitation reporting.
@@ -856,8 +1449,9 @@ compatibility, unknown additive data, server requests, terminal history,
 native-subagent opaque/event passthrough, controller/observer matrices,
 capability discovery, interaction idempotency, safe event profiles, and every
 documented error mapping, including artifact, independent run-state, and
-profile-event schemas, the brokered independent-subagent capability and CLI
-composition, canonical upstream file-change kinds, and semantic
+profile-event schemas, the `brokered_independent_subagent_runs` compatibility
+feature and Independent Specialist CLI composition, canonical upstream
+file-change kinds, and semantic
 multi-diff aggregate bounds.
 Drive every operation shared by Machine CLI and gRPC from one golden semantic
 scenario and require equal normalized result, typed error, durable state,

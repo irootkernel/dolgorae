@@ -1,0 +1,17 @@
+{
+  "operation": "assign_specialist_task",
+  "target": {
+    "role_ref": "independent-code-reviewer"
+  },
+  "objective": "Review the token refresh implementation.",
+  "context_refs": [
+    "018f0000-0000-7000-8000-000000004001"
+  ],
+  "expected_output": [
+    "correctness findings",
+    "recommended fixes"
+  ],
+  "execution_intent": "read_only",
+  "blocking": true,
+  "deadline_seconds": 900
+}

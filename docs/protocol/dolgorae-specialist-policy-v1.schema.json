@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-policy/v1",
+  "title": "Dolgorae immutable Specialist Policy snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_name",
+    "revision",
+    "approval_policy",
+    "max_active_specialists",
+    "roles"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "policy_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "approval_policy": {
+      "enum": [
+        "user_approval_required",
+        "fully_delegated"
+      ]
+    },
+    "max_active_specialists": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/role_policy"
+      }
+    }
+  },
+  "$defs": {
+    "role_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "role_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role_ref",
+        "display_name",
+        "description",
+        "agent_configuration",
+        "max_active_instances",
+        "reuse_policy",
+        "allowed_access",
+        "activation_policy",
+        "primary_may_request",
+        "collaboration_source",
+        "collaboration_target",
+        "auto_approve_when_fully_delegated"
+      ],
+      "properties": {
+        "role_ref": {
+          "$ref": "#/$defs/role_ref"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "agent_configuration": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v1"
+        },
+        "max_active_instances": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "reuse_policy": {
+          "enum": [
+            "never",
+            "reuse_idle_compatible",
+            "reuse_any_compatible"
+          ]
+        },
+        "allowed_access": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "read_only",
+              "isolated_write",
+              "canonical_workspace_write"
+            ]
+          }
+        },
+        "activation_policy": {
+          "enum": [
+            "on_mail",
+            "manual",
+            "keep_resident"
+          ]
+        },
+        "primary_may_request": {
+          "type": "boolean"
+        },
+        "collaboration_source": {
+          "type": "boolean"
+        },
+        "collaboration_target": {
+          "type": "boolean"
+        },
+        "auto_approve_when_fully_delegated": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "x-semanticValidator": "protocol/validators/validate_specialist_policy_v1.py",
+  "x-invariants": [
+    "role_ref values are unique",
+    "the complete policy and its JCS SHA-256 are stored on the Orchestrated Session",
+    "fully delegated hiring is limited to roles whose auto-approval bit is true",
+    "canonical or isolated write access requires a dedicated execution lane",
+    "collaboration-capable roles use on_mail or keep_resident activation"
+  ]
+}

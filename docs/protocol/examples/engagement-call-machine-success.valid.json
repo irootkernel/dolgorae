@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "engagement.call",
+  "invocation_id": "018f0000-0000-7000-8000-000000006022",
+  "data": {
+    "operation": "open_external_engagement_result",
+    "engagement_id": "018f0000-0000-7000-8000-000000003002",
+    "state": "active"
+  }
+}

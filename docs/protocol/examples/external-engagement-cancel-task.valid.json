@@ -1,0 +1,7 @@
+{
+  "operation": "cancel_external_specialist_task",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002",
+  "task_id": "018f0000-0000-7000-8000-000000003010",
+  "reason": "The external request was superseded.",
+  "idempotency_key": "external-host/session-42/cancel-task-10"
+}

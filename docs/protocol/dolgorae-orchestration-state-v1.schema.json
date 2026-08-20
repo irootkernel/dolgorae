@@ -1,0 +1,1896 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/orchestration-state/v1",
+  "title": "Dolgorae durable orchestration, mailbox, activation, collaboration, and engagement state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workspace_id",
+    "revision",
+    "head_sequence",
+    "head_hash",
+    "aggregate_operations",
+    "orchestrated_sessions",
+    "external_engagements",
+    "spawn_operations",
+    "specialist_tasks",
+    "activation_operations",
+    "collaboration_exchanges",
+    "mailbox_items"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/workspace_id"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "head_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "head_hash": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "aggregate_operations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/aggregate_operation"
+      }
+    },
+    "orchestrated_sessions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/orchestrated_session"
+      }
+    },
+    "external_engagements": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/external_engagement"
+      }
+    },
+    "spawn_operations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/spawn_operation"
+      }
+    },
+    "specialist_tasks": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/specialist_task"
+      }
+    },
+    "activation_operations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/activation_operation"
+      }
+    },
+    "collaboration_exchanges": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/collaboration_exchange"
+      }
+    },
+    "mailbox_items": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/mailbox_item"
+      }
+    }
+  },
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "workspace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "x-maxUtf8Bytes": 256
+    },
+    "opaque_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+          "x-maxUtf8Bytes": 128
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+          "x-maxUtf8Bytes": 64
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+          "x-maxUtf8Bytes": 256
+        }
+      }
+    },
+    "aggregate_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "operation_kind",
+        "aggregate_kind",
+        "aggregate_id",
+        "idempotency_key",
+        "request_sha256",
+        "root_run_id",
+        "external_controller_ref",
+        "controller_binding",
+        "state",
+        "safe_error_code",
+        "requested_at",
+        "provisioning_started_at",
+        "ready_at",
+        "finished_at"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "operation_kind": {
+          "enum": [
+            "create_orchestrated_session",
+            "open_external_engagement"
+          ]
+        },
+        "aggregate_kind": {
+          "enum": [
+            "orchestrated_session",
+            "external_specialist_engagement"
+          ]
+        },
+        "aggregate_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "request_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "root_run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_controller_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "requested",
+            "provisioning",
+            "ready",
+            "failed",
+            "cancelled",
+            "recovery_required"
+          ]
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "provisioning_started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "ready_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "controller_binding": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/aggregate_controller_binding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "create_orchestrated_session"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "aggregate_kind": {
+                "const": "orchestrated_session"
+              },
+              "root_run_id": {
+                "$ref": "#/$defs/uuid7"
+              },
+              "external_controller_ref": {
+                "type": "null"
+              },
+              "controller_binding": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "open_external_engagement"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "aggregate_kind": {
+                "const": "external_specialist_engagement"
+              },
+              "root_run_id": {
+                "type": "null"
+              },
+              "external_controller_ref": {
+                "$ref": "#/$defs/opaque_ref"
+              },
+              "controller_binding": {
+                "$ref": "#/$defs/aggregate_controller_binding"
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "one bootstrap operation owns each aggregate identity",
+        "create_orchestrated_session uses aggregate_id == root_run_id",
+        "open_external_engagement is committed atomically with an empty External Specialist Engagement; hires are separate durable operations",
+        "same-key replay returns the same aggregate identity"
+      ]
+    },
+    "orchestrated_session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aggregate_kind",
+        "semantic_owner",
+        "session_id",
+        "bootstrap_operation_id",
+        "root_run_id",
+        "status",
+        "composition_state",
+        "approval_policy",
+        "specialist_policy",
+        "specialist_policy_sha256",
+        "collaboration_policy_sha256",
+        "collaboration_policy",
+        "revision",
+        "members",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "aggregate_kind": {
+          "const": "orchestrated_session"
+        },
+        "semantic_owner": {
+          "const": "dolgorae"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "bootstrap_operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "root_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "status": {
+          "enum": [
+            "creating",
+            "active",
+            "degraded",
+            "recovering",
+            "completing",
+            "aborting",
+            "completed",
+            "aborted"
+          ]
+        },
+        "composition_state": {
+          "enum": [
+            "standalone_primary",
+            "brokered_hierarchy"
+          ]
+        },
+        "approval_policy": {
+          "enum": [
+            "user_approval_required",
+            "fully_delegated"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "specialist_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "members": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/brokered_member"
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "collaboration_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "collaboration_policy": {
+          "$ref": "#/$defs/collaboration_policy"
+        },
+        "specialist_policy": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy/v1"
+        }
+      },
+      "x-invariants": [
+        "bootstrap_operation_id references the sole aggregate bootstrap operation",
+        "session_id equals root_run_id in v1",
+        "approval_policy equals specialist_policy.approval_policy",
+        "specialist_policy_sha256 is the JCS SHA-256 of specialist_policy",
+        "composition_state is brokered_hierarchy iff at least one member is not retired",
+        "one Run may belong to at most one nonterminal aggregate",
+        "collaboration policy is immutable for the session revision that accepted an exchange"
+      ]
+    },
+    "brokered_member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "parent_run_id",
+        "origin",
+        "runtime_owner",
+        "semantic_owner",
+        "role_ref",
+        "role_snapshot_sha256",
+        "agent_configuration_sha256",
+        "spawn_operation_id",
+        "spawned_by_turn_id",
+        "membership_state",
+        "actor_residency",
+        "activation_policy",
+        "current_activation_operation_id",
+        "joined_at",
+        "retired_at"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "parent_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "origin": {
+          "const": "brokered"
+        },
+        "runtime_owner": {
+          "const": "dolgorae"
+        },
+        "semantic_owner": {
+          "const": "dolgorae"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/role_ref"
+        },
+        "role_snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "agent_configuration_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "spawn_operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "spawned_by_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "membership_state": {
+          "enum": [
+            "provisioning",
+            "active",
+            "degraded",
+            "retiring",
+            "retired"
+          ]
+        },
+        "actor_residency": {
+          "$ref": "#/$defs/actor_residency"
+        },
+        "activation_policy": {
+          "enum": [
+            "on_mail",
+            "manual",
+            "keep_resident",
+            "never"
+          ]
+        },
+        "current_activation_operation_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "joined_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "retired_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "x-invariants": [
+        "retiring prevents new work and waits for authoritative task, mailbox, and delivery quiescence",
+        "retired membership has terminal actor residency and retired_at",
+        "on_mail passivated target with queued mail has one requested or activating activation operation",
+        "keep_resident is never passivated by idle timeout",
+        "actor residency does not replace the core Run lifecycle"
+      ]
+    },
+    "external_engagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aggregate_kind",
+        "semantic_owner",
+        "engagement_id",
+        "bootstrap_operation_id",
+        "external_controller_ref",
+        "controller_binding",
+        "label",
+        "status",
+        "revision",
+        "members",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "aggregate_kind": {
+          "const": "external_specialist_engagement"
+        },
+        "semantic_owner": {
+          "const": "external_controller"
+        },
+        "engagement_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "bootstrap_operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "external_controller_ref": {
+          "$ref": "#/$defs/opaque_ref"
+        },
+        "status": {
+          "enum": [
+            "creating",
+            "active",
+            "degraded",
+            "recovering",
+            "completing",
+            "aborting",
+            "completed",
+            "aborted"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "members": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/external_member"
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-maxUtf8Bytes": 256
+        },
+        "controller_binding": {
+          "$ref": "#/$defs/aggregate_controller_binding"
+        }
+      },
+      "x-invariants": [
+        "bootstrap_operation_id references the sole aggregate bootstrap operation created by explicit engagement open",
+        "Dolgorae stores operational Specialist state but not the external task graph",
+        "one Run may belong to at most one nonterminal aggregate",
+        "external_controller_ref and Controller binding are immutable for the engagement",
+        "an engagement may be active with zero members before the first hire",
+        "every mutating facade call revalidates the persisted Controller binding"
+      ]
+    },
+    "external_member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "origin",
+        "runtime_owner",
+        "semantic_owner",
+        "role_ref",
+        "role_snapshot_sha256",
+        "agent_configuration_sha256",
+        "hire_operation_id",
+        "membership_state",
+        "actor_residency",
+        "activation_policy",
+        "current_activation_operation_id",
+        "joined_at",
+        "released_at"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "origin": {
+          "const": "external_hire"
+        },
+        "runtime_owner": {
+          "const": "dolgorae"
+        },
+        "semantic_owner": {
+          "const": "external_controller"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/role_ref"
+        },
+        "role_snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "agent_configuration_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "hire_operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "membership_state": {
+          "enum": [
+            "provisioning",
+            "active",
+            "degraded",
+            "releasing",
+            "released"
+          ]
+        },
+        "actor_residency": {
+          "$ref": "#/$defs/actor_residency"
+        },
+        "activation_policy": {
+          "enum": [
+            "on_external_request",
+            "manual",
+            "keep_resident",
+            "never"
+          ]
+        },
+        "current_activation_operation_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "joined_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "x-invariants": [
+        "releasing prevents new work and waits for authoritative task and delivery quiescence",
+        "released membership has terminal actor residency and released_at",
+        "keep_resident is never passivated by idle timeout",
+        "External Specialist Engagement members cannot originate Collaboration Exchanges"
+      ]
+    },
+    "spawn_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "aggregate_kind",
+        "aggregate_id",
+        "idempotency_key",
+        "parent_run_id",
+        "child_run_id",
+        "approval_request_id",
+        "requested_spec_sha256",
+        "state",
+        "safe_error_code",
+        "requested_at",
+        "provisioning_started_at",
+        "ready_at",
+        "finished_at"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "aggregate_kind": {
+          "enum": [
+            "orchestrated_session",
+            "external_specialist_engagement"
+          ]
+        },
+        "aggregate_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "parent_run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "child_run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested_spec_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "state": {
+          "enum": [
+            "awaiting_approval",
+            "requested",
+            "provisioning",
+            "ready",
+            "denied",
+            "failed",
+            "cancelled",
+            "recovery_required"
+          ]
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "provisioning_started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "ready_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "approval_request_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "aggregate_kind orchestrated_session requires parent_run_id",
+        "external specialist hire has null parent_run_id and null approval_request_id",
+        "awaiting_approval and denied have no child Run or member",
+        "idempotency_key is unique within aggregate_id",
+        "the child Run ID and member are allocated before external process creation",
+        "user_approval_required orchestrated-session operations retain approval_request_id after approval",
+        "fully_delegated orchestrated-session operations have null approval_request_id"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "aggregate_kind": {
+                "const": "external_specialist_engagement"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "approval_request_id": {
+                "type": "null"
+              },
+              "state": {
+                "not": {
+                  "enum": [
+                    "awaiting_approval",
+                    "denied"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "awaiting_approval"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "aggregate_kind": {
+                "const": "orchestrated_session"
+              },
+              "child_run_id": {
+                "type": "null"
+              },
+              "approval_request_id": {
+                "$ref": "#/$defs/uuid7"
+              },
+              "safe_error_code": {
+                "type": "null"
+              },
+              "provisioning_started_at": {
+                "type": "null"
+              },
+              "ready_at": {
+                "type": "null"
+              },
+              "finished_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "denied"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "aggregate_kind": {
+                "const": "orchestrated_session"
+              },
+              "child_run_id": {
+                "type": "null"
+              },
+              "approval_request_id": {
+                "$ref": "#/$defs/uuid7"
+              },
+              "safe_error_code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "provisioning_started_at": {
+                "type": "null"
+              },
+              "ready_at": {
+                "type": "null"
+              },
+              "finished_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "requested",
+                  "provisioning",
+                  "ready",
+                  "failed",
+                  "recovery_required"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "child_run_id": {
+                "$ref": "#/$defs/uuid7"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "specialist_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "task_kind",
+        "aggregate_id",
+        "idempotency_key",
+        "source_run_id",
+        "source_turn_id",
+        "external_request_ref",
+        "target_run_id",
+        "target_turn_id",
+        "request_artifact_ref",
+        "result_artifact_ref",
+        "priority_class",
+        "state",
+        "created_at",
+        "safe_error_code",
+        "deadline_at",
+        "claim_lease_until",
+        "claim_owner",
+        "claimed_at",
+        "queued_at",
+        "dispatched_at",
+        "completed_at",
+        "delivered_at"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "task_kind": {
+          "enum": [
+            "brokered_delegation",
+            "external_assignment"
+          ]
+        },
+        "aggregate_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "source_run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "external_request_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "target_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "request_artifact_ref": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "result_artifact_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "completed_not_delivered",
+            "delivered",
+            "failed",
+            "interrupted_unknown",
+            "cancelled",
+            "expired"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dispatched_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "delivered_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "priority_class": {
+          "$ref": "#/$defs/priority_class"
+        },
+        "queued_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claimed_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_owner": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_lease_until": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deadline_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task_kind": {
+                "const": "brokered_delegation"
+              }
+            },
+            "required": [
+              "task_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_run_id": {
+                "$ref": "#/$defs/uuid7"
+              },
+              "source_turn_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "external_request_ref": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_kind": {
+                "const": "external_assignment"
+              }
+            },
+            "required": [
+              "task_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_run_id": {
+                "type": "null"
+              },
+              "source_turn_id": {
+                "type": "null"
+              },
+              "external_request_ref": {
+                "$ref": "#/$defs/opaque_ref"
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "idempotency_key is unique within aggregate_id",
+        "queued, claimed, and dispatching are backed by one specialist_task_request mailbox item",
+        "claim leases cover only pre-dispatch ownership",
+        "completed_not_delivered may redeliver the existing result but may not rerun the target Turn",
+        "interrupted_unknown forbids automatic replay",
+        "a Collaboration Exchange inherits its root Specialist task priority"
+      ]
+    },
+    "priority_class": {
+      "enum": [
+        "interactive",
+        "normal",
+        "background"
+      ]
+    },
+    "actor_residency": {
+      "enum": [
+        "unstarted",
+        "resident",
+        "passivating",
+        "passivated",
+        "activating",
+        "recovering",
+        "unavailable",
+        "terminal"
+      ]
+    },
+    "collaboration_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "priority_classes",
+        "starvation_limit_seconds",
+        "max_consecutive_from_same_source",
+        "max_pending_per_specialist",
+        "max_pending_per_source_target",
+        "max_pending_per_session",
+        "max_blocking_waits_per_run",
+        "max_blocking_depth",
+        "max_exchanges_per_root_task",
+        "max_inline_request_bytes",
+        "idle_passivation_seconds",
+        "activation_timeout_seconds",
+        "max_activation_attempts",
+        "reconciliation_interval_seconds"
+      ],
+      "properties": {
+        "priority_classes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "interactive",
+            "normal",
+            "background"
+          ],
+          "properties": {
+            "interactive": {
+              "const": 3
+            },
+            "normal": {
+              "const": 2
+            },
+            "background": {
+              "const": 1
+            }
+          }
+        },
+        "starvation_limit_seconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "max_consecutive_from_same_source": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "max_pending_per_specialist": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "max_pending_per_source_target": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "max_pending_per_session": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "max_blocking_waits_per_run": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "max_blocking_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "max_exchanges_per_root_task": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "max_inline_request_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576
+        },
+        "idle_passivation_seconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 86400
+        },
+        "activation_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "max_activation_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "reconciliation_interval_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300
+        }
+      }
+    },
+    "activation_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activation_id",
+        "aggregate_kind",
+        "aggregate_id",
+        "run_id",
+        "trigger_kind",
+        "state",
+        "attempt",
+        "lease_owner",
+        "lease_until",
+        "safe_error_code",
+        "requested_at",
+        "started_at",
+        "completed_at"
+      ],
+      "properties": {
+        "activation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "aggregate_kind": {
+          "enum": [
+            "orchestrated_session",
+            "external_specialist_engagement"
+          ]
+        },
+        "aggregate_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "trigger_kind": {
+          "enum": [
+            "mailbox",
+            "external_request",
+            "manual",
+            "recovery"
+          ]
+        },
+        "state": {
+          "enum": [
+            "requested",
+            "activating",
+            "ready",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "lease_owner": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_until": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_error_code": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "one Run has at most one requested or activating activation operation",
+        "mailbox trigger is valid only for an on_mail brokered member",
+        "a ready activation corresponds to resident actor residency",
+        "activation never replays an outcome-unknown Turn"
+      ]
+    },
+    "collaboration_exchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exchange_id",
+        "session_id",
+        "root_task_id",
+        "parent_exchange_id",
+        "idempotency_key",
+        "source_run_id",
+        "source_turn_id",
+        "source_tool_call_id",
+        "target_run_id",
+        "target_turn_id",
+        "request_artifact_ref",
+        "context_manifest_ref",
+        "result_artifact_ref",
+        "priority_class",
+        "blocks_source_turn",
+        "hop_depth",
+        "enqueue_sequence",
+        "execution_state",
+        "delivery_state",
+        "safe_error_code",
+        "claim_owner",
+        "claim_lease_until",
+        "deadline_at",
+        "created_at",
+        "claimed_at",
+        "dispatched_at",
+        "completed_at",
+        "acknowledged_at"
+      ],
+      "properties": {
+        "exchange_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "session_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "root_task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "parent_exchange_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "source_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "source_turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "source_tool_call_id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "target_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "target_turn_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_artifact_ref": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "context_manifest_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_artifact_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority_class": {
+          "$ref": "#/$defs/priority_class"
+        },
+        "blocks_source_turn": {
+          "type": "boolean"
+        },
+        "hop_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "enqueue_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "execution_state": {
+          "enum": [
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted_unknown",
+            "expired"
+          ]
+        },
+        "delivery_state": {
+          "enum": [
+            "none",
+            "pending",
+            "acknowledged",
+            "abandoned"
+          ]
+        },
+        "safe_error_code": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_owner": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_lease_until": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deadline_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "claimed_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dispatched_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acknowledged_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "source and target are different active brokered members in session_id",
+        "root_task_id names a brokered delegation targeted at source_run_id",
+        "priority_class equals the root task priority",
+        "blocking active exchanges form an acyclic wait graph",
+        "succeeded execution stores one immutable result and uses pending or acknowledged delivery",
+        "interrupted_unknown forbids automatic replay"
+      ]
+    },
+    "mailbox_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aggregate_kind",
+        "aggregate_id",
+        "mailbox_run_id",
+        "mailbox_sequence",
+        "item_kind",
+        "related_id",
+        "priority_class",
+        "blocks_source_turn",
+        "item_state",
+        "lease_owner",
+        "lease_until",
+        "created_at",
+        "delivered_at",
+        "acknowledged_at"
+      ],
+      "properties": {
+        "aggregate_kind": {
+          "enum": [
+            "orchestrated_session",
+            "external_specialist_engagement"
+          ]
+        },
+        "aggregate_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "mailbox_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "mailbox_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "item_kind": {
+          "enum": [
+            "specialist_task_request",
+            "collaboration_request",
+            "collaboration_result"
+          ]
+        },
+        "related_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "priority_class": {
+          "$ref": "#/$defs/priority_class"
+        },
+        "blocks_source_turn": {
+          "type": "boolean"
+        },
+        "item_state": {
+          "enum": [
+            "queued",
+            "claimed",
+            "delivered",
+            "acknowledged",
+            "cancelled"
+          ]
+        },
+        "lease_owner": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_until": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "delivered_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acknowledged_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "mailbox sequence is unique within mailbox_run_id",
+        "related_id resolves to a Specialist task or Collaboration Exchange according to item_kind",
+        "collaboration request mailbox is the target Run and result mailbox is the source Run",
+        "claim leases cover only pre-dispatch ownership"
+      ]
+    },
+    "role_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "aggregate_controller_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_id",
+        "generation",
+        "kind",
+        "principal_sha256",
+        "capability_sha256"
+      ],
+      "properties": {
+        "controller_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": [
+            "workflow_orchestrator",
+            "automation"
+          ]
+        },
+        "principal_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "capability_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "x-invariants": [
+        "capability_sha256 is the domain-separated digest of the canonical 32-byte Controller capability",
+        "raw capability bytes are never persisted",
+        "every external engagement mutation revalidates controller_id, generation, and capability digest in constant time"
+      ]
+    }
+  },
+  "x-semanticValidator": "protocol/validators/validate_orchestration_state_v1.py",
+  "x-invariants": [
+    "aggregate identifiers are unique across both aggregate kinds",
+    "one Run belongs to at most one nonterminal aggregate",
+    "every member references one matching write-ahead spawn or hire operation",
+    "every Specialist task references an existing aggregate and member",
+    "completed results are redelivered but never semantically replayed",
+    "interrupted_unknown forbids automatic replay"
+  ]
+}

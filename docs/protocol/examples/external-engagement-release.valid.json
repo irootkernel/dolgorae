@@ -1,0 +1,7 @@
+{
+  "operation": "release_external_specialist",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002",
+  "specialist_run_id": "018f0000-0000-7000-8000-000000003003",
+  "reason": "The review phase is complete.",
+  "idempotency_key": "session-42/reviewer/release"
+}

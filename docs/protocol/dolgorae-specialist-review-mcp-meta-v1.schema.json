@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-review-mcp-meta/v1",
+  "title": "Dolgorae Specialist Review MCP per-request metadata fragment v1",
+  "description": "Host-controlled MCP params._meta extension used to correlate one logical external review request across transport reconnect or retry. This field is not part of model-visible tool arguments.",
+  "type": "object",
+  "required": [
+    "xyz.rootkernel.dolgorae/externalRequestRef"
+  ],
+  "properties": {
+    "xyz.rootkernel.dolgorae/externalRequestRef": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  },
+  "additionalProperties": true,
+  "x-invariants": [
+    "the trusted host generates one UUIDv7 per logical tool invocation and repeats it unchanged on a transport retry",
+    "the model cannot read, choose, or override the reference through tool arguments",
+    "same reference and same normalized request replay returns the original review identity",
+    "same reference with a different normalized request fails with IDEMPOTENCY_CONFLICT",
+    "connection or stdio-process identity is never used as session continuity"
+  ]
+}

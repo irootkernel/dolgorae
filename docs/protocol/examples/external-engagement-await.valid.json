@@ -1,0 +1,9 @@
+{
+  "operation": "await_external_specialist_tasks",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002",
+  "task_ids": [
+    "018f0000-0000-7000-8000-000000003004"
+  ],
+  "return_when": "all",
+  "transport_wait_seconds": 30
+}

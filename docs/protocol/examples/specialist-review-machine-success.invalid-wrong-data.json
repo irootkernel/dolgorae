@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "specialist.review",
+  "invocation_id": "018f0000-0000-7000-8000-000000006011",
+  "data": {
+    "name": "Dolgorae",
+    "version": "0.0.0"
+  }
+}

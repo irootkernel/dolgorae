@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "workspace_id": "1111111111111111111111111111111111111111111111111111111111111111",
+  "revision": 1,
+  "head_sequence": 1,
+  "head_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "aggregate_operations": [
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000003001",
+      "operation_kind": "open_external_engagement",
+      "aggregate_kind": "external_specialist_engagement",
+      "aggregate_id": "018f0000-0000-7000-8000-000000003002",
+      "idempotency_key": "external-host/session-42/engagement",
+      "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "root_run_id": null,
+      "external_controller_ref": {
+        "namespace": "external-ai",
+        "kind": "session",
+        "id": "session-42"
+      },
+      "state": "ready",
+      "safe_error_code": null,
+      "requested_at": "2026-08-20T01:00:00Z",
+      "provisioning_started_at": "2026-08-20T01:00:00Z",
+      "ready_at": "2026-08-20T01:00:04Z",
+      "finished_at": "2026-08-20T01:00:04Z",
+      "controller_binding": {
+        "controller_id": "018f0000-0000-7000-8000-00000000e001",
+        "generation": 1,
+        "kind": "workflow_orchestrator",
+        "principal_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "capability_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    }
+  ],
+  "orchestrated_sessions": [],
+  "external_engagements": [
+    {
+      "aggregate_kind": "external_specialist_engagement",
+      "semantic_owner": "external_controller",
+      "engagement_id": "018f0000-0000-7000-8000-000000003002",
+      "bootstrap_operation_id": "018f0000-0000-7000-8000-000000003001",
+      "external_controller_ref": {
+        "namespace": "external-ai",
+        "kind": "session",
+        "id": "session-42"
+      },
+      "label": "External review session",
+      "status": "active",
+      "revision": 1,
+      "members": [],
+      "created_at": "2026-08-20T01:00:00Z",
+      "updated_at": "2026-08-20T01:00:00Z",
+      "controller_binding": {
+        "controller_id": "018f0000-0000-7000-8000-00000000e001",
+        "generation": 1,
+        "kind": "workflow_orchestrator",
+        "principal_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "capability_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    }
+  ],
+  "spawn_operations": [],
+  "specialist_tasks": [],
+  "activation_operations": [],
+  "collaboration_exchanges": [],
+  "mailbox_items": []
+}

@@ -1,0 +1,15 @@
+{
+  "operation": "review_working_tree",
+  "scope": "working_tree",
+  "objective": "Review the current working-tree changes and report concrete defects before completion.",
+  "focus": [
+    "correctness",
+    "regressions",
+    "concurrency",
+    "error_handling",
+    "test_coverage"
+  ],
+  "expected_output": "structured_findings_v1",
+  "deadline_seconds": 900,
+  "workspace_path": "/Users/example/project"
+}

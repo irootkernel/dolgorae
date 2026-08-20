@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "policy_name": "personal-alpha-supervised",
+  "revision": 1,
+  "approval_policy": "user_approval_required",
+  "max_active_specialists": 4,
+  "roles": [
+    {
+      "role_ref": "independent-code-reviewer",
+      "display_name": "Independent Code Reviewer",
+      "description": "Reviews implementation and evidence without owning the final decision.",
+      "agent_configuration": {
+        "schema_version": 1,
+        "runtime_profile": "codex-default",
+        "model": null,
+        "default_effort": "high",
+        "purpose": "review",
+        "purpose_label": null,
+        "required_capabilities": [],
+        "instructions": "Act as an independent code reviewer. Return evidence-backed findings and do not modify the canonical workspace.",
+        "execution_lane": "shared_readonly",
+        "required_assurance": "best_effort_personal_alpha",
+        "native_subagent_policy": "enabled"
+      },
+      "max_active_instances": 2,
+      "reuse_policy": "reuse_any_compatible",
+      "allowed_access": [
+        "read_only"
+      ],
+      "activation_policy": "on_mail",
+      "primary_may_request": true,
+      "collaboration_source": true,
+      "collaboration_target": true,
+      "auto_approve_when_fully_delegated": true
+    },
+    {
+      "role_ref": "tester",
+      "display_name": "Test Specialist",
+      "description": "Runs bounded tests and returns reproducible logs and conclusions.",
+      "agent_configuration": {
+        "schema_version": 1,
+        "runtime_profile": "codex-default",
+        "model": null,
+        "default_effort": "medium",
+        "purpose": "implementation",
+        "purpose_label": null,
+        "required_capabilities": [],
+        "instructions": "Run bounded tests and return reproducible evidence. Use isolated write access only when the accepted task authorizes it.",
+        "execution_lane": "dedicated",
+        "required_assurance": "best_effort_personal_alpha",
+        "native_subagent_policy": "enabled"
+      },
+      "max_active_instances": 2,
+      "reuse_policy": "reuse_idle_compatible",
+      "allowed_access": [
+        "read_only",
+        "isolated_write"
+      ],
+      "activation_policy": "on_mail",
+      "primary_may_request": true,
+      "collaboration_source": true,
+      "collaboration_target": true,
+      "auto_approve_when_fully_delegated": true
+    }
+  ]
+}

@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_sequence": 2,
+  "head_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "aggregate_operations": [
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000001a00",
+      "operation_kind": "create_orchestrated_session",
+      "aggregate_kind": "orchestrated_session",
+      "aggregate_id": "018f0000-0000-7000-8000-000000000001",
+      "idempotency_key": "bootstrap/session/018f0000-0000-7000-8000-000000000001",
+      "request_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "root_run_id": "018f0000-0000-7000-8000-000000000001",
+      "external_controller_ref": null,
+      "state": "ready",
+      "safe_error_code": null,
+      "requested_at": "2026-08-20T00:10:00Z",
+      "provisioning_started_at": "2026-08-20T00:10:00Z",
+      "ready_at": "2026-08-20T00:10:00Z",
+      "finished_at": "2026-08-20T00:10:00Z",
+      "controller_binding": null
+    }
+  ],
+  "orchestrated_sessions": [
+    {
+      "aggregate_kind": "orchestrated_session",
+      "semantic_owner": "dolgorae",
+      "session_id": "018f0000-0000-7000-8000-000000000001",
+      "root_run_id": "018f0000-0000-7000-8000-000000000001",
+      "status": "active",
+      "composition_state": "standalone_primary",
+      "approval_policy": "user_approval_required",
+      "revision": 2,
+      "specialist_policy_sha256": "ea35b954691aa1a1461984cc6ecc29ce7a85c80085695a25df2acc5276b45a53",
+      "collaboration_policy_sha256": "ba0365e8605249ba9a80f6548279c9ecbcd7436bea6f688a0b5e2ec5e98bf2e0",
+      "collaboration_policy": {
+        "priority_classes": {
+          "interactive": 3,
+          "normal": 2,
+          "background": 1
+        },
+        "starvation_limit_seconds": 300,
+        "max_consecutive_from_same_source": 2,
+        "max_pending_per_specialist": 16,
+        "max_pending_per_source_target": 4,
+        "max_pending_per_session": 128,
+        "max_blocking_waits_per_run": 2,
+        "max_blocking_depth": 2,
+        "max_exchanges_per_root_task": 8,
+        "max_inline_request_bytes": 65536,
+        "idle_passivation_seconds": 600,
+        "activation_timeout_seconds": 30,
+        "max_activation_attempts": 3,
+        "reconciliation_interval_seconds": 30
+      },
+      "members": [],
+      "created_at": "2026-08-20T00:10:00Z",
+      "updated_at": "2026-08-20T00:11:00Z",
+      "bootstrap_operation_id": "018f0000-0000-7000-8000-000000001a00",
+      "specialist_policy": {
+        "schema_version": 1,
+        "policy_name": "personal-alpha-supervised",
+        "revision": 1,
+        "approval_policy": "user_approval_required",
+        "max_active_specialists": 4,
+        "roles": [
+          {
+            "role_ref": "independent-code-reviewer",
+            "display_name": "Independent Code Reviewer",
+            "description": "Reviews implementation and evidence without owning the final decision.",
+            "agent_configuration": {
+              "schema_version": 1,
+              "runtime_profile": "codex-default",
+              "model": null,
+              "default_effort": "high",
+              "purpose": "review",
+              "purpose_label": null,
+              "required_capabilities": [],
+              "instructions": "Act as an independent code reviewer. Return evidence-backed findings and do not modify the canonical workspace.",
+              "execution_lane": "shared_readonly",
+              "required_assurance": "best_effort_personal_alpha",
+              "native_subagent_policy": "enabled"
+            },
+            "max_active_instances": 2,
+            "reuse_policy": "reuse_any_compatible",
+            "allowed_access": [
+              "read_only"
+            ],
+            "activation_policy": "on_mail",
+            "primary_may_request": true,
+            "collaboration_source": true,
+            "collaboration_target": true,
+            "auto_approve_when_fully_delegated": true
+          },
+          {
+            "role_ref": "tester",
+            "display_name": "Test Specialist",
+            "description": "Runs bounded tests and returns reproducible logs and conclusions.",
+            "agent_configuration": {
+              "schema_version": 1,
+              "runtime_profile": "codex-default",
+              "model": null,
+              "default_effort": "medium",
+              "purpose": "implementation",
+              "purpose_label": null,
+              "required_capabilities": [],
+              "instructions": "Run bounded tests and return reproducible evidence. Use isolated write access only when the accepted task authorizes it.",
+              "execution_lane": "dedicated",
+              "required_assurance": "best_effort_personal_alpha",
+              "native_subagent_policy": "enabled"
+            },
+            "max_active_instances": 2,
+            "reuse_policy": "reuse_idle_compatible",
+            "allowed_access": [
+              "read_only",
+              "isolated_write"
+            ],
+            "activation_policy": "on_mail",
+            "primary_may_request": true,
+            "collaboration_source": true,
+            "collaboration_target": true,
+            "auto_approve_when_fully_delegated": true
+          }
+        ]
+      }
+    }
+  ],
+  "spawn_operations": [
+    {
+      "operation_id": "018f0000-0000-7000-8000-000000000030",
+      "aggregate_kind": "orchestrated_session",
+      "aggregate_id": "018f0000-0000-7000-8000-000000000001",
+      "idempotency_key": "session-1/security-reviewer/approval-1",
+      "parent_run_id": "018f0000-0000-7000-8000-000000000001",
+      "child_run_id": "018f0000-0000-7000-8000-000000000032",
+      "approval_request_id": "018f0000-0000-7000-8000-000000000031",
+      "requested_spec_sha256": "abababababababababababababababababababababababababababababababab",
+      "state": "awaiting_approval",
+      "safe_error_code": null,
+      "requested_at": "2026-08-20T00:10:30Z",
+      "provisioning_started_at": null,
+      "ready_at": null,
+      "finished_at": null
+    }
+  ],
+  "specialist_tasks": [],
+  "collaboration_exchanges": [],
+  "mailbox_items": [],
+  "activation_operations": [],
+  "external_engagements": [],
+  "revision": 2
+}

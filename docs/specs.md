@@ -17,174 +17,454 @@ validator explicitly named by this specification are also normative.
 
 ## Definitions
 
-- **Master**: a human, interactive client, workflow orchestrator, or local
-  automation process that invokes a public Dolgorae adapter and owns
-  orchestration decisions.
-- **Controller**: the one master authorized by a durable capability binding to
-  mutate a run.
+- **Master**: the existing compatibility term for a human, interactive client,
+  workflow orchestrator, or local automation process that invokes a public
+  Dolgorae adapter. New product prose SHOULD name the more precise orchestration
+  owner defined by the selected use case.
+- **Controller**: the one capability-bound authority allowed to mutate a
+  particular Run. A Controller is not an agent role or a session-level control
+  plane.
+- **User-Facing Use Case**: one of exactly two product entry models:
+  `Dolgorae-Orchestrated Session` or `External Specialist Engagement`. The
+  selected use case determines who owns semantic orchestration.
+- **Dolgorae-Orchestrated Session**: a durable user-facing session in which
+  Dolgorae owns the Primary Agent, internal Specialist brokerage, operational
+  orchestration state, and recovery. Gul is the canonical client for this use
+  case.
+- **External Specialist Engagement**: a durable operational boundary in which
+  an external AI remains the Primary Agent and semantic control plane and hires
+  one or more Dolgorae-managed Specialists.
+- **Orchestration Session Record**: the authoritative Dolgorae record for one
+  Dolgorae-Orchestrated Session. In v1 its session ID equals its Primary Run ID.
+- **Specialist Engagement Record**: the authoritative Dolgorae operational
+  record for Specialists hired by one external control plane. It does not store
+  or own the external plan or task graph.
+- **Aggregate Bootstrap Operation**: the durable write-ahead operation that
+  creates exactly one Orchestration Session Record or Specialist Engagement
+  Record. It owns aggregate identity, bootstrap idempotency, request digest,
+  provenance, and crash recovery before any member Run is published.
+- **Primary Orchestration Tool Bridge**: the private run-bound tool surface used
+  by a Primary Agent to request, assign, await, inspect, and release Specialists.
+  Source session, Run, Turn, tool-call identity, Controller authority, and
+  idempotency are bound outside model-controlled arguments.
+- **External Specialist Facade**: the private CLI or trusted MCP surface used
+  by an external AI to explicitly open an empty External Specialist Engagement
+  and then inspect, hire, assign, await, collect, cancel, release, or close its
+  Specialists without adding another semantic planner.
+- **Orchestration Launch Intent**: optional non-secret metadata in a protected
+  Controller carrier. Its presence explicitly selects a Dolgorae-Orchestrated
+  Session and names the Specialist Policy to snapshot. It is creation input, not
+  Controller authority, and is never inherited by a Specialist credential.
+- **Specialist Policy Registry**: the machine-local, workspace-scoped registry
+  of checked Specialist Policy documents selectable by Orchestration Launch
+  Intent. Active sessions retain complete immutable snapshots and do not depend
+  on later registry contents.
+- **Specialist Policy**: the immutable, schema-validated session snapshot that
+  defines approval mode, allowed roles, Agent Configuration references,
+  cardinality, reuse, access, activation, and collaboration permissions.
+- **Agent Topology**: internal composition terminology over independent Runs. It
+  is not a user-facing mode, `control_mode`, or public enum.
+- **Standalone Primary composition**: the internal composition state of a
+  Dolgorae-Orchestrated Session with no active Independent Specialist Run.
+- **Brokered Hierarchy**: the internal composition state of a
+  Dolgorae-Orchestrated Session with one Primary Run and one or more durable
+  Independent Specialist Runs owned by the Dolgorae Orchestration Broker.
+- **Orchestration Broker**: the Dolgorae control-plane component that owns
+  Brokered Hierarchy membership, internal Specialist Controller credentials,
+  idempotent spawn operations, task delivery, result redelivery, collaboration
+  mailboxes, activation, and recovery. It is not an LLM-visible authority.
+- **Brokered Specialist Collaboration**: bounded logical direct communication
+  between two Independent Specialist Runs in the same active Brokered Hierarchy.
+  The Primary Agent is not a message relay; the Dolgorae Collaboration Plane
+  validates, persists, schedules, delivers, and audits every exchange.
+- **Collaboration Plane**: the internal Orchestration Broker subsystem composed
+  of the Collaboration Service, durable mailbox store, Mailbox Scheduler,
+  Activation Manager, and run-bound private tool bridge.
+- **Collaboration Exchange**: one durable, correlated Specialist-to-Specialist
+  request and result boundary with independent execution and delivery states.
+- **Durable Mailbox**: the SQLite-backed ordered inbox for work addressed to one
+  Specialist Run. A mailbox is durable state and is not a polling loop inside
+  the Specialist.
+- **Virtual Actor**: an Independent Specialist Run whose logical identity,
+  thread, role, mailbox, and recovery state persist even when its Worker and any
+  Run-owned physical lane generation are absent. A shared Profile Server may
+  remain resident independently.
+- **Passivation**: verified release of a Virtual Actor's Worker and Run-owned
+  physical lane while preserving its resumable logical Run, thread, aggregate
+  membership, and mailbox.
+- **Activation**: restoration of a passivated Virtual Actor into a resident,
+  dispatchable Run generation. Mail-triggered activation is performed by the
+  Activation Manager, never by the model itself.
+- **Primary Run**: the independent Run that hosts the user-facing Primary Agent
+  of a Dolgorae-Orchestrated Session.
+- **Primary Agent**: the Codex agent hosted by a Primary Run.
+- **Independent Specialist Run**: an independent durable Dolgorae Run selected
+  for a bounded specialist role. It has its own thread, Worker, Controller,
+  execution lane, audit ledger, and recovery state.
+- **Independent Specialist Agent**: the Codex agent hosted by an Independent
+  Specialist Run.
+- **Native Delegation**: a Codex agent's use of Codex-native subagents inside
+  its own Run.
+- **Native Subagent Policy**: the orthogonal Runtime Profile capability and
+  immutable instruction policy governing Native Delegation. It is not a use
+  case or Agent Topology.
 - **Observer**: a same-OS-user caller allowed to read client-safe projections
   without acquiring mutation authority.
-- **Run**: one durable Dolgorae session, identified by a UUIDv7 and bound to one
-  Codex thread.
-- **Turn**: one identified Codex execution within a run, beginning when
+- **Run**: one durable Dolgorae session primitive, identified by a UUIDv7 and
+  bound to one Codex thread. Aggregate membership never merges Run identity or
+  lifecycle.
+- **Turn**: one identified Codex execution within a Run, beginning when
   `turn/start` is accepted and ending only when Codex confirms completed,
   interrupted, or failed status.
-- **Worker**: the hidden per-run Dolgorae process that owns one direct App Server
-  WebSocket connection, worker control socket, run lifecycle, and audit writer.
+- **Worker**: the hidden per-Run Dolgorae process that owns one direct App Server
+  WebSocket connection, worker control socket, Run lifecycle, and audit writer.
 - **Server epoch**: one globally unique lifetime of any physical Codex App
   Server generation, whether the shared Profile Server or a Dedicated Lane
   Server.
-- **Run generation**: one worker lifetime and its direct connection within a run.
-- **Runtime Profile**: a user-local, named Codex execution configuration consisting of
-  a direct absolute Codex executable, normalized global argv, canonical
-  `CODEX_HOME`, and an explicit non-secret environment map.
+- **Run generation**: one Worker lifetime and its direct App Server connection
+  lifetime within a Run. Access-policy changes do not increment it.
+- **Policy epoch**: the monotonic version of a Run's effective read/write policy.
+  A verified in-place access transition increments this value without changing
+  Run generation, thread identity, or logical lane.
+- **Thread generation**: the monotonic Dolgorae binding generation for a Codex
+  thread start, resume, or fork operation that installs immutable developer
+  instructions.
+- **Runtime Profile**: a user-local named Codex execution configuration
+  consisting of a direct absolute executable, normalized global argv, canonical
+  `CODEX_HOME`, deterministic non-secret environment, process-static
+  configuration, and verified runtime capabilities. It does not define agent
+  character.
+- **Agent Configuration**: the immutable role-facing configuration resolved for
+  a Run: Runtime Profile snapshot, model, default effort, purpose, required
+  capabilities, and Controller instructions. Different Agent Configurations may
+  share one Runtime Profile.
 - **Profile Server**: the shared-read-only Codex App Server singleton selected
   by one Runtime Profile launch-authority contract.
-- **Dedicated Lane Server**: one physical Codex App Server generation owned by
-  a Run's immutable dedicated logical lane.
+- **Dedicated Lane Server**: one physical Codex App Server generation owned by a
+  Run's immutable dedicated logical lane.
 - **Event Projection**: the `minimal` or `operational` delivery view over one
   durable event cursor domain.
-- **Public RPC Gateway**: the optional foreground `dolgorae serve` process that
-  exposes the shared semantic service as standard gRPC over a user-private Unix
-  domain socket without owning Run or worker lifecycle.
+- **Public RPC Gateway**: the public gRPC adapter hosted by the foreground
+  `dolgorae serve` process over a user-private Unix domain socket. The adapter is
+  not durable authority. The process is optional for finite low-level clients,
+  but an active Dolgorae-Orchestrated Session that enables Brokered Specialist
+  Collaboration requires its supervised Control-Plane Runtime.
+- **Control-Plane Runtime**: the reconstructable in-process Orchestration Broker,
+  Collaboration Plane, Mailbox Scheduler, Activation Manager, private tool
+  bridge, and sole workspace orchestration-database mutation owner hosted by
+  `dolgorae serve`. SQLite, not this runtime, remains durable authority.
 - **Codex Config Profile**: a Codex `--profile` selection inside normalized
   global argv; it is not a Dolgorae Runtime Profile.
-- **Reader**: a run whose turns use Codex read-only sandbox policy.
-- **Writer**: the single run named by durable Dolgorae writer authority for a
-  canonical workspace and whose turns may use workspace-write sandbox policy.
-- **Terminal turn**: a turn confirmed as completed, interrupted, or failed.
-- **Forkable turn**: a terminal turn whose exact status is listed in the
-  checked Codex required-subset manifest as accepted for `lastTurnId` by the
-  pinned profile. Terminal and forkable are intentionally not synonyms.
+- **Reader**: a Run whose Turns use Codex read-only sandbox policy.
+- **Writer**: the single Run named by durable Dolgorae writer authority for a
+  canonical workspace and whose Turns may use workspace-write sandbox policy.
+- **Terminal Turn**: a Turn confirmed as completed, interrupted, or failed.
+- **Forkable Turn**: a terminal Turn whose exact status is listed in the checked
+  Codex required-subset manifest as accepted for `lastTurnId` by the pinned
+  profile. Terminal and forkable are intentionally not synonyms.
+
+### Canonical User-Case Mapping
+
+The user or trusted integration explicitly selects one of two product use
+cases. User-facing clients MAY resolve low-level settings from that selection,
+but the semantic service MUST receive complete `control_mode`, execution lane,
+required assurance, Runtime Profile, purpose, and native-subagent policy values.
+An `UNSPECIFIED` value or hidden interactive default is invalid.
+
+| User-facing use case | Primary placement | Run composition | Semantic orchestration owner | Dolgorae operational ownership |
+| --- | --- | --- | --- | --- |
+| **Dolgorae-Orchestrated Session** | Primary Agent inside Dolgorae | one `direct_interactive` Primary Run, plus optional internally brokered `managed_agent` Specialist Runs | Dolgorae | Primary Run, Brokered Hierarchy, Specialist membership, spawn, task delivery, collaboration mailboxes, activation, audit, and recovery |
+| **External Specialist Engagement** | Primary Agent outside Dolgorae | one or more externally controlled `managed_agent` Specialist Runs | external AI or host | Specialist Run, accepted task boundary, result delivery, audit, and recovery |
+
+#### Compilation Over the Unchanged Public Run Contract
+
+The two product facades compile to the existing public v1 Run operations. The
+checked public Protobuf remains unchanged, but aggregate creation is explicit
+inside the semantic service and durable orchestration store. Client name,
+process name, and undocumented defaults MUST NOT select a use case.
+
+A public `StartRun` bootstraps a Dolgorae-Orchestrated Session only when all
+of the following are true:
+
+- the protected Controller carrier has `kind: human_cli` or
+  `kind: interactive_client`;
+- the carrier contains `orchestration_launch.use_case` equal to
+  `dolgorae_orchestrated_session` and a valid `specialist_policy_name`;
+- `control_mode` is explicitly `direct_interactive`; and
+- the request has no parent reference.
+
+Controller kind, client name, process name, and `direct_interactive` alone do
+not infer the product use case. A direct-interactive root without launch intent
+remains a low-level Run primitive and has no Orchestration Session, Specialist
+Policy, or Brokered Hierarchy. A launch intent on a managed Run, a parented Run,
+or an unsupported Controller kind is `INVALID_ARGUMENT` before allocation.
+
+Before publishing an accepted Orchestrated Session root, Dolgorae MUST:
+
+1. validate the complete explicit Run configuration, Controller credential, and
+   Orchestration Launch Intent;
+2. resolve `specialist_policy_name` from the canonical workspace's
+   Specialist Policy Registry, validate it, and include its name, revision, and
+   JCS SHA-256 in the normalized idempotency request;
+3. preallocate one UUIDv7 used as both `run_id` and `session_id`, plus one
+   Aggregate Bootstrap Operation ID that is also the cross-store correlation
+   identifier;
+4. commit the `create_orchestrated_session` operation, the `creating` session
+   record, the complete immutable Specialist Policy snapshot, and the
+   orchestration event;
+5. append and fsync the matching Run creation intent carrying the same bootstrap
+   operation ID before publishing the Run manifest; and
+6. mark the bootstrap operation `ready` and the session `active` only after the
+   empty Primary Run is authoritatively published.
+
+Exact replay of the same idempotency key and normalized request returns the
+original Run and session. A changed policy snapshot under the same idempotency
+key is a conflict. A crash after either durable boundary is reconciled using the
+preallocated identity and bootstrap operation ID. It MUST NOT create another
+Primary Run or another session. An authoritative bootstrap failure is retained
+as terminal evidence, while an ambiguous boundary requires recovery and is
+never silently replayed. A `direct_interactive` Run with any parent reference
+is invalid.
+
+An External Specialist Engagement is opened explicitly through
+`open_external_engagement` on the External Specialist Facade defined by
+[`dolgorae-external-specialist-facade-v1.schema.json`](protocol/dolgorae-external-specialist-facade-v1.schema.json).
+The open request supplies immutable external provenance and one aggregate-scoped
+idempotency key. The adapter binds the canonical workspace and exactly one
+protected aggregate-owner Controller credential outside model-visible payloads.
+Only `workflow_orchestrator` and `automation` credentials are accepted. Dolgorae
+persists an immutable Aggregate Controller Binding containing the public
+Controller ID, generation 1, kind, normalized-principal digest, and
+capability digest; raw capability bytes are never persisted. The opaque
+`external_controller_ref` remains semantic provenance and grants no authority.
+Dolgorae allocates the `engagement_id` and bootstrap-operation ID, then
+atomically commits the `open_external_engagement` operation and an empty active
+engagement before returning the server-generated identifier. Opening an
+engagement does not create a Run, lane, thread, or Turn.
+
+Exact open replay with the same canonical workspace, Aggregate Controller
+Binding, external provenance, idempotency key, and request digest returns the
+same engagement. Same-key drift is `IDEMPOTENCY_CONFLICT`. Every later facade
+call MUST name that engagement ID and present the same aggregate-owner
+Controller credential. Dolgorae reopens and validates the protected carrier at
+the serialization point and compares Controller ID, kind, normalized principal,
+and capability digest against the stored binding. A
+`hire_external_specialist` call additionally supplies a fresh per-Run
+Controller credential carrier outside model-visible payloads. Dolgorae preallocates the hire-operation ID and child Run
+ID and commits the write-ahead hire operation, member, and child Run reservation
+before any process, lane, thread, or Turn side effect. The trusted facade then
+compiles the accepted hire into a complete `managed_agent` Run start with the
+reserved parent projection:
+
+```text
+namespace = dolgorae.external-specialist-engagement.v1
+kind      = specialist
+id        = <Dolgorae-generated engagement UUIDv7>
+```
+
+Only the trusted External Specialist Facade may create that reserved projection.
+A raw low-level `StartRun` MUST NOT implicitly open, join, or infer an External
+Specialist Engagement. A generic `managed_agent` Run outside an aggregate
+remains a valid low-level primitive, but it receives no engagement membership,
+hire-operation, accepted-task, or result-redelivery contract. Existing generic
+Runs cannot be attached in place; hiring creates a new Run.
+
+The internal Orchestration Broker uses the reserved public parent projection
+`dolgorae.orchestrated-session.v1 / specialist / <session_id>` for owned
+Specialists. That projection supports safe presentation and filtering only. The
+internal aggregate registry, bootstrap and spawn operations, and member records
+remain authoritative. Reserved namespaces never grant Controller authority.
+
+A Dolgorae-Orchestrated Session starts in Standalone Primary composition and
+enters Brokered Hierarchy composition when the Orchestration Broker adds at
+least one active Specialist. This is a dynamic internal composition state, not a
+second user mode and not a change of session ownership.
+
+An External Specialist Engagement never becomes a Brokered Hierarchy. V1
+prohibits a Specialist in that use case from hiring another first-class
+Dolgorae Specialist. The external control plane hires additional roles directly.
+
+Runtime Profile selection never selects agent character. The complete immutable
+Agent Configuration snapshot defines the role used by a Primary or Specialist
+Run. Native Subagent Policy is orthogonal to both use cases. The derived
+[use-case and topology guide](agent-topology-terminology.md) provides examples
+without owning this contract.
 
 ## SPEC-001: Product Boundary and Supported Environment
 
-Dolgorae MUST provide persistent, controller-owned Codex Runs for direct
-interactive sessions and externally managed agents through one distributable
-`dolgorae` executable. A **Codex-native subagent** is an internal descendant of
-one Codex Run; an **Independent Dolgorae Run** is a peer session created by a
-trusted external controller. These terms MUST NOT be conflated. Dolgorae MUST
-NOT install a Dolgorae global daemon, project
-daemon, launchd unit, Codex binary, authentication material, or `CODEX_HOME`.
-It MAY manage one Codex app-server singleton per canonical profile
-`CODEX_HOME`; that Codex process is not a Dolgorae daemon.
+Dolgorae MUST expose exactly two user-facing use cases through one distributable
+`dolgorae` executable:
+
+1. **Dolgorae-Orchestrated Session**, in which Dolgorae owns the Primary Agent,
+   brokered Specialist operation, durable operational orchestration state, and
+   recovery. Gul is the canonical client for this use case.
+2. **External Specialist Engagement**, in which another AI remains the Primary
+   Agent and semantic control plane and selectively hires Dolgorae-managed
+   Specialists.
+
+These use cases are product entry models, not additional `control_mode` values.
+Every Primary or Specialist remains an independent Run with its own thread,
+Worker, Controller binding, lane, audit ledger, and recovery state. A
+Dolgorae-Orchestrated Session begins in Standalone Primary composition and
+enters Brokered Hierarchy composition when its Orchestration Broker owns at
+least one active Independent Specialist Run. An External Specialist Engagement
+MUST NOT create a second semantic control plane and MUST NOT become a Brokered
+Hierarchy.
+
+A Codex-native subagent is an internal descendant of one Codex Run. An
+Independent Specialist Run is a durable peer Run. These concepts MUST NOT be
+conflated. Native Delegation remains an orthogonal Runtime Profile capability
+and never creates a Dolgorae aggregate member, Controller, Worker, or writer
+authority.
+
+Dolgorae MUST NOT install a Dolgorae global daemon, project daemon, launchd
+unit, Codex binary, authentication material, or `CODEX_HOME`. It MAY manage one
+Codex App Server singleton per canonical Runtime Profile launch-authority
+contract and one or more Run-owned Dedicated Lane Server generations. Those
+Codex processes are not Dolgorae daemons.
 
 The first supported release is a personal alpha for Apple Silicon macOS 26.0
-or later (`aarch64-apple-darwin`) on local APFS. Both the workspace and its
-configured state/lock root MUST report `MNT_LOCAL` and `f_fstypename ==
-"apfs"`; there is no v1 override. Intel macOS, Linux, Windows, network
-filesystems, non-APFS local filesystems, public installers, and automatic
-updates are not supported release targets. Empirical release evidence is
-valid only for the recorded OS build and MUST be refreshed on a new macOS
-major version.
+or later (`aarch64-apple-darwin`) on local APFS. The canonical workspace and
+Dolgorae's configured mutable state and lock root MUST report `MNT_LOCAL` and
+`f_fstypename == "apfs"`; there is no v1 override. Intel macOS, Linux,
+Windows, network filesystems, non-APFS local filesystems, public installers,
+and automatic updates are not supported release targets. Empirical release
+evidence is valid only for the recorded OS build and MUST be refreshed on a new
+macOS major version.
 
-Dolgorae depends on user-prepared Runtime Profiles. Codex app-server 0.147.0 is
-the current compatibility baseline. Background-process safety is owned by
-each Sticky Dedicated logical lane across its successive process generations
-and by the macOS process census; it MUST NOT depend on a future Codex
-terminal-management API. A newer native API MAY supply additional evidence but
-never replaces lane-generation identity, census, or cleanup.
+Dolgorae depends on user-prepared Runtime Profiles. Codex App Server 0.147.0 is
+the current compatibility baseline. Background-process safety is owned by each
+Sticky Dedicated logical lane across its successive physical generations and
+by the macOS process census; it MUST NOT depend on a future Codex terminal-
+management API. A newer native API MAY supply additional evidence but never
+replaces lane-generation identity, census, or cleanup.
 
-Dolgorae MUST be the only Codex app-server supervisor used by supported
-external-master integrations. An external master MUST use the stable Dolgorae
-Machine CLI or public local gRPC adapter and MUST NOT start, connect to, or
-control the singleton, its dedicated App Server socket, or a private worker
-socket. This is a
-supported-integration boundary, not a
-claim that Dolgorae can prevent a hostile same-user process or an unrelated
-editor from mutating the workspace. Dolgorae remains local-only: v1 MUST NOT
-bind a public TCP port, provide remote authentication, or require a remote
-client to remain connected. V1 MUST NOT expose TCP, a remote bind, direct
-Tailscale access, or remote authentication; a Gul deployment owns remote HTTP
-authentication and authorization outside Dolgorae.
+V1 is an offline shell-execution environment. Reader and writer Turns use
+`networkAccess:false`. Dependency installation, remote Git operations, and
+arbitrary external API calls are outside the supported shell contract unless a
+future SOT revision defines a separate network policy. MCP servers, plugins,
+and apps may perform side effects outside Codex's shell sandbox; such effects
+are trusted profile behavior and are outside Dolgorae's hard one-writer
+guarantee.
+
+Dolgorae MUST be the only Codex App Server supervisor used by supported Gul and
+external-AI integrations. A client MUST use the stable Machine CLI or public
+local gRPC adapter and MUST NOT start, connect to, or control a Profile Server,
+Dedicated Lane Server, or private Worker socket. This is a supported-
+integration boundary, not a claim that Dolgorae can prevent a hostile same-user
+process or an unrelated editor from mutating the workspace.
+
+Dolgorae remains local-only. V1 MUST NOT bind a public TCP port, provide remote
+authentication, require a remote client to remain connected, expose direct
+Tailscale access, or make a private Worker or App Server transport public. A Gul
+deployment owns remote HTTP authentication, authorization, and presentation
+outside Dolgorae.
 
 ## SPEC-002: Workspace Initialization and Discovery
 
-`dolgorae init [PATH]` MUST initialize a Git workspace. `dolgorae init --non-git
-[PATH]` MUST explicitly opt a general directory into Dolgorae. A run MUST NOT
-start in an uninitialized workspace.
+`dolgorae init [PATH]` MUST initialize a Git workspace. `dolgorae init
+--non-git [PATH]` MUST explicitly opt a general directory into Dolgorae. A Run
+or aggregate MUST NOT start in an uninitialized workspace.
 
 In Git mode, Dolgorae runs
 `git -c core.quotePath=true -C <supplied-existing-directory> rev-parse --show-toplevel`
 without a shell and requires exit 0 and exactly one LF-terminated stdout
-result; bounded stderr is diagnostic only when exit is zero. A double-quoted result is decoded with Git's documented
-C-style path quoting (including octal byte escapes); an unquoted result is the
-bytes before the sole final LF. Invalid quoting, trailing output, or NUL is a
-Git discovery failure. The canonical workspace is libc `realpath(3)` applied to
-that decoded existing directory, even when the supplied path is a subdirectory.
-In non-Git mode it is `realpath(3)` applied to the existing initialized
-directory. The canonical path is the returned absolute POSIX byte sequence
-with no trailing slash except for root, followed by the macOS Data-volume
-alias rule below. Dolgorae performs no Unicode normalization or case folding.
-Symlink and case-insensitive lookup belong to `realpath(3)`, but APFS
-firmlinks do not: when the result is exactly `/System/Volumes/Data` or begins
-with `/System/Volumes/Data/`, Dolgorae derives the candidate `/` or the path with
-that prefix removed and substitutes it only when no-follow `stat` of both
-paths yields the same `(st_dev, st_ino)`. The same rule is applied in Git and
-non-Git mode before any digest is computed.
+result. Bounded stderr is diagnostic only when exit is zero. A double-quoted
+result is decoded with Git's documented C-style path quoting, including octal
+byte escapes; an unquoted result is the bytes before the sole final LF. Invalid
+quoting, trailing output, or NUL is a Git discovery failure. The canonical
+workspace is libc `realpath(3)` applied to that decoded existing directory,
+even when the supplied path is a subdirectory. In non-Git mode it is
+`realpath(3)` applied to the existing initialized directory.
+
+The canonical path is the returned absolute POSIX byte sequence with no
+trailing slash except for root, followed by the macOS Data-volume alias rule.
+Dolgorae performs no Unicode normalization or case folding. Symlink and case-
+insensitive lookup belong to `realpath(3)`, but APFS firmlinks do not. When the
+result is exactly `/System/Volumes/Data` or begins with
+`/System/Volumes/Data/`, Dolgorae derives the candidate `/` or the path with
+that prefix removed and substitutes it only when no-follow `stat` of both paths
+yields the same `(st_dev, st_ino)`. The same rule is applied in Git and non-Git
+mode before any digest is computed.
 
 The workspace digest is lowercase hexadecimal SHA-256 over
-`"dolgorae-workspace-v1\0"` followed by those canonical path bytes. The full
-64-character digest is the workspace ID. Lock pathnames are fixed names below
-the per-workspace lock root owned by SPEC-007 and are never digest-derived,
-because that root is already scoped to one canonical workspace. The short
-socket name is RFC 4648 uppercase unpadded base32 of the first 160 bits of
-SHA-256 over
-`"dolgorae-socket-v1\0" || workspace_digest_bytes || run_uuid_bytes`. The manifest
-records both the canonical path bytes in the lossless path representation and
-the full workspace digest. Here `workspace_digest_bytes` is the raw 32-byte
-SHA-256 result, not its hex text, and `run_uuid_bytes` is the UUID's 16 bytes in
-RFC 4122/network order, not its hyphenated text. Every component MUST use these
+`"dolgorae-workspace-v1\0"` followed by the canonical path bytes. The full
+64-character digest is the workspace ID. The short Worker socket name remains
+RFC 4648 uppercase unpadded base32 of the first 160 bits of SHA-256 over
+`"dolgorae-socket-v1\0" || workspace_digest_bytes || run_uuid_bytes`, where
+the digest and UUID inputs are their raw bytes. Every component MUST use the
 same preimages.
 
 Each linked Git worktree has its own canonical top-level path and is therefore
-a separate Dolgorae workspace, run store, and writer authority. Dolgorae supports one
-writer lane per worktree; it does not serialize writers across worktrees that
-share a common Git directory.
+a separate Dolgorae workspace, aggregate registry, Run store, and writer
+authority. Dolgorae serializes at most one writer per canonical worktree and
+does not serialize worktrees that share a Git common directory.
 
 Dirty Git workspaces are allowed. Run creation MUST record a read-only baseline
 containing HEAD, branch, tracked changes, and untracked paths. Dolgorae MUST NOT
 discard, reset, stash, or otherwise rewrite pre-existing changes.
 
-Later commands discover the nearest ancestor containing `.dolgorae`; an explicit
-`--workspace PATH` overrides discovery. Discovery selects a workspace only. It
-MUST NOT implicitly select a run.
+Later commands discover the nearest ancestor containing `.dolgorae`; an
+explicit `--workspace PATH` overrides discovery. Discovery selects a workspace
+only. It MUST NOT implicitly select a Run, Dolgorae-Orchestrated Session, or
+External Specialist Engagement.
 
 Git-mode `.dolgorae` MUST be at the canonical Git top level. `--non-git` is
 rejected for a path inside any Git worktree, and a nested `.dolgorae` below an
 already initialized workspace is rejected. Non-Git mode records an empty Git
-baseline. Absence of the `git` executable, a Git version older than 2.39, or a
-Git discovery failure returns `WORKSPACE_INITIALIZATION_CONFLICT` rather than
-silently falling back to non-Git mode.
+baseline. Absence of `git`, a Git version older than 2.39, or a Git discovery
+failure returns `WORKSPACE_INITIALIZATION_CONFLICT` rather than silently
+falling back to non-Git mode.
 
-In Git mode, initialization creates exactly these tracked project policy files:
+The agent-writable workspace contains only portable project policy:
 
 ```text
-.dolgorae/
+<canonical-workspace>/.dolgorae/
   .gitignore
   config.yaml
 ```
 
 `config.yaml` is strict YAML and contains exactly `schema_version: 1` and
-`mode: git|non_git`. Unknown or duplicate keys, wrong types, unsupported schema versions, and
-malformed YAML return `CONFIG_INVALID`. The file is hand-editable, but Dolgorae
-never rewrites it except during first initialization. `.dolgorae/.gitignore`
-contains exactly `/local.yaml`, `/runs/`, `/runtime/`, `/evidence/`, and
-`/cache/`; it MUST NOT ignore `.dolgorae` as a whole. Initialization also creates
-an untracked mode-0600 `.dolgorae/local.yaml` with `schema_version: 1` and an
-empty `profiles` mapping.
+`mode: git|non_git`. Unknown or duplicate keys, wrong types, unsupported schema
+versions, and malformed YAML return `CONFIG_INVALID`. Dolgorae never rewrites
+it after first initialization. `.dolgorae/.gitignore` contains exactly
+`/exports/`; it MUST NOT ignore `.dolgorae` as a whole. Non-Git initialization
+creates the same two files without claiming that they are tracked.
 
-Non-Git initialization creates the same two files and the same ignore contents,
-but makes no claim that either file is tracked. The ignore file remains useful
-if the directory is later placed below a version-control workspace.
+All machine-local configuration and mutable authority live outside the
+canonical workspace at:
+
+```text
+~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/
+  workspace.json
+  local.yaml
+  specialist-policies/
+  runs/
+  runtime/
+  orchestration/
+  evidence/
+  cache/
+```
+
+`workspace.json` binds the workspace ID to the lossless canonical path and
+initialization mode. `local.yaml` is the mode-0600 Runtime Profile registry.
+`specialist-policies/` is a current-uid-owned mode-0700 directory containing
+mode-0600 checked JSON policy documents named `<policy-name>.json`. `runs/`,
+`runtime/`, `orchestration/`, `evidence/`, and `cache/` contain only
+Dolgorae-owned mutable state. The per-workspace state root is current-uid-owned
+mode 0700, is verified local APFS, and is never placed in a Codex
+`writableRoots` list or model-visible path. An agent may read the tracked project
+policy files when the task requires it, but it cannot reach machine-local
+profiles, Specialist Policies, or mutable Dolgorae authority through the
+workspace sandbox.
 
 Initialization uses create-exclusive temporary files, file `fsync`, rename,
-and parent-directory `fsync`. Repeating `init` succeeds with `created:false`
-only when the recorded mode, canonical workspace, schema,
-and existing policy files are byte-for-byte compatible. It never overwrites an
-existing tracked policy file. A partial layout, nested workspace, changed mode,
-or conflicting policy returns
-`WORKSPACE_INITIALIZATION_CONFLICT`.
+and parent-directory `fsync` for both project policy and the Application
+Support workspace record. Repeating `init` succeeds with `created:false` only
+when mode, canonical workspace, workspace ID, schema, and existing policy files
+are compatible. It never overwrites an existing tracked policy file. A partial
+layout, nested workspace, changed mode, state-root identity conflict, or
+incompatible policy returns `WORKSPACE_INITIALIZATION_CONFLICT`.
 
 ## SPEC-003: Profile, Account, and Singleton Binding
 
@@ -193,11 +473,16 @@ review artifacts. `SPEC-014` is the sole current authority for execution-lane
 cardinality, residency, server generations, profile lifecycle, and process
 census.
 
-The project-local profile configuration lives at:
+The machine-local Runtime Profile registry lives at:
 
 ```text
-<canonical-workspace>/.dolgorae/local.yaml
+~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/local.yaml
 ```
+
+The canonical workspace contains no mutable profile registry. Runtime Profile
+configuration is execution, account, tooling, and process-static capability
+configuration. Agent character is owned by the immutable Agent Configuration
+resolved for each Run.
 
 A Runtime Profile contains:
 
@@ -205,14 +490,18 @@ A Runtime Profile contains:
 - an absolute Codex executable and shell-free validated global argv;
 - an absolute expected `CODEX_HOME`;
 - the symbolic `profile_state_directory_v1` launch-cwd policy;
-- an explicit non-secret environment map.
-- an optional `native_subagents: enabled` policy. Absence and `enabled` have the
-  same canonical meaning for a public profile.
+- an explicit non-secret environment map; and
+- a required `native_subagents: enabled` acknowledgement.
+
+A public profile MUST state `native_subagents: enabled` explicitly. Absence is
+`PROFILE_CONFIG_INVALID`. `disabled` remains diagnostic-only because the pinned
+runtime does not enforce it.
 
 `local.yaml` is strict YAML with top-level `schema_version: 1` and a `profiles`
 mapping keyed by name. Each entry contains nonempty `argv: [string, ...]`,
-absolute `codex_home: string`, `environment: {string: string}`, and optional
-`native_subagents: enabled`. An explicit `disabled` value is rejected with
+absolute `codex_home: string`, `environment: {string: string}`, and required
+`native_subagents: enabled`. An absent policy is `PROFILE_CONFIG_INVALID`. An
+explicit `disabled` value is rejected with
 `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE`; it is reserved to diagnostic probes and
 is not a supported production profile contract. `argv[0]`
 MUST be an absolute regular Codex executable; v1 rejects shell interpreters,
@@ -248,17 +537,50 @@ Environment names are explicit, require `PATH`, `LANG`, and `LC_ALL`, reserve `C
 all stored values as non-secret local configuration. Unknown or duplicate keys,
 empty argv, relative homes,
 wrong types, a missing required environment value, malformed YAML, and unsupported schema versions return
-`PROFILE_CONFIG_INVALID`. Profile add/remove holds a workspace-local config lock and uses
+`PROFILE_CONFIG_INVALID`. Profile add/remove holds a per-workspace Application Support config lock and uses
 write-temp, file `fsync`, rename, and directory `fsync`; the registry is
 hand-editable and MUST NOT contain credentials, tokens, or other secrets.
-The `.dolgorae` private directory is mode 0700 and `local.yaml` is mode
-0600; creation and replacement reject a wrong-owner or more-permissive file.
+The per-workspace Application Support root is mode 0700 and `local.yaml` is
+mode 0600; creation and replacement reject a wrong-owner or more-permissive
+file. That root is outside the agent-writable workspace.
 
 Profile names are unique within one project. Every profile command MUST resolve
 an initialized workspace through `--workspace` or normal upward discovery.
 `profile add` MUST reject an existing name with
 `PROFILE_ALREADY_EXISTS`; it MUST NOT overwrite a profile implicitly. Replacement
 requires an explicit remove followed by add.
+
+### Specialist Policy Registry
+
+The machine-local Specialist Policy Registry lives at:
+
+```text
+~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/specialist-policies/
+```
+
+Each entry is a create-exclusive `<policy-name>.json` file that validates
+against
+[`dolgorae-specialist-policy-v1.schema.json`](protocol/dolgorae-specialist-policy-v1.schema.json)
+and its executable semantic validator. The content `policy_name` MUST match the
+filename exactly. Files are current-uid-owned mode 0600, no-symlink regular
+files, at most 1 MiB, and installed through a descriptor-relative temporary
+file, file `fsync`, rename, and directory `fsync`. Unknown schema versions,
+duplicate role references, unresolved Runtime Profiles, unavailable required
+capabilities, write-capable roles without Dedicated Lane configuration, or
+invalid collaboration activation are rejected before installation.
+
+Policy add is create-exclusive. Replacement requires an explicit remove and
+add; removing or replacing a registry entry never mutates an existing session
+because every session stores the complete policy snapshot and digest. A new
+Orchestration Launch Intent MUST name an installed policy. Policy resolution,
+Agent Configuration validation against the current Runtime Profile capability
+snapshot, and JCS hashing occur before root Run allocation. The resolved policy
+name, revision, and digest participate in StartRun idempotency normalization.
+
+V1 does not select a hidden default policy. Gul or another trusted interactive
+client chooses a named policy when creating the protected Controller carrier.
+A client MAY present simple presets such as approval-required and fully-
+delegated, but each preset resolves to an explicit installed policy name.
 
 Dolgorae MUST construct the singleton environment from the Runtime Profile definition,
 not from the invocation that wins startup. It obtains `HOME`, `USER`, `LOGNAME`,
@@ -276,20 +598,30 @@ that the selected locale is reported by the platform locale database. The three
 exact values enter the immutable launch authority and profile state. Caller
 `PATH`, virtual-environment variables and locale categories are never inherited.
 
-`run start` MUST require an explicit profile. Before use, Dolgorae MUST validate
-the executable, version, app-server schema, initialization handshake, login
-readiness, model listing, and actual `codexHome`. A `codexHome` mismatch is a
-hard failure.
+`run start` MUST require an explicit Runtime Profile. Before allocating a Run,
+Dolgorae MUST validate the executable, version, App Server schema,
+initialization handshake, login readiness, model listing, actual `codexHome`,
+and required capabilities. A `codexHome` mismatch is a hard failure. This
+readiness check MAY start or reuse the shared Profile Server even for a
+Dedicated Run; it MUST NOT start that Run's physical Dedicated Lane Server or
+allocate its Codex thread.
 
-Run creation stores a complete immutable Runtime Profile snapshot, not only its digest.
-The snapshot contains exactly the profile name, canonical `CODEX_HOME`,
+Run creation stores a complete immutable Runtime Profile snapshot and a
+separate immutable Agent Configuration snapshot, not only their digests. The
+Runtime Profile snapshot contains exactly the profile name, canonical
+`CODEX_HOME`,
 normalized argv, `launch_cwd_policy`, derived concrete launch cwd, sanitized environment, enabled
 and disabled features, normalized process-static configuration, initial configuration
 observation, executable identity, Codex version, generated App Server schema
 digest, compatibility-manifest digest, launch-contract digest, and initial
 server key. It contains sufficient non-secret bytes and explicit-absence markers
 to reconstruct the accepted launch contract after registry edit or deletion.
-Existing runs MUST NOT be rebound to another account or `CODEX_HOME`.
+Existing Runs MUST NOT be rebound to another account or `CODEX_HOME`. The
+Agent Configuration snapshot additionally records the accepted model, default
+effort, purpose, required capabilities, role reference, normalized Controller
+instructions, instruction digests, and Runtime Profile snapshot digest.
+Different Agent Configurations MAY share one Runtime Profile and one compatible
+Profile Server launch contract.
 
 The launch-authority contract records
 `launch_cwd_policy:"profile_state_directory_v1"`; it MUST NOT contain the
@@ -506,11 +838,11 @@ Unknown events are ignored only when the required-subset policy proves them
 non-semantic; an event that could affect an active turn fails closed. The
 CLI-worker socket MUST use a short
 user-private runtime path derived from the canonical workspace identity and run
-ID; durable state remains under `.dolgorae/runs/`.
+ID; durable state remains under `<application-support-workspace>/runs/`.
 
-The actual worker socket node is the sole per-run exception to project-local
-runtime storage and lives below `/tmp/dolgorae-<uid>/s/`; its identity authority
-lives in `.dolgorae/runtime/runs/<run-id>.json`. A live worker MUST detect a
+The actual worker socket node is the sole per-Run exception to Application
+Support runtime storage and lives below `/tmp/dolgorae-<uid>/s/`; its identity authority
+lives in `<application-support-workspace>/runtime/runs/<run-id>.json`. A live worker MUST detect a
 missing socket pathname or private directory, safely recreate the private root,
 bind a replacement listener, increment `control_socket_epoch`, and atomically
 replace the runtime record without restarting its active App Server connection
@@ -524,9 +856,17 @@ Every run-scoped command MUST receive the run ID explicitly.
 
 Every run manifest also records the controller binding, controller generation,
 purpose, optional external label and parent reference, required capabilities,
-and the profile capability snapshot accepted at creation. These fields are
-durable run identity; worker, connection, singleton, and CLI restart MUST NOT discard
-or reinterpret them.
+and the profile capability snapshot accepted at creation. It additionally
+stores an optional immutable `aggregate_binding` containing aggregate kind,
+aggregate ID, operation ID, and, for a Specialist, role reference plus role and
+Agent Configuration digests. The Orchestrated Session Primary binding names the
+Aggregate Bootstrap Operation and policy digest; a brokered or external
+Specialist binding names its spawn or hire operation. Generic low-level Runs
+have no aggregate binding. This binding is cross-store reconciliation evidence,
+not a replacement for SQLite aggregate authority, and must agree with the
+reserved public parent projection when one exists. These fields are durable Run
+identity; worker, connection, singleton, and CLI restart MUST NOT discard or
+reinterpret them.
 
 The CLI-worker handshake includes schema version, Dolgorae semantic version,
 binary SHA-256, workspace/run identity, and expected run generation. A
@@ -561,7 +901,8 @@ dolgorae [--human] init [PATH] [--non-git]
 dolgorae [--human] serve --socket <absolute-private-socket-path> [--ready-fd <fd>]
 
 dolgorae [--human] runtime capabilities
-dolgorae [--human] controller credential create --kind <kind> --instance-id <id> [--subject-id <id>] --output <new-path>
+dolgorae [--human] engagement call --workspace <path> --request-fd <fd> (--controller-file <path> | --controller-fd <fd>) [--new-controller-file <path> | --new-controller-fd <fd>]
+dolgorae [--human] controller credential create --kind <kind> --instance-id <id> [--subject-id <id>] [--orchestration-policy <name>] --output <new-path>
 dolgorae [--human] operator credential initialize --output <new-path>
 dolgorae [--human] operator credential rotate [--operator-file <path> | --operator-fd <fd>] --output <new-path>
 
@@ -572,7 +913,7 @@ dolgorae [--human] workspace writer handoff-prepare --workspace <path> --from <r
 dolgorae [--human] workspace writer handoff-commit --workspace <path> --handoff-id <id> --expected-generation <n> [--controller-file <path> | --controller-fd <fd>]
 dolgorae [--human] workspace writer handoff-cancel --workspace <path> --handoff-id <id> [--controller-file <path> | --controller-fd <fd>]
 
-dolgorae [--human] profile add <name> [--workspace <path>] --codex-home <absolute-path> [--native-subagents <enabled|disabled>] [--env <name=value>]... -- <argv...>
+dolgorae [--human] profile add <name> [--workspace <path>] --codex-home <absolute-path> --native-subagents enabled [--env <name=value>]... -- <argv...>
 dolgorae [--human] profile list [--workspace <path>]
 dolgorae [--human] profile show <name> [--workspace <path>]
 dolgorae [--human] profile remove <name> [--workspace <path>]
@@ -588,7 +929,13 @@ dolgorae [--human] profile state reset <name> [--workspace <path>] [--operator-f
 dolgorae [--human] profile diagnostics list <name> [--workspace <path>] [--after <cursor>] [--limit <n>] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
 dolgorae [--human] profile events <name> [--workspace <path>] [--after <cursor>] [--follow] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
 
-dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] start --workspace <path> --profile <name> [--control-mode <direct-interactive|managed-agent>] [--execution-lane <shared-readonly|dedicated>] [--required-assurance <best-effort-personal-alpha|verified-thread-scoped-control|strong-process-containment>] [--model <model>] [--effort <effort>] [--purpose <purpose>] [--purpose-label <label>] [--parent-namespace <value> --parent-kind <value> --parent-id <value>] [--require-capability <name>]... [--instructions <text> | --instructions-file <path> | --instructions-stdin] --idempotency-key <key>
+dolgorae [--human] specialist policy add <name> [--workspace <path>] --file <path>
+dolgorae [--human] specialist policy list [--workspace <path>]
+dolgorae [--human] specialist policy show <name> [--workspace <path>]
+dolgorae [--human] specialist policy validate --file <path> [--workspace <path>]
+dolgorae [--human] specialist policy remove <name> [--workspace <path>]
+
+dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] start --workspace <path> --profile <name> --control-mode <direct-interactive|managed-agent> --execution-lane <shared-readonly|dedicated> --required-assurance <best-effort-personal-alpha|verified-thread-scoped-control|strong-process-containment> [--model <model>] [--effort <effort>] --purpose <purpose> [--purpose-label <label>] [--parent-namespace <value> --parent-kind <value> --parent-id <value>] [--require-capability <name>]... [--instructions <text> | --instructions-file <path> | --instructions-stdin] --idempotency-key <key>
 dolgorae [--human] run list [--workspace <path>]
 dolgorae [--human] run status <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] send <run-id> [--workspace <path>] [--write] [--message <text>] [--image <auto|low|high>=<path>]... [--effort <effort>] --idempotency-key <key> [--timeout <duration>]
@@ -601,7 +948,7 @@ dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] interac
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] respond <run-id> --request-id <id> --idempotency-key <key> [--workspace <path>] [--response-fd <fd>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] artifact show <run-id> <artifact-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] artifact read <run-id> <artifact-id> --offset <n> --length <n> [--workspace <path>]
-dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] artifact export <run-id> <artifact-id> --output <path> [--workspace <path>]
+dolgorae [--human] run (--controller-file <path> | --controller-fd <fd>) artifact export <run-id> <artifact-id> --output <path> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] interrupt <run-id> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] set-effort <run-id> <effort> [--workspace <path>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] acquire-write <run-id> [--workspace <path>]
@@ -615,12 +962,29 @@ dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] create-
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] close <run-id> [--workspace <path>] [--interrupt]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] delete <run-id> --confirm [--workspace <path>]
 dolgorae [--human] run verify <run-id> [--workspace <path>]
-dolgorae [--human] run export <run-id> [--output <directory>] [--workspace <path>]
+dolgorae [--human] run (--controller-file <path> | --controller-fd <fd>) export <run-id> [--output <directory>] [--workspace <path>]
 dolgorae [--human] run [--operator-file <path> | --operator-fd <fd>] controller reset <run-id> [--workspace <path>] --confirm <run-id> [--new-controller-file <path> | --new-controller-fd <fd>]
 dolgorae [--human] run [--controller-file <path> | --controller-fd <fd>] controller verify <run-id> [--workspace <path>]
 ```
 
-`run start` creates an empty idle Dolgorae session and MUST NOT allocate a Codex
+`engagement call` is the Machine CLI carrier for the checked External
+Specialist Facade schema. It reads exactly one JSON request from the protected,
+non-TTY `--request-fd`, emits one ordinary machine envelope whose data validates
+as the corresponding result variant, and never accepts engagement requests in
+argv or environment variables. Every operation requires exactly one
+`--controller-file` or `--controller-fd` carrying the aggregate-owner
+Controller credential. `open_external_engagement` accepts only
+`workflow_orchestrator` or `automation` and snapshots generation 1 into the
+Aggregate Controller Binding. Every later operation revalidates the same
+Controller ID, kind, normalized principal, and capability digest before any
+observation or mutation. `--new-controller-file` or `--new-controller-fd` is
+required only for `hire_external_specialist`, is forbidden for every other
+operation, and carries the fresh Controller credential for the new Specialist
+Run. The owner carrier and new-Run carrier are distinct protected inputs.
+Trusted MCP adapters call the same semantic facade and checked payload contract.
+V1 does not support in-place engagement-owner Controller transfer or rotation.
+
+`run start` creates an empty idle Run and MUST NOT allocate a Codex
 thread, acquire writer authority, start a physical Dedicated Lane Server, or
 start the first turn. Every newly allocated Run begins with no writer authority.
 A dedicated Run publishes its logical lane with `server_lane.state=absent`,
@@ -632,14 +996,18 @@ instructions. Instructions accept exactly one source: `--instructions`,
 `--instructions-file`, or `--instructions-stdin`. They MUST NOT weaken Dolgorae's
 hard agent invariants.
 
-`run start` MUST bind a controller credential. `human_cli` and
-`interactive_client` derive or accept `direct_interactive` and default purpose
-to `{kind:"interactive",external_label:null}`, lane to `dedicated`, and
-assurance to `best_effort_personal_alpha`. `workflow_orchestrator` and
-`automation` MUST explicitly provide `managed_agent`, purpose, lane, and
-required assurance; none may silently inherit interactive defaults. Purpose,
-including its creation-time external label, is immutable. Parent-reference
-arguments are all-or-none. Required
+`run start` MUST bind a Controller credential and MUST receive explicit
+`control_mode`, purpose, execution lane, and required assurance for every
+Controller kind. `UNSPECIFIED`, omission, and hidden interactive defaults are
+invalid. A user-facing Gul or external-AI facade MAY resolve these low-level
+values from the selected use case, but it sends the complete normalized request
+to the semantic service. A parentless `direct_interactive` root with checked Orchestration Launch Intent
+atomically bootstraps its Orchestration Session as specified above. A root
+without launch intent remains a low-level Run. A raw `managed_agent` start never
+opens or joins an External Specialist Engagement; reserved aggregate parent
+namespaces are accepted only from the authenticated internal Broker or External
+Specialist Facade. Purpose, including its creation-time external label, is
+immutable. Parent-reference arguments are all-or-none. Required
 capabilities are checked before run allocation; an unavailable capability
 returns `CAPABILITY_UNSUPPORTED` and leaves no run directory. Every subsequent
 state-changing run command MUST present the bound credential through exactly
@@ -658,9 +1026,10 @@ applying the state transition. A CLI-side check or an unqualified
 check in the byte-0 bootstrap owner before publishing the manifest.
 
 A shared Run is published only after the shared Profile Server has a ready,
-non-null epoch. A dedicated Run is published after durable logical-lane
-allocation even while its physical state is absent; only a Turn requires a
-ready non-null server epoch. Failure to start a physical dedicated generation
+non-null epoch. A dedicated Run may use that same server only as pre-allocation
+profile-readiness evidence. The dedicated Run is published after durable
+logical-lane allocation while its own physical state remains absent; only a
+Turn requires a ready non-null Dedicated Lane Server epoch. Failure to start a physical dedicated generation
 leaves the logical Run idle and returns `DEDICATED_SERVER_START_FAILED`; it does
 not fabricate a Turn or change lanes.
 
@@ -1003,10 +1372,10 @@ normative:
 | `CONTROLLER_MISMATCH` | 4 | controller-authorized mutation | the supplied capability does not own the run |
 | `CONTROLLER_RESET_NOT_ALLOWED` | 4 | `run controller reset` | active work, a pending interaction, handoff, or unverifiable writer state blocks reset |
 | `OPERATOR_MISMATCH` | 4 | operator credential rotation, profile stop/restart, controller reset, `workspace writer reset` | the supplied separate local operator capability is absent, stale, or invalid |
-| `CONTROL_MODE_REQUIRED` | 2 | `run start` | a `workflow_orchestrator` or `automation` controller did not supply `--control-mode`; managed runs never inherit interactive defaults |
+| `CONTROL_MODE_REQUIRED` | 2 | `run start` | `control_mode` is omitted or `UNSPECIFIED`; no Controller kind inherits a hidden mode |
 | `CONTROL_MODE_CONTROLLER_MISMATCH` | 4 | `run start`, `run create-write-continuation` | the controller kind is not permitted by the requested control mode, or is `other` |
-| `PURPOSE_REQUIRED` | 2 | `run start` | a managed run did not supply `--purpose` |
-| `EXECUTION_LANE_REQUIRED` | 2 | `run start` | a managed run did not supply `--execution-lane` |
+| `PURPOSE_REQUIRED` | 2 | `run start` | purpose is omitted or `UNSPECIFIED` for any Run |
+| `EXECUTION_LANE_REQUIRED` | 2 | `run start` | execution lane is omitted or `UNSPECIFIED`; no interactive default exists |
 | `CAPABILITY_UNSUPPORTED` | 4 | `run start`, projection and interaction commands | a required Dolgorae or profile feature is unavailable |
 | `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE` | 4 | profile add/update/doctor | the public profile requests disable enforcement that pinned Codex 0.147.0 did not provide |
 | `ACCESS_TRANSITION_UNSUPPORTED` | 4 | write acquire/release and handoff | the tested profile cannot safely apply the requested policy to the existing thread; create a lineage-linked write continuation |
@@ -1028,7 +1397,7 @@ normative:
 | `SHARED_RUN_WRITE_FORBIDDEN` | 4 | `run send/submit --write`, `run acquire-write` | a `shared_readonly` run requested write; a lineage-linked write continuation is required |
 | `THREAD_RESIDENCY_CONFLICT` | 4 | run attach/recovery/reconcile and writer operations | a thread was observed outside its immutable logical lane |
 | `SAME_HOME_MULTI_SERVER_UNSAFE` | 5 | `profile doctor`, `run start`, and lane-starting run commands | the pinned same-home shared/dedicated coexistence campaign did not pass for this profile |
-| `ASSURANCE_LEVEL_UNAVAILABLE` | 4 | `run start`, `run create-write-continuation` | `required_assurance` exceeds the profile snapshot's achievable level; only lowering the pre-allocation request is permitted |
+| `ASSURANCE_LEVEL_UNAVAILABLE` | 4 | `run start`, `run create-write-continuation` | `required_assurance` is `UNSPECIFIED` or exceeds the profile snapshot's achievable level; a complete supported value is required before allocation |
 | `DEDICATED_HISTORY_BARRIER_FAILED` | 4 | `run resume/recover/reconcile` | the persisted history revision/digest barrier did not admit a successor generation in the same logical lane |
 | `PROFILE_LANE_MIGRATION_REQUIRED` | 4 | `profile server migrate` | a live lane is incompatible with the requested generation contract and the complete lane set requires operator migration |
 | `DEDICATED_SERVER_START_FAILED` | 6 | `run send/submit`, `run resume` | a physical Dedicated Lane Server generation could not start; the logical run stays idle and the same lane may be retried |
@@ -1069,9 +1438,10 @@ table rather than assign an exit class locally.
 “State-changing run command” means start, send, submit, respond, interrupt,
 set-effort, acquire-write, release-write, pause, resume, recover, reconcile,
 fork, create-write-continuation, close, delete, controller reset, or writer
-handoff. Status, list, wait, events, pending, writer status, controller verify,
-verify, and export are observers; timeline is a Controller-authorized read. Export
-embeds a failing verification result rather than refusing. Confirmed delete is
+handoff. Status, list, wait, events, pending, writer status, controller verify, and
+verify are observer operations. Timeline, artifact export, and whole-Run export
+require immediate Controller authorization. Whole-Run export embeds a failing
+verification result rather than refusing. Confirmed delete is
 the explicit integrity-failure escape described in SPEC-010.
 For a write recovery path, same-run identity safety is evaluated before
 writer-authority activation: `RECOVERY_REQUIRED` therefore takes precedence
@@ -1282,14 +1652,15 @@ the optional Controller carrier unlocks show/read only after serialization-point
 revalidation. No command exposes the internal artifact path.
 
 Observed paths are populated only when `measured` is true and describe workspace
-changes during the terminal turn interval. In Git mode
-they are the sorted unique workspace-relative paths from
+changes during the terminal turn interval. In Git mode they are the sorted
+unique workspace-relative paths from
 `git status --porcelain=v2 -z --untracked-files=all`; ignored paths and
-`.dolgorae/runs/`, `.dolgorae/runtime/`, `.dolgorae/evidence/`, and
-`.dolgorae/cache/` are excluded, while
-tracked policy-file changes remain visible. In non-Git mode they are the changed regular files from
-no-follow pre/post `(device,inode,size,mtime_ns)` snapshots, also excluding
-those four internal directories. Valid UTF-8 paths are strings; other POSIX bytes use
+`.dolgorae/exports/` are excluded, while tracked `.dolgorae/config.yaml` and
+`.dolgorae/.gitignore` policy-file changes remain visible. Application Support
+state is outside the workspace and therefore cannot appear in Git status. In
+non-Git mode observed paths are the changed regular files from no-follow pre/post
+`(device,inode,size,mtime_ns)` snapshots, also excluding `.dolgorae/exports/` and
+never traversing the Application Support state root. Valid UTF-8 paths are strings; other POSIX bytes use
 `{"$dolgorae_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
 The machine schemas enforce the alphabet, four-character grouping, and exact
 terminal padding in addition to declaring `contentEncoding`. At most 4,096 paths are retained and
@@ -1330,11 +1701,12 @@ Dolgorae limit and MAY observe a writer's intermediate files; there is no
 snapshot isolation or rollback. A canonical workspace has at most one Dolgorae
 writer across every run and profile.
 
-A brokered independent subagent Run participates in that same workspace writer
-authority without regard to which client or broker caused its creation. If a
-Gul-origin Run, ordinary-Codex-origin child, or any other Dolgorae Run already
-owns the canonical workspace, a competing child write MUST return `WRITER_BUSY`;
-it MUST NOT queue, take over, or infer permission from its parent relationship.
+An Independent Specialist Run in an External Specialist Engagement or Brokered Hierarchy
+participates in that same workspace writer authority without regard to which
+client or coordinator caused its creation. If a Gul-origin Primary Run, an
+external-primary-origin specialist, or any other Dolgorae Run already owns the
+canonical workspace, a competing specialist write MUST return `WRITER_BUSY`; it
+MUST NOT queue, take over, or infer permission from its parent relationship.
 Editors and Codex processes operating outside Dolgorae remain outside this
 serialization guarantee.
 
@@ -1350,8 +1722,8 @@ explicit release or safe terminal/absence reconciliation completes. Acquisition
 never queues automatically.
 
 The writer serializer is BSD `flock(2)` with exclusive semantics on
-`.dolgorae/runtime/locks/writer.lock`; a free lock is never evidence that no
-writer exists. The authoritative `.dolgorae/runtime/writer.json` is a
+`<application-support-workspace>/runtime/locks/writer.lock`; a free lock is never evidence that no
+writer exists. The authoritative `<application-support-workspace>/runtime/writer.json` is a
 versioned, atomically replaced and directory-fsynced state machine with
 `none`, `reserved`, `active`, `releasing`, `handoff_prepared`, and
 `blocked_unknown` states. It
@@ -1359,8 +1731,8 @@ records workspace/run IDs, controller ID/generation, writer and worker
 generations, profile server key/epoch, thread/active-turn IDs, lifecycle,
 pending interaction count, last durable event cursor, and recovery state.
 Per-run startup locks are
-`.dolgorae/runtime/locks/startup/<run-id>.lock`; the handoff serializer is
-`.dolgorae/runtime/locks/handoff.lock`. Creation and validation use
+`<application-support-workspace>/runtime/locks/startup/<run-id>.lock`; the handoff serializer is
+`<application-support-workspace>/runtime/locks/handoff.lock`. Creation and validation use
 workspace-fd-relative no-symlink operations, validate `EEXIST`, ownership and
 mode 0700/0600 with `fstat`, and require the canonical workspace to report
 `MNT_LOCAL` plus `f_fstypename == "apfs"`. Path or device/inode drift fails
@@ -1648,7 +2020,7 @@ If worker `SIGTERM` arrives during an active turn, it sends `turn/interrupt`,
 waits up to five seconds for a terminal event, fsyncs terminal evidence when
 observed, and records `outcome_unknown` on expiry before generation cleanup.
 The worker holding byte 1 normally unlinks its own socket. There is no volatile
-sibling sidecar: `.dolgorae/runtime/runs/<run-id>.json` is the sole socket
+sibling sidecar: `<application-support-workspace>/runtime/runs/<run-id>.json` is the sole socket
 identity authority. On recovery, only the byte-0 election winner may authorize
 unlink after an exact matching runtime record and prior-generation absence are
 proved; the replacement worker performs it after acquiring byte 1 and before
@@ -1656,23 +2028,33 @@ bind. An occupied path with no matching record fails closed. Shutdown attempts
 this cleanup for ten seconds and otherwise leaves the path for that verified
 next owner.
 
-Acquire or release never restarts the selected shared/dedicated lane server and never substitutes a
-connection generation for authorization. A known unavailable/unverified
-transition returns `ACCESS_TRANSITION_UNSUPPORTED` before reservation, leaving
-the record unchanged. Once a supported transition begins, it follows the
-`reserved`/`releasing` crash-safe landings above; failure never falsely restores
-the pre-transition state. For read-to-write, the required action is a
-new lineage-linked writer run/thread that establishes write policy before
-authority activation. For write-to-read, the incumbent cannot simply fork and
-release: the user must pause/close it, prove terminal turn and protocol-supported
-background-execution absence, retire its connection, transactionally clear
-authority, and then create or resume a separate reader. When the pinned protocol
-cannot prove that absence, authority remains `blocked_unknown`. Unsupported handoff
-fails before commit and uses that same writer-retirement path; it never leaves
-two runs believing they own authority. Worker byte-1 ownership does not change
-during an actually supported in-place transition.
-Start, resume, fork, and recovery otherwise create readers and do not acquire
-writer authority.
+Acquire or release never changes a Run's logical lane and never substitutes a
+Worker or connection generation for authorization. For a Dedicated Run whose
+pinned profile reports a verified transition, read-to-write and write-to-read
+apply, verify, and commit policy in place on the same physical Dedicated Lane
+Server generation and the same Codex thread. The Run's `policy_epoch`
+increments on each committed access transition; `run_generation`, thread ID,
+thread generation, lane ID, process generation, and server epoch do not change.
+
+A known unavailable or unverified Dedicated transition returns
+`ACCESS_TRANSITION_UNSUPPORTED` before reservation and leaves authority
+unchanged. That Run may use a lineage-linked Dedicated write continuation.
+`shared_readonly` Runs always require a Dedicated write continuation and never
+transition in place. Failure during a started transition follows the durable
+`reserved` or `releasing` landing rules and never falsely restores the prior
+state.
+
+A writer transfer between the Primary Run and a brokered Specialist normally
+crosses Controller identities. V1 therefore performs explicit source release,
+authoritative verification that workspace writer state is `none`, and
+destination acquisition. The same-Controller atomic handoff operation MUST NOT
+be used across those identities, and V1 does not claim an atomic cross-
+Controller handoff. A competitor may win the intervening acquisition; the
+Orchestration Broker handles `WRITER_BUSY` by rescheduling rather than taking
+over or queueing.
+
+Start, resume, fork, and recovery otherwise create read-effective Runs and do
+not acquire writer authority.
 
 Readers MAY run during writer turns and may observe intermediate workspace
 state. Dolgorae provides no read snapshot isolation. A consistent review SHOULD
@@ -1832,6 +2214,52 @@ snapshot. The effort is accepted only when that snapshot advertises the exact va
 value returns `INVALID_ARGUMENT`; an unadvertised value returns
 `COMPATIBILITY_REJECTED`.
 
+
+### Aggregate and Broker Recovery
+
+Dolgorae-Orchestrated Session and External Specialist Engagement recovery is
+SQLite-state and event-log driven and MUST preserve independent Run recovery
+semantics.
+
+Every aggregate has exactly one referenced Aggregate Bootstrap Operation. A
+non-`creating` Orchestration Session and every External Specialist Engagement
+require a `ready` bootstrap operation. Startup reconciliation joins the
+bootstrap operation, aggregate row, bootstrap operation ID carried by the Primary Run
+creation intent, Primary Run manifest, and Primary audit ledger. A missing or mismatched side cannot be
+fabricated from the other side. It is completed with the original preallocated
+identity only when the persisted evidence proves the external side effect was
+not duplicated; otherwise the aggregate enters recovery and blocks mutation.
+
+Before creating a brokered or externally hired Specialist process, Worker,
+thread, or physical lane generation, Dolgorae MUST transactionally allocate the
+child Run ID and append a write-ahead spawn or hire operation with its aggregate
+ID, idempotency key, parent or external provenance, role snapshot digest, and
+Run-configuration digest. Repeating the same key and normalized identity returns
+the original operation and child Run. Identity drift is
+`IDEMPOTENCY_CONFLICT` and MUST NOT allocate another Specialist.
+
+Startup reconciliation verifies the orchestration SQLite database and its
+hash-chained event table, scans queued mail and nonterminal operations, and
+compares them with authoritative Run, Worker, lane, thread, and ledger state. A `requested` or `provisioning` operation with no accepted external
+side effect may continue using the preallocated child Run ID. A Specialist task
+whose result is durably `completed_not_delivered` redelivers the existing result
+reference without rerunning the task. A task that was accepted or running but
+whose completion is not authoritative becomes `interrupted_unknown`; Dolgorae
+MUST NOT replay it automatically or infer semantic completion.
+
+Loss of a Dolgorae-Orchestrated Session's Primary Run changes the aggregate to
+`degraded` or `recovering`; it MUST NOT automatically destroy owned Specialist
+Runs. Explicit session completion gracefully retires owned idle Specialists.
+Explicit abort cancels or interrupts owned Specialists under ordinary Run rules
+and preserves unresolved evidence. External Specialist Engagement recovery
+restores Specialist operational state and delivery receipts but never invents
+or reconstructs the external AI's plan or task graph.
+
+One Run may belong to at most one active aggregate. Active reparenting,
+in-place role conversion, and in-place transfer between the two use cases are
+forbidden in v1. A change of orchestration owner or role requires a new Run and
+explicit context or artifact handoff.
+
 ## SPEC-009: Pending Requests and Approvals
 
 The checked [Codex required-subset manifest](protocol/codex-0.147.0-required-subset.json)
@@ -1946,13 +2374,29 @@ capability but is not exposed as v1 public input.
 
 ## SPEC-010: Audit, Retention, and Deletion
 
-Every allocated run has a private directory at `.dolgorae/runs/<run-id>/` with:
+Every allocated Run has a private directory at `<application-support-workspace>/runs/<run-id>/` with:
 
 - `manifest.json`: fixed run configuration and provenance;
 - `audit.jsonl`: the sole append-only audit authority;
 - `state.json`: a disposable materialized view rebuilt from the ledger.
 - `worker.log` and `worker.log.1`: bounded diagnostics, never audit authority;
 - `recovery/`: preserved torn-tail and repair evidence.
+
+The workspace also has
+`<application-support-workspace>/orchestration/orchestration.sqlite3` as the sole
+transactional authority for Dolgorae-Orchestrated Session, External Specialist
+Engagement, aggregate bootstrap, membership, spawn or hire operation, Specialist task,
+Collaboration Exchange, mailbox, activation, and result-delivery transitions.
+It MUST use SQLite WAL, foreign keys, `synchronous=FULL`, a bounded busy timeout,
+and one workspace mutation owner. A hash-chained append-only
+`orchestration_event` table is committed with each state transition.
+`orchestration/state.json` and any orchestration JSONL are disposable exports
+that MUST validate against
+`protocol/dolgorae-orchestration-state-v1.schema.json`. A multi-object change that affects an aggregate and a Run uses the durable
+Aggregate Bootstrap, spawn, or hire Operation ID as its cross-store correlation
+identifier. The SQLite portion commits in one crash-consistent transaction, and
+the matching Run creation intent is fsynced with that same Operation ID before
+runtime publication. Exports are never coequal authorities.
 
 The audit contains Dolgorae lifecycle records and redacted app-server wire
 records in one total order. Each record contains schema version, sequence/event
@@ -2056,7 +2500,7 @@ records only `payload_unrepresentable` metadata and never raw bytes.
 Run directories use mode 0700 and sensitive files mode 0600. Prompts and command
 or tool output may still contain secrets; same-OS-user confidentiality is not
 guaranteed.
-`.dolgorae/runtime/` is mode 0700 and its records are mode 0600. `worker.log` is
+`<application-support-workspace>/runtime/` is mode 0700 and its records are mode 0600. `worker.log` is
 limited to 1 MiB with one rotation and remains diagnostics-only.
 
 Audit completeness is limited to Dolgorae lifecycle, app-server-exposed main-turn
@@ -2098,7 +2542,7 @@ prefix. It creates a mode-0700 directory containing 0600 `bundle.json`,
 boundary as well as
 schema version, workspace/run identity, filenames, hashes, and source-derived
 timestamps; lexicographic filenames and source bytes make repeated exports
-content-deterministic. Runtime records, locks, logs, project-local profile configuration,
+content-deterministic. Runtime records, locks, logs, machine-local Runtime Profile configuration,
 `CODEX_HOME`, images, and raw torn-tail evidence are excluded. A failing audit
 does not suppress export: both bundle and verification set
 `verification_failed:true`, while other state-changing commands fail closed.
@@ -2108,7 +2552,7 @@ path MUST NOT already exist; Dolgorae never merges or overwrites an export and
 returns `INVALID_ARGUMENT` on collision.
 
 Automatically retained probe, recovery, and diagnostic evidence MUST live under
-`.dolgorae/evidence/`. An export without an explicit output path defaults to a
+`<application-support-workspace>/evidence/`. An export without an explicit output path defaults to a
 create-exclusive child of that directory. A user MAY explicitly request an
 external export destination; that copy is user output, not runtime authority.
 
@@ -2116,88 +2560,531 @@ There is no retention limit or automatic deletion. `run delete` is allowed
 only for closed or start-failed runs and requires `--confirm`; it is the sole
 state-changing command allowed after audit integrity failure and appends no
 record to a ledger it cannot trust. It permanently
-deletes the Dolgorae run directory only. It MUST NOT delete the Codex thread from
+deletes the Dolgorae Application Support Run directory only. It MUST NOT delete the Codex thread from
 `CODEX_HOME`, and Dolgorae MUST NOT later auto-import that orphaned thread.
 
 ## SPEC-011: Agent Instruction and Side-Effect Policy
 
-Dolgorae injects developer instructions that are immutable for one run
-generation and identify the process as a master-controlled Dolgorae subagent.
-They include run ID and canonical workspace; actual write authority derives
-from the durable authority record plus enforced sandbox policy, not prompt
-text. Writer acquire/release does not restart the worker, connection, or shared
-singleton. Immutable user run instructions remain subordinate and unchanged.
-The instructions MUST establish these rules:
+Dolgorae composes two instruction layers.
 
-- `.dolgorae` is reserved; the agent must not read or modify it unless the master
-  explicitly requests audit or review access.
-- Answer, explain, review, and diagnose requests do not authorize mutation.
-- Build and fix requests may mutate only in a writer run.
-- Safe, local, in-scope edits and checks may proceed autonomously when the task
-  authorizes implementation.
-- External side effects, destructive actions, and meaningful scope expansion
-  require master direction.
-- Git add, commit, and push each require explicit master authorization.
-- Background process creation requires explicit master authorization.
-- Native subagents must avoid overlapping write-heavy delegation and prefer
-  parallelism only for independent or read-heavy work.
-- The response reports outcome, material changes or findings, verification,
-  and blockers without imposing a rigid JSON format on the model.
+The **generation-immutable instruction contract** is installed whenever a
+thread generation is started, resumed, or forked. It contains the Run ID,
+canonical workspace, use-case role presentation, instruction-contract versions,
+Native Subagent Policy, and behavior invariants that do not change during that
+thread generation. It MUST NOT contain mutable current access, writer ownership,
+writer generation, or `policy_epoch`.
 
-The `.dolgorae` reservation is prompt-enforced policy, not a sandbox deny-list or
-same-user security boundary. Changes to `.dolgorae/config.yaml` and
-`.dolgorae/.gitignore` remain observable workspace changes; only worker-owned
-run/runtime/evidence/cache paths are filtered.
+Every Turn additionally receives a **dynamic access context** derived at the
+mutation serialization point from authoritative writer state and the verified
+sandbox carrier. It identifies `read` or `write` access, `policy_epoch`, writer
+generation when present, and the closed network policy. A committed Dedicated
+access transition updates this Turn-scoped context and increments
+`policy_epoch` without changing `run_generation`, thread ID, thread generation,
+or immutable Controller instructions.
 
-The profile's own Codex configuration, AGENTS instructions, skills, plugins,
-and apps remain available unless they conflict with Dolgorae's hard invariants.
-MCP servers follow the checked launch snapshot. Native subagents remain
-available only when the profile snapshot reports them `supported`. The pinned
-0.147.0 default enables `multi_agent`; its corrected live campaign proved the
-complete child lifecycle and reports `supported`. Its disabled diagnostic still
-created a child and therefore reports `unverified`, never `unavailable`.
+Role presentation follows authoritative aggregate membership, not model text.
+A `direct_interactive` root of a Dolgorae-Orchestrated Session is described as a
+Primary Agent. A `managed_agent` member in a Brokered Hierarchy or External
+Specialist Engagement is described as an Independent Specialist Agent. A
+generic managed Run outside those aggregates is described as an externally
+managed workflow agent. `parent_ref` may support non-authoritative provenance
+wording but grants no authority.
+
+Dolgorae distinguishes enforced invariants from agent behavior policy.
+
+**Enforced invariants** include:
+
+- Controller and Operator credential validation;
+- Run, aggregate, writer, and idempotency state transitions;
+- one Dolgorae writer per canonical workspace;
+- read-only or workspace-write sandbox selection;
+- `networkAccess:false` for v1 shell execution;
+- mutable Dolgorae authority stored outside the agent-writable workspace;
+- append-only audit and orchestration-journal ownership; and
+- fail-closed recovery on ambiguous work, identity, policy, or delivery state.
+
+**Agent behavior policy** is injected as defense in depth and MUST state:
+
+- answering, explaining, reviewing, and diagnosing do not authorize mutation;
+- implementation may mutate only when the current Turn context is write;
+- safe local in-scope edits and checks may proceed when the task authorizes them;
+- destructive actions, external side effects, and meaningful scope expansion
+  require Controller direction;
+- Git add, commit, and push each require explicit Controller authorization;
+- background process creation requires explicit Controller authorization;
+- Native Delegation must avoid overlapping write-heavy work and prefer native
+  children for independent or read-heavy work; and
+- the response reports outcome, material changes or findings, verification, and
+  blockers without imposing a rigid model-visible JSON format.
+
+The tracked `.dolgorae/config.yaml` and `.dolgorae/.gitignore` files are ordinary
+workspace policy files. Mutable Run, writer, audit, orchestration, profile,
+evidence, and cache authority is under Application Support and MUST NOT be in a
+Codex writable root. Prompt policy is not a hostile same-user security boundary.
+
+The profile's Codex configuration, AGENTS instructions, skills, plugins, apps,
+and checked MCP servers remain available unless they conflict with enforced
+invariants. Their mutable external contents are not part of Dolgorae's byte-
+immutable role claim. The explicit normalized Controller instructions and Agent
+Configuration digest are the durable role snapshot. Side effects performed by
+MCP servers, plugins, or apps outside the shell sandbox remain outside the hard
+one-writer guarantee.
+
+The selected Runtime Profile MUST explicitly declare `native_subagents:
+enabled`. Exact Codex 0.147.0 enabled evidence reports lifecycle observation and
+quiescence tracking as `supported`; its disabled diagnostic still created a
+child and therefore proves that disable enforcement is unavailable. V1 MUST NOT
+claim a per-Run native-subagent opt-out.
 
 ## SPEC-012: Orchestration Boundary and Compatibility
 
-Independent Dolgorae runs use hub-and-spoke orchestration: only the master may
-create, address, interrupt, fork, pause, close, or delete them. A Dolgorae-managed
-agent MUST NOT invoke `dolgorae` to control another run or connect to another
-run's worker socket. V1 has no peer messaging or run-to-run delegation.
+Dolgorae uses one shared Run core behind two product-level facades. Run
+authority remains hub-and-spoke: only each Run's bound Controller may mutate it,
+and a model never receives another Run's Controller credential, Operator
+credential, private Worker socket, or database path. Brokered Specialist
+Collaboration adds a bounded broker-mediated message path, not peer Run control.
 
-A trusted external automation broker MAY accept a model-originated request to
-operate an Independent Dolgorae Run as a subagent. The broker, not the requesting
-model or parent Run, remains that child's master and `automation` Controller.
-This is brokered hub-and-spoke orchestration, not delegated Run authority. The
-broker MUST keep the child Controller credential outside every LLM-visible
-channel and MUST use the existing public CLI composition: create one protected
-Controller credential, `run start` with `managed-agent`, `dedicated`, explicit
-purpose and assurance, and an all-or-none parent reference, then use ordinary
-`send`/`submit`, `wait`/`events`, `interrupt`, writer, and `close` operations.
-The child is durable across broker or parent disconnect and MUST NOT be closed or
-have writer authority released merely because either caller disappears.
+### Aggregate Bootstrap and Facade Entry
 
-The parent reference and any child Run ID returned to the requesting model are
-non-authoritative provenance and routing data. They MUST NOT authorize a child
-mutation. Only the broker may retrieve or resolve the child's full interactions;
-the parent may receive bounded client-safe status and result material selected by
-the broker. A child remains prohibited from shelling out to control its parent or
-another Run. Parent-held delegation capabilities, nested authority transfer, and
-peer messaging remain outside v1.
+Aggregate identity is never inferred from a list of Runs. A parentless
+direct-interactive root with a checked Orchestration Launch Intent creates its
+Orchestration Session through a durable `create_orchestrated_session` bootstrap
+operation. A root without that intent remains a low-level Run. An external
+integration creates its engagement only through an explicit
+`open_external_engagement` call. That call atomically creates one
+`open_external_engagement` bootstrap operation and an empty active engagement,
+then returns the Dolgorae-generated engagement ID. Each later
+`hire_external_specialist` call targets that ID and durably reserves its hire
+operation, member, and child Run before runtime side effects. A raw Run, parent
+projection, or later listing MUST NOT lazily infer, attach, or regroup an
+engagement.
 
-The shared singleton has one profile-generation environment, so Dolgorae MUST
-NOT claim that a per-run `DOLGORAE_*` marker reaches commands, MCP servers, or
-native subagents. A diagnostic marker, if observed, is advisory only and cannot
-authorize or reject any command. A command launched by Codex that invokes
-Dolgorae without the run's controller capability can use the ordinary same-uid
-client-safe observer surface but cannot mutate that or another run. Controller
-or operator credentials are never placed in the workspace, prompts, argv,
-singleton environment, or client-safe events.
+Each aggregate record stores `bootstrap_operation_id`, and each bootstrap
+operation points back to exactly one aggregate. Same-key replay with the same
+normalized request returns the original aggregate. Same-key drift is
+`IDEMPOTENCY_CONFLICT`. Aggregate bootstrap state, the hash-chained event, and
+any prepared Run creation identity are committed before process, lane, thread,
+or Turn side effects.
 
-When a profile reports native subagents `supported`, their children belong to
-the parent run and app-server-managed session tree; they do not create
-independent Dolgorae runs or writer authorities. `unavailable` rejects their
-use. `unverified` fails closed for any operation that requires proof of native
-quiescence and MUST NOT be presented to callers as working support.
+### Dolgorae-Orchestrated Session
+
+A Dolgorae-Orchestrated Session is a first-class durable aggregate whose
+`session_id` equals its Primary Run ID in v1. Dolgorae owns the Primary Agent's
+semantic orchestration loop, while Gul owns presentation, user input, approval
+UX, and any remote authentication boundary.
+
+The internal Orchestration Broker may accept a Primary Agent's advisory request
+for configured Specialist work only under the session's explicit approval
+policy and immutable Specialist Policy snapshot. The snapshot validates against
+`protocol/dolgorae-specialist-policy-v1.schema.json`; its complete JCS SHA-256 is
+recorded on the session, and role references resolve only against that snapshot.
+Runtime Profile identity never selects role character.
+
+The broker owns a distinct internal Controller credential for every Specialist
+Run and keeps all credentials outside prompts, model input, events, audit
+payloads, and Gul projections. The Primary Agent may request work and receive
+bounded results but MUST NOT mutate, interrupt, resolve interactions for, or
+acquire writer authority on a Specialist Run directly.
+
+#### Primary Orchestration Tool
+
+The Primary Run uses the private run-bound payload contract
+`protocol/dolgorae-orchestration-tool-v1.schema.json`. The bridge binds session,
+source Run, source Turn, tool-call identity, root priority, Controller authority,
+and idempotency outside model-controlled arguments. The model cannot provide or
+override those fields and cannot select a Runtime Profile, model, Controller,
+priority elevation, or access beyond the immutable Specialist Policy. The
+checked operations are:
+
+- request and await a Specialist instance;
+- list safe Specialist status;
+- assign, await, collect, and cancel Specialist tasks; and
+- request graceful Specialist release.
+
+Under `user_approval_required`, every new Specialist instance creates a durable
+request and a typed `user_input` Controller Interaction on the Primary Run before
+any child Run is allocated. Approval resumes the same idempotent request;
+rejection records a terminal request result. Under `fully_delegated`, automatic
+provisioning is allowed only when the requested role exists in the session
+policy, has `auto_approve_when_fully_delegated: true`, remains below its instance
+limit, and requires no capability beyond the accepted policy. Missing or
+disallowed roles are rejected rather than silently created or silently escalated.
+
+Role reuse is deterministic and does not create a second membership operation.
+`never` always requests a new instance subject to limits.
+`reuse_idle_compatible` selects an idle active member with the exact same role,
+role snapshot, Agent Configuration digest, and admitted access.
+`reuse_any_compatible` may also select a busy compatible member, whose later
+task is queued normally. Selection orders idle before busy, then lower pending
+mail count, then lower Run ID. A reused `request_specialist_result` returns the
+existing member's original `spawn_operation_id` with `reused: true`; no new
+spawn operation is appended. The Primary Run's durable tool-call/result ledger
+binds that reuse decision to the source Turn and tool-call idempotency identity,
+so exact replay returns the same member even if queue state later changes.
+Reparenting, role conversion, configuration drift, and reuse across sessions are
+forbidden.
+
+Assigning a task to an existing ready Specialist does not repeat hire approval.
+The task inherits the Primary root priority; the model cannot raise it. A role
+selector resolves an existing eligible member deterministically and never
+auto-hires a missing role. Cancellation is safe for queued work and uses the
+ordinary interrupt and `interrupted_unknown` rules after possible target Turn
+acceptance. A compatible existing Specialist may be reused only when its
+immutable role policy permits reuse; the operation result reports whether reuse
+occurred. Canonical-workspace write intent remains subject to the ordinary
+writer protocol and may return a typed writer conflict without changing the
+member or task. Release is graceful: it prevents new work, waits for
+authoritative terminal work and delivery state, and never discards an unknown
+outcome.
+
+Dolgorae is authoritative for the Orchestration Session Record, Primary Run,
+Brokered Hierarchy membership, parent-child lineage, role and Agent
+Configuration snapshots, owned Specialist lifecycle, write-ahead spawn
+operations, accepted Specialist tasks, collaboration exchanges, durable
+mailboxes, result-delivery receipts, activation, passivation, writer
+coordination, event sequence, audit, and recovery. Standalone Primary and
+Brokered Hierarchy are dynamic composition states of this one use case, not
+separate user modes.
+
+An active Dolgorae-Orchestrated Session that permits Brokered Specialist
+Collaboration MUST have a Gul-supervised foreground `dolgorae serve` control-
+plane runtime. The public gRPC adapter remains a transport adapter; the same
+process hosts reconstructable broker, scheduler, activation, and private tool-
+bridge services. SQLite is the durable authority. No installed daemon is added.
+
+### Brokered Specialist Collaboration
+
+A Specialist in one active Brokered Hierarchy MAY submit a bounded consultation
+to an already provisioned Specialist in the same Orchestration Session. The
+request is logically direct because the Primary Agent does not relay its body or
+result. The request is physically mediated by the Collaboration Plane, which
+MUST validate authority, persist the exchange, schedule the target, deliver the
+result, and record causal audit state.
+
+The Collaboration Plane MUST NOT provide peer lifecycle control. A Specialist
+cannot through collaboration hire another Specialist, obtain a peer credential,
+address another session, change a peer role or Runtime Profile, interrupt or
+close a peer Run, resolve a peer interaction, or transfer writer authority.
+External Specialist Engagements do not support Specialist-to-Specialist
+collaboration in v1.
+
+A collaboration-capable Specialist uses a private run-bound tool bridge. Source
+Run, source Turn, and tool-call identity MUST be bound outside model-controlled
+arguments. The model MUST NOT receive or choose an idempotency key. The bridge
+provides separate submit and await operations so multiple requests can proceed
+concurrently. A bounded convenience operation MAY compose submit and await.
+
+The pinned transport MUST prove source identity and bounded wait behavior before
+implementation. If a shared Profile Server cannot bind a private tool invocation
+to one Run and Turn, every collaboration-capable member MUST use a Dedicated
+Lane with a private bridge. A model invoking the public CLI or connecting to a
+peer Worker remains forbidden.
+
+### Durable Mailbox and Virtual Actor Activation
+
+Each brokered Specialist has a durable SQLite mailbox. The Specialist itself
+MUST NOT poll SQLite. The control-plane runtime owns one central Mailbox
+Scheduler for all workspaces it serves. After committing a mailbox change it
+adds the target Run to an in-memory dirty set and wakes the scheduler. Startup
+and one low-frequency global reconciliation scan repair lost wake signals,
+expired pre-dispatch claims, and process crashes; this is not per-Run polling.
+
+A Specialist is a Virtual Actor. When resident and idle, the scheduler may
+immediately dispatch its next mailbox item. When running or waiting, new items
+remain queued and MUST NOT preempt the active Turn. When safely passivated under
+`on_mail` policy, the Activation Manager MUST use a compare-and-swap transition
+and one bounded activation lease to start a new Worker generation, start or
+reuse the physical lane, resume the recorded thread, verify effective
+configuration, and wake the scheduler. Concurrent mail MUST produce one
+activation and multiple queued items, not duplicate Worker generations.
+
+`passivated` is distinct from core Run `paused` and `closed`. A passivated Run is
+logically active and resumable. A paused Run requires explicit authorized
+resume. A closed, retired, or released Run is terminal and MUST reject new mail.
+Activation failure retains queued mail, records a safe blocker, and marks the
+member unavailable; it MUST NOT discard the request or silently replace the
+Specialist.
+
+Passivation is allowed only while the core Run is idle, owns no writer, has no
+pending interaction, has no blocking outbound collaboration, has no required
+unacknowledged result, has no dispatchable mailbox item, satisfies background-
+process cleanup, and has authoritative resumable thread state. Passivation
+preserves Run ID, logical lane, thread ID, Agent Configuration, aggregate
+membership, mailbox, and audit history.
+
+### Scheduling, Priority, and Backpressure
+
+A target Run executes at most one Turn at a time. Collaboration queueing is
+owned by the Orchestration and Collaboration layer; low-level public `run send`
+and `run submit` keep their existing `RUN_BUSY` behavior.
+
+The scheduler MUST choose the next dispatchable item using this deterministic
+order:
+
+1. internal recovery or lifecycle work;
+2. starvation override after the session policy limit;
+3. inherited root priority: `interactive`, then `normal`, then `background`;
+4. dependency-unblock boost when the source Turn is actively waiting;
+5. earliest deadline; and
+6. oldest mailbox sequence.
+
+A Specialist cannot raise its own priority. A collaboration exchange inherits
+its root Specialist task priority. The scheduler MUST enforce source fairness,
+no-preemption, queue and fan-out limits, bounded blocking depth, and an acyclic
+blocking-wait graph. Exact queue position is not a contract because priority,
+aging, cancellation, and recovery can reorder items.
+
+The default v1 collaboration-policy snapshot is: starvation limit 300 seconds;
+maximum two consecutive items from one source; maximum 16 pending items per
+Specialist, four per source-target pair, and 128 per session; maximum two
+blocking waits per Run, depth two, and eight exchanges per root task; maximum
+65,536 inline request bytes; passivation after 600 idle seconds; activation
+timeout 30 seconds with three attempts; and one global reconciliation scan every
+30 seconds. Large context MUST be passed by immutable artifact reference.
+
+A blocking collaboration MUST be rejected if the source owns writer authority
+or if adding its wait edge creates a cycle. Collaboration never implies writer
+handoff. The source may submit a nonblocking read-only request, release writer
+work, and await later.
+
+### Request, Response, and Recovery Semantics
+
+A Collaboration Exchange has independent execution and delivery state. Request
+submission, mailbox insertion, event append, and any activation-request marker
+MUST commit in one SQLite transaction before the in-memory wake. Target result
+commit, immutable result artifact reference, source result-mailbox insertion,
+and event append MUST also commit in one transaction.
+
+A busy target queues the request. The active Turn is never interrupted for a
+higher-priority mailbox item. A short claim lease covers only the boundary before
+authoritative target Turn acceptance. It MUST NOT permit another executor to
+steal or replay a running LLM Turn. Unknown Turn acceptance or outcome becomes
+`interrupted_unknown` and is not automatically replayed.
+
+Result notification is at least once and consumption is idempotent by exchange
+ID and immutable result artifact. A transport await ending does not cancel the
+exchange. A completed result may remain `pending` in the source mailbox and be
+awaited or collected after source restart. Dolgorae MUST NOT start an unsolicited
+continuation Turn solely because a result arrived.
+
+### External Specialist Engagement
+
+An External Specialist Engagement exists when another AI is already the Primary
+Agent and semantic control plane. It is opened and operated through the checked
+private CLI or MCP payload contract
+[`dolgorae-external-specialist-facade-v1.schema.json`](protocol/dolgorae-external-specialist-facade-v1.schema.json).
+Opening is an explicit, empty aggregate operation. The adapter binds the
+canonical workspace and an aggregate-owner Controller credential outside the
+payload. Dolgorae stores an immutable Aggregate Controller Binding containing
+Controller ID, generation 1, kind, normalized-principal digest, and capability
+digest. The opaque external reference is immutable semantic provenance, not an
+authorization token. Every later facade call must present the same owner
+credential and is rejected before observation or mutation when the workspace or
+binding differs. Hiring additionally creates a member Run through a write-ahead
+hire operation and a separately supplied per-Run Controller carrier. Raw managed
+Run creation never infers or joins an engagement.
+
+The checked facade operations are `open_external_engagement`,
+`get_external_engagement`, `hire_external_specialist`,
+`assign_external_specialist_task`, `await_external_specialist_tasks`,
+`collect_external_specialist_results`, `cancel_external_specialist_task`,
+`release_external_specialist`, and `close_external_engagement`. `Open` creates
+only the empty durable aggregate; `get` exposes only safe operational membership
+and task counts. Cancellation follows the ordinary fail-closed Turn-acceptance
+boundary, and close applies explicit complete or abort semantics.
+
+The external AI decides the objective, task
+graph, role selection, dependencies, retries, replacement, and semantic
+completion. Dolgorae MUST NOT create a Primary Run or another orchestration loop
+for that engagement.
+
+Dolgorae owns only the hired Specialist boundary: engagement identity, external
+provenance, Specialist membership, role and Agent Configuration snapshots,
+idempotent hire operations, accepted tasks, results, delivery receipts, Run and
+Turn state, interactions, writer state, audit, and recovery. It does not persist
+or infer the external AI's full plan or workflow graph. A Specialist in this use
+case MUST NOT hire another first-class Dolgorae Specialist or address another
+Specialist through the Collaboration Plane in v1; the external control plane
+hires and coordinates additional roles directly.
+
+External Specialists default to read-only analysis or isolated change
+production. Direct writes to the canonical workspace are safe only when the
+external integration quiesces its own writer and participates in Dolgorae's
+writer protocol. Writes by external tools remain outside Dolgorae serialization.
+
+### One-Shot Specialist Review Adapter
+
+Dolgorae MUST provide a narrow convenience adapter for the first and most common
+External Specialist Engagement flow: one independent read-only review of the
+current working tree. The canonical Machine CLI command is:
+
+```text
+dolgorae specialist review \
+  --workspace <workspace> \
+  --profile <reviewer-runtime-profile> \
+  --scope working-tree \
+  --format json
+```
+
+The optional external stdio MCP adapter exposes exactly one corresponding
+model-facing tool named `dolgorae_review`. Both entry points use the checked
+review payloads in
+[`dolgorae-specialist-review-tool-v1.schema.json`](protocol/dolgorae-specialist-review-tool-v1.schema.json).
+The CLI wraps a successful review result in the ordinary checked machine
+envelope with command tag `specialist.review`; an enabled MCP adapter returns
+the checked review result or checked review error directly. Both compile to the
+ordinary External Specialist Facade sequence: explicit engagement open,
+read-only Reviewer hire, one task assignment, bounded await, result collection,
+release, and close. This adapter is not a third user-facing use case and does
+not create a Primary Run, task graph, Brokered Hierarchy, or Collaboration
+Exchange.
+
+The Machine CLI path is mandatory for `MILESTONE-SR1`. The MCP path is
+capability-gated by a pinned-host probe. MCP is stateless across requests: the
+adapter MUST NOT infer logical-request continuity from a connection, JSON-RPC
+request ID, or stdio process. Replay-safe mode requires the trusted host to
+generate one UUIDv7 per logical call and repeat it unchanged in
+`tools/call params._meta` under the checked vendor key
+`xyz.rootkernel.dolgorae/externalRequestRef`. The metadata fragment is validated
+against
+[`dolgorae-specialist-review-mcp-meta-v1.schema.json`](protocol/dolgorae-specialist-review-mcp-meta-v1.schema.json).
+The model cannot supply or override this value through tool arguments. Same
+reference and same normalized request return the original review identity;
+same reference with different input returns `IDEMPOTENCY_CONFLICT`.
+
+If the pinned host cannot prove preservation of the per-request reference
+across every supported retry and reconnect boundary, the MCP tool MUST NOT be
+advertised for SR1 and Codex CLI uses the Machine CLI carrier through its shell
+tool. There is no connection-derived, process-derived, or best-effort MCP
+fallback. Same reference with different normalized input returns
+`IDEMPOTENCY_CONFLICT`, `retryable:false`, and required action
+`fix_host_request_carrier` without allocating another Reviewer Run.
+
+The model-visible request contains only the review objective, fixed
+`working_tree` scope, allowlisted focus dimensions, fixed structured result
+contract, and bounded deadline. Canonical workspace, Runtime Profile,
+aggregate-owner and per-Run Controller credentials, external provenance,
+request identity, and idempotency MUST be bound by the trusted adapter and MUST
+NOT be accepted from model arguments. The external MCP adapter does not require
+Dolgorae source Run or Turn identity because the external AI is already the
+semantic control plane.
+
+The Reviewer MUST be an independent `managed_agent` Run with a separate Codex
+thread, immutable Reviewer Agent Configuration, canonical-workspace read-only
+access, and shell network disabled. Its Runtime Profile MUST NOT register the
+`dolgorae_review` adapter. The semantic service MUST also reject nested
+first-class Specialist creation from the externally hired Reviewer.
+
+A successful review MUST validate against the checked result shape, store one
+immutable result artifact, contain no hidden reasoning or raw protocol frame,
+report `workspace_write_observed: false`, and order findings by `P0`, `P1`,
+`P2`, then `P3` with stable input order within one severity. Reviewer failure,
+timeout, cancellation, invalid structured output, observed workspace mutation,
+or unknown Turn acceptance or outcome MUST produce a checked non-success
+result. Unknown work MUST NOT be replayed automatically.
+
+The first adapter profile supports one Reviewer, one active task, read-only
+access, and working-tree scope only. It does not queue a second task, retain a
+reusable member after the adapter closes the engagement, or enable lateral
+Specialist collaboration. Later durable External Specialist Engagement features
+extend the same aggregate and Run contracts rather than replacing this adapter.
+
+### Durable Broker State and Operations
+
+The authoritative orchestration store is
+`<application-support-workspace>/orchestration/orchestration.sqlite3` in WAL
+mode with foreign keys enabled and full synchronous durability. A hash-chained
+append-only event table is committed in the same transactions as aggregate,
+mailbox, activation, execution, and delivery state. JSONL and JSON snapshots are
+exports or replaceable diagnostics, never coequal authorities.
+
+The checked `dolgorae-orchestration-state-v1.schema.json` owns the exported
+materialized shape for aggregate bootstrap operations, both aggregates,
+membership, spawn or hire operations, Specialist tasks, collaboration exchanges,
+mailbox items, and activation
+operations. Cross-object validity is owned by the executable
+`protocol/validators/validate_orchestration_state_v1.py`; schema-only acceptance
+is insufficient. At minimum the SQLite authority records:
+
+- aggregate bootstrap operation ID, kind, idempotency key, request digest,
+  provenance, state, and timestamps;
+- aggregate ID, kind, status, revision, semantic owner, and collaboration-policy
+  snapshot;
+- Primary Run or external Controller provenance and, for an External
+  Specialist Engagement, the immutable Aggregate Controller Binding containing
+  public Controller identity, generation, kind, normalized-principal digest,
+  and capability digest;
+- member Run ID, parent relationship where applicable, ownership, role reference,
+  role snapshot digest, Agent Configuration digest, membership, and actor
+  residency;
+- idempotency key and write-ahead state for each spawn, hire, and collaboration
+  operation;
+- source, target, root task, parent exchange, priority, deadline, and causal depth;
+- mailbox sequence, item kind, claim lease, and delivery receipt;
+- activation trigger, lease, attempts, outcome, and safe blocker;
+- independent execution and delivery states, including durable pending results
+  and `interrupted_unknown`; and
+- aggregate event sequence and hash-chain head.
+
+Child Run identity and the operation record MUST be committed before starting a
+Worker, physical lane generation, or Codex thread. Same-key and same-normalized-
+identity replay returns the original operation. After restart, a durably
+completed but undelivered result is redelivered without re-execution. A task or
+exchange whose outcome is not authoritative is never automatically replayed.
+
+A Primary Run failure marks its Dolgorae-Orchestrated Session `degraded` or
+`recovering`; owned Specialists remain available for reconciliation and are not
+automatically destroyed. New collaboration requests are not accepted while the
+Primary orchestration authority is unavailable. Explicit completion or abort
+applies ordinary Run close and interruption rules to owned Specialists and
+queued work. Attached external state is never destroyed merely because an
+engagement or client disconnects.
+
+One Run may belong to at most one active aggregate. V1 forbids active
+reparenting, in-place role conversion, nested first-class Specialist hiring from
+an External Specialist Engagement, and in-place conversion between the two use
+cases. Parent-held Run-control capabilities, direct Worker-to-Worker transport,
+unbounded peer chat, and cross-Run model authority remain future work. Bounded
+broker-mediated Specialist Collaboration is part of Brokered Hierarchy v1.
+
+The existing public v1 gRPC Run operations remain the low-level Gul wire
+contract. A direct-interactive root `StartRun` carrying checked launch metadata
+in its protected Controller carrier is aggregate-aware inside the semantic
+service and creates the Orchestration Session without a new RPC. The
+Machine CLI additionally carries the private External Specialist Facade through
+`engagement call --request-fd`; trusted MCP adapters use the same checked
+payloads. Primary orchestration and Specialist collaboration use separate
+run-bound private tools. None of these private facades changes the checked public
+Protobuf source or descriptor. A future additive read-only aggregate query may
+improve presentation, but it is not required for state ownership or recovery.
+
+Gul v1 obtains a safe operational view from the existing Primary Run stream,
+Controller Interactions, `ListRuns`, and public parent projections. It MAY show
+that a Specialist was requested, provisioned, busy, passivated, degraded, or
+retired, but MUST treat those projections as presentation data. It MUST NOT use
+`DiagnosticReported` strings, local caches, or reconstructed parent links as
+aggregate recovery authority.
+
+`parent_ref` remains authority-neutral provenance on the public Run contract.
+For brokered members, the internal Orchestration Session Record is the canonical
+membership authority. For externally hired Specialists, the Specialist
+Engagement Record is the canonical operational membership authority. A parent
+reference or collaboration exchange never authorizes a Run mutation or proves
+Controller ownership.
+
+The shared Profile Server has one profile-generation environment, so Dolgorae
+MUST NOT claim that a per-Run `DOLGORAE_*` marker reaches commands, MCP servers,
+or native subagents. A diagnostic marker, if observed, is advisory only. A
+command launched by Codex that invokes Dolgorae without the Run's Controller
+capability may use ordinary same-uid client-safe observation but cannot mutate
+that or another Run. Controller and Operator credentials are never placed in
+the workspace, prompts, argv, App Server environment, or client-safe events.
+
+Native Subagent Policy is orthogonal to both user-facing use cases. Native
+children belong to their parent Run and App Server-managed session tree. They do
+not create Independent Specialist Runs, aggregate members, Controllers, Workers,
+or writer authorities. Active or unknown native state blocks every operation
+that requires quiescence.
 
 Dolgorae uses the stable app-server API surface plus the narrowly pinned
 `item/tool/requestUserInput` capability. A connection that requires tested
@@ -2237,8 +3124,12 @@ promotes production eligibility.
 
 ## SPEC-013: External Runtime and Controller Contract
 
-The Machine CLI and optional local gRPC gateway are the two public v1 adapters.
-Both MUST call one semantic application service with identical state
+The Machine CLI and supervised local gRPC gateway are the two public v1
+adapters. The gateway is optional for finite low-level clients and required for
+any live Gul Orchestrated Session, including Standalone Primary, Brokered
+Hierarchy, and later Brokered Specialist Collaboration. The Machine CLI is the
+mandatory SR1 carrier. Both adapters MUST call one semantic application service
+with identical state
 transitions, authorization, idempotency, errors, audit effects, and safe
 projections for every overlapping operation. The CLI additionally owns
 the built-in credential-creation command, Operator-authorized profile/repair
@@ -2246,9 +3137,10 @@ operations, and path-writing export. No credential-creation RPC exists; a
 trusted same-user client may instead create a checked-schema Controller carrier
 under its capability-advertised descendant. The private per-Run worker socket, shared/dedicated App
 Server sockets, direct WebSocket transport, and Codex protocol remain private.
-V1 provides no MCP adapter, TCP listener, remote bind, direct Tailscale
+V1 provides no public MCP adapter, TCP listener, remote bind, direct Tailscale
 exposure, remote authentication, client-streaming, bidirectional streaming, or
-workspace-wide event stream.
+workspace-wide event stream. The private run-bound collaboration bridge in
+SPEC-012 is an internal control-plane transport and is not a public adapter.
 
 `runtime capabilities` and `GetCapabilities` MUST return finite machine/event/
 RPC protocol versions, accepted client range, checked descriptor SHA-256,
@@ -2281,18 +3173,32 @@ a child. A later pin must rerun the same gate; a policy change still
 requires operator-authorized profile migration. Binary-level support
 does not override a rejected or incapable profile. A run declaring a required
 capability MUST fail before allocation when that profile does not provide it.
-The stable binary feature `brokered_independent_subagent_runs` is true when the
-SPEC-012 public-adapter composition and Controller separation are implemented. A broker
-MUST require that feature before presenting the composition as supported; the
-flag does not advertise an MCP adapter, Operator authority, or parent-held
-delegation capability.
+The stable binary feature `brokered_independent_subagent_runs` retains its
+existing wire name for compatibility. It is true when SPEC-012's public-adapter
+composition, Controller separation, and durable operational records for
+Independent Specialist Runs are implemented. The internal Orchestration Broker
+and every external Specialist client MUST require that feature before presenting
+Brokered Hierarchy composition or External Specialist Engagement as supported.
+The flag does not advertise an MCP adapter, Operator authority, parent-held
+delegation capability, or ownership of an external AI's plan. Durable Brokered
+Hierarchy and External Specialist operational state are Dolgorae authorities
+defined by SPEC-012.
 
 A controller credential is a strict object conforming to the checked v1 schema.
 It contains a UUIDv7 `controller_id`, one of `human_cli`,
 `interactive_client`, `workflow_orchestrator`, `automation`, or `other`, a
-nonempty instance ID, optional subject ID, and exactly 32 random capability
-bytes encoded as unpadded base64url. Instance and subject IDs are at most 128
-and 256 UTF-8 bytes and reject NUL and control characters. The credential file
+nonempty instance ID, optional subject ID, exactly 32 random capability bytes
+encoded as unpadded base64url, and optional non-secret `orchestration_launch`
+metadata. That metadata is valid only for a `human_cli` or
+`interactive_client` credential used to create a parentless
+`direct_interactive` root. `--orchestration-policy <name>` emits
+`use_case: dolgorae_orchestrated_session` plus the explicit policy name; it is
+invalid for all other credential kinds. The metadata participates in root
+StartRun idempotency but not in Controller principal normalization or capability
+digest comparison. It is ignored for later authorization after its accepted
+snapshot is stored, is never copied into a child credential, and never grants
+membership or mutation authority. Instance and subject IDs are at most 128 and
+256 UTF-8 bytes and reject NUL and control characters. The credential file
 is caller-owned, same-uid, regular, no-symlink, mode 0600, at most 4 KiB, and
 opened before worker discovery. The inherited-fd form has the same 4 KiB bound.
 The two carriers are mutually exclusive. Dolgorae MUST strip the secret before
@@ -2339,10 +3245,11 @@ or release, pause, resume, recover, reconcile, fork, close, delete, and writer
 handoff. Controller equality requires both the controller ID and a constant-time
 comparison of the persisted capability digest. A normal fork inherits the
 controller. A mismatch is non-retryable and MUST NOT reveal whether controller
-ID or capability comparison failed. All same-uid local callers may list runs
-and read status, wait results,
-pending interaction summaries, client-safe events, writer status, verification,
-and exports without a capability. Controller metadata is visible; capability
+ID or capability comparison failed. All same-uid local callers may list Runs and read status, wait results,
+pending interaction summaries, client-safe events, writer status, and
+verification without a capability. Whole-Run export requires immediate
+Controller authorization because it may contain complete prompts, responses,
+and operational history. Controller metadata is visible; capability
 bytes and their digest are never visible. External applications own any
 authentication and authorization applied before exposing those observer results
 remotely.
@@ -2424,14 +3331,20 @@ leaves the old controller authoritative and writer state active or
 pending interaction, handoff, or unverifiable generation remains a rejection.
 Paused and `outcome_unknown` resets retain all recovery evidence.
 
-Purpose and parent metadata are opaque to Dolgorae authority behavior.
+Purpose and public parent metadata are authority-neutral.
 `purpose.kind` is the closed enum `interactive`, `planning`, `implementation`,
 `review`, `research`, `discussion`, `workflow_stage`, or `other`; an optional
-external label is at most 128 UTF-8 bytes.
-`parent_ref.namespace`, `kind`, and `id` are all-or-none, limited to 128, 64,
-and 256 UTF-8 bytes, and reject NUL/control characters. They may be used only
-for filtering, display, and audit provenance; Dolgorae MUST NOT implement
-mission, task, role, finding, review-disposition, or workflow semantics.
+external label is at most 128 UTF-8 bytes. `parent_ref.namespace`, `kind`, and
+`id` are all-or-none, limited to 128, 64, and 256 UTF-8 bytes, and reject
+NUL/control characters.
+
+`parent_ref` supports filtering, presentation, role wording, and audit
+provenance but never grants lifecycle or mutation authority. A
+`direct_interactive` Primary Run MUST NOT carry a parent reference. A
+`managed_agent` Run may carry external provenance, but Brokered Hierarchy and
+External Specialist Engagement membership are established only by the durable
+aggregate registry. Dolgorae does not implement the external AI's mission,
+task graph, findings, or review-disposition semantics.
 
 Client-safe event cursors are canonical decimal-string run-ledger sequences and
 survive observer disconnect, worker replacement, and server epoch changes.
@@ -2443,43 +3356,54 @@ make deduplication deterministic and replay MUST NOT execute a side effect.
 
 ## SPEC-014: Control Modes, Execution Lanes, and Assurance
 
-Every Run MUST durably record immutable `control_mode` and `execution_lane`
-values at creation. `control_mode` is `direct_interactive` or `managed_agent`;
-`execution_lane` is `shared_readonly` or `dedicated`. `purpose` is one of
-`interactive`, `planning`, `implementation`, `review`, `research`,
-`discussion`, `workflow_stage`, or `other`. The canonical purpose is the
-immutable object `{kind,external_label}`; the nullable label is also fixed at
-creation. Purpose is descriptive metadata and MUST NOT select or change the
-execution lane, writer authority, controller, or assurance policy.
+Every Run MUST durably record immutable `control_mode`, `execution_lane`,
+required assurance, purpose, Runtime Profile snapshot, and Agent Configuration
+snapshot at creation. `control_mode` is `direct_interactive` or `managed_agent`;
+`execution_lane` is `shared_readonly` or `dedicated`. The semantic service MUST
+reject omission and every `UNSPECIFIED` value. User-facing clients may resolve
+the low-level mapping from the selected use case, but hidden service defaults do
+not exist.
 
-A direct interactive Run accepts only a `human_cli` or `interactive_client`
-Controller and defaults to purpose `interactive`, lane `dedicated`, and
-required assurance `best_effort_personal_alpha`. It may explicitly request
-`shared_readonly`, which is permanently read-only. A managed Run accepts only
-`workflow_orchestrator` or `automation`; control mode, purpose, lane, and
-required assurance MUST all be supplied. Controller kind `other` MUST NOT bind a v1 Run. Kkotge-like
-interactive clients contain no LLM and are direct controllers, not managed
-agents.
+A Dolgorae-Orchestrated Session Primary Run uses `direct_interactive` with a
+`human_cli` or `interactive_client` Controller and no public parent reference.
+Its accepted Run ID is the session ID. An internally brokered Specialist uses
+`managed_agent` with an internal `automation` Controller, authoritative
+Orchestration Session membership, and the presentation-only parent reference
+`dolgorae.orchestrated-session.v1 / specialist / <session_id>`. An External
+Specialist Engagement uses `managed_agent` with a `workflow_orchestrator` or
+`automation` Controller and the grouping parent reference
+`dolgorae.external-specialist-engagement.v1 / specialist / <engagement_id>`.
+Generic managed workflow Runs remain valid outside either aggregate only with a
+non-reserved provenance namespace. Controller kind `other` MUST NOT bind a v1
+Run.
 
-Instructions use `dolgorae.instructions/v1`: common prefix version 1 plus mode
-prefix version 1, purpose prefix version 1, and bounded Controller instructions.
-The direct prefix routes
-normalized approvals and user input to its interactive Controller. The managed
-prefix routes low-level interactions only through its orchestrator or
-automation Controller and tells the model not to search for controller
-credentials. The Controller capability MUST remain outside prompts, developer
-instructions, model/tool input, environment, machine output, audit, events,
-diagnostics, and persisted Run state. For a shared Run, every turn additionally
-carries Codex
+`purpose` is one of `interactive`, `planning`, `implementation`, `review`,
+`research`, `discussion`, `workflow_stage`, or `other`. The canonical purpose
+is the immutable object `{kind,external_label}`. Purpose is descriptive and
+MUST NOT select or change execution lane, writer authority, Controller,
+aggregate ownership, or assurance policy.
+
+Instructions use `dolgorae.instructions/v1`: a generation-immutable common,
+mode, purpose, and role prefix plus bounded Controller instructions. Current
+access is not part of that immutable prefix. Every Turn carries a separate
+access context derived from authoritative policy and writer state, including
+`policy_epoch`. The Controller capability remains outside prompts, developer
+instructions, model or tool input, environment, machine output, audit, events,
+diagnostics, and persisted Run projections.
+
+For a shared Run, every Turn additionally carries Codex
 `collaborationMode:{mode:"plan",settings:{model:<selected>,developer_instructions:<composed>}}`,
 read-only sandbox, `networkAccess:false`, and `approvalPolicy:"never"`. Its
-immutable prefix prohibits workspace modification, privilege escalation, and
-long-lived background work, permits bounded validation under the OS temporary
-directory, and directs workspace-writing validation to a dedicated write continuation.
-This is a personal-alpha behavior boundary, not per-Run process containment.
-Observers receive only authorized
-redacted projections and MUST NOT resolve an interaction. V1 has no single-use
-observer delegation.
+behavior policy prohibits workspace modification and directs write-requiring
+validation to a Dedicated write continuation. For a Dedicated Run, a verified
+read/write transition changes only effective access and increments
+`policy_epoch`; it does not change Run generation, thread generation, thread
+identity, lane, process generation, or server epoch. This remains a personal-
+alpha behavior and coordination boundary, not hardened per-Run process
+containment.
+
+Observers receive only authorized redacted projections and MUST NOT resolve an
+interaction. V1 has no single-use observer delegation.
 
 Every persisted Run state and every machine-readable Run projection MUST pass
 both `dolgorae-run-state-v1.schema.json` and the executable normative validator
@@ -2644,6 +3568,42 @@ The public gRPC v1 surface is:
 - `ArtifactService`: unary metadata-only `GetArtifact` and bounded
   `ReadArtifactChunk`.
 
+The descriptor is frozen, but runtime method availability is capability-
+advertised. `GetCapabilities.supported_methods` MUST contain only methods whose
+full semantic and safety contract is implemented. `MILESTONE-BH1` requires the
+checked minimum Run gateway set recorded in
+`dolgorae-capabilities-v1.schema.json` and
+`dolgorae-grpc-conformance-v1.json`: capability/workspace/profile bootstrap,
+Primary Run start/get/list/submit and basic lifecycle recovery, Run event
+streaming, Controller interaction handling, basic writer status/acquire/release,
+Controller verification, and artifact metadata/bounded chunk retrieval.
+Timeline, profile diagnostics, advanced Run operations, writer handoff, delete,
+verification, and write continuation remain unavailable and unadvertised until
+`TASK-010-A`. A client
+MUST fail closed rather than call an unadvertised method. `MILESTONE-PA1`
+requires the complete descriptor method set.
+
+The checked public v1 Protobuf and descriptor remain unchanged by the two-use-
+case and internal-broker revision. Gul uses the existing Run surface and a protected Controller carrier containing
+explicit Orchestration Launch Intent to create and control the
+`direct_interactive` Primary Run. The semantic service resolves the named
+Specialist Policy and creates the matching Orchestration Session and Aggregate
+Bootstrap Operation before the Run is published. Dolgorae's internal Orchestration Broker uses protected
+internal credentials and the same semantic Run operations to provision and
+supervise brokered Specialists. Gul MUST NOT become the authority for Brokered
+Hierarchy membership, spawn state, or result-delivery recovery. It may
+reconstruct presentation through `ListRuns`, reserved parent projections, and
+root/member Run observations, while Dolgorae's orchestration SQLite state and
+event log remain authoritative.
+
+An external AI opens and operates an External Specialist Engagement through the
+private External Specialist Facade, which compiles each hire and task into the
+same semantic Run core. A raw public `managed_agent` StartRun does not infer
+engagement membership. Dolgorae persists the accepted Specialist boundary but
+MUST NOT persist or execute an additional external task graph. Future aggregate-
+query RPCs, if needed, are additive v1 extensions and do not alter this
+release's checked wire shape.
+
 Workspace initialization, profile mutation/lifecycle, Operator-authorized
 reset/repair/migration, and server-side filesystem export MUST remain Machine
 CLI-only. Controller credential creation has no gRPC method, but a trusted
@@ -2662,6 +3622,12 @@ diagnostic text to derive either rule.
 Method availability is capability-advertised;
 absence from gRPC MUST NOT create an alternate semantic rule. There is no
 client-streaming or bidirectional RPC in v1.
+
+`StartRun` MUST reject `CONTROL_MODE_UNSPECIFIED`,
+`EXECUTION_LANE_UNSPECIFIED`, `ASSURANCE_LEVEL_UNSPECIFIED`, and absent purpose
+before allocating a Run. Gul and external-AI adapters may choose explicit values
+from their selected use case, but the semantic request is complete and
+deterministic.
 
 `GetCapabilities` MUST also return typed Dolgorae/protocol versions, descriptor
 digest, supported methods, transports, control modes, lanes, assurance and lane
@@ -2842,7 +3808,10 @@ original destination Run; any identity drift returns typed
 
 Interaction summaries MUST use typed kind/status/Controller kind and include
 creation, nullable expiry, and nullable resolution timestamps; absent expiry
-means the provider supplied no deadline. `ControllerInteraction` MUST select
+means the provider supplied no deadline. `user_escalation_required` is
+`true` exactly while a supported Interaction is `pending` and `false` for
+`resolved` or `stale`; it is a deterministic delivery signal, not a prediction
+about whether a human will answer. `ControllerInteraction` MUST select
 exactly one typed payload matching `summary.kind`: command approval, file-change
 approval, user input, or recognized unsupported Interaction. Permission and MCP
 elicitation requests map to the unsupported payload; unavailable connector
@@ -2948,22 +3917,23 @@ evidence kind, and source revision.
 
 | Runtime case ID | Owner | Required evidence | Evidence verifier |
 |---|---|---|---|
-| `slow_consumer_isolation` | `TASK-010-A` | `multi_run_pressure_e2e` | `tools/probes/verify_slow_consumer_isolation.py` |
-| `protected_interaction_lost_response` | `TASK-010-A` | `secret_canary_and_fault_barrier` | `tools/probes/verify_protected_interaction_lost_response.py` |
-| `gateway_restart` | `TASK-010-A` | `active_run_restart_e2e` | `tools/probes/verify_gateway_restart.py` |
-| `socket_ownership` | `TASK-010-A` | `macos_uds_attack_matrix` | `tools/probes/verify_socket_ownership.py` |
-| `private_boundary` | `TASK-015` | `real_gul_harness` | `tools/probes/verify_private_boundary.py` |
-| `run_configuration_restart` | `TASK-010-A` | `accepted_configuration_restart_e2e` | `tools/probes/verify_run_configuration_restart.py` |
-| `start_run_allocation_replay` | `TASK-010-A` | `allocation_loss_conflict_and_tombstone_e2e` | `tools/probes/verify_start_run_allocation_replay.py` |
-| `interaction_size_and_secret_barrier` | `TASK-010-A` | `preparse_bound_and_no_secret_replay_e2e` | `tools/probes/verify_interaction_size_and_secret_barrier.py` |
-| `event_revision_action_barrier` | `TASK-010-A` | `stale_aggregate_action_e2e` | `tools/probes/verify_event_revision_action_barrier.py` |
+| `slow_consumer_isolation` | `TASK-009-D1A` | `multi_run_pressure_e2e` | `tools/probes/verify_slow_consumer_isolation.py` |
+| `protected_interaction_lost_response` | `TASK-009-D1A` | `secret_canary_and_fault_barrier` | `tools/probes/verify_protected_interaction_lost_response.py` |
+| `gateway_restart` | `TASK-009-D1A` | `active_run_restart_e2e` | `tools/probes/verify_gateway_restart.py` |
+| `socket_ownership` | `TASK-009-D1A` | `macos_uds_attack_matrix` | `tools/probes/verify_socket_ownership.py` |
+| `private_boundary` | `TASK-009-E1` | `real_gul_harness` | `tools/probes/verify_private_boundary.py` |
+| `run_configuration_restart` | `TASK-009-D1A` | `accepted_configuration_restart_e2e` | `tools/probes/verify_run_configuration_restart.py` |
+| `start_run_allocation_replay` | `TASK-009-D1A` | `allocation_loss_conflict_and_tombstone_e2e` | `tools/probes/verify_start_run_allocation_replay.py` |
+| `interaction_size_and_secret_barrier` | `TASK-009-D1A` | `preparse_bound_and_no_secret_replay_e2e` | `tools/probes/verify_interaction_size_and_secret_barrier.py` |
+| `event_revision_action_barrier` | `TASK-009-D1A` | `stale_aggregate_action_e2e` | `tools/probes/verify_event_revision_action_barrier.py` |
 | `lossless_non_utf8_path` | `TASK-013` | `opaque_path_cross_adapter_e2e` | `tools/probes/verify_lossless_non_utf8_path.py` |
-| `threadless_first_write_runtime` | `TASK-010-A` | `threadless_submit_writer_activation_e2e` | `tools/probes/verify_threadless_first_write_runtime.py` |
+| `threadless_first_write_runtime` | `TASK-009-D1A` | `threadless_submit_writer_activation_e2e` | `tools/probes/verify_threadless_first_write_runtime.py` |
 
 ## External Protocol References
 
 - [Official Codex app-server documentation](https://learn.chatgpt.com/docs/app-server)
 - [Official Codex subagents documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents)
+- [MCP 2026-07-28 Base Protocol](https://modelcontextprotocol.io/specification/2026-07-28/basic)
 
 These references describe Codex behavior. Dolgorae-specific policy in this SOT
 remains authoritative for Dolgorae.

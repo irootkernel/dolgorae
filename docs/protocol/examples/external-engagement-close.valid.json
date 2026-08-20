@@ -1,0 +1,7 @@
+{
+  "operation": "close_external_engagement",
+  "engagement_id": "018f0000-0000-7000-8000-000000003002",
+  "mode": "complete",
+  "idempotency_key": "session-42/close",
+  "reason": "The external workflow is complete."
+}

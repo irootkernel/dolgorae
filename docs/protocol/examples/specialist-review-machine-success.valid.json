@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "specialist.review",
+  "invocation_id": "018f0000-0000-7000-8000-000000006010",
+  "data": {
+    "operation": "review_working_tree_result",
+    "review_id": "018f0000-0000-7000-8000-000000006001",
+    "reviewer_run_id": "018f0000-0000-7000-8000-000000006002",
+    "state": "completed",
+    "summary": "The change has one correctness defect and one missing regression test.",
+    "findings": [
+      {
+        "severity": "P1",
+        "title": "Cancellation can publish a stale success result",
+        "description": "The completion path can commit success after cancellation wins the lifecycle race.",
+        "path": "internal/review/coordinator.rs",
+        "line_start": 184,
+        "line_end": 211,
+        "recommendation": "Gate result commit on the authoritative task lifecycle revision and add a cancellation race test.",
+        "confidence": "high"
+      },
+      {
+        "severity": "P2",
+        "title": "No regression test covers duplicate tool-call retry",
+        "description": "The adapter has no test proving that transport retry returns the original review identity.",
+        "path": "tests/specialist_review.rs",
+        "line_start": null,
+        "line_end": null,
+        "recommendation": "Add a same-tool-call retry test and assert one Reviewer Run and one result artifact.",
+        "confidence": "medium"
+      }
+    ],
+    "result_artifact_ref": "018f0000-0000-7000-8000-000000006003",
+    "workspace_write_observed": false
+  }
+}

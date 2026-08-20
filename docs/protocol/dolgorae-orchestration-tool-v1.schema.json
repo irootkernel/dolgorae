@@ -1,0 +1,809 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/orchestration-tool/v1",
+  "title": "Dolgorae private Primary orchestration tool v1",
+  "description": "Private run-bound tool payloads for a Primary Agent. Session, source Run, source Turn, tool-call identity, Controller authority, and idempotency are bound out of band and are deliberately absent from model-controlled requests.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request_specialist_request"
+    },
+    {
+      "$ref": "#/$defs/request_specialist_result"
+    },
+    {
+      "$ref": "#/$defs/await_operations_request"
+    },
+    {
+      "$ref": "#/$defs/await_operations_result"
+    },
+    {
+      "$ref": "#/$defs/list_specialists_request"
+    },
+    {
+      "$ref": "#/$defs/list_specialists_result"
+    },
+    {
+      "$ref": "#/$defs/assign_task_request"
+    },
+    {
+      "$ref": "#/$defs/assign_task_result"
+    },
+    {
+      "$ref": "#/$defs/await_tasks_request"
+    },
+    {
+      "$ref": "#/$defs/await_tasks_result"
+    },
+    {
+      "$ref": "#/$defs/collect_results_request"
+    },
+    {
+      "$ref": "#/$defs/collect_results_result"
+    },
+    {
+      "$ref": "#/$defs/cancel_task_request"
+    },
+    {
+      "$ref": "#/$defs/cancel_task_result"
+    },
+    {
+      "$ref": "#/$defs/release_request"
+    },
+    {
+      "$ref": "#/$defs/release_result"
+    },
+    {
+      "$ref": "#/$defs/error_result"
+    }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "x-maxUtf8Bytes": 256
+    },
+    "target_selector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/uuid7"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role_ref"
+          ],
+          "properties": {
+            "role_ref": {
+              "$ref": "#/$defs/bounded_text"
+            }
+          }
+        }
+      ]
+    },
+    "request_specialist_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "role_ref",
+        "objective",
+        "expected_output",
+        "requested_access",
+        "deadline_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "request_specialist"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/bounded_text"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "expected_output": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 512
+          }
+        },
+        "requested_access": {
+          "enum": [
+            "read_only",
+            "isolated_write",
+            "canonical_workspace_write"
+          ]
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    },
+    "specialist_operation_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "role_ref",
+        "state",
+        "specialist_run_id",
+        "approval_request_id",
+        "reused",
+        "safe_error_code"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/bounded_text"
+        },
+        "state": {
+          "enum": [
+            "awaiting_approval",
+            "requested",
+            "provisioning",
+            "ready",
+            "denied",
+            "failed",
+            "cancelled",
+            "recovery_required"
+          ]
+        },
+        "specialist_run_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approval_request_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reused": {
+                "const": true
+              }
+            },
+            "required": [
+              "reused"
+            ]
+          },
+          "then": {
+            "properties": {
+              "state": {
+                "const": "ready"
+              },
+              "specialist_run_id": {
+                "$ref": "#/$defs/uuid7"
+              },
+              "safe_error_code": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "awaiting_approval",
+                  "denied"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "specialist_run_id": {
+                "type": "null"
+              },
+              "approval_request_id": {
+                "$ref": "#/$defs/uuid7"
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "reused true returns the existing member original spawn operation ID and creates no new spawn operation",
+        "the Primary Run tool-call result ledger is the idempotency authority for a reuse decision",
+        "awaiting_approval and denied have no Specialist Run identity",
+        "approval_request_id is retained after approval in user_approval_required sessions"
+      ]
+    },
+    "request_specialist_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "specialist_operation"
+      ],
+      "properties": {
+        "operation": {
+          "const": "request_specialist_result"
+        },
+        "specialist_operation": {
+          "$ref": "#/$defs/specialist_operation_summary"
+        }
+      }
+    },
+    "await_operations_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "operation_ids",
+        "return_when",
+        "transport_wait_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_specialist_operations"
+        },
+        "operation_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "return_when": {
+          "enum": [
+            "any",
+            "all"
+          ]
+        },
+        "transport_wait_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "await_operations_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "operations",
+        "pending"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_specialist_operations_result"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/specialist_operation_summary"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        }
+      }
+    },
+    "list_specialists_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation"
+      ],
+      "properties": {
+        "operation": {
+          "const": "list_specialists"
+        }
+      }
+    },
+    "specialist_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "role_ref",
+        "membership_state",
+        "actor_residency",
+        "task_state"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "role_ref": {
+          "$ref": "#/$defs/bounded_text"
+        },
+        "membership_state": {
+          "enum": [
+            "provisioning",
+            "active",
+            "degraded",
+            "retiring",
+            "retired"
+          ]
+        },
+        "actor_residency": {
+          "enum": [
+            "unstarted",
+            "resident",
+            "passivating",
+            "passivated",
+            "activating",
+            "recovering",
+            "unavailable",
+            "terminal"
+          ]
+        },
+        "task_state": {
+          "enum": [
+            "idle",
+            "queued",
+            "running",
+            "waiting",
+            "unavailable"
+          ]
+        }
+      }
+    },
+    "list_specialists_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "specialists"
+      ],
+      "properties": {
+        "operation": {
+          "const": "list_specialists_result"
+        },
+        "specialists": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/specialist_summary"
+          }
+        }
+      }
+    },
+    "assign_task_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "target",
+        "objective",
+        "context_refs",
+        "expected_output",
+        "execution_intent",
+        "blocking",
+        "deadline_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "assign_specialist_task"
+        },
+        "target": {
+          "$ref": "#/$defs/target_selector"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "context_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "expected_output": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 512
+          }
+        },
+        "execution_intent": {
+          "enum": [
+            "read_only",
+            "isolated_write",
+            "canonical_workspace_write"
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        }
+      }
+    },
+    "assign_task_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "target_run_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "assign_specialist_task_result"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "target_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "queued",
+            "claimed",
+            "dispatching",
+            "running"
+          ]
+        }
+      }
+    },
+    "task_result_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "state",
+        "target_run_id",
+        "result_artifact_ref",
+        "safe_error_code"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted_unknown",
+            "expired"
+          ]
+        },
+        "target_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "result_artifact_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "await_tasks_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_ids",
+        "return_when",
+        "transport_wait_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_specialist_tasks"
+        },
+        "task_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        },
+        "return_when": {
+          "enum": [
+            "any",
+            "all"
+          ]
+        },
+        "transport_wait_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "await_tasks_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "pending"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_specialist_tasks_result"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task_result_summary"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uuid7"
+          }
+        }
+      }
+    },
+    "collect_results_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "limit"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_specialist_results"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "collect_results_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_specialist_results_result"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task_result_summary"
+          }
+        }
+      }
+    },
+    "release_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "run_id",
+        "reason"
+      ],
+      "properties": {
+        "operation": {
+          "const": "release_specialist"
+        },
+        "run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      }
+    },
+    "release_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "run_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "release_specialist_result"
+        },
+        "run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "retiring",
+            "retired",
+            "rejected"
+          ]
+        }
+      }
+    },
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "code",
+        "retryable",
+        "message"
+      ],
+      "properties": {
+        "operation": {
+          "const": "orchestration_error"
+        },
+        "code": {
+          "enum": [
+            "ORCHESTRATION_NOT_AVAILABLE",
+            "ORCHESTRATION_TRANSPORT_UNAVAILABLE",
+            "ORCHESTRATION_IDEMPOTENCY_CONFLICT",
+            "SPECIALIST_APPROVAL_REQUIRED",
+            "SPECIALIST_REQUEST_DENIED",
+            "SPECIALIST_ROLE_UNAVAILABLE",
+            "SPECIALIST_POLICY_DENIED",
+            "SPECIALIST_NOT_ACTIVE",
+            "SPECIALIST_TASK_LIMIT",
+            "SPECIALIST_WRITER_CONFLICT",
+            "TARGET_RUN_TERMINAL",
+            "INTERRUPTED_UNKNOWN",
+            "SPECIALIST_TASK_NOT_FOUND",
+            "SPECIALIST_TASK_NOT_CANCELLABLE"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      }
+    },
+    "cancel_task_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "reason"
+      ],
+      "properties": {
+        "operation": {
+          "const": "cancel_specialist_task"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      }
+    },
+    "cancel_task_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "state"
+      ],
+      "properties": {
+        "operation": {
+          "const": "cancel_specialist_task_result"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "cancelled",
+            "interrupt_requested",
+            "interrupted_unknown",
+            "already_terminal"
+          ]
+        }
+      }
+    }
+  },
+  "x-privateTransport": "run-bound MCP bridge; not part of dolgorae.public.v1",
+  "x-transportBoundFields": [
+    "orchestrated_session_id",
+    "source_primary_run_id",
+    "source_turn_id",
+    "source_tool_call_id",
+    "controller_principal",
+    "root_priority",
+    "idempotency_key"
+  ]
+}

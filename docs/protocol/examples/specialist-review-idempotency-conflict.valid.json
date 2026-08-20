@@ -1,0 +1,9 @@
+{
+  "operation": "specialist_review_error",
+  "review_id": "018f0000-0000-7000-8000-000000006001",
+  "code": "IDEMPOTENCY_CONFLICT",
+  "message": "The external request reference was reused with different normalized input.",
+  "retryable": false,
+  "required_action": "fix_host_request_carrier",
+  "external_request_ref": "018f0000-0000-7000-8000-000000006020"
+}
