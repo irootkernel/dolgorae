@@ -1,7 +1,7 @@
 # Dolgorae Roadmap
 
-Status: Ordered implementation roadmap. `EPIC-000` remains in
-`IN_REVIEW` for `TASK-000-H`. `EPIC-002A` is the first user-usable product
+Status: Ordered implementation roadmap. `EPIC-000` and `TASK-000-H` are
+`COMPLETE`; `EPIC-001` and `TASK-001` are `ACTIVE`. `EPIC-002A` is the first user-usable product
 slice. Completing it unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -16,8 +16,8 @@ transport-independent Dolgorae orchestration core and Brokered Hierarchy, live
 Primary control-plane integration, and finally the durable Collaboration Plane. `TASK-009-E0` remains the live run-bound
 transport probe and occurs only after the Brokered Hierarchy core is complete.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
-matches the accepted product contract. `TASK-001` remains `PLANNED` and is not
-eligible for activation until `TASK-000-H` completes.
+matches the accepted product contract. `TASK-001` is the active implementation
+task after completion of the full pre-implementation stabilization gate.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -91,7 +91,7 @@ Push always requires separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
-Status: `IN_REVIEW`
+Status: `COMPLETE`
 
 Goal: Retire external protocol uncertainty and make the product, architecture,
 and roadmap deterministic before production implementation begins.
@@ -427,7 +427,7 @@ inferred from this superseded state.
 
 ### TASK-000-H: User-Case and Internal Contract Reconciliation
 
-Status: `IN_REVIEW`
+Status: `COMPLETE`
 
 Reconcile the active SOT around exactly two user-facing use cases:
 Dolgorae-Orchestrated Session and External Specialist Engagement. Preserve
@@ -506,14 +506,14 @@ until this gate completes.
 
 ## EPIC-001: Foundation and Durable State
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Goal: Establish the Rust program, stable machine contract, workspace policy,
 and audit-first run storage on which every process operation depends.
 
 ### TASK-001: Rust CLI and Core Contract
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Implement the Rust 2024 binary skeleton, command parser, UUIDv7 identities,
 stable JSON success/error envelopes, exit-status mapping, typed lifecycle, aggregate, control-mode, purpose, execution-lane,
