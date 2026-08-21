@@ -4,7 +4,6 @@
   "title": "Dolgorae disposable Run ledger projection v1",
   "type": "object",
   "additionalProperties": false,
-  "x-semanticValidator": "tools/validators/validate_task003b_ledger.py#validate_state",
   "required": [
     "schema_version",
     "run_id",

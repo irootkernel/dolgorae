@@ -4,7 +4,6 @@
   "title": "Dolgorae immutable Run manifest v1",
   "type": "object",
   "additionalProperties": false,
-  "x-semanticValidator": "tools/validators/validate_task003a_records.py#validate_manifest",
   "required": [
     "schema_version",
     "run_id",

@@ -696,11 +696,6 @@ The selected Runtime Profile must explicitly acknowledge
 `native_subagents: enabled`; v1 does not claim disable enforcement for Codex
 0.147.0.
 
-The complete communication map is summarized in the derived
-[use-case and topology terminology guide](agent-topology-terminology.md). The
-runtime mailbox, scheduling, activation, and recovery design is summarized in
-[brokered-specialist-collaboration.md](brokered-specialist-collaboration.md).
-
 Instruction composition is split into a generation-immutable role and behavior
 contract and a Turn-scoped access context. The immutable contract does not
 contain current access. Each Turn receives authoritative access, writer facts,
@@ -870,8 +865,7 @@ timeout, and one workspace mutation owner. A hash-chained append-only
 `orchestration_event` table commits with state changes. `orchestration/state.json`
 and JSONL exports are replaceable materializations validated against
 [`dolgorae-orchestration-state-v1.schema.json`](protocol/dolgorae-orchestration-state-v1.schema.json)
-and the executable semantic validator
-[`validate_orchestration_state_v1.py`](protocol/validators/validate_orchestration_state_v1.py).
+with cross-object invariants enforced by the Rust orchestration implementation.
 
 The state owner creates an External Specialist Engagement entirely inside one
 SQLite transaction. Orchestrated Session bootstrap coordinates SQLite with the

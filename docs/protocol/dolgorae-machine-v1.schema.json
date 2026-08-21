@@ -772,7 +772,6 @@
     },
     "run": {
       "type": "object",
-      "x-semanticValidator": "tools/validators/validate_run_projection_v1.py#validate_run_projection_v1",
       "additionalProperties": false,
       "required": [
         "workspace_id",

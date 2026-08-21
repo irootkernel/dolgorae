@@ -286,9 +286,7 @@ Dolgorae Specialist. The external control plane hires additional roles directly.
 
 Runtime Profile selection never selects agent character. The complete immutable
 Agent Configuration snapshot defines the role used by a Primary or Specialist
-Run. Native Subagent Policy is orthogonal to both use cases. The derived
-[use-case and topology guide](agent-topology-terminology.md) provides examples
-without owning this contract.
+Run. Native Subagent Policy is orthogonal to both use cases.
 
 ## SPEC-001: Product Boundary and Supported Environment
 
@@ -3067,9 +3065,9 @@ The checked `dolgorae-orchestration-state-v1.schema.json` owns the exported
 materialized shape for aggregate bootstrap operations, both aggregates,
 membership, spawn or hire operations, Specialist tasks, collaboration exchanges,
 mailbox items, and activation
-operations. Cross-object validity is owned by the executable
-`protocol/validators/validate_orchestration_state_v1.py`; schema-only acceptance
-is insufficient. At minimum the SQLite authority records:
+operations. The Rust orchestration implementation owns cross-object validity;
+the JSON Schema validates only the exported structure. At minimum the SQLite
+authority records:
 
 - aggregate bootstrap operation ID, kind, idempotency key, request digest,
   provenance, state, and timestamps;
@@ -3470,19 +3468,12 @@ containment.
 Observers receive only authorized redacted projections and MUST NOT resolve an
 interaction. V1 has no single-use observer delegation.
 
-Every persisted Run state and every machine-readable Run projection MUST pass
-both `dolgorae-run-state-v1.schema.json` and the executable normative validator
-`tools/validators/run_state_semantic_validator_v1.py` after extracting the
-shared state fields. Machine projections additionally pass
-`tools/validators/validate_run_projection_v1.py` with authoritative policy,
-selected-server, shared-server, and lineage context.
-Schema-only acceptance is insufficient; persistence and projection fail closed
-when the validator rejects any cross-field invariant.
-The module's `validate_run_state_v1` helper checks structural cross-fields for
-fixtures only. The normative persistence CLI calls
-`validate_authoritative_run_state_v1`, which requires committed-policy and
-selected-server context and, for lineage, authoritative source/workspace and
-destination identity. Missing context is rejection, never an omitted check.
+Every persisted Run state and every machine-readable Run projection MUST match
+`dolgorae-run-state-v1.schema.json`. The Rust persistence and projection paths
+additionally enforce cross-field invariants with authoritative policy,
+selected-server, shared-server, and lineage context. Missing context is
+rejection, never an omitted check. JSON Schema validation alone is insufficient
+for these runtime decisions.
 
 One profile owns one shared read-only logical lane and zero or more dedicated
 logical lanes. A shared Run's persistent thread is loaded only in the shared
@@ -3975,24 +3966,22 @@ socket.
 
 Public-v1 freeze is gated by this normative runtime inventory. The checked
 conformance registry may mirror these rows but may not add, remove, rename, or
-reassign one. A closure artifact is valid only when its listed verifier exists,
-its SHA-256 is recorded, and executing that verifier with
-`--verify-evidence <artifact>` returns `ok:true` for the same case ID, owner,
-evidence kind, and source revision.
+reassign one. A release is valid only when each listed black-box test exists
+and passes for the release candidate.
 
-| Runtime case ID | Owner | Required evidence | Evidence verifier |
+| Runtime case ID | Owner | Required test | Test path |
 |---|---|---|---|
-| `slow_consumer_isolation` | `TASK-009-D1A` | `multi_run_pressure_e2e` | `tools/probes/verify_slow_consumer_isolation.py` |
-| `protected_interaction_lost_response` | `TASK-009-D1A` | `secret_canary_and_fault_barrier` | `tools/probes/verify_protected_interaction_lost_response.py` |
-| `gateway_restart` | `TASK-009-D1A` | `active_run_restart_e2e` | `tools/probes/verify_gateway_restart.py` |
-| `socket_ownership` | `TASK-009-D1A` | `macos_uds_attack_matrix` | `tools/probes/verify_socket_ownership.py` |
-| `private_boundary` | `TASK-009-E1` | `real_gul_harness` | `tools/probes/verify_private_boundary.py` |
-| `run_configuration_restart` | `TASK-009-D1A` | `accepted_configuration_restart_e2e` | `tools/probes/verify_run_configuration_restart.py` |
-| `start_run_allocation_replay` | `TASK-009-D1A` | `allocation_loss_conflict_and_tombstone_e2e` | `tools/probes/verify_start_run_allocation_replay.py` |
-| `interaction_size_and_secret_barrier` | `TASK-009-D1A` | `preparse_bound_and_no_secret_replay_e2e` | `tools/probes/verify_interaction_size_and_secret_barrier.py` |
-| `event_revision_action_barrier` | `TASK-009-D1A` | `stale_aggregate_action_e2e` | `tools/probes/verify_event_revision_action_barrier.py` |
-| `lossless_non_utf8_path` | `TASK-013` | `opaque_path_cross_adapter_e2e` | `tools/probes/verify_lossless_non_utf8_path.py` |
-| `threadless_first_write_runtime` | `TASK-009-D1A` | `threadless_submit_writer_activation_e2e` | `tools/probes/verify_threadless_first_write_runtime.py` |
+| `slow_consumer_isolation` | `TASK-009-D1A` | `multi_run_pressure_e2e` | `tests/e2e/test_slow_consumer_isolation.py` |
+| `protected_interaction_lost_response` | `TASK-009-D1A` | `secret_canary_and_fault_barrier` | `tests/e2e/test_protected_interaction_lost_response.py` |
+| `gateway_restart` | `TASK-009-D1A` | `active_run_restart_e2e` | `tests/e2e/test_gateway_restart.py` |
+| `socket_ownership` | `TASK-009-D1A` | `macos_uds_attack_matrix` | `tests/e2e/test_socket_ownership.py` |
+| `private_boundary` | `TASK-009-E1` | `real_gul_harness` | `tests/e2e/test_private_boundary.py` |
+| `run_configuration_restart` | `TASK-009-D1A` | `accepted_configuration_restart_e2e` | `tests/e2e/test_run_configuration_restart.py` |
+| `start_run_allocation_replay` | `TASK-009-D1A` | `allocation_loss_conflict_and_tombstone_e2e` | `tests/e2e/test_start_run_allocation_replay.py` |
+| `interaction_size_and_secret_barrier` | `TASK-009-D1A` | `preparse_bound_and_no_secret_replay_e2e` | `tests/e2e/test_interaction_size_and_secret_barrier.py` |
+| `event_revision_action_barrier` | `TASK-009-D1A` | `stale_aggregate_action_e2e` | `tests/e2e/test_event_revision_action_barrier.py` |
+| `lossless_non_utf8_path` | `TASK-013` | `opaque_path_cross_adapter_e2e` | `tests/e2e/test_lossless_non_utf8_path.py` |
+| `threadless_first_write_runtime` | `TASK-009-D1A` | `threadless_submit_writer_activation_e2e` | `tests/e2e/test_threadless_first_write_runtime.py` |
 
 ## External Protocol References
 

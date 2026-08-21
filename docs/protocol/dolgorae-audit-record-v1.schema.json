@@ -4,7 +4,6 @@
   "title": "Dolgorae canonical audit ledger record v1",
   "type": "object",
   "additionalProperties": false,
-  "x-semanticValidator": "tools/validators/validate_task003a_records.py#validate_audit_record",
   "required": [
     "schema_version",
     "sequence",

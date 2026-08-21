@@ -16,7 +16,9 @@ def main() -> int:
     errors: list[str] = []
     checked_links = 0
     checked_files = 0
-    for path in sorted((ROOT / "docs").rglob("*.md")):
+    paths = [ROOT / "README.md", ROOT / "CONTRIBUTING.md"]
+    paths.extend(sorted((ROOT / "docs").rglob("*.md")))
+    for path in paths:
         checked_files += 1
         text = path.read_text(encoding="utf-8")
         fence: tuple[str, int] | None = None

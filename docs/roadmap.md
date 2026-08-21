@@ -21,7 +21,7 @@ transport probe and occurs only after the Brokered Hierarchy core is complete.
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
 replay, projection, and observer-publication work. EPIC-001 completed after its
-deferred-feedback hardening and Epic-level acceptance checks passed.
+Epic-level acceptance checks passed.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -62,10 +62,10 @@ Allowed Epic and Task states are `PLANNED`, `ACTIVE`, `IN_REVIEW`, `BLOCKED`,
 - A Task may become active only after all preceding Tasks are complete and all
   SOT contradictions affecting it are resolved.
 - A hyphen-suffixed stabilization Task such as `TASK-000-A` may be inserted
-  between production Tasks to resolve later review findings. It may create only
-  SOT, checked schemas, toolchain policy, test/fake/probe fixtures, evidence, dispositions,
-  and review artifacts, never production code. It uses the ordinary completion
-  gate and does not rewrite the historical status of an earlier completed Task.
+  between production Tasks to resolve later findings. It may create only SOT,
+  checked schemas, toolchain policy, and test fixtures, never production code.
+  It uses the ordinary completion gate and does not rewrite the historical
+  status of an earlier completed Task.
 - An Epic becomes complete only when all of its Tasks and Epic-level acceptance
   checks are complete.
 
@@ -80,15 +80,10 @@ A Task is `COMPLETE` only when all of the following are true:
    recovery, process identity, locking, audit bytes, or external protocol
    semantics additionally requires a stated adversarial attack budget and
    empirical verification of every normative OS/external behavior it introduces.
-5. Every blocking finding is fixed in SOT text or a checked artifact, or
-   rejected with evidence, and independently confirmed as resolved. A statement
-   present only in disposition prose is not implemented.
-6. Non-blocking findings are recorded in
-   [deferred-feedback.md](deferred-feedback.md).
-7. An [implementation note](implementation-notes.md) records the evidence, and
-   [review history](reviews/README.md) indexes the preserved input,
-   disposition, and closure artifacts.
-8. One or more task-scoped Git commits are linked from that note.
+5. Every blocking finding is fixed in the owning SOT, implementation, or checked
+   artifact, or rejected with independently verified rationale.
+6. Deferred findings are assigned to an owning roadmap task or public issue.
+7. One or more task-scoped Git commits contain the completed change.
 
 This gate does not prescribe how an implementer divides commits or stages files.
 Push always requires separate explicit user authorization.
@@ -97,416 +92,22 @@ Push always requires separate explicit user authorization.
 
 Status: `COMPLETE`
 
-Goal: Retire external protocol uncertainty and make the product, architecture,
-and roadmap deterministic before production implementation begins.
+EPIC-000 established the product boundary, architecture, public protocol,
+workspace model, controller and writer authority, run-state projection, and
+external compatibility baseline used by implementation. Its stabilization tasks
+`TASK-000` through `TASK-000-H` are complete or superseded as recorded below.
 
-### TASK-000: Architecture Reconciliation and Codex Probe
-
-Status: `COMPLETE`
-
-Reconcile the then-current writer-lock contract, stale-generation cleanup, runtime discovery,
-`outcome_unknown`, audit encoding/redaction/durability, protocol bounds, public
-error mapping, worktree identity, and worker detachment contracts. Run isolated
-probes against the pinned Codex 0.147.0 profile for crash-history durability,
-stable sandbox read/write enforcement, native-subagent event visibility, and
-generated schema shape. Also measure bounded real frame sizes and exercise a
-workspace-write crash followed by live `thread/read` and
-`thread/fork(lastTurnId)`. Verify advertised effort behavior, turnless-thread
-persistence limits, post-turn resume/history, active `turn/interrupt`, and the
-macOS lock/process semantics used by recovery. Preserve bounded, redacted fixtures and record every
-`review.md` finding as fixed, rejected with evidence, or deferred. Working
-results live in [TASK-000 probe evidence](probes/task-000.md).
-
-Verification: parse and link-check every SOT document; verify the generated
-schema contains the required stable subset; run repeatable isolated protocol
-probes with recorded commands and versions; compile and run the durable macOS
-OS-semantics probe; independently review all revised contracts and probe
-evidence with an adversarial concurrency/recovery pass. If crash history lacks terminal evidence, record
-that recovery converges to `outcome_unknown` and fork rather than weakening the
-no-replay rule.
-
-Task acceptance: all blocking pre-implementation findings are resolved, probe
-results and limitations are durable, the Task completion gate passes, and no
-production source has been introduced. Only then may `TASK-001` become active.
-
-### TASK-000-A: Round-4 Contract and Probe Closure
-
-Status: `COMPLETE`
-
-Preserve the immutable Round-4 input; resolve every C/H/M/L finding in a checked
-owner disposition; add machine-output and Codex required-subset schemas; pin the
-toolchain and Darwin dependency boundary; harden shared probes; and update the
-downstream roadmap so every normative mechanism has an owning deterministic
-fixture.
-
-Verification: all checked schemas validate; durable probes pass against Codex
-0.147.0 with Python/clang/SDK recorded; macOS tests cover kqueue,
-`proc_listpgrppids` units, `MNT_LOCAL`, lock descriptor/inode behavior, and
-spawn attributes; an independent reviewer spends at least 40 stated adversarial
-scenarios across wire, audit, identity, locking, cleanup, and traceability and
-returns no unresolved findings.
-
-Task acceptance: NOTE-002 links the immutable-input and implementation commits,
-every Round-4 row has a disposition and evidence, no production source exists,
-and TASK-001 remains planned until this Task is complete.
-
-### TASK-000-B: Round-5 Contract, Traceability, and Probe Closure
-
-Status: `COMPLETE`
-
-Preserve the immutable Round-5 input and create one owner-disposition row per
-finding. Reconcile spawn-image identity, APFS/firmlink workspace identity,
-volatile sockets, absolute Git writable roots, timed locks, fail-closed worker
-attachment, version-skew shutdown, interrupt expiry, fork boundaries, manifest
-comparison/notifications, machine-output evolution, JSON ingest, export
-snapshots, redaction digits, and access-generation semantics. Add the checked
-requirement reverse index and one offline/live probe entry point. Test fixtures
-and the fake app-server are lawful stabilization outputs; production Rust is
-not.
-
-Verification: the Round-5 P-1 through P-12 campaign (with byte-1 takeover
-replaced by a no-signal fail-closed case and unsupported filesystems rejected),
-all checked-schema/error/manifest cross-validation, requirement-index coverage,
-Markdown/static checks, and an independent refutation-first review by a lane
-that did not author the disposition. The review must include crash-recover-
-resume, contested attachment, SIGTERM/approval-expiry, artifact-level schema
-inspection, at least 40 recorded counter-searches, and target-platform empirical
-checks. Live Codex observations and local performance measurements are recorded
-as bounded secret-free evidence.
-
-Task acceptance: every Round-5 row is individually verified or rejected with
-evidence, no fix exists only in disposition prose, all required live/offline
-gates pass, NOTE-003 links task-scoped commits, no production source exists, and
-TASK-001 remains planned. These conditions were independently confirmed at
-`aacb1b2`; TASK-000-B is complete.
-
-### TASK-000-C: Singleton, Local-State, and Writer Contract Stabilization
-
-Status: `COMPLETE`
-
-Replace the pre-implementation per-run server and target vocabulary with
-profile-scoped singleton, project-local state, and cross-profile lazy-writer
-contracts before production TASK-001 begins. This Task changes documentation
-and checked protocol artifacts only. Its completed scope comprises the three
-phases below.
-
-#### Named Profiles and App-Server Singleton
-
-Define generic named profiles, one compatible app-server singleton per canonical
-`CODEX_HOME`, exclusive per-run connections, profile-wide lifecycle and
-membership, and the corresponding public/machine terminology.
-
-Verification: profile terminology scan excluding immutable review history,
-official/installed app-server capability comparison, protocol JSON/schema
-checks, requirement ownership, Markdown links, offline regression gate, and
-Git whitespace/scope checks.
-
-#### Project-Local Configuration and Runtime Layout
-
-Move portable and machine-local configuration, run/runtime state, locks, and
-evidence beneath `.dolgorae/`, retaining only the documented singleton and short
-Unix-socket exceptions.
-
-#### Lazy Cross-Profile Writer Handoff
-
-Replace startup-selected access with explicit lazy writer acquisition, release,
-and user-confirmed idle takeover shared by all profiles in one canonical
-workspace. TASK-000-D supersedes its process-held lease mechanism with durable
-writer authority while preserving the product goal.
-
-Task acceptance: every completed phase is internally consistent, checked schemas
-match the SOT, NOTE-004 records bounded evidence and goal commits, no production
-or probe code changes, and TASK-001 remains planned.
-
-Cold-validation remediation: the original NOTE-004 waiver of the ordinary
-independent-review gate was invalid. The current TASK-000-C contract and
-evidence received a targeted independent hardening review, the corrected
-record is indexed, and the remediation is committed under the planned subject
-`[TASK-000-C] Restore independent review evidence` without changing this
-successful lifecycle state.
-
-### TASK-000-D: Controller, Projection, and Integration Contract
-
-Status: `COMPLETE`
-
-Rebaseline the unreleased v1 contract so interactive clients and workflow
-orchestrators share launch-contract coordination while selecting either the
-shared-read-only server or a Run-owned dedicated lane generation, with common
-controller authorization, workspace writer authority, normalized interactions,
-and client-safe replay.
-
-Treat the repository-root `prompt.md` as user-owned, ignored, non-normative
-input; preserve only its digest and disposition in tracked review records. Record its
-[requirement disposition](external-runtime-disposition.md) plus the
-[singleton-correction disposition](singleton-correction-disposition.md) and
-[follow-up disposition](reviews/task-000-d-follow-up-disposition.md), plus the
-[second follow-up disposition](reviews/task-000-d-second-follow-up-disposition.md).
-Reconcile it with named profiles, the profile-scoped singleton, lazy writer
-access, and existing recovery rules. Add controller capability and operator
-reset, open same-user observation, explicit same-controller handoff, runtime and
-profile capability discovery, purpose/parent metadata, normalized interactions,
-and append-time minimal/operational event projections. Rebaseline every checked
-v1 schema and error shape before production implementation. This includes a
-Dolgorae-owned direct-executable launch contract, direct WebSocket-over-Unix
-transport, manager-owned shared/dedicated lane-server epochs, complete profile membership, durable
-writer authority, worker-side controller revalidation, a separate operator
-capability, discriminated interactions, and separate durable event-record and
-delivery schemas. The follow-up additionally owns one global lock hierarchy,
-threadless first-write staging, fail-closed background-execution policy,
-restorable profile snapshots and operator server-key migration, membership
-repair, identity-complete shutdown, deterministic launch cwd/config drift,
-projection enforcement, final-response selection, meaningful file-change
-approval, secret receipts, and multi-client routing evidence.
-The second follow-up originally proposed exclusive Writer Capsules. ADR-019
-supersedes that transient topology while retaining complete process-census
-cleanup authority, PREPARE/APPLY/COMMIT operation tokens, symbolic
-launch cwd and deterministic locale/PATH, independent effective-policy/writer
-state, bounded artifacts, profile diagnostics, conditional event identity, and
-publication of Runs only after a ready server epoch.
-
-The pinned topology campaign supersedes the transient Writer Capsule portion
-with ADR-019. TASK-000-D now owns immutable `control_mode` and `execution_lane`,
-sticky Dedicated Execution Lanes, per-workspace concurrent writers, separated
-server/workload/writer state, requested/achieved assurance, fixed thread
-residency, profile-wide lane enumeration, and a fresh lineage-linked dedicated
-successor when a shared Run needs write. Exact 0.147.0 gates A/C/E and the
-closed-generation history barrier passed; cross-server migration and
-background-terminal authority failed, but Dolgorae's exact process-census
-cleanup campaign passed. The retained native-subagent conclusion is invalid:
-its parser reported no collaboration item while bounded wire evidence contains
-`subAgentActivity` and `collabAgentToolCall`. Codex-native child threads are
-distinct from independent Dolgorae Runs and workers. The corrected exact-version
-campaign recognizes both shapes, proves the enabled parent/child lifecycle and
-restart history, and permits `supported`; active or unknown native state still
-makes quiescence-requiring transitions fail closed. The disabled diagnostic
-produced a child and cannot advertise `unavailable`.
-
-Verification: parse and meta-validate all protocol JSON; resolve every cross-file
-reference; prove command/data/error enum equality and typed positive/negative
-instances; validate credential carrier bounds and secret exclusions; exercise
-controller mismatch/reset, observer visibility, handoff expiry/races,
-interaction reconnect/staleness, cursor replay/profile filtering, direct
-WebSocket fragmentation/ping/close/multi-client behavior, singleton crash and
-restart reconciliation, writer crash boundaries, policy transitions, and
-reasoning non-retention through deterministic and pinned live fixtures. Run the full offline gate,
-requirement reverse index, Markdown links, obsolete-contract scans, and Git
-whitespace checks. At the third-follow-up historical checkpoint TASK-000-D was
-complete, but the fourth follow-up reopened the gate for corrected contracts,
-fresh live campaigns, a reproducible evidence package, and independent review.
-
-Task acceptance: the input disposition, SOT, architecture, ADRs, checked
-schemas, roadmap ownership, and verification fixtures agree; an independent
-read-only review has no unresolved blocking finding; an implementation note
-links task-scoped commits; no production source exists; TASK-001 remains
-planned until this gate is complete. This architecture gate is complete;
-TASK-001 remains `PLANNED` as the next implementation task.
-
-Cold-validation remediation: the fourth-follow-up closure checks and aggregate
-evidence matrix now derive their verdicts from checked authorities and executed
-probe results, NOTE-010 carries the required completion metadata and commit
-links, and the corrected evidence is independently reviewed under the planned
-subject `[TASK-000-D] Harden closure evidence integrity`. TASK-000-D remains in
-its successful lifecycle state.
-
-### TASK-000-E: CLI-First Brokered Subagent Contract
-
-Status: `SUPERSEDED` by `TASK-000-F`
-
-Make the existing machine CLI a complete, discoverable foundation for a future
-trusted host adapter that lets ordinary Codex and Gul-hosted direct sessions
-request Independent Dolgorae Runs as subagents without receiving Run authority.
-
-Add the brokered hub-and-spoke use case to SPEC-012, ADR-010/020, architecture,
-runtime capabilities, writer semantics, and downstream verification ownership.
-The broker remains each child's `automation` Controller, uses the existing
-credential and Run commands, creates a `managed_agent` Dedicated Run with opaque
-parent provenance, and returns only bounded safe status/result material. Keep
-MCP transport, public sockets, parent-held delegation capabilities, nested
-authority, peer messaging, and transient same-thread Writer Capsules outside
-this task.
-
-Verification: parse and meta-validate every checked schema; run the SOT
-consistency and link gates; validate positive capability fixtures and rejection
-of a missing brokered-subagent feature; exercise a deterministic fake-broker
-composition for ordinary-Codex-shaped and Gul-direct-shaped parent references;
-prove Controller canaries never enter model-visible data; and prove competing
-Dolgorae writers in one canonical workspace converge on one authority plus
-`WRITER_BUSY` without claiming serialization of external editors.
-
-The task was superseded before its completion gate. Its broker-held Controller,
-hub-and-spoke orchestration, bounded result, and writer-conflict requirements
-are carried into `TASK-000-F`; no completion or independent-review evidence is
-inferred from the superseded state.
-
-### TASK-000-F: Public Local gRPC SOT and Protocol Contract
-
-Status: `COMPLETE`
-
-Rebaseline the unreleased public v1 contract around two adapters sharing one
-semantic service, with a supervised local gRPC gateway suitable for Gul and
-without weakening Controller, writer, recovery, event, audit, or private-
-transport boundaries.
-
-Amend ADR-001, add ADR-021 and SPEC-015, revise architecture/security/lifecycle,
-and publish `dolgorae.public.v1` Protobuf source plus deterministic descriptor,
-error mapping, mutation policy, capabilities, timeline, artifact, and machine-
-CLI derivatives. Generalize `create-successor` as
-`CreateWriteContinuation`, make Run allocation idempotent, add side-effect-free
-Controller verification, preserve threadless first-write rules, and retain the
-TASK-000-E broker composition over either public adapter. Add a derived
-implementation memo and assign production implementation to downstream tasks;
-this stabilization Task MUST NOT add production Rust code.
-
-Complete the Gul-facing v1 draft with absolute-path workspace bootstrap,
-version-zero capability negotiation, full typed capability/profile/Run/writer/
-interaction/lineage projections, typed Controller Interaction payloads and
-limits, durable accepted Run configuration, typed event `oneof` plus aggregate
-revision stamps, typed error actions including write continuation,
-discoverable Controller-carrier schema policy, same-principal continuation
-receipts, lossless output paths, closed capability blockers, exact StartRun
-replay, stream-end behavior, and explicit protected-input/socket ownership
-rules. The public v1 MUST remain unfrozen until all 30 memo criteria are
-verified and every runtime-pending case is closed.
-
-Verification: parse and meta-validate every JSON artifact; compile and lint the
-Protobuf module; regenerate and byte-compare the descriptor; prove command,
-error, capability, method-kind, mutation-policy, cursor, artifact, timeline,
-and Controller-carrier consistency; run Markdown links, obsolete sole-CLI/
-public-socket scans, semantic run-state fixtures, and `git diff --check`.
-Independently review at least the server-lifecycle, UDS attack, stream-pressure,
-credential TOCTOU, ambiguous-mutation, threadless-write, continuation-lineage,
-timeline-redaction, artifact, error-mapping, and version-evolution boundaries.
-Descriptor-backed adapter conformance MUST parse concrete Protobuf fixtures,
-compare normalized Machine/gRPC projections, preserve all Interaction support
-states, reject invalid profile default-model catalogs, and report production
-runtime cases separately rather than hardcoding completion.
-
-Task acceptance: all 30 acceptance rows in the local-gRPC implementation memo
-resolve to active authorities and deterministic verification; one independent
-read-only review reports no unresolved blocking finding; an implementation note
-and review index record the completed evidence and task-scoped commit; no
-production source exists; and `TASK-001` remains `PLANNED` until this gate is
-complete.
-
-Cold-validation remediation: NOTE-011 now records its completion date, exact
-task commit, and independent reviewer identity; active verification ownership
-names the completed carry-forward TASK-000-F rather than superseded TASK-000-E,
-and the consistency lint rejects future superseded owners. The isolated result
-is reviewed under the planned subject `[TASK-000-F] Close carry-forward
-evidence gaps` without changing this successful lifecycle state.
-
-TASK-000-F closure status: at that checkpoint, `TASK-000` and
-`TASK-000-A` through `TASK-000-D` were complete, `TASK-000-E` was superseded by
-a completed `TASK-000-F`, and the Epic-level hardening pass found no unresolved
-valid finding. `TASK-000-G` subsequently reopened a terminology-only gate and was then
-superseded by `TASK-000-H` when the accepted two-use-case model introduced
-durable internal orchestration state and related contract changes. Earlier
-completion evidence remains valid for its reviewed snapshot, but `TASK-001` is
-not eligible until `TASK-000-H` closes.
-
-Validation record (2026-08-20): task hierarchy normalization is `d83f2cf`;
-TASK-000-F closure is `9b8a712`; cold-validation task remediations are
-`49c4422`, `5e7cea6`, and `2730c4f`; Epic hardening commits are `b61678c`,
-`ddbb5a9`, `d1c2cb9`, `eff0b3d`, and `6c65628`. Final whole-workspace review
-`r_01a01b5d-e074-78a5-859a-40c5a76d232a` and exact committed correction delta
-`r_01a01b74-34cf-7c66-acbf-eedbadb69899` have complete six-role coverage,
-passing CI decisions, committed publication, and zero unresolved valid
-findings. Four Gaori gates, the exact Codex 0.147.0 retained aggregate, Buf,
-Ruff F, compileall, JSON, and whitespace checks pass. DF-001 and DF-002 retain
-two informational future-environment triggers; neither changes current Epic
-acceptance. The commit containing this record performs the final lifecycle
-transition without activating `TASK-001` or freezing public v1.
-
-### TASK-000-G: Agent Topology Terminology Alignment
-
-Status: `SUPERSEDED`
-
-This Task introduced useful distinctions among Primary Runs, Independent
-Specialist Runs, and Codex-native subagents, but treated three topologies as
-user-selected composition modes and prohibited durable hierarchy ownership.
-The accepted two-use-case model and internal Brokered Hierarchy recovery state
-change actual product and persistence contracts. `TASK-000-H` owns the active
-reconciliation and review. No completion or independent-review evidence is
-inferred from this superseded state.
-
-### TASK-000-H: User-Case and Internal Contract Reconciliation
-
-Status: `COMPLETE`
-
-Reconcile the active SOT around exactly two user-facing use cases:
-Dolgorae-Orchestrated Session and External Specialist Engagement. Preserve
-independent Run identity and the checked public v1 Protobuf shape while adding
-an internal Orchestration Broker and durable aggregate state for
-Dolgorae-created Specialists.
-
-The Task owns:
-
-- canonical use-case and terminology updates;
-- first-class Orchestration Session, External Specialist Engagement, Aggregate
-  Bootstrap Operation, membership, write-ahead spawn or hire, Specialist task,
-  and result-delivery contracts;
-- Runtime Profile and Agent Configuration separation;
-- explicit `control_mode`, lane, assurance, purpose, and native policy at the
-  semantic boundary;
-- Dedicated in-place policy transitions with `policy_epoch`, while
-  `run_generation` remains Worker and connection lifetime only;
-- generation-immutable instruction and Turn-scoped access-context separation;
-- relocation of mutable profiles, Run, writer, lock, orchestration, evidence,
-  and cache authority to Application Support;
-- explicit release, verify, acquire for cross-Controller hierarchy writer
-  movement;
-- enforced-invariant versus agent-behavior-policy separation;
-- offline shell policy and external side-effect caveats;
-- deterministic interaction escalation and Controller-authorized whole-Run
-  export;
-- `user_input` artifact reconciliation;
-- the checked `dolgorae-orchestration-state-v1.schema.json`, semantic validator,
-  and fixtures;
-- deterministic Orchestrated Session bootstrap behind the unchanged public root
-  `StartRun`, including prepared cross-store recovery;
-- explicit External Specialist Engagement open and private hire facade, with raw
-  `managed_agent` Runs excluded from aggregate inference;
-- the immutable Specialist Policy snapshot contract;
-- the private Primary orchestration tool payload contract, including task
-  cancellation; and
-- the private External Specialist Facade payload contract, complete open/get/
-  hire/assign/await/collect/cancel/release/close operation set, and Machine CLI
-  carrier;
-- the Specialist-review-first delivery sequence, `EPIC-002A`, and cumulative
-  product milestone boundaries; and
-- the checked one-shot Specialist Review CLI and external MCP payload contract,
-  examples, validator ownership, and recursion-prevention boundary.
-
-This Task MUST NOT change the checked `dolgorae.public.v1` Protobuf source or
-descriptor. Existing Run RPCs remain the low-level Gul contract and shared
-semantic execution core. External AI integrations use the checked private
-External Specialist Facade rather than inferring an engagement from raw Runs. A
-future additive aggregate-query surface is outside this Task. Gul v1 uses the
-existing Run list, parent projection, Run events, and Controller Interaction
-surface only as a safe operational view; none of those projections replaces the
-internal aggregate registry as recovery authority.
-
-Verification: parse and meta-validate every JSON artifact; validate positive and
-negative orchestration-state, Specialist Policy, Primary orchestration tool,
-External Specialist Facade, and one-shot Specialist Review fixtures; prove
-write-ahead aggregate bootstrap and
-child identity, aggregate membership, and idempotency invariants; scan active SOT
-for obsolete
-external-only hierarchy ownership, hidden interactive defaults, project-local
-mutable authority, access-policy-driven Run generations, and immutable
-current-access wording; byte-compare the public Protobuf source and descriptor
-against the TASK-000-F snapshot; check local Markdown links and code fences;
-and obtain an independent read-only review focused on crash recovery, authority
-ownership, duplicate Specialist creation, unknown task replay, writer races,
-accidental Gul wire changes, and the supplemental Specialist-review-first
-roadmap input under `docs/reviews/`.
-
-Task acceptance: active SPEC, architecture, ADR, roadmap, TODO, guide, and
-checked artifacts contain no contradictory ownership or state-machine rule;
-all TASK-000-H fixtures and static gates pass; public wire bytes are unchanged;
-one independent review reports no unresolved blocking finding; a task-scoped
-commit and implementation note are recorded; and `TASK-001` remains `PLANNED`
-until this gate completes.
+| Task | Status | Result |
+| --- | --- | --- |
+| `TASK-000` | `COMPLETE` | Reconciled the initial architecture and pinned external-runtime contract. |
+| `TASK-000-A` | `COMPLETE` | Closed schema, traceability, and deterministic validation gaps. |
+| `TASK-000-B` | `COMPLETE` | Completed contract and compatibility stabilization. |
+| `TASK-000-C` | `COMPLETE` | Established singleton, local-state, and writer invariants. |
+| `TASK-000-D` | `COMPLETE` | Established controller, projection, and integration contracts. |
+| `TASK-000-E` | `SUPERSEDED` | Replaced by the public local RPC and two-use-case design. |
+| `TASK-000-F` | `COMPLETE` | Froze the public local gRPC SOT and protocol contract. |
+| `TASK-000-G` | `SUPERSEDED` | Replaced by TASK-000-H terminology and ownership rules. |
+| `TASK-000-H` | `COMPLETE` | Reconciled the two public use cases and internal orchestration ownership. |
 
 ## EPIC-001: Foundation and Durable State
 

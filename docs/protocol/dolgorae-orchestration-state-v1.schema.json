@@ -1884,7 +1884,6 @@
       ]
     }
   },
-  "x-semanticValidator": "protocol/validators/validate_orchestration_state_v1.py",
   "x-invariants": [
     "aggregate identifiers are unique across both aggregate kinds",
     "one Run belongs to at most one nonterminal aggregate",

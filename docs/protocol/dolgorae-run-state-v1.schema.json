@@ -4,7 +4,6 @@
   "title": "Dolgorae execution-lane, policy, writer, and workload state v1",
   "type": "object",
   "additionalProperties": false,
-  "x-semanticValidator": "tools/validators/run_state_semantic_validator_v1.py#validate_run_state_v1",
   "required": ["state_variant", "control_mode", "purpose", "execution_lane", "effective_policy", "writer_authority", "server_lane", "workload_background_state", "requested_assurance", "achieved_assurance", "instruction_contract", "lineage"],
   "properties": {
     "state_variant": { "$ref": "#/$defs/state_variant" },

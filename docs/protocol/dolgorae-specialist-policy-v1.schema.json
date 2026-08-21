@@ -134,7 +134,6 @@
       }
     }
   },
-  "x-semanticValidator": "protocol/validators/validate_specialist_policy_v1.py",
   "x-invariants": [
     "role_ref values are unique",
     "the complete policy and its JCS SHA-256 are stored on the Orchestrated Session",
