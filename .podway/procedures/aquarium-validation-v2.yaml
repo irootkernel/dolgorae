@@ -1,0 +1,243 @@
+schema: podway.procedure/v2
+id: aquarium-validation-v2
+version: "2"
+name: Aquarium Validation
+purpose: Audit and remediate one completed epic until current evidence supports validation.
+description: A convergent Podway procedure for epic-wide direct audit, remediation, re-audit, review, and validation closeout.
+goal_tracking: true
+node_definitions:
+  baseline-record:
+    type: action
+    title: Record validation baseline
+    intent: Bind validation to the completed committed epic and its authority.
+    items:
+      - id: baseline-summary
+        type: text
+        prompt: Record epic identity, committed revision, authority, worktree, dependencies, and evidence baseline.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
+      - id: plan-handoff-artifact
+        type: artifact
+        prompt: Attach an existing approved epic plan only when the owning epic-handler carries a plan handoff.
+        required: false
+        allowed_media_types:
+          - text/markdown
+  audit-record:
+    type: action
+    title: Audit the epic
+    intent: Record a fresh requirement matrix, checks, review evidence, and confirmed gaps.
+    items:
+      - id: audit-summary
+        type: text
+        prompt: Record the audited snapshot, matrix result, checks, Mulgae evidence, and confirmed gaps.
+        required: true
+        min_length: 1
+        max_length: 8000
+        multiline: true
+      - id: confirmed-gap-count
+        type: integer
+        prompt: Record the number of confirmed in-scope gaps.
+        required: true
+  gap-decision:
+    type: decision
+    title: Evaluate audit gaps
+    objective: Route confirmed gaps to remediation and a clean audit to final review.
+    prompt: Does the fresh audit contain a confirmed gap?
+    evidence_guidance:
+      - Read the audit snapshot, matrix, checks, review, and confirmed gap count.
+    options:
+      - id: clean
+        label: Audit clean
+        criteria: No confirmed gap remains and every required check has current evidence.
+      - id: gaps-found
+        label: Gaps found
+        criteria: At least one confirmed gap requires owned remediation.
+    reason:
+      required: true
+      prompt: Explain the selection using the audit evidence.
+  remediation-record:
+    type: action
+    title: Remediate confirmed gaps
+    intent: Record completed owned remediation goals, commits, verification, and reviews.
+    items:
+      - id: remediation-summary
+        type: text
+        prompt: Record every remediation completed in this pass with its gap owner, correction, commit, checks, Mulgae evidence, and remaining external blockers.
+        required: true
+        min_length: 1
+        max_length: 8000
+        multiline: true
+  final-review-record:
+    type: action
+    title: Record final validation evidence
+    intent: Record the latest clean audit and complete whole-epic Mulgae result.
+    items:
+      - id: review-round
+        type: integer
+        prompt: Record the positive whole-epic root-review ordinal for the current validation goal revision.
+        required: true
+      - id: review-mode
+        type: choice
+        prompt: Record whether this round may trigger remediation or is confirmation-only.
+        required: true
+        choices:
+          - remediation-eligible
+          - confirmation-only
+      - id: review-run-id
+        type: text
+        prompt: Record the exact committed Mulgae root review run ID.
+        required: true
+        min_length: 1
+        max_length: 128
+        multiline: true
+      - id: final-review-summary
+        type: text
+        prompt: Record final snapshot, required checks, operational completion, coverage, publication, CI decision, findings query, and roadmap consistency.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: unresolved-valid-findings
+        type: integer
+        prompt: Record the number of unresolved valid findings.
+        required: true
+  final-review-decision:
+    type: decision
+    title: Evaluate final validation
+    objective: Route an incomplete or remediation-eligible review to rework, validate only clean evidence, and leave a confirmation-only review with valid findings undecided for user direction.
+    prompt: Is the latest epic snapshot ready for validation closeout?
+    evidence_guidance:
+      - Read the final audit, required checks, review ordinal and mode, exact Mulgae run, and roadmap states.
+      - Select no option while a confirmation-only review retains a valid finding and the user has not authorized the next action.
+    options:
+      - id: validated
+        label: Validation supported
+        criteria: The fresh audit is clean, the root review is operationally complete with passing CI, and no unresolved valid finding remains.
+      - id: rework-required
+        label: Rework required
+        criteria: Evidence is stale or incomplete, CI failed, or a confirmed gap or remediation-eligible valid finding requires correction. Do not select this option for a confirmation-only hold without user authorization.
+    reason:
+      required: true
+      prompt: Explain the selection using the final validation evidence.
+  goal-assessment:
+    type: decision
+    title: Assess the epic validation goal
+    objective: Determine whether current evidence supports the validation goal.
+    prompt: What is the outcome of the validation goal?
+    evidence_guidance:
+      - Read the baseline, latest clean audit, remediation history, and final review evidence.
+    options:
+      - id: achieved
+        label: Goal achieved
+        criteria: Fresh criterion assessments support the current validation goal.
+      - id: not-achieved
+        label: Goal not achieved
+        criteria: Fresh evidence does not support the current validation goal.
+      - id: superseded
+        label: Goal superseded
+        criteria: The current validation goal is no longer desired.
+    reason:
+      required: true
+      prompt: Explain the outcome using criterion assessments and evidence.
+    assessment:
+      target: session_goal
+      outcomes:
+        achieved: achieved
+        not-achieved: not_achieved
+        superseded: superseded
+  closeout-record:
+    type: action
+    title: Record validation closeout
+    intent: Record the final audited snapshot, roadmap record, commits, residue, and publication state.
+    items:
+      - id: closeout-summary
+        type: text
+        prompt: Record validation outcome and final lifecycle evidence.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+graph:
+  entry: capture-baseline
+  nodes:
+    - id: capture-baseline
+      use: baseline-record
+      next: audit
+    - id: audit
+      use: audit-record
+      next: decide-gaps
+    - id: decide-gaps
+      use: gap-decision
+      evidence_from:
+        - node: audit
+          required: true
+      routes:
+        clean:
+          to: final-review
+          effect: advance
+        gaps-found:
+          to: remediate
+          effect: advance
+    - id: remediate
+      use: remediation-record
+      next: re-audit
+    - id: re-audit
+      use: audit-record
+      next: decide-re-audit
+    - id: decide-re-audit
+      use: gap-decision
+      evidence_from:
+        - node: remediate
+          required: true
+        - node: re-audit
+          required: true
+      routes:
+        clean:
+          to: final-review
+          effect: advance
+        gaps-found:
+          to: remediate
+          effect: rework
+    - id: final-review
+      use: final-review-record
+      next: decide-final-review
+    - id: decide-final-review
+      use: final-review-decision
+      evidence_from:
+        - node: final-review
+          required: true
+      routes:
+        validated:
+          to: assess-goal
+          effect: advance
+        rework-required:
+          to: audit
+          effect: rework
+    - id: assess-goal
+      use: goal-assessment
+      evidence_from:
+        - node: capture-baseline
+          required: true
+        - node: final-review
+          required: true
+      routes:
+        achieved:
+          to: closeout
+          effect: advance
+        not-achieved:
+          to: closeout
+          effect: advance
+        superseded:
+          to: closeout
+          effect: advance
+    - id: closeout
+      use: closeout-record
+      terminal: true
+manual_rework:
+  allowed_targets:
+    - audit
+    - remediate
+    - re-audit
+    - final-review

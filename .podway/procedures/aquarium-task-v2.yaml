@@ -1,0 +1,323 @@
+schema: podway.procedure/v2
+id: aquarium-task-v2
+version: "2"
+name: Aquarium Task
+purpose: Deliver one approved roadmap task through the complete Aquarium evidence workflow.
+description: A Podway record of task-handler planning, implementation, verification, refinement, documentation, review, approval, and closeout.
+goal_tracking: true
+node_definitions:
+  plan-record:
+    type: action
+    title: Record the approved plan
+    intent: Bind execution to the approved task plan and authority.
+    items:
+      - id: plan-summary
+        type: text
+        prompt: Record the approved plan and its authority boundary.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: plan-handoff-artifact
+        type: artifact
+        prompt: Attach the approved Markdown plan only for an explicit plan handoff.
+        required: false
+        allowed_media_types:
+          - text/markdown
+  implementation-record:
+    type: action
+    title: Record implementation
+    intent: Record the isolated implementation and focused evidence.
+    items:
+      - id: implementation-summary
+        type: text
+        prompt: Summarize the implemented requirements and task-owned paths.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: source-revision
+        type: text
+        prompt: Record HEAD and the task-owned dirty-tree identity.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+  verification-record:
+    type: action
+    title: Record verification
+    intent: Record current requirement-mapped verification evidence.
+    items:
+      - id: verification-summary
+        type: text
+        prompt: Record commands, actors, exit statuses, evidence references, and gaps.
+        required: true
+        min_length: 1
+        max_length: 6000
+        multiline: true
+      - id: verification-acceptable
+        type: choice
+        prompt: Record whether all required current verification is acceptable.
+        required: true
+        choices:
+          - acceptable
+          - unacceptable
+  verification-decision:
+    type: decision
+    title: Evaluate verification
+    objective: Only a task with acceptable current evidence may proceed.
+    prompt: Does the recorded verification satisfy the roadmap requirements?
+    evidence_guidance:
+      - Read the implementation revision and complete verification summary.
+    options:
+      - id: passed
+        label: Verification passed
+        criteria: All required checks have current acceptable evidence.
+      - id: failed
+        label: Verification failed
+        criteria: A required check failed, is stale, or lacks required evidence.
+    reason:
+      required: true
+      prompt: Explain the decision using the recorded evidence.
+  refinement-record:
+    type: action
+    title: Record refinement
+    intent: Record deslop, optimization, staged baseline, and refreshed checks.
+    items:
+      - id: refinement-summary
+        type: text
+        prompt: Record cleanup, optimization reasoning, staging scope, and refreshed evidence.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+  documentation-record:
+    type: action
+    title: Record documentation
+    intent: Record durable documentation and roadmap review-state evidence.
+    items:
+      - id: documentation-summary
+        type: text
+        prompt: Record documentation paths, synchronization, validation, and roadmap state.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+  review-record:
+    type: action
+    title: Record Mulgae review
+    intent: Record complete review capture and adjudicated findings.
+    items:
+      - id: review-round
+        type: integer
+        prompt: Record the positive root-review ordinal for the current goal revision.
+        required: true
+      - id: review-mode
+        type: choice
+        prompt: Record whether this round may trigger remediation or is confirmation-only.
+        required: true
+        choices:
+          - remediation-eligible
+          - confirmation-only
+      - id: review-run-id
+        type: text
+        prompt: Record the exact committed Mulgae root review run ID.
+        required: true
+        min_length: 1
+        max_length: 128
+        multiline: true
+      - id: review-summary
+        type: text
+        prompt: Record target, operational completion, coverage, publication, CI decision, findings query, and dispositions.
+        required: true
+        min_length: 1
+        max_length: 6000
+        multiline: true
+      - id: unresolved-valid-findings
+        type: integer
+        prompt: Record the number of unresolved valid findings.
+        required: true
+  review-decision:
+    type: decision
+    title: Evaluate review
+    objective: Route an incomplete or remediation-eligible review to rework, approve only a clean review, and leave a confirmation-only review with valid findings undecided for user direction.
+    prompt: Is the latest complete task target ready for goal assessment?
+    evidence_guidance:
+      - Read the review ordinal, mode, exact Mulgae run, findings dispositions, and current post-review verification evidence.
+      - Select no option while a confirmation-only review retains a valid finding and the user has not authorized the next action.
+    options:
+      - id: approved
+        label: Review approved
+        criteria: The root review is operationally complete, CI passed, no valid unresolved finding remains, and the review pass changed no files.
+      - id: changes-requested
+        label: Changes requested
+        criteria: Review is incomplete, CI failed, or a remediation-eligible valid finding requires correction through the owning phase. Do not select this option for a confirmation-only hold without user authorization.
+    reason:
+      required: true
+      prompt: Explain the decision using the recorded review evidence.
+  goal-assessment:
+    type: decision
+    title: Assess the task goal
+    objective: Determine the current roadmap task goal from fresh evidence.
+    prompt: What is the outcome of the current task goal?
+    evidence_guidance:
+      - Read the approved plan, latest implementation, verification, documentation, and review evidence.
+    options:
+      - id: achieved
+        label: Goal achieved
+        criteria: Fresh criterion assessments support the current goal revision.
+      - id: not-achieved
+        label: Goal not achieved
+        criteria: Fresh evidence does not support the current goal revision.
+      - id: superseded
+        label: Goal superseded
+        criteria: The current goal revision is no longer the desired outcome.
+    reason:
+      required: true
+      prompt: Explain the outcome using criterion assessments and evidence.
+    assessment:
+      target: session_goal
+      outcomes:
+        achieved: achieved
+        not-achieved: not_achieved
+        superseded: superseded
+  outcome-record:
+    type: action
+    title: Record the assessed outcome
+    intent: Record the outcome and any required follow-up before approval.
+    items:
+      - id: outcome-summary
+        type: text
+        prompt: Record the assessed outcome and follow-up commitments.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+  approval-decision:
+    type: decision
+    title: Record final user approval
+    objective: Close only with the task-close confirmations required by repository authority; a rejection whose correction changes behavior must reach implementation through manual rework.
+    prompt: Did the user accept tests, documentation, and the exact final implementation?
+    evidence_guidance:
+      - Read the assessed outcome and the exact final diff presented to the user.
+    options:
+      - id: approved
+        label: Final approval granted
+        criteria: Every applicable task-close confirmation is affirmative.
+      - id: changes-requested
+        label: Changes requested
+        criteria: A confirmation is explicitly negative, requests a correction, or names a specific unmet gate.
+    reason:
+      required: true
+      prompt: Record the user's decision and the approved authority boundary.
+  closeout-record:
+    type: action
+    title: Record task closeout
+    intent: Record final roadmap, commit, worktree, and publication states.
+    items:
+      - id: closeout-summary
+        type: text
+        prompt: Record terminal roadmap state, commit if any, worktree state, and publication state.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+graph:
+  entry: record-plan
+  nodes:
+    - id: record-plan
+      use: plan-record
+      next: implement
+    - id: implement
+      use: implementation-record
+      next: verify
+    - id: verify
+      use: verification-record
+      next: decide-verification
+    - id: decide-verification
+      use: verification-decision
+      evidence_from:
+        - node: implement
+          required: true
+        - node: verify
+          required: true
+      routes:
+        passed:
+          to: refine
+          effect: advance
+        failed:
+          to: implement
+          effect: rework
+    - id: refine
+      use: refinement-record
+      next: document
+    - id: document
+      use: documentation-record
+      next: review
+    - id: review
+      use: review-record
+      next: decide-review
+    - id: decide-review
+      use: review-decision
+      evidence_from:
+        - node: review
+          required: true
+      routes:
+        approved:
+          to: assess-goal
+          effect: advance
+        changes-requested:
+          to: refine
+          effect: rework
+    - id: assess-goal
+      use: goal-assessment
+      evidence_from:
+        - node: record-plan
+          required: true
+        - node: implement
+          required: true
+        - node: verify
+          required: true
+        - node: refine
+          required: true
+        - node: document
+          required: true
+        - node: review
+          required: true
+      routes:
+        achieved:
+          to: record-outcome
+          effect: advance
+        not-achieved:
+          to: record-outcome
+          effect: advance
+        superseded:
+          to: record-outcome
+          effect: advance
+    - id: record-outcome
+      use: outcome-record
+      next: approve-closeout
+    - id: approve-closeout
+      use: approval-decision
+      evidence_from:
+        - node: assess-goal
+          required: true
+        - node: record-outcome
+          required: true
+      routes:
+        approved:
+          to: closeout
+          effect: advance
+        changes-requested:
+          to: refine
+          effect: rework
+    - id: closeout
+      use: closeout-record
+      terminal: true
+manual_rework:
+  allowed_targets:
+    - implement
+    - verify
+    - refine
+    - document
+    - review

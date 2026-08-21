@@ -1,0 +1,216 @@
+schema: podway.procedure/v2
+id: aquarium-design-v2
+version: "1"
+name: Aquarium Design
+purpose: Shape one approved project, epic, refactor, or Design Gate document set without implementing it.
+description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, quality review, exact-diff approval, document application, and closeout.
+goal_tracking: true
+node_definitions:
+  context-record:
+    type: action
+    title: Capture design authority
+    intent: Bind the workflow to its canonical identity, source authority, scope, and approved provider boundary.
+    items:
+      - id: context-summary
+        type: text
+        prompt: Record canonical identity, source paths and digests, approved operations, exclusions, and evidence gaps.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
+  discovery-record:
+    type: action
+    title: Record Ouroboros discovery
+    intent: Record bounded requirements and decision evidence returned by approved leaf operations.
+    items:
+      - id: discovery-summary
+        type: text
+        prompt: Record provider operation IDs, adjudicated requirements, decisions, open questions, and bounded source references.
+        required: true
+        min_length: 1
+        max_length: 6000
+        multiline: true
+  draft-record:
+    type: action
+    title: Record the proposed design
+    intent: Bind quality review to one exact draft and Design Gate impact.
+    items:
+      - id: draft-summary
+        type: text
+        prompt: Record target paths, draft digests, work-unit identity, Design Gate impact, and unresolved constraints.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
+  quality-record:
+    type: action
+    title: Record Ouroboros quality evidence
+    intent: Record the QA result and local adjudication for the current draft.
+    items:
+      - id: quality-summary
+        type: text
+        prompt: Record QA operation IDs, findings, dispositions, and remaining evidence gaps.
+        required: true
+        min_length: 1
+        max_length: 6000
+        multiline: true
+      - id: unresolved-valid-findings
+        type: integer
+        prompt: Record unresolved valid finding count.
+        required: true
+  quality-decision:
+    type: decision
+    title: Evaluate design quality
+    objective: Only a complete, internally consistent draft may be proposed for application.
+    prompt: Is the current draft ready for exact-diff approval?
+    evidence_guidance:
+      - Read the draft identity, Ouroboros QA evidence, local adjudication, and gate impact.
+    options:
+      - id: passed
+        label: Quality passed
+        criteria: QA is complete and no valid unresolved finding remains.
+      - id: revise
+        label: Revision required
+        criteria: A valid finding, unresolved design decision, or evidence gap requires a new draft.
+    reason:
+      required: true
+      prompt: Explain the decision from current evidence.
+  approval-decision:
+    type: decision
+    title: Record exact-diff approval
+    objective: Apply only the complete diff explicitly approved by the user.
+    prompt: Did the user approve the displayed target paths and complete diff?
+    evidence_guidance:
+      - Compare the displayed diff with the current target snapshots.
+    options:
+      - id: approved
+        label: Exact diff approved
+        criteria: The user explicitly approved the complete displayed diff and targets have not changed.
+      - id: changes-requested
+        label: Changes requested
+        criteria: The user rejected or changed the proposal, or a target snapshot changed.
+    reason:
+      required: true
+      prompt: Record the user's decision and exact approved boundary.
+  application-record:
+    type: action
+    title: Apply and validate documents
+    intent: Record only approved document changes and current validation evidence.
+    items:
+      - id: application-summary
+        type: text
+        prompt: Record applied paths and digests, validation commands and outcomes, and final Design Gate state.
+        required: true
+        min_length: 1
+        max_length: 6000
+        multiline: true
+  goal-assessment:
+    type: decision
+    title: Assess the design goal
+    objective: Determine whether the approved document outcome was achieved without implementation.
+    prompt: What is the outcome of the current design goal?
+    evidence_guidance:
+      - Read the approved diff, applied digests, validation, and Design Gate state.
+    options:
+      - id: achieved
+        label: Goal achieved
+        criteria: The exact approved documents are applied and all required validation is current.
+      - id: not-achieved
+        label: Goal not achieved
+        criteria: Required documents, validation, or gate resolution remain incomplete.
+      - id: superseded
+        label: Goal superseded
+        criteria: The desired design outcome has been replaced explicitly.
+    reason:
+      required: true
+      prompt: Explain the outcome using current artifact evidence.
+    assessment:
+      target: session_goal
+      outcomes:
+        achieved: achieved
+        not-achieved: not_achieved
+        superseded: superseded
+  closeout-record:
+    type: action
+    title: Record design closeout
+    intent: Record final artifacts, gate state, residue, commit authority, and publication state.
+    items:
+      - id: closeout-summary
+        type: text
+        prompt: Record final paths and digests, gate IDs or pending status, repository residue, commit if required, and publication state.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+graph:
+  entry: capture-context
+  nodes:
+    - id: capture-context
+      use: context-record
+      next: discover
+    - id: discover
+      use: discovery-record
+      next: draft
+    - id: draft
+      use: draft-record
+      next: quality
+    - id: quality
+      use: quality-record
+      next: decide-quality
+    - id: decide-quality
+      use: quality-decision
+      evidence_from:
+        - node: draft
+          required: true
+        - node: quality
+          required: true
+      routes:
+        passed:
+          to: approve-diff
+          effect: advance
+        revise:
+          to: draft
+          effect: rework
+    - id: approve-diff
+      use: approval-decision
+      evidence_from:
+        - node: draft
+          required: true
+        - node: quality
+          required: true
+      routes:
+        approved:
+          to: apply-documents
+          effect: advance
+        changes-requested:
+          to: draft
+          effect: rework
+    - id: apply-documents
+      use: application-record
+      next: assess-goal
+    - id: assess-goal
+      use: goal-assessment
+      evidence_from:
+        - node: capture-context
+          required: true
+        - node: apply-documents
+          required: true
+      routes:
+        achieved:
+          to: closeout
+          effect: advance
+        not-achieved:
+          to: closeout
+          effect: advance
+        superseded:
+          to: closeout
+          effect: advance
+    - id: closeout
+      use: closeout-record
+      terminal: true
+manual_rework:
+  allowed_targets:
+    - discover
+    - draft
+    - quality
+    - approve-diff

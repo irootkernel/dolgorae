@@ -1,0 +1,207 @@
+schema: podway.procedure/v2
+id: aquarium-goal-v2
+version: "2"
+name: Aquarium Goal
+purpose: Deliver one epic member, remediation, or closeout goal with current evidence.
+description: A flexible goal-centered Podway procedure for epic-handler work.
+goal_tracking: true
+node_definitions:
+  work-record:
+    type: action
+    title: Complete the goal work
+    intent: Record the bounded implementation, investigation, documentation, and lifecycle work.
+    items:
+      - id: work-summary
+        type: text
+        prompt: Record the completed goal work and task-owned boundary.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
+      - id: source-revision
+        type: text
+        prompt: Record HEAD and the goal-owned dirty-tree identity.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: plan-handoff-artifact
+        type: artifact
+        prompt: Attach the approved Markdown epic plan only for an explicit plan handoff.
+        required: false
+        allowed_media_types:
+          - text/markdown
+  evidence-record:
+    type: action
+    title: Record verification and review
+    intent: Record current checks and complete Mulgae evidence for this goal.
+    items:
+      - id: review-round
+        type: integer
+        prompt: Record the positive ordinal of this operationally complete Mulgae root review for the current goal revision.
+        required: true
+      - id: review-mode
+        type: choice
+        prompt: Record whether this member-task review may be remediated now or deferred to epic hardening.
+        required: true
+        choices:
+          - remediation-eligible
+          - hardening-deferral-eligible
+      - id: review-run-id
+        type: text
+        prompt: Record the exact committed Mulgae root review run ID.
+        required: true
+        min_length: 1
+        max_length: 128
+        multiline: true
+      - id: evidence-summary
+        type: text
+        prompt: Record commands, exit statuses, review target, operational completion, CI decision, coverage, publication, findings-query status, findings, deferrals, and gaps.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: unresolved-valid-findings
+        type: integer
+        prompt: Record the number of unresolved valid findings.
+        required: true
+  hardening-deferral-record:
+    type: action
+    title: Record epic hardening deferral
+    intent: Preserve the bounded second-review findings that epic hardening must reconcile.
+    items:
+      - id: hardening-deferral-run-id
+        type: text
+        prompt: Record the exact committed second-round Mulgae root review run ID.
+        required: true
+        min_length: 1
+        max_length: 128
+        multiline: true
+      - id: hardening-deferral-finding-ids
+        type: list
+        prompt: Record every exact unresolved valid finding ID from that run.
+        required: true
+        min_items: 1
+        max_items: 200
+        max_item_length: 128
+        unique: true
+      - id: hardening-deferral-summary
+        type: text
+        prompt: Record the member task and bounded finding severities, dispositions, and repository-relative paths; the exact run and finding IDs are recorded separately.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+  evidence-decision:
+    type: decision
+    title: Evaluate goal evidence
+    objective: Only complete current evidence or an explicit bounded member-task deferral may proceed.
+    prompt: Does the current evidence support this goal?
+    evidence_guidance:
+      - Read the goal work, checks, Mulgae status, and finding dispositions.
+    options:
+      - id: supported
+        label: Evidence supports goal
+        criteria: Required checks and review are complete, CI passed, and no unresolved valid finding remains.
+      - id: deferred-for-hardening
+        label: Findings deferred to epic hardening
+        criteria: Required checks are current, this is an epic member task, its complete second review is recorded in hardening-deferral-eligible mode, and every remaining valid finding is durably linked to its authoritative Mulgae run and bounded Podway evidence for epic hardening.
+      - id: rework-required
+        label: Rework required
+        criteria: Evidence or CI failed, evidence is stale or incomplete, or a valid finding remains without the exact second-review member-task deferral above.
+    reason:
+      required: true
+      prompt: Explain the selection using the recorded evidence.
+  goal-assessment:
+    type: decision
+    title: Assess the goal
+    objective: Determine whether the current goal revision is achieved.
+    prompt: What is the outcome of the current goal?
+    evidence_guidance:
+      - Read the latest work and evidence records and assess every goal criterion.
+    options:
+      - id: achieved
+        label: Goal achieved
+        criteria: Fresh criterion assessments support the current goal revision.
+      - id: not-achieved
+        label: Goal not achieved
+        criteria: Fresh evidence does not support the current goal revision.
+      - id: superseded
+        label: Goal superseded
+        criteria: The current goal revision is no longer desired.
+    reason:
+      required: true
+      prompt: Explain the outcome using criterion assessments and evidence.
+    assessment:
+      target: session_goal
+      outcomes:
+        achieved: achieved
+        not-achieved: not_achieved
+        superseded: superseded
+  closeout-record:
+    type: action
+    title: Record goal closeout
+    intent: Record roadmap, commit, worktree, and publication handoff state.
+    items:
+      - id: closeout-summary
+        type: text
+        prompt: Record the outcome, roadmap state, commit, residue, and publication state.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+graph:
+  entry: complete-work
+  nodes:
+    - id: complete-work
+      use: work-record
+      next: record-evidence
+    - id: record-evidence
+      use: evidence-record
+      next: decide-evidence
+    - id: decide-evidence
+      use: evidence-decision
+      evidence_from:
+        - node: complete-work
+          required: true
+        - node: record-evidence
+          required: true
+      routes:
+        supported:
+          to: assess-goal
+          effect: advance
+        deferred-for-hardening:
+          to: record-hardening-deferral
+          effect: advance
+        rework-required:
+          to: complete-work
+          effect: rework
+    - id: record-hardening-deferral
+      use: hardening-deferral-record
+      next: assess-goal
+    - id: assess-goal
+      use: goal-assessment
+      evidence_from:
+        - node: complete-work
+          required: true
+        - node: record-evidence
+          required: true
+        - node: record-hardening-deferral
+          required: false
+      routes:
+        achieved:
+          to: closeout
+          effect: advance
+        not-achieved:
+          to: closeout
+          effect: advance
+        superseded:
+          to: closeout
+          effect: advance
+    - id: closeout
+      use: closeout-record
+      terminal: true
+manual_rework:
+  allowed_targets:
+    - complete-work
+    - record-evidence
