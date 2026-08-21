@@ -2498,6 +2498,16 @@ head beyond the last fsynced record; an ahead projection is rebuilt and audited
 as `projection_rewound`, not treated as integrity failure. V1 does not claim
 power-loss durability.
 
+The ledger writer holds a nonblocking exclusive BSD `flock(2)` on
+`audit.jsonl` for the complete lifetime of every writable ledger handle. A
+second handle fails with `RUN_BUSY` semantics before replay, repair, append, or
+projection publication. Opening a ledger is bounded to 512 MiB and 1,000,000
+complete records in addition to the five-minute replay deadline; crossing any
+bound fails before ordinary mutation. Append validation projects only the new
+record from the already checked in-memory projection, and observer paging
+starts at the first record after its cursor instead of rescanning the prefix.
+These resource bounds do not authorize truncating a valid complete history.
+
 The 100-millisecond publication interval is diagnostic and never fails a run.
 `events --follow` waits with `EVFILT_VNODE` on the ledger parent and active
 file, reopens after rename, and rechecks the fsynced watermark on every wake;
@@ -2554,8 +2564,20 @@ isolated from required native lifecycle evidence. Receipt-side filtering is
 therefore the sole normative mechanism for that profile; a future pin that
 proves safe isolation MAY additionally request suppression. It appends only the method,
 raw byte length, SHA-256, and `reasoning_content_not_retained` classification.
+The v1 receipt classifier suppresses every `item/reasoning/*`,
+`item/plan/*`, and `turn/plan/*` method and every `item/started` or
+`item/completed` payload whose `params.item.type` is `reasoning` or `plan`.
+The 2 MiB raw bound is checked before any UTF-8 conversion or JSON parse.
 Client-safe events are normalized and schema-validated at append time; later
 projection never needs to reinterpret a version-specific raw payload.
+
+Client-event integer fields are limited to the exact JCS-safe integer interval
+`-9007199254740991..=9007199254740991`; unsigned fields use its nonnegative
+half. Checked schemas, the semantic validator, Rust validation, and stored JCS
+bytes enforce the same interval. Checked timestamp validation performs calendar
+validation in addition to the exact six-digit UTC lexical form, and every
+`x-maxUtf8Bytes` annotation is an enforced semantic constraint rather than
+documentation-only metadata.
 
 The Codex thread in the pinned `CODEX_HOME` is conversation-continuation
 authority. Dolgorae's ledger is audit authority. Missing Codex history cannot be

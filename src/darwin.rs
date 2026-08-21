@@ -2,6 +2,7 @@ use crate::providers::{MonotonicClock, ProcessIdentity, ProviderError};
 use std::ffi::{CStr, CString, OsString};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::unix::io::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -69,6 +70,16 @@ impl DarwinSystem {
         if unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) }
             != 0
         {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn lock_exclusive_nonblocking(self, file: &std::fs::File) -> Result<(), std::io::Error> {
+        // SAFETY: flock receives the live descriptor borrowed from `file`; it
+        // neither takes ownership nor outlives the call. The lock remains tied
+        // to the open file description retained by the caller.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())

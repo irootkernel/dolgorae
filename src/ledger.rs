@@ -1,17 +1,16 @@
-use crate::audit::{
-    AuditError, AuditKind, AuditRecord, GENESIS_PREVIOUS_HASH, is_microsecond_utc_timestamp,
-};
-pub use crate::domain::{Access as ProjectedAccess, RunLifecycle};
+use crate::audit::{AuditError, AuditKind, AuditRecord, GENESIS_PREVIOUS_HASH};
+use crate::darwin::DarwinSystem;
 use crate::fault::{FaultBarrier, FaultInjected, FaultInjector, NoFaults};
 use crate::jcs::{
     LosslessJson, RAW_PAYLOAD_LIMIT, REPRESENTED_PAYLOAD_LIMIT, canonicalize, parse, sha256_hex,
 };
-use crate::workspace::{
-    LosslessPath, SystemWorkspacePlatform, WorkspacePlatform, sync_directory,
-    verify_secure_directory, verify_secure_file,
+pub use crate::projection::{
+    LedgerHead, ProjectedAccess, ProjectedWriterAuthority, RunLifecycle, RunStateProjection,
 };
-use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use crate::workspace::{
+    SystemWorkspacePlatform, WorkspacePlatform, sync_directory, verify_secure_directory,
+    verify_secure_file,
+};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
@@ -27,6 +26,9 @@ pub const MAX_EVENT_DELIVERIES: usize = 32;
 pub const MAX_EVENT_DELIVERY_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_AUDIT_LINE_BYTES: usize = REPRESENTED_PAYLOAD_LIMIT + 64 * 1024;
 pub const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_LEDGER_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_LEDGER_RECORDS: usize = 1_000_000;
+pub const REPLAY_BUDGET_MILLIS: u64 = 5 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppendDurability {
@@ -37,6 +39,11 @@ pub enum AppendDurability {
 #[derive(Debug)]
 pub enum LedgerError {
     Io(std::io::Error),
+    IoContext {
+        operation: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
     Audit(AuditError),
     Fault(FaultInjected),
     SecurityPolicy(crate::machine::MachineError),
@@ -44,12 +51,19 @@ pub enum LedgerError {
     InvalidRecord(String),
     InvalidEvent(String),
     Projection(String),
+    WriterBusy(PathBuf),
+    OperationTimeout(String),
 }
 
 impl std::fmt::Display for LedgerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => error.fmt(formatter),
+            Self::IoContext {
+                operation,
+                path,
+                source,
+            } => write!(formatter, "{operation} at {}: {source}", path.display()),
             Self::Audit(error) => error.fmt(formatter),
             Self::Fault(error) => error.fmt(formatter),
             Self::SecurityPolicy(error) => {
@@ -63,6 +77,14 @@ impl std::fmt::Display for LedgerError {
             Self::InvalidRecord(reason) => write!(formatter, "invalid audit record: {reason}"),
             Self::InvalidEvent(reason) => write!(formatter, "invalid client event: {reason}"),
             Self::Projection(reason) => write!(formatter, "invalid state projection: {reason}"),
+            Self::WriterBusy(path) => write!(
+                formatter,
+                "run ledger is already owned by another writer: {}",
+                path.display()
+            ),
+            Self::OperationTimeout(reason) => {
+                write!(formatter, "ledger operation timed out: {reason}")
+            }
         }
     }
 }
@@ -116,269 +138,7 @@ impl LedgerClock for SystemLedgerClock {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LedgerHead {
-    pub sequence: u64,
-    pub hash: String,
-}
-
-impl Default for LedgerHead {
-    fn default() -> Self {
-        Self {
-            sequence: 0,
-            hash: GENESIS_PREVIOUS_HASH.to_owned(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectedWriterAuthority {
-    None,
-    Reserved,
-    Active,
-    HandoffPrepared,
-    Releasing,
-    BlockedUnknown,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunStateProjection {
-    pub schema_version: u32,
-    pub run_id: Uuid,
-    pub lifecycle: RunLifecycle,
-    pub run_generation: u64,
-    pub thread_id: Option<String>,
-    pub active_turn_id: Option<String>,
-    pub latest_turn_id: Option<String>,
-    pub pending_requests: Vec<String>,
-    pub access: ProjectedAccess,
-    pub writer_authority: ProjectedWriterAuthority,
-    pub default_effort: Option<String>,
-    pub last_event_cursor: Option<String>,
-    pub ledger_head: LedgerHead,
-}
-
-impl RunStateProjection {
-    fn empty(run_id: Uuid) -> Self {
-        Self {
-            schema_version: 1,
-            run_id,
-            lifecycle: RunLifecycle::Starting,
-            run_generation: 0,
-            thread_id: None,
-            active_turn_id: None,
-            latest_turn_id: None,
-            pending_requests: Vec::new(),
-            access: ProjectedAccess::Unknown,
-            writer_authority: ProjectedWriterAuthority::None,
-            default_effort: None,
-            last_event_cursor: None,
-            ledger_head: LedgerHead::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventProjection {
-    Minimal,
-    Operational,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunStateEventPayload {
-    pub previous: Option<String>,
-    pub current: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TurnStateEventPayload {
-    pub previous: Option<String>,
-    pub current: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FinalResponse {
-    Inline { text: String },
-    Artifact { artifact: Box<ArtifactMetadata> },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactMetadata {
-    pub schema_version: u32,
-    pub artifact_id: Uuid,
-    pub run_id: Uuid,
-    pub kind: String,
-    pub visibility: String,
-    pub interaction_request_id: Option<Uuid>,
-    pub media_type: String,
-    pub byte_length: u64,
-    pub sha256: String,
-    pub created_at: String,
-    pub retention: String,
-    pub integrity: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResponseEventPayload {
-    pub response: FinalResponse,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InteractionOpenedPayload {
-    pub request_id: String,
-    pub interaction_kind: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InteractionResolvedPayload {
-    pub request_id: String,
-    pub outcome: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeErrorPayload {
-    pub error_code: String,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UsagePayload {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceChangesPayload {
-    pub paths: Vec<LosslessPath>,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WriterEventPayload {
-    pub previous: String,
-    pub current: String,
-    pub writer_run_id: Option<Uuid>,
-    pub writer_generation: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecoveryEventPayload {
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandStartedPayload {
-    pub command: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandCompletedPayload {
-    pub command: Vec<String>,
-    pub exit_status: Option<i64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticPayload {
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GenerationPayload {
-    pub run_generation: u64,
-    pub server_epoch: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReasoningSuppressionPayload {
-    pub method: String,
-    pub byte_length: u64,
-    pub sha256: String,
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload")]
-pub enum ClientEventData {
-    #[serde(rename = "run.state_changed")]
-    RunStateChanged(RunStateEventPayload),
-    #[serde(rename = "turn.state_changed")]
-    TurnStateChanged(TurnStateEventPayload),
-    #[serde(rename = "response.final")]
-    ResponseFinal(ResponseEventPayload),
-    #[serde(rename = "interaction.opened")]
-    InteractionOpened(InteractionOpenedPayload),
-    #[serde(rename = "interaction.resolved")]
-    InteractionResolved(InteractionResolvedPayload),
-    #[serde(rename = "runtime.error")]
-    RuntimeError(RuntimeErrorPayload),
-    #[serde(rename = "usage.reported")]
-    UsageReported(UsagePayload),
-    #[serde(rename = "workspace.changes")]
-    WorkspaceChanges(WorkspaceChangesPayload),
-    #[serde(rename = "writer.state_changed")]
-    WriterStateChanged(WriterEventPayload),
-    #[serde(rename = "recovery.required")]
-    RecoveryRequired(RecoveryEventPayload),
-    #[serde(rename = "command.started")]
-    CommandStarted(CommandStartedPayload),
-    #[serde(rename = "command.completed")]
-    CommandCompleted(CommandCompletedPayload),
-    #[serde(rename = "diagnostic.reported")]
-    DiagnosticReported(DiagnosticPayload),
-    #[serde(rename = "generation.changed")]
-    GenerationChanged(GenerationPayload),
-    #[serde(rename = "reasoning.suppressed")]
-    ReasoningSuppressed(ReasoningSuppressionPayload),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientEventRecord {
-    pub schema_version: u32,
-    pub event_schema_version: u32,
-    pub cursor: String,
-    pub event_id: Uuid,
-    pub timestamp: String,
-    pub workspace_id: String,
-    pub run_id: Uuid,
-    pub thread_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub server_key: String,
-    pub server_epoch: u64,
-    #[serde(flatten)]
-    pub data: ClientEventData,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EventDelivery {
-    pub schema_version: u32,
-    pub kind: String,
-    pub projection: EventProjection,
-    pub replay: bool,
-    pub record: ClientEventRecord,
-}
+pub use crate::event::*;
 
 struct PendingCommit {
     deadline_millis: u64,
@@ -409,11 +169,14 @@ pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFault
     recovery_path: PathBuf,
     file: File,
     records: Vec<AuditRecord>,
+    ledger_bytes: u64,
     durable_len: usize,
     projection: RunStateProjection,
+    tail_projection: RunStateProjection,
     pending_since_millis: Option<u64>,
     poisoned: bool,
     clock: Arc<C>,
+    replay_started_millis: u64,
     faults: Arc<F>,
     scheduled: Arc<ScheduledCommit<C, F>>,
 }
@@ -444,7 +207,15 @@ impl<C: LedgerClock, F: FaultInjector> Drop for Ledger<C, F> {
         );
         match result {
             Ok(()) => state.published = Some(pending.projection),
-            Err(error) => state.error = Some(error.to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                eprintln!(
+                    "dolgorae: final ledger commit failed for run {} at {}: {message}",
+                    self.run_id,
+                    self.state_path.display()
+                );
+                state.error = Some(message);
+            }
         }
     }
 }
@@ -476,8 +247,23 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             .read(true)
             .append(true)
             .mode(0o600)
-            .open(&audit_path)?;
-        let (mut records, tail) = scan_ledger(&mut file, run_id)?;
+            .open(&audit_path)
+            .map_err(|error| io_at("open audit ledger", &audit_path, error))?;
+        DarwinSystem
+            .lock_exclusive_nonblocking(&file)
+            .map_err(|error| {
+                if error
+                    .raw_os_error()
+                    .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+                {
+                    LedgerError::WriterBusy(audit_path.clone())
+                } else {
+                    io_at("lock audit ledger", &audit_path, error)
+                }
+            })?;
+        let replay_started = clock.monotonic_millis();
+        let (mut records, tail) =
+            scan_ledger(&mut file, &audit_path, run_id, &clock, replay_started)?;
         let clock = Arc::new(clock);
         let faults = Arc::new(faults);
         let scheduled = Arc::new(ScheduledCommit {
@@ -488,18 +274,28 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             clock: Arc::clone(&clock),
             faults: Arc::clone(&faults),
         });
+        let initial_projection = replay_with_budget(run_id, &records, &*clock, replay_started)?;
+        let ledger_bytes = tail.as_ref().map_or(
+            file.metadata()
+                .map_err(|error| io_at("inspect audit ledger", &audit_path, error))?
+                .len(),
+            |tail| tail.prefix_length,
+        );
         let mut ledger = Self {
             run_id,
             root,
             state_path,
             recovery_path,
             file,
-            projection: replay(run_id, &records)?,
+            projection: initial_projection.clone(),
+            tail_projection: initial_projection,
             durable_len: records.len(),
             records: std::mem::take(&mut records),
+            ledger_bytes,
             pending_since_millis: None,
             poisoned: false,
             clock,
+            replay_started_millis: replay_started,
             faults,
             scheduled,
         };
@@ -511,9 +307,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         Ok(ledger)
     }
 
-    #[must_use]
-    pub fn head(&self) -> LedgerHead {
-        self.effective_projection().ledger_head
+    pub fn head(&self) -> Result<LedgerHead, LedgerError> {
+        Ok(self.projection()?.ledger_head)
     }
 
     #[must_use]
@@ -530,14 +325,34 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             .map_or(GENESIS_PREVIOUS_HASH, AuditRecord::hash)
     }
 
-    #[must_use]
-    pub fn projection(&self) -> RunStateProjection {
+    pub fn projection(&self) -> Result<RunStateProjection, LedgerError> {
+        self.check_scheduler_health()?;
         self.effective_projection()
     }
 
-    #[must_use]
-    pub fn durable_records(&self) -> &[AuditRecord] {
-        &self.records[..self.effective_durable_len()]
+    pub fn try_projection(&self) -> Result<RunStateProjection, LedgerError> {
+        self.projection()
+    }
+
+    pub fn try_head(&self) -> Result<LedgerHead, LedgerError> {
+        self.head()
+    }
+
+    pub fn durable_records(&self) -> Result<&[AuditRecord], LedgerError> {
+        self.check_scheduler_health()?;
+        Ok(&self.records[..self.effective_durable_len()?])
+    }
+
+    pub fn try_durable_records(&self) -> Result<&[AuditRecord], LedgerError> {
+        self.durable_records()
+    }
+
+    pub(crate) fn check_open_replay_budget(&self) -> Result<(), LedgerError> {
+        check_replay_budget(&*self.clock, self.replay_started_millis)
+    }
+
+    pub fn close(mut self) -> Result<(), LedgerError> {
+        self.flush()
     }
 
     pub fn append(
@@ -585,12 +400,18 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             ));
         }
         self.validate_next(&record)?;
-        let mut candidate_records = Vec::with_capacity(self.records.len().saturating_add(1));
-        candidate_records.extend_from_slice(&self.records);
-        candidate_records.push(record.clone());
-        let candidate_projection = replay(self.run_id, &candidate_records).map_err(|error| {
-            LedgerError::InvalidRecord(format!("record cannot be projected: {error}"))
-        })?;
+        let line = record.canonical_line()?;
+        if line.len() > MAX_AUDIT_LINE_BYTES {
+            return Err(LedgerError::InvalidRecord(
+                "canonical audit line exceeds the bounded record limit".to_owned(),
+            ));
+        }
+        let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+        check_append_capacity(self.ledger_bytes, self.records.len(), line_bytes)?;
+        let candidate_projection = project_next(self.run_id, &self.tail_projection, &record)
+            .map_err(|error| {
+                LedgerError::InvalidRecord(format!("record cannot be projected: {error}"))
+            })?;
         let scheduled = Arc::clone(&self.scheduled);
         let mut scheduled_state = scheduled.state.lock().map_err(|_| {
             LedgerError::Integrity("group-commit state lock was poisoned".to_owned())
@@ -601,12 +422,6 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         }
         self.faults.check(FaultBarrier::BeforeLedgerAppend)?;
         let write_result = (|| {
-            let line = record.canonical_line()?;
-            if line.len() > MAX_AUDIT_LINE_BYTES {
-                return Err(LedgerError::InvalidRecord(
-                    "canonical audit line exceeds the bounded record limit".to_owned(),
-                ));
-            }
             self.file.write_all(&line)?;
             self.faults.check(FaultBarrier::AfterLedgerAppend)?;
             Ok::<(), LedgerError>(())
@@ -617,6 +432,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             return Err(error);
         }
         self.records.push(record);
+        self.ledger_bytes = self.ledger_bytes.saturating_add(line_bytes);
+        self.tail_projection = candidate_projection.clone();
         let started = *self
             .pending_since_millis
             .get_or_insert_with(|| self.clock.monotonic_millis());
@@ -662,7 +479,9 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         run_generation: u64,
         durability: AppendDurability,
     ) -> Result<(), LedgerError> {
-        record.validate(self.run_id, self.next_sequence())?;
+        record
+            .validate(self.run_id, self.next_sequence())
+            .map_err(|error| LedgerError::InvalidEvent(error.to_string()))?;
         let timestamp = record.timestamp.clone();
         let raw = serde_json::to_vec(&record)
             .map_err(|error| LedgerError::InvalidEvent(error.to_string()))?;
@@ -696,6 +515,11 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         run_generation: u64,
         durability: AppendDurability,
     ) -> Result<AuditKind, LedgerError> {
+        if raw.len() > RAW_PAYLOAD_LIMIT {
+            return Err(LedgerError::InvalidRecord(
+                "app-server payload exceeds the 2 MiB pre-parse limit".to_owned(),
+            ));
+        }
         if !bounded(method, 256) {
             return Err(LedgerError::InvalidRecord(
                 "app-server method is empty or exceeds 256 UTF-8 bytes".to_owned(),
@@ -763,7 +587,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 "ledger requires reopen after an ambiguous append or sync failure".to_owned(),
             ));
         }
-        if self.effective_durable_len() == self.records.len() {
+        if self.effective_durable_len()? == self.records.len() {
             self.durable_len = self.records.len();
             self.pending_since_millis = None;
             return Ok(());
@@ -772,14 +596,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         let mut scheduled_state = scheduled.state.lock().map_err(|_| {
             LedgerError::Integrity("group-commit state lock was poisoned".to_owned())
         })?;
-        let projection = match replay(self.run_id, &self.records) {
-            Ok(projection) => projection,
-            Err(error) => {
-                self.poisoned = true;
-                scheduled_state.error = Some(error.to_string());
-                return Err(error);
-            }
-        };
+        let projection = self.tail_projection.clone();
         if let Err(error) = commit_projection(
             &self.file,
             &self.root,
@@ -805,15 +622,18 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         projection: EventProjection,
         replay_delivery: bool,
     ) -> Result<Vec<EventDelivery>, LedgerError> {
-        if after > self.effective_projection().ledger_head.sequence {
-            return Err(LedgerError::InvalidEvent(
-                "event cursor is beyond the durable ledger head".to_owned(),
-            ));
+        let durable_head = self.projection()?.ledger_head.sequence;
+        if after > durable_head {
+            return Err(LedgerError::InvalidEvent(format!(
+                "event cursor {after} is beyond durable ledger head {durable_head}"
+            )));
         }
         let mut deliveries = Vec::new();
         let mut delivery_bytes = 0_usize;
-        for record in self.durable_records() {
-            if record.sequence() <= after || record.kind() != AuditKind::ClientEvent {
+        let durable_records = self.durable_records()?;
+        let first = durable_records.partition_point(|record| record.sequence() <= after);
+        for record in &durable_records[first..] {
+            if record.kind() != AuditKind::ClientEvent {
                 continue;
             }
             let event = event_from_payload(record.payload())?;
@@ -901,33 +721,41 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         Ok(())
     }
 
-    fn effective_durable_len(&self) -> usize {
-        self.scheduled
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| {
-                state
-                    .published
-                    .as_ref()
-                    .map(|value| value.ledger_head.sequence)
-            })
+    fn effective_durable_len(&self) -> Result<usize, LedgerError> {
+        let state = self.scheduled.state.lock().map_err(|_| {
+            LedgerError::Integrity("group-commit state lock was poisoned".to_owned())
+        })?;
+        Ok(state
+            .published
+            .as_ref()
+            .map(|value| value.ledger_head.sequence)
             .and_then(|sequence| usize::try_from(sequence).ok())
             .unwrap_or(self.durable_len)
             .max(self.durable_len)
-            .min(self.records.len())
+            .min(self.records.len()))
     }
 
-    fn effective_projection(&self) -> RunStateProjection {
-        self.scheduled
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| state.published.clone())
+    fn effective_projection(&self) -> Result<RunStateProjection, LedgerError> {
+        let state = self.scheduled.state.lock().map_err(|_| {
+            LedgerError::Integrity("group-commit state lock was poisoned".to_owned())
+        })?;
+        Ok(state
+            .published
+            .clone()
             .filter(|projection| {
                 projection.ledger_head.sequence > self.projection.ledger_head.sequence
             })
-            .unwrap_or_else(|| self.projection.clone())
+            .unwrap_or_else(|| self.projection.clone()))
+    }
+
+    fn check_scheduler_health(&self) -> Result<(), LedgerError> {
+        let state = self.scheduled.state.lock().map_err(|_| {
+            LedgerError::Integrity("group-commit state lock was poisoned".to_owned())
+        })?;
+        if let Some(error) = &state.error {
+            return Err(LedgerError::Integrity(error.clone()));
+        }
+        Ok(())
     }
 
     fn preserve_and_truncate_tail(&mut self, tail: TornTail) -> Result<(), LedgerError> {
@@ -1017,7 +845,10 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         for entry in fs::read_dir(&self.recovery_path)? {
             let entry = entry?;
             let name = entry.file_name().into_string().map_err(|_| {
-                LedgerError::Integrity("recovery evidence name is not valid UTF-8".to_owned())
+                LedgerError::Integrity(
+                    "recovery evidence name is not valid UTF-8; inspect the recovery directory and remove only a verified foreign entry"
+                        .to_owned(),
+                )
             })?;
             if name.starts_with(".tail-evidence-") && name.ends_with(".tmp") {
                 verify_secure_file(&entry.path(), current_uid()).map_err(machine_as_security)?;
@@ -1027,7 +858,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             }
             let Some((sequence, digest)) = parse_tail_evidence_name(&name) else {
                 return Err(LedgerError::Integrity(format!(
-                    "unrecognized recovery entry: {name}"
+                    "unrecognized recovery entry: {name}; inspect {} and remove it only after verifying that it is not Dolgorae recovery evidence",
+                    self.recovery_path.display()
                 )));
             };
             verify_secure_file(&entry.path(), current_uid()).map_err(machine_as_security)?;
@@ -1075,7 +907,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
     }
 
     fn reconcile_projection(&mut self) -> Result<(), LedgerError> {
-        let rebuilt = replay(self.run_id, self.durable_records())?;
+        self.check_open_replay_budget()?;
+        let rebuilt = self.tail_projection.clone();
         let existing = match read_bounded(&self.state_path, MAX_STATE_BYTES) {
             Ok(bytes) => serde_json::from_slice::<RunStateProjection>(&bytes).ok(),
             Err(LedgerError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1257,16 +1090,38 @@ struct TornTail {
     bytes: Vec<u8>,
 }
 
-fn scan_ledger(
+fn scan_ledger<C: LedgerClock>(
     file: &mut File,
+    audit_path: &Path,
     run_id: Uuid,
+    clock: &C,
+    started_millis: u64,
 ) -> Result<(Vec<AuditRecord>, Option<TornTail>), LedgerError> {
+    let ledger_bytes = file
+        .metadata()
+        .map_err(|error| io_at("inspect audit ledger", audit_path, error))?
+        .len();
+    if ledger_bytes > MAX_LEDGER_BYTES {
+        return Err(LedgerError::Integrity(format!(
+            "audit ledger exceeds the {MAX_LEDGER_BYTES}-byte replay bound"
+        )));
+    }
     let mut reader = BufReader::new(file.try_clone()?);
     reader.seek(SeekFrom::Start(0))?;
     let mut records = Vec::new();
     let mut prefix_length = 0_u64;
     let mut tail = None;
     while let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? {
+        if clock.monotonic_millis().saturating_sub(started_millis) >= REPLAY_BUDGET_MILLIS {
+            return Err(LedgerError::OperationTimeout(format!(
+                "full replay exceeded {REPLAY_BUDGET_MILLIS} milliseconds"
+            )));
+        }
+        if records.len() >= MAX_LEDGER_RECORDS {
+            return Err(LedgerError::Integrity(format!(
+                "audit ledger exceeds the {MAX_LEDGER_RECORDS}-record replay bound"
+            )));
+        }
         let byte_count = line.len();
         if !terminated {
             tail = Some(TornTail {
@@ -1320,9 +1175,29 @@ fn scan_ledger(
         }
         records.push(record);
         prefix_length = prefix_length.saturating_add(u64::try_from(byte_count).unwrap_or(u64::MAX));
+        check_replay_budget(clock, started_millis)?;
     }
+    check_replay_budget(clock, started_millis)?;
     file.seek(SeekFrom::End(0))?;
     Ok((records, tail))
+}
+
+fn check_append_capacity(
+    current_bytes: u64,
+    current_records: usize,
+    line_bytes: u64,
+) -> Result<(), LedgerError> {
+    if current_records >= MAX_LEDGER_RECORDS {
+        return Err(LedgerError::Integrity(format!(
+            "append would exceed the {MAX_LEDGER_RECORDS}-record ledger bound"
+        )));
+    }
+    if current_bytes.saturating_add(line_bytes) > MAX_LEDGER_BYTES {
+        return Err(LedgerError::Integrity(format!(
+            "append would exceed the {MAX_LEDGER_BYTES}-byte ledger bound"
+        )));
+    }
+    Ok(())
 }
 
 fn read_bounded_segment(reader: &mut impl BufRead) -> Result<Option<(Vec<u8>, bool)>, LedgerError> {
@@ -1354,441 +1229,55 @@ fn read_bounded_segment(reader: &mut impl BufRead) -> Result<Option<(Vec<u8>, bo
     }
 }
 
-fn replay(run_id: Uuid, records: &[AuditRecord]) -> Result<RunStateProjection, LedgerError> {
-    let mut state = RunStateProjection::empty(run_id);
-    let mut pending = BTreeSet::new();
+fn replay_with_budget<C: LedgerClock>(
+    run_id: Uuid,
+    records: &[AuditRecord],
+    clock: &C,
+    started_millis: u64,
+) -> Result<RunStateProjection, LedgerError> {
+    let mut projection = RunStateProjection::empty(run_id);
     for record in records {
-        if record.run_id() != run_id {
-            return Err(LedgerError::Integrity(
-                "replay crossed run identity".to_owned(),
-            ));
-        }
-        state.run_generation = state.run_generation.max(record.run_generation());
-        match record.kind() {
-            AuditKind::RunCreated => {
-                state.lifecycle = RunLifecycle::Starting;
-                if let Some(access) = payload_string(record.payload(), "initial_access") {
-                    state.access = parse_access(&access)?;
-                }
-                state.default_effort = payload_string(record.payload(), "default_effort");
-                if state
-                    .default_effort
-                    .as_deref()
-                    .is_some_and(|value| !bounded(value, 64))
-                {
-                    return Err(LedgerError::Integrity(
-                        "default effort exceeds its projection bound".to_owned(),
-                    ));
-                }
-            }
-            AuditKind::ThreadBound => {
-                let thread = required_payload_string(record.payload(), "thread_id")?;
-                if !bounded(&thread, 256) {
-                    return Err(LedgerError::Integrity(
-                        "thread identity exceeds its projection bound".to_owned(),
-                    ));
-                }
-                state.thread_id = Some(thread);
-            }
-            AuditKind::TurnStarted => {
-                let turn = required_payload_string(record.payload(), "turn_id")?;
-                if !bounded(&turn, 256) {
-                    return Err(LedgerError::Integrity(
-                        "turn identity exceeds its projection bound".to_owned(),
-                    ));
-                }
-                state.active_turn_id = Some(turn.clone());
-                state.latest_turn_id = Some(turn);
-                state.lifecycle = RunLifecycle::Running;
-            }
-            AuditKind::TurnTerminal => {
-                let turn = required_payload_string(record.payload(), "turn_id")?;
-                if !bounded(&turn, 256) {
-                    return Err(LedgerError::Integrity(
-                        "turn identity exceeds its projection bound".to_owned(),
-                    ));
-                }
-                if state.active_turn_id.as_deref() == Some(turn.as_str()) {
-                    state.active_turn_id = None;
-                }
-                state.latest_turn_id = Some(turn);
-                state.lifecycle = if pending.is_empty() {
-                    RunLifecycle::Idle
-                } else {
-                    RunLifecycle::WaitingInteraction
-                };
-            }
-            AuditKind::LifecycleTransition => {
-                state.lifecycle =
-                    parse_lifecycle(&required_payload_string(record.payload(), "current")?)?;
-                if matches!(
-                    state.lifecycle,
-                    RunLifecycle::Closed | RunLifecycle::StartFailed | RunLifecycle::OutcomeUnknown
-                ) {
-                    state.active_turn_id = None;
-                }
-            }
-            AuditKind::RunGenerationStarted | AuditKind::RunGenerationStopped => {
-                state.run_generation = record.run_generation();
-            }
-            AuditKind::InteractionOpened => {
-                let request = required_payload_string(record.payload(), "request_id")?;
-                if !bounded(&request, 256) || pending.len() >= 4096 {
-                    return Err(LedgerError::Integrity(
-                        "pending interaction exceeds projection bounds".to_owned(),
-                    ));
-                }
-                pending.insert(request);
-                state.lifecycle = RunLifecycle::WaitingInteraction;
-            }
-            AuditKind::InteractionResolved => {
-                let request = required_payload_string(record.payload(), "request_id")?;
-                if !bounded(&request, 256) {
-                    return Err(LedgerError::Integrity(
-                        "resolved interaction exceeds its projection bound".to_owned(),
-                    ));
-                }
-                pending.remove(&request);
-                state.lifecycle = if pending.is_empty() {
-                    if state.active_turn_id.is_some() {
-                        RunLifecycle::Running
-                    } else {
-                        RunLifecycle::Idle
-                    }
-                } else {
-                    RunLifecycle::WaitingInteraction
-                };
-            }
-            AuditKind::WriterAcquired => {
-                state.writer_authority = ProjectedWriterAuthority::Active;
-                state.access = ProjectedAccess::Write;
-            }
-            AuditKind::WriterReleased => {
-                state.writer_authority = ProjectedWriterAuthority::None;
-                state.access = ProjectedAccess::Read;
-            }
-            AuditKind::WriterHandoffRequested => {
-                state.writer_authority = ProjectedWriterAuthority::HandoffPrepared;
-                state.access = ProjectedAccess::Transitioning;
-            }
-            AuditKind::WriterHandoffCancelled => {
-                state.writer_authority = ProjectedWriterAuthority::Active;
-                state.access = ProjectedAccess::Write;
-            }
-            AuditKind::WriterHandoffCompleted => {
-                state.writer_authority = ProjectedWriterAuthority::None;
-                state.access = ProjectedAccess::Read;
-            }
-            AuditKind::Reconciliation => {
-                state.lifecycle = RunLifecycle::ReconciliationRequired;
-            }
-            AuditKind::ClientEvent => {
-                let event = event_from_payload(record.payload())?;
-                event.validate(run_id, record.sequence()).map_err(|error| {
-                    LedgerError::Integrity(format!("stored client event is invalid: {error}"))
-                })?;
-                state.last_event_cursor = Some(event.cursor);
-            }
-            AuditKind::StartFailed => {
-                state.lifecycle = RunLifecycle::StartFailed;
-                state.active_turn_id = None;
-            }
-            AuditKind::OutcomeUnknown => {
-                state.lifecycle = RunLifecycle::OutcomeUnknown;
-                state.active_turn_id = None;
-            }
-            _ => {}
-        }
-        state.ledger_head = LedgerHead {
-            sequence: record.sequence(),
-            hash: record.hash().to_owned(),
-        };
+        projection = project_next(run_id, &projection, record)?;
+        check_replay_budget(clock, started_millis)?;
     }
-    state.pending_requests = pending.into_iter().collect();
-    validate_projection(&state)?;
-    Ok(state)
+    check_replay_budget(clock, started_millis)?;
+    Ok(projection)
 }
 
-impl ClientEventRecord {
-    fn validate(&self, run_id: Uuid, sequence: u64) -> Result<(), LedgerError> {
-        let invalid = |reason: &str| LedgerError::InvalidEvent(reason.to_owned());
-        if self.schema_version != 1 || self.event_schema_version != 1 {
-            return Err(invalid("unsupported event schema version"));
-        }
-        if self.cursor != sequence.to_string() {
-            return Err(invalid("event cursor must equal the audit sequence"));
-        }
-        if self.event_id.get_version_num() != 7
-            || self.run_id != run_id
-            || run_id.get_version_num() != 7
-        {
-            return Err(invalid("event or run identity is invalid"));
-        }
-        if !is_microsecond_utc_timestamp(&self.timestamp)
-            || !is_sha256(&self.workspace_id)
-            || !is_sha256(&self.server_key)
-            || self.server_epoch == 0
-        {
-            return Err(invalid("event provenance is invalid"));
-        }
-        if self
-            .thread_id
-            .as_deref()
-            .is_some_and(|value| !bounded(value, 256))
-            || self
-                .turn_id
-                .as_deref()
-                .is_some_and(|value| !bounded(value, 256))
-        {
-            return Err(invalid("event thread or turn identity is invalid"));
-        }
-        if self.data.requires_turn() && (self.thread_id.is_none() || self.turn_id.is_none()) {
-            return Err(invalid(
-                "event type requires exact thread and turn identities",
-            ));
-        }
-        self.data.validate(self.run_id)
+fn check_replay_budget<C: LedgerClock>(clock: &C, started_millis: u64) -> Result<(), LedgerError> {
+    if clock.monotonic_millis().saturating_sub(started_millis) >= REPLAY_BUDGET_MILLIS {
+        return Err(LedgerError::OperationTimeout(format!(
+            "full replay exceeded {REPLAY_BUDGET_MILLIS} milliseconds"
+        )));
     }
+    Ok(())
 }
 
-impl ClientEventData {
-    fn minimal(&self) -> bool {
-        matches!(
-            self,
-            Self::RunStateChanged(_)
-                | Self::TurnStateChanged(_)
-                | Self::ResponseFinal(_)
-                | Self::InteractionOpened(_)
-                | Self::InteractionResolved(_)
-                | Self::RuntimeError(_)
-                | Self::WriterStateChanged(_)
-                | Self::RecoveryRequired(_)
-        )
-    }
-
-    fn requires_turn(&self) -> bool {
-        matches!(
-            self,
-            Self::TurnStateChanged(_)
-                | Self::ResponseFinal(_)
-                | Self::InteractionOpened(_)
-                | Self::InteractionResolved(_)
-                | Self::UsageReported(_)
-                | Self::WorkspaceChanges(_)
-                | Self::CommandStarted(_)
-                | Self::CommandCompleted(_)
-                | Self::ReasoningSuppressed(_)
-        )
-    }
-
-    fn validate(&self, run_id: Uuid) -> Result<(), LedgerError> {
-        let invalid = |reason: &str| LedgerError::InvalidEvent(reason.to_owned());
-        match self {
-            Self::RunStateChanged(payload) => {
-                if payload
-                    .previous
-                    .as_deref()
-                    .is_some_and(|value| !valid_run_state(value))
-                    || !valid_run_state(&payload.current)
-                {
-                    return Err(invalid("run state event contains an unknown state"));
-                }
-            }
-            Self::TurnStateChanged(payload) => {
-                if payload
-                    .previous
-                    .as_deref()
-                    .is_some_and(|value| !valid_turn_state(value))
-                    || !valid_turn_state(&payload.current)
-                {
-                    return Err(invalid("turn state event contains an unknown state"));
-                }
-            }
-            Self::ResponseFinal(payload) => {
-                payload.response.validate(run_id)?;
-            }
-            Self::InteractionOpened(payload) => {
-                if !bounded(&payload.request_id, 256)
-                    || !matches!(
-                        payload.interaction_kind.as_str(),
-                        "command_execution_approval"
-                            | "file_change_approval"
-                            | "user_input"
-                            | "unsupported_request"
-                    )
-                {
-                    return Err(invalid("interaction-opened payload is invalid"));
-                }
-            }
-            Self::InteractionResolved(payload) => {
-                if !bounded(&payload.request_id, 256)
-                    || !matches!(
-                        payload.outcome.as_str(),
-                        "accepted"
-                            | "declined"
-                            | "cancelled"
-                            | "answered"
-                            | "stale"
-                            | "method_not_found"
-                    )
-                {
-                    return Err(invalid("interaction-resolved payload is invalid"));
-                }
-            }
-            Self::RuntimeError(payload) => {
-                if payload.error_code.is_empty()
-                    || !payload.error_code.bytes().enumerate().all(|(index, byte)| {
-                        if index == 0 {
-                            byte.is_ascii_uppercase()
-                        } else {
-                            byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
-                        }
-                    })
-                    || !bounded(&payload.message, 4096)
-                {
-                    return Err(invalid("runtime-error payload is invalid"));
-                }
-            }
-            Self::UsageReported(_) => {}
-            Self::WorkspaceChanges(payload) => {
-                if payload.paths.len() > 4096
-                    || payload.paths.iter().any(|path| match path {
-                        LosslessPath::Utf8(value) => !bounded(value, 4096),
-                        LosslessPath::Bytes { bytes } => {
-                            if bytes.len() > 8192 {
-                                return true;
-                            }
-                            let Ok(decoded) =
-                                base64::engine::general_purpose::STANDARD.decode(bytes)
-                            else {
-                                return true;
-                            };
-                            base64::engine::general_purpose::STANDARD.encode(decoded) != *bytes
-                        }
-                    })
-                {
-                    return Err(invalid("workspace-changes payload exceeds bounds"));
-                }
-            }
-            Self::WriterStateChanged(payload) => {
-                if !valid_writer_state(&payload.previous)
-                    || !valid_writer_state(&payload.current)
-                    || payload
-                        .writer_run_id
-                        .is_some_and(|identity| identity.get_version_num() != 7)
-                {
-                    return Err(invalid("writer payload is invalid"));
-                }
-            }
-            Self::RecoveryRequired(payload) => {
-                if !bounded(&payload.reason, 4096) {
-                    return Err(invalid("recovery reason exceeds its bound"));
-                }
-            }
-            Self::CommandStarted(payload) => validate_command(&payload.command)?,
-            Self::CommandCompleted(payload) => validate_command(&payload.command)?,
-            Self::DiagnosticReported(payload) => {
-                if !bounded(&payload.message, 4096) {
-                    return Err(invalid("diagnostic message exceeds its bound"));
-                }
-            }
-            Self::GenerationChanged(payload) => {
-                if payload.server_epoch == 0 {
-                    return Err(invalid("generation event requires a positive server epoch"));
-                }
-            }
-            Self::ReasoningSuppressed(payload) => {
-                if !bounded(&payload.method, 256)
-                    || !is_sha256(&payload.sha256)
-                    || payload.reason != "reasoning_content_not_retained"
-                {
-                    return Err(invalid("reasoning suppression metadata is invalid"));
-                }
-            }
-        }
-        Ok(())
-    }
+fn project_next(
+    run_id: Uuid,
+    current: &RunStateProjection,
+    record: &AuditRecord,
+) -> Result<RunStateProjection, LedgerError> {
+    crate::projection::project_next(run_id, current, record, projection_event_cursor)
+        .map_err(LedgerError::Integrity)
 }
 
-impl FinalResponse {
-    fn validate(&self, run_id: Uuid) -> Result<(), LedgerError> {
-        let invalid = |reason: &str| LedgerError::InvalidEvent(reason.to_owned());
-        match self {
-            Self::Inline { text } => {
-                if !bounded(text, 1024 * 1024) {
-                    return Err(invalid("inline final response exceeds 1 MiB"));
-                }
-            }
-            Self::Artifact { artifact } => artifact.validate(run_id)?,
-        }
-        Ok(())
-    }
+fn projection_event_cursor(record: &AuditRecord) -> Result<String, String> {
+    let event = event_from_payload(record.payload()).map_err(|error| error.to_string())?;
+    event
+        .validate(record.run_id(), record.sequence())
+        .map_err(|error| format!("stored client event is invalid: {error}"))?;
+    Ok(event.cursor)
 }
-
-impl ArtifactMetadata {
-    fn validate(&self, run_id: Uuid) -> Result<(), LedgerError> {
-        let invalid = |reason: &str| LedgerError::InvalidEvent(reason.to_owned());
-        if self.schema_version != 1
-            || self.artifact_id.get_version_num() != 7
-            || self.run_id != run_id
-            || self.kind != "final_response"
-            || self.visibility != "observer"
-            || self.interaction_request_id.is_some()
-            || self.media_type != "text/markdown"
-            || self.byte_length > 32 * 1024 * 1024
-            || !is_sha256(&self.sha256)
-            || !is_microsecond_utc_timestamp(&self.created_at)
-            || self.retention != "run_lifetime"
-            || !matches!(
-                self.integrity.as_str(),
-                "verified" | "unverified" | "failed"
-            )
-        {
-            return Err(invalid("final-response artifact metadata is invalid"));
-        }
-        Ok(())
-    }
-}
-
 fn event_from_payload(payload: &LosslessJson) -> Result<ClientEventRecord, LedgerError> {
-    const EVENT_FIELDS: [&str; 13] = [
-        "schema_version",
-        "event_schema_version",
-        "cursor",
-        "event_id",
-        "timestamp",
-        "workspace_id",
-        "run_id",
-        "thread_id",
-        "turn_id",
-        "server_key",
-        "server_epoch",
-        "type",
-        "payload",
-    ];
-    let LosslessJson::Object(entries) = payload else {
-        return Err(LedgerError::Integrity(
-            "client event payload is not an object".to_owned(),
-        ));
-    };
-    if entries.len() != EVENT_FIELDS.len()
-        || entries
-            .iter()
-            .any(|(name, _)| !EVENT_FIELDS.contains(&name.as_str()))
-    {
-        return Err(LedgerError::Integrity(
-            "client event has missing or unknown top-level fields".to_owned(),
-        ));
-    }
-    let bytes = canonicalize(payload).map_err(|error| {
-        LedgerError::Integrity(format!("client event is not canonical: {error}"))
-    })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| LedgerError::Integrity(format!("client event is invalid: {error}")))
+    crate::event::from_payload(payload).map_err(|error| LedgerError::Integrity(error.to_string()))
 }
 
 fn is_reasoning_message(method: &str, raw: &[u8]) -> bool {
-    if method.starts_with("item/reasoning/") {
+    if method.starts_with("item/reasoning/")
+        || method.starts_with("item/plan/")
+        || method.starts_with("turn/plan/")
+    {
         return true;
     }
     if !matches!(method, "item/started" | "item/completed") {
@@ -1800,7 +1289,10 @@ fn is_reasoning_message(method: &str, raw: &[u8]) -> bool {
     let Ok(value) = parse(text) else {
         return false;
     };
-    lossless_path_string(&value, &["params", "item", "type"]).as_deref() == Some("reasoning")
+    matches!(
+        lossless_path_string(&value, &["params", "item", "type"]).as_deref(),
+        Some("reasoning" | "plan")
+    )
 }
 
 fn lossless_path_string(value: &LosslessJson, path: &[&str]) -> Option<String> {
@@ -1833,138 +1325,9 @@ fn payload_string(payload: &LosslessJson, name: &str) -> Option<String> {
     })
 }
 
-fn required_payload_string(payload: &LosslessJson, name: &str) -> Result<String, LedgerError> {
-    payload_string(payload, name).ok_or_else(|| {
-        LedgerError::Integrity(format!("audit payload is missing required string {name}"))
-    })
-}
-
-fn parse_lifecycle(value: &str) -> Result<RunLifecycle, LedgerError> {
-    serde_json::from_value(serde_json::Value::String(value.to_owned()))
-        .map_err(|_| LedgerError::Integrity(format!("unknown lifecycle projection {value}")))
-}
-
-fn parse_access(value: &str) -> Result<ProjectedAccess, LedgerError> {
-    serde_json::from_value(serde_json::Value::String(value.to_owned()))
-        .map_err(|_| LedgerError::Integrity(format!("unknown access projection {value}")))
-}
-
-fn valid_run_state(value: &str) -> bool {
-    parse_lifecycle(value).is_ok()
-}
-
-fn valid_turn_state(value: &str) -> bool {
-    matches!(
-        value,
-        "reserved"
-            | "accepted"
-            | "running"
-            | "waiting_interaction"
-            | "interrupting"
-            | "completed"
-            | "failed"
-            | "interrupted"
-            | "outcome_unknown"
-    )
-}
-
-fn valid_writer_state(value: &str) -> bool {
-    matches!(
-        value,
-        "none" | "reserved" | "active" | "handoff_prepared" | "releasing" | "blocked_unknown"
-    )
-}
-
-fn validate_command(command: &[String]) -> Result<(), LedgerError> {
-    if command.len() > 256 || command.iter().any(|argument| !bounded(argument, 4096)) {
-        return Err(LedgerError::InvalidEvent(
-            "command payload exceeds its bounds".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_projection(projection: &RunStateProjection) -> Result<(), LedgerError> {
-    let invalid = |reason: &str| LedgerError::Projection(reason.to_owned());
-    if projection.schema_version != 1 || projection.run_id.get_version_num() != 7 {
-        return Err(invalid("projection schema or run identity is invalid"));
-    }
-    if !is_sha256(&projection.ledger_head.hash)
-        || (projection.ledger_head.sequence == 0
-            && projection.ledger_head.hash != GENESIS_PREVIOUS_HASH)
-    {
-        return Err(invalid("projection ledger head is invalid"));
-    }
-    if projection
-        .thread_id
-        .as_deref()
-        .is_some_and(|value| !bounded(value, 256))
-        || projection
-            .active_turn_id
-            .as_deref()
-            .is_some_and(|value| !bounded(value, 256))
-        || projection
-            .latest_turn_id
-            .as_deref()
-            .is_some_and(|value| !bounded(value, 256))
-        || projection
-            .default_effort
-            .as_deref()
-            .is_some_and(|value| !bounded(value, 64))
-    {
-        return Err(invalid("projection identity or effort exceeds its bound"));
-    }
-    if projection.pending_requests.len() > 4096
-        || projection
-            .pending_requests
-            .iter()
-            .any(|value| !bounded(value, 256))
-        || projection
-            .pending_requests
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-    {
-        return Err(invalid(
-            "pending requests are not bounded, sorted, and unique",
-        ));
-    }
-    if projection.active_turn_id.is_some() && projection.active_turn_id != projection.latest_turn_id
-    {
-        return Err(invalid("active turn is not the latest turn"));
-    }
-    if matches!(
-        projection.lifecycle,
-        RunLifecycle::Closed | RunLifecycle::StartFailed | RunLifecycle::OutcomeUnknown
-    ) && projection.active_turn_id.is_some()
-    {
-        return Err(invalid("terminal projection retains an active turn"));
-    }
-    if projection.lifecycle == RunLifecycle::WaitingInteraction
-        && projection.pending_requests.is_empty()
-    {
-        return Err(invalid("waiting projection has no pending interaction"));
-    }
-    if projection.writer_authority == ProjectedWriterAuthority::Active
-        && projection.access != ProjectedAccess::Write
-    {
-        return Err(invalid("active writer projection is not write-capable"));
-    }
-    if projection
-        .last_event_cursor
-        .as_deref()
-        .is_some_and(|cursor| {
-            cursor.parse::<u64>().map_or(true, |value| {
-                value == 0 || value > projection.ledger_head.sequence || cursor.starts_with('0')
-            })
-        })
-    {
-        return Err(invalid(
-            "event cursor exceeds or disagrees with the ledger head",
-        ));
-    }
-    Ok(())
+    crate::projection::validate(projection).map_err(LedgerError::Projection)
 }
-
 fn read_bounded(path: &PathBuf, maximum: u64) -> Result<Vec<u8>, LedgerError> {
     let file = File::open(path)?;
     let metadata = file.metadata()?;
@@ -2031,6 +1394,14 @@ fn machine_as_security(error: crate::machine::MachineError) -> LedgerError {
     LedgerError::SecurityPolicy(error)
 }
 
+fn io_at(operation: &'static str, path: &Path, source: std::io::Error) -> LedgerError {
+    LedgerError::IoContext {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
 fn current_uid() -> u32 {
     SystemWorkspacePlatform.current_uid()
 }
@@ -2061,4 +1432,37 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::is_microsecond_utc_timestamp;
+
+    #[test]
+    fn production_timestamp_formatter_emits_calendar_valid_microsecond_utc() {
+        let cases = [
+            (UNIX_EPOCH, "1970-01-01T00:00:00.000000Z"),
+            (
+                UNIX_EPOCH + Duration::from_secs(951_782_400),
+                "2000-02-29T00:00:00.000000Z",
+            ),
+            (
+                UNIX_EPOCH + Duration::from_secs(4_102_444_800),
+                "2100-01-01T00:00:00.000000Z",
+            ),
+        ];
+        for (instant, expected) in cases {
+            let timestamp = format_system_timestamp(instant);
+            assert_eq!(timestamp, expected);
+            assert!(is_microsecond_utc_timestamp(&timestamp));
+        }
+    }
+
+    #[test]
+    fn append_capacity_accepts_exact_limits_and_rejects_the_first_excess() {
+        assert!(check_append_capacity(MAX_LEDGER_BYTES - 1, MAX_LEDGER_RECORDS - 1, 1).is_ok());
+        assert!(check_append_capacity(MAX_LEDGER_BYTES, MAX_LEDGER_RECORDS - 1, 1).is_err());
+        assert!(check_append_capacity(0, MAX_LEDGER_RECORDS, 1).is_err());
+    }
 }

@@ -426,15 +426,33 @@ impl Drop for IdempotencyReservation {
 pub struct ConformantLedger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFaults> {
     ledger: Ledger<C, F>,
     bootstrap_recovery: bool,
+    conformance: Option<ConformanceState>,
+    tail_conformance: Option<ConformanceState>,
+}
+
+#[derive(Clone)]
+struct ConformanceState {
+    report: ConformanceReport,
+    previous_generation: u64,
+    previous_kind: Option<AuditKind>,
+    active_turn: Option<String>,
+    pending: BTreeSet<String>,
+    accepted_intents: BTreeMap<(IdempotencyOperation, String), (String, Uuid)>,
 }
 
 impl ConformantLedger<SystemLedgerClock, NoFaults> {
     pub fn open(root: impl Into<PathBuf>, run_id: Uuid) -> Result<Self, ConformanceError> {
         let ledger = Ledger::open(root, run_id)?;
-        verify_ledger_records(run_id, ledger.durable_records())?;
+        let conformance = Some(ConformanceState::from_verified(
+            run_id,
+            ledger.durable_records()?,
+            || ledger.check_open_replay_budget().map_err(Into::into),
+        )?);
         Ok(Self {
             ledger,
             bootstrap_recovery: false,
+            tail_conformance: conformance.clone(),
+            conformance,
         })
     }
 
@@ -443,7 +461,7 @@ impl ConformantLedger<SystemLedgerClock, NoFaults> {
         run_id: Uuid,
     ) -> Result<Self, ConformanceError> {
         let ledger = Ledger::open(root, run_id)?;
-        if ledger.durable_records().len() > 3 {
+        if ledger.durable_records()?.len() > 3 {
             return Err(ConformanceError::InvalidHistory(
                 "bootstrap recovery found records beyond the closed prefix".to_owned(),
             ));
@@ -451,6 +469,8 @@ impl ConformantLedger<SystemLedgerClock, NoFaults> {
         Ok(Self {
             ledger,
             bootstrap_recovery: true,
+            conformance: None,
+            tail_conformance: None,
         })
     }
 }
@@ -463,10 +483,16 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         faults: F,
     ) -> Result<Self, ConformanceError> {
         let ledger = Ledger::open_with(root, run_id, clock, faults)?;
-        verify_ledger_records(run_id, ledger.durable_records())?;
+        let conformance = Some(ConformanceState::from_verified(
+            run_id,
+            ledger.durable_records()?,
+            || ledger.check_open_replay_budget().map_err(Into::into),
+        )?);
         Ok(Self {
             ledger,
             bootstrap_recovery: false,
+            tail_conformance: conformance.clone(),
+            conformance,
         })
     }
 
@@ -477,7 +503,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         faults: F,
     ) -> Result<Self, ConformanceError> {
         let ledger = Ledger::open_with(root, run_id, clock, faults)?;
-        if ledger.durable_records().len() > 3 {
+        if ledger.durable_records()?.len() > 3 {
             return Err(ConformanceError::InvalidHistory(
                 "bootstrap recovery found records beyond the closed prefix".to_owned(),
             ));
@@ -485,6 +511,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         Ok(Self {
             ledger,
             bootstrap_recovery: true,
+            conformance: None,
+            tail_conformance: None,
         })
     }
 
@@ -492,7 +520,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         &mut self,
         request: &BootstrapRequest,
     ) -> Result<ConformanceReport, ConformanceError> {
-        if request.intent.run_id != self.ledger.projection().run_id
+        if request.intent.run_id != self.ledger.projection()?.run_id
             || !is_sha256(&request.workspace_id)
         {
             return Err(ConformanceError::InvalidHistory(
@@ -537,7 +565,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
             previous = record.hash().to_owned();
             records.push(record);
         }
-        let durable = self.ledger.durable_records();
+        let durable = self.ledger.durable_records()?;
         let mut mismatch = None;
         for (index, (existing, expected)) in durable.iter().zip(&records).enumerate() {
             if existing.canonical_line()? != expected.canonical_line()? {
@@ -554,8 +582,14 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         for record in records.into_iter().skip(durable.len()) {
             self.ledger.append(record, AppendDurability::Required)?;
         }
-        let report = verify_ledger_records(request.intent.run_id, self.ledger.durable_records())?;
+        let report = verify_ledger_records(request.intent.run_id, self.ledger.durable_records()?)?;
         self.bootstrap_recovery = false;
+        self.conformance = Some(ConformanceState::from_verified(
+            request.intent.run_id,
+            self.ledger.durable_records()?,
+            || Ok(()),
+        )?);
+        self.tail_conformance = self.conformance.clone();
         Ok(report)
     }
 
@@ -580,13 +614,20 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
             ));
         }
         self.ledger.flush()?;
-        let mut candidate = self.ledger.durable_records().to_vec();
-        candidate.push(record.clone());
-        verify_ledger_records(record.run_id(), &candidate)?;
+        self.conformance = self.tail_conformance.clone();
+        let mut candidate = self.tail_conformance.clone().ok_or_else(|| {
+            ConformanceError::InvalidHistory("conformance state is not initialized".to_owned())
+        })?;
+        candidate.apply(&record)?;
+        candidate.require_complete_terminal_pair()?;
         if record.kind() == AuditKind::LifecycleTransition {
             self.ledger.append_conformance_record(record, durability)?;
         } else {
             self.ledger.append(record, durability)?;
+        }
+        self.tail_conformance = Some(candidate);
+        if durability == AppendDurability::Required {
+            self.conformance = self.tail_conformance.clone();
         }
         Ok(())
     }
@@ -601,7 +642,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         reason: &str,
         authority: StartFailureAuthority,
     ) -> Result<ConformanceReport, ConformanceError> {
-        if authority.run_id != self.ledger.projection().run_id {
+        if authority.run_id != self.ledger.projection()?.run_id {
             return Err(ConformanceError::UnauthorizedStartFailure);
         }
         let report = self.verify()?;
@@ -727,10 +768,22 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
     }
 
     pub fn verify(&self) -> Result<ConformanceReport, ConformanceError> {
-        verify_ledger_records(
-            self.ledger.projection().run_id,
-            self.ledger.durable_records(),
-        )
+        let durable_count = u64::try_from(self.ledger.durable_records()?.len()).unwrap_or(u64::MAX);
+        let state = self
+            .tail_conformance
+            .as_ref()
+            .filter(|state| state.report.record_count == durable_count)
+            .or(self.conformance.as_ref())
+            .ok_or_else(|| {
+                ConformanceError::InvalidHistory("conformance state is not initialized".to_owned())
+            })?;
+        if state.report.record_count != durable_count {
+            return Err(ConformanceError::InvalidHistory(
+                "durable ledger and cached conformance state diverged".to_owned(),
+            ));
+        }
+        state.require_complete_terminal_pair()?;
+        Ok(state.report.clone())
     }
 
     #[must_use]
@@ -744,11 +797,12 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         kind: AuditKind,
         payload: LosslessJson,
     ) -> Result<AuditRecord, ConformanceError> {
+        let projection = self.ledger.projection()?;
         Ok(AuditRecord::new(
             self.ledger.next_sequence(),
             timestamp,
-            self.ledger.projection().run_id,
-            self.ledger.projection().run_generation,
+            projection.run_id,
+            projection.run_generation,
             kind,
             payload,
             self.ledger.previous_hash(),
@@ -760,15 +814,308 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         evidence: AuditRecord,
         seal: AuditRecord,
     ) -> Result<ConformanceReport, ConformanceError> {
-        let mut candidate = self.ledger.durable_records().to_vec();
-        candidate.push(evidence.clone());
-        candidate.push(seal.clone());
-        verify_ledger_records(evidence.run_id(), &candidate)?;
+        self.ledger.flush()?;
+        self.conformance = self.tail_conformance.clone();
+        let mut candidate = self.conformance.clone().ok_or_else(|| {
+            ConformanceError::InvalidHistory("conformance state is not initialized".to_owned())
+        })?;
+        candidate.apply(&evidence)?;
+        candidate.apply(&seal)?;
+        candidate.require_complete_terminal_pair()?;
         self.ledger
             .append_conformance_record(evidence, AppendDurability::Required)?;
         self.ledger
             .append_conformance_record(seal, AppendDurability::Required)?;
-        self.verify()
+        let report = candidate.report.clone();
+        self.conformance = Some(candidate.clone());
+        self.tail_conformance = Some(candidate);
+        Ok(report)
+    }
+}
+
+impl ConformanceState {
+    fn from_verified(
+        run_id: Uuid,
+        records: &[AuditRecord],
+        mut check_budget: impl FnMut() -> Result<(), ConformanceError>,
+    ) -> Result<Self, ConformanceError> {
+        let report = verify_ledger_records_with_check(run_id, records, &mut check_budget)?;
+        let mut active_turn = None;
+        let mut pending = BTreeSet::new();
+        let mut accepted_intents = BTreeMap::new();
+        for record in records {
+            match record.kind() {
+                AuditKind::IdempotencyReserved => {
+                    let intent = intent_from_payload(record.payload())?;
+                    accepted_intents.insert(
+                        (intent.operation, intent.idempotency_key),
+                        (intent.normalized_identity_sha256, intent.run_id),
+                    );
+                }
+                AuditKind::TurnStarted => {
+                    active_turn = Some(required_string(record.payload(), "turn_id")?);
+                }
+                AuditKind::TurnTerminal | AuditKind::OutcomeUnknown => active_turn = None,
+                AuditKind::InteractionOpened => {
+                    pending.insert(required_string(record.payload(), "request_id")?);
+                }
+                AuditKind::InteractionResolved => {
+                    pending.remove(&required_string(record.payload(), "request_id")?);
+                }
+                _ => {}
+            }
+            check_budget()?;
+        }
+        check_budget()?;
+        Ok(Self {
+            report,
+            previous_generation: records.last().map_or(0, AuditRecord::run_generation),
+            previous_kind: records.last().map(AuditRecord::kind),
+            active_turn,
+            pending,
+            accepted_intents,
+        })
+    }
+
+    fn apply(&mut self, record: &AuditRecord) -> Result<(), ConformanceError> {
+        let expected_sequence = self.report.record_count.saturating_add(1);
+        if record.sequence() != expected_sequence
+            || record.run_id() != self.report.run_id
+            || record.previous_hash() != self.report.head_hash
+        {
+            return Err(ConformanceError::InvalidHistory(format!(
+                "record {expected_sequence} breaks identity, sequence, or hash continuity"
+            )));
+        }
+        if record.run_generation() < self.previous_generation {
+            return Err(ConformanceError::InvalidHistory(format!(
+                "record {expected_sequence} regresses run generation"
+            )));
+        }
+        let line = record.canonical_line()?;
+        let reparsed = AuditRecord::from_canonical_line(&line[..line.len() - 1])?;
+        if reparsed.canonical_line()? != line {
+            return Err(ConformanceError::InvalidHistory(format!(
+                "record {expected_sequence} is not a canonical fixed point"
+            )));
+        }
+        if self.report.terminal_sealed {
+            return Err(ConformanceError::InvalidHistory(
+                "record follows a terminal seal".to_owned(),
+            ));
+        }
+        if matches!(
+            self.previous_kind,
+            Some(AuditKind::StartFailed | AuditKind::CleanupResult)
+        ) && record.kind() != AuditKind::LifecycleTransition
+        {
+            return Err(ConformanceError::InvalidHistory(
+                "terminal evidence is not immediately followed by its seal".to_owned(),
+            ));
+        }
+        if matches!(
+            record.kind(),
+            AuditKind::WorkspaceInitialized
+                | AuditKind::RunCreated
+                | AuditKind::WriteContinuationCreated
+        ) {
+            return Err(ConformanceError::InvalidHistory(
+                "bootstrap kind repeats after allocation".to_owned(),
+            ));
+        }
+        match record.kind() {
+            AuditKind::IdempotencyReserved => {
+                let intent = intent_from_payload(record.payload())?;
+                if intent.run_id != self.report.run_id {
+                    return Err(ConformanceError::InvalidHistory(
+                        "idempotency intent targets another run".to_owned(),
+                    ));
+                }
+                let key = (intent.operation, intent.idempotency_key.clone());
+                let identity = (intent.normalized_identity_sha256, intent.run_id);
+                if self
+                    .accepted_intents
+                    .insert(key, identity.clone())
+                    .is_some_and(|existing| existing != identity)
+                {
+                    return Err(ConformanceError::InvalidHistory(
+                        "idempotency key conflicts with durable operation identity".to_owned(),
+                    ));
+                }
+            }
+            AuditKind::TurnStarted => {
+                let turn_id = required_string(record.payload(), "turn_id")?;
+                if !utf8_bounded(&turn_id, 256) || self.active_turn.is_some() {
+                    return Err(ConformanceError::InvalidHistory(
+                        "turn_started does not name one inactive bounded turn".to_owned(),
+                    ));
+                }
+                self.report.lifecycle =
+                    checked_implicit_transition(self.report.lifecycle, RunLifecycle::Running)?;
+                self.active_turn = Some(turn_id);
+            }
+            AuditKind::TurnTerminal => {
+                let turn_id = required_string(record.payload(), "turn_id")?;
+                if self.active_turn.as_deref() != Some(turn_id.as_str()) {
+                    return Err(ConformanceError::InvalidHistory(
+                        "turn_terminal does not match the active turn".to_owned(),
+                    ));
+                }
+                self.active_turn = None;
+                let target = if self.pending.is_empty() {
+                    RunLifecycle::Idle
+                } else {
+                    RunLifecycle::WaitingInteraction
+                };
+                self.report.lifecycle = checked_implicit_transition(self.report.lifecycle, target)?;
+            }
+            AuditKind::InteractionOpened => {
+                let request_id = required_string(record.payload(), "request_id")?;
+                if !utf8_bounded(&request_id, 256) || !self.pending.insert(request_id) {
+                    return Err(ConformanceError::InvalidHistory(
+                        "interaction_opened is duplicate or unbounded".to_owned(),
+                    ));
+                }
+                if self.report.lifecycle != RunLifecycle::WaitingInteraction {
+                    self.report.lifecycle = checked_implicit_transition(
+                        self.report.lifecycle,
+                        RunLifecycle::WaitingInteraction,
+                    )?;
+                }
+            }
+            AuditKind::InteractionResolved => {
+                let request_id = required_string(record.payload(), "request_id")?;
+                if !self.pending.remove(&request_id) {
+                    return Err(ConformanceError::InvalidHistory(
+                        "interaction_resolved does not match an open interaction".to_owned(),
+                    ));
+                }
+                let target = if self.pending.is_empty() {
+                    if self.active_turn.is_some() {
+                        RunLifecycle::Running
+                    } else {
+                        RunLifecycle::Idle
+                    }
+                } else {
+                    RunLifecycle::WaitingInteraction
+                };
+                if self.report.lifecycle != target {
+                    self.report.lifecycle =
+                        checked_implicit_transition(self.report.lifecycle, target)?;
+                }
+            }
+            AuditKind::Reconciliation => {
+                self.report.lifecycle = checked_implicit_transition(
+                    self.report.lifecycle,
+                    RunLifecycle::ReconciliationRequired,
+                )?;
+            }
+            AuditKind::OutcomeUnknown => {
+                self.report.lifecycle = checked_implicit_transition(
+                    self.report.lifecycle,
+                    RunLifecycle::OutcomeUnknown,
+                )?;
+                self.active_turn = None;
+            }
+            AuditKind::StartFailed => {
+                if self.report.lifecycle != RunLifecycle::Starting {
+                    return Err(ConformanceError::InvalidHistory(
+                        "start_failed evidence is outside starting".to_owned(),
+                    ));
+                }
+                ensure_object_keys(record.payload(), &["reason"])?;
+                if !utf8_bounded(&required_string(record.payload(), "reason")?, 1024) {
+                    return Err(ConformanceError::InvalidHistory(
+                        "start_failed reason is outside its bound".to_owned(),
+                    ));
+                }
+            }
+            AuditKind::CleanupResult => {
+                ensure_object_keys(record.payload(), &["outcome"])?;
+                if !utf8_bounded(&required_string(record.payload(), "outcome")?, 1024) {
+                    return Err(ConformanceError::InvalidHistory(
+                        "closed seal cleanup outcome is outside its bound".to_owned(),
+                    ));
+                }
+            }
+            AuditKind::LifecycleTransition => self.apply_transition(record)?,
+            _ => {}
+        }
+        self.report.record_count = expected_sequence;
+        self.report.head_hash = record.hash().to_owned();
+        self.previous_generation = record.run_generation();
+        self.previous_kind = Some(record.kind());
+        Ok(())
+    }
+
+    fn apply_transition(&mut self, record: &AuditRecord) -> Result<(), ConformanceError> {
+        let has_interrupt_confirmation =
+            object_has_key(record.payload(), "interrupt_terminal_confirmed")?;
+        if has_interrupt_confirmation {
+            ensure_object_keys(
+                record.payload(),
+                &[
+                    "previous",
+                    "current",
+                    "terminal_seal",
+                    "interrupt_terminal_confirmed",
+                ],
+            )?;
+        } else {
+            ensure_object_keys(record.payload(), &["previous", "current", "terminal_seal"])?;
+        }
+        let previous = parse_lifecycle(&required_string(record.payload(), "previous")?)?;
+        let current = parse_lifecycle(&required_string(record.payload(), "current")?)?;
+        let terminal_seal = required_bool(record.payload(), "terminal_seal")?;
+        let interrupt_confirmed = optional_bool(record.payload(), "interrupt_terminal_confirmed")?;
+        if previous != self.report.lifecycle || !lifecycle_transition_allowed(previous, current) {
+            return Err(ConformanceError::InvalidHistory(
+                "lifecycle transition is not allowed from reconstructed state".to_owned(),
+            ));
+        }
+        let needs_confirmation =
+            matches!(
+                previous,
+                RunLifecycle::Running | RunLifecycle::WaitingInteraction
+            ) && matches!(current, RunLifecycle::Paused | RunLifecycle::Closed);
+        if interrupt_confirmed != needs_confirmation.then_some(true) {
+            return Err(ConformanceError::InvalidHistory(
+                "interrupt terminal confirmation does not match the direct edge".to_owned(),
+            ));
+        }
+        let terminal = matches!(current, RunLifecycle::Closed | RunLifecycle::StartFailed);
+        if terminal != terminal_seal {
+            return Err(ConformanceError::InvalidHistory(
+                "terminal_seal does not match transition finality".to_owned(),
+            ));
+        }
+        if current == RunLifecycle::StartFailed
+            && self.previous_kind != Some(AuditKind::StartFailed)
+        {
+            return Err(ConformanceError::InvalidHistory(
+                "start_failed seal lacks adjacent failure evidence".to_owned(),
+            ));
+        }
+        if current == RunLifecycle::Closed && self.previous_kind != Some(AuditKind::CleanupResult) {
+            return Err(ConformanceError::InvalidHistory(
+                "closed seal lacks adjacent cleanup evidence".to_owned(),
+            ));
+        }
+        self.report.lifecycle = current;
+        self.report.terminal_sealed = terminal;
+        Ok(())
+    }
+
+    fn require_complete_terminal_pair(&self) -> Result<(), ConformanceError> {
+        if matches!(
+            self.previous_kind,
+            Some(AuditKind::StartFailed | AuditKind::CleanupResult)
+        ) {
+            return Err(ConformanceError::InvalidHistory(
+                "terminal evidence is missing its terminal seal".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -776,6 +1123,15 @@ pub fn verify_ledger_records(
     run_id: Uuid,
     records: &[AuditRecord],
 ) -> Result<ConformanceReport, ConformanceError> {
+    verify_ledger_records_with_check(run_id, records, &mut || Ok(()))
+}
+
+fn verify_ledger_records_with_check(
+    run_id: Uuid,
+    records: &[AuditRecord],
+    check_budget: &mut impl FnMut() -> Result<(), ConformanceError>,
+) -> Result<ConformanceReport, ConformanceError> {
+    check_budget()?;
     if run_id.get_version_num() != 7 {
         return Err(ConformanceError::InvalidHistory(
             "run identity must be UUIDv7".to_owned(),
@@ -1097,7 +1453,9 @@ pub fn verify_ledger_records(
         }
         previous_hash = record.hash();
         previous_generation = record.run_generation();
+        check_budget()?;
     }
+    check_budget()?;
     if records.last().is_some_and(|record| {
         matches!(
             record.kind(),
@@ -1593,7 +1951,13 @@ mod tests {
         assert!(report.terminal_sealed);
         assert!(
             required_bool(
-                ledger.inner().durable_records().last().unwrap().payload(),
+                ledger
+                    .inner()
+                    .durable_records()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .payload(),
                 "interrupt_terminal_confirmed",
             )
             .unwrap()

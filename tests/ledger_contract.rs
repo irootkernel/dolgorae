@@ -4,16 +4,17 @@ use dolgorae::jcs::{LosslessJson, sha256_hex};
 use dolgorae::ledger::{
     AppendDurability, ArtifactMetadata, ClientEventData, ClientEventRecord, EventProjection,
     FinalResponse, Ledger, LedgerClock, LedgerError, MAX_AUDIT_LINE_BYTES, MAX_EVENT_DELIVERIES,
-    MAX_STATE_BYTES, ResponseEventPayload, RunStateProjection, RuntimeErrorPayload, UsagePayload,
-    WorkspaceChangesPayload,
+    MAX_STATE_BYTES, REPLAY_BUDGET_MILLIS, ResponseEventPayload, RunStateProjection,
+    RuntimeErrorPayload, UsagePayload, WorkspaceChangesPayload,
 };
 use dolgorae::workspace::LosslessPath;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -44,6 +45,84 @@ impl LedgerClock for TestClock {
 
     fn timestamp(&self) -> String {
         TIMESTAMP.to_owned()
+    }
+}
+
+struct ReplayTimeoutClock(AtomicU64);
+
+impl LedgerClock for ReplayTimeoutClock {
+    fn monotonic_millis(&self) -> u64 {
+        self.0.fetch_add(REPLAY_BUDGET_MILLIS, Ordering::SeqCst)
+    }
+
+    fn timestamp(&self) -> String {
+        TIMESTAMP.to_owned()
+    }
+}
+
+struct ProjectionReplayTimeoutClock(AtomicU64);
+
+impl LedgerClock for ProjectionReplayTimeoutClock {
+    fn monotonic_millis(&self) -> u64 {
+        if self.0.fetch_add(1, Ordering::SeqCst) < 4 {
+            0
+        } else {
+            REPLAY_BUDGET_MILLIS
+        }
+    }
+
+    fn timestamp(&self) -> String {
+        TIMESTAMP.to_owned()
+    }
+}
+
+#[derive(Clone)]
+struct CountingReplayClock(Arc<AtomicU64>);
+
+impl LedgerClock for CountingReplayClock {
+    fn monotonic_millis(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    fn timestamp(&self) -> String {
+        TIMESTAMP.to_owned()
+    }
+}
+
+#[derive(Clone, Default)]
+struct BlockingCommitFaults {
+    gate: Arc<(Mutex<(bool, bool)>, Condvar)>,
+}
+
+impl BlockingCommitFaults {
+    fn wait_until_entered(&self) {
+        let (state, signal) = &*self.gate;
+        let mut state = state.lock().unwrap();
+        while !state.0 {
+            state = signal.wait(state).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        let (state, signal) = &*self.gate;
+        state.lock().unwrap().1 = true;
+        signal.notify_all();
+    }
+}
+
+impl FaultInjector for BlockingCommitFaults {
+    fn check(&self, barrier: FaultBarrier) -> Result<(), FaultInjected> {
+        if barrier == FaultBarrier::BeforeLedgerFileSync {
+            let (state, signal) = &*self.gate;
+            let mut state = state.lock().unwrap();
+            state.0 = true;
+            signal.notify_all();
+            while !state.1 {
+                state = signal.wait(state).unwrap();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -91,7 +170,7 @@ fn streaming_group_commit_publishes_at_100_milliseconds_only_after_fsync() {
     );
     ledger.append(record, AppendDurability::Streaming).unwrap();
     assert_eq!(read_state(&tree.root).ledger_head.sequence, 0);
-    assert_eq!(ledger.durable_records().len(), 0);
+    assert_eq!(ledger.durable_records().unwrap().len(), 0);
     clock.advance(99);
     thread::sleep(Duration::from_millis(20));
     assert_eq!(read_state(&tree.root).ledger_head.sequence, 0);
@@ -99,12 +178,225 @@ fn streaming_group_commit_publishes_at_100_milliseconds_only_after_fsync() {
     wait_until(Duration::from_millis(500), || {
         read_state(&tree.root).ledger_head.sequence == 1
     });
-    assert_eq!(ledger.durable_records().len(), 1);
+    assert_eq!(ledger.durable_records().unwrap().len(), 1);
     assert_eq!(read_state(&tree.root).ledger_head.sequence, 1);
     assert_eq!(
-        ledger.projection().access,
+        ledger.projection().unwrap().access,
         dolgorae::ledger::ProjectedAccess::Read
     );
+}
+
+#[test]
+fn manual_tick_commits_only_at_the_group_deadline() {
+    let tree = RunTree::new();
+    let clock = TestClock::new();
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, clock.clone(), NoFaults).unwrap();
+    let record = next_record(&ledger, AuditKind::RunCreated, object(&[]));
+    ledger.append(record, AppendDurability::Streaming).unwrap();
+    clock.advance(99);
+    assert!(!ledger.tick().unwrap());
+    assert_eq!(ledger.head().unwrap().sequence, 0);
+    clock.advance(1);
+    assert!(ledger.tick().unwrap());
+    assert_eq!(ledger.try_head().unwrap().sequence, 1);
+
+    let second = next_record(
+        &ledger,
+        AuditKind::ThreadBound,
+        object(&[("thread_id", string("t"))]),
+    );
+    ledger.append(second, AppendDurability::Streaming).unwrap();
+    assert!(!ledger.tick().unwrap());
+    clock.advance(99);
+    assert!(!ledger.tick().unwrap());
+    clock.advance(1);
+    assert!(ledger.tick().unwrap());
+    assert_eq!(ledger.try_head().unwrap().sequence, 2);
+}
+
+#[test]
+fn explicit_close_surfaces_a_final_commit_failure() {
+    let tree = RunTree::new();
+    let faults = RecordingFaults::failing(FaultBarrier::BeforeLedgerFileSync);
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), faults).unwrap();
+    let record = next_record(&ledger, AuditKind::RunCreated, object(&[]));
+    ledger.append(record, AppendDurability::Streaming).unwrap();
+    assert!(ledger.close().is_err());
+}
+
+#[test]
+fn second_writer_is_rejected_before_replay_or_append() {
+    let tree = RunTree::new();
+    let first =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let error = match Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults)
+    {
+        Ok(_) => panic!("second writer unexpectedly acquired the ledger"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, LedgerError::WriterBusy(_)));
+    drop(first);
+    Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+}
+
+#[test]
+fn writer_lock_child_probe() {
+    let Ok(root) = std::env::var("DOLGORAE_LEDGER_LOCK_PROBE_ROOT") else {
+        return;
+    };
+    let run_id =
+        Uuid::parse_str(&std::env::var("DOLGORAE_LEDGER_LOCK_PROBE_RUN_ID").expect("probe run ID"))
+            .unwrap();
+    let error = match Ledger::open_with(root, run_id, TestClock::new(), NoFaults) {
+        Ok(_) => panic!("child process unexpectedly acquired the ledger"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, LedgerError::WriterBusy(_)));
+}
+
+#[test]
+fn child_process_cannot_acquire_an_owned_ledger() {
+    let tree = RunTree::new();
+    let owner =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("writer_lock_child_probe")
+        .env("DOLGORAE_LEDGER_LOCK_PROBE_ROOT", &tree.root)
+        .env("DOLGORAE_LEDGER_LOCK_PROBE_RUN_ID", tree.run_id.to_string())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    drop(owner);
+}
+
+#[test]
+fn full_replay_honors_the_injected_five_minute_deadline() {
+    let tree = RunTree::new();
+    let record = AuditRecord::new(
+        1,
+        TIMESTAMP,
+        tree.run_id,
+        0,
+        AuditKind::RunCreated,
+        object(&[]),
+        "0".repeat(64),
+    )
+    .unwrap();
+    fs::write(
+        tree.root.join("audit.jsonl"),
+        record.canonical_line().unwrap(),
+    )
+    .unwrap();
+    let error = match Ledger::open_with(
+        tree.root.clone(),
+        tree.run_id,
+        ReplayTimeoutClock(AtomicU64::new(0)),
+        NoFaults,
+    ) {
+        Ok(_) => panic!("replay unexpectedly exceeded its budget"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, LedgerError::OperationTimeout(_)));
+}
+
+#[test]
+fn projection_replay_consumes_the_same_five_minute_deadline() {
+    let tree = RunTree::new();
+    let record = AuditRecord::new(
+        1,
+        TIMESTAMP,
+        tree.run_id,
+        0,
+        AuditKind::RunCreated,
+        object(&[]),
+        "0".repeat(64),
+    )
+    .unwrap();
+    fs::write(
+        tree.root.join("audit.jsonl"),
+        record.canonical_line().unwrap(),
+    )
+    .unwrap();
+    let error = match Ledger::open_with(
+        tree.root.clone(),
+        tree.run_id,
+        ProjectionReplayTimeoutClock(AtomicU64::new(0)),
+        NoFaults,
+    ) {
+        Ok(_) => panic!("projection replay unexpectedly exceeded its budget"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, LedgerError::OperationTimeout(_)));
+}
+
+#[test]
+fn projection_reconciliation_reuses_the_initial_replay_result() {
+    let tree = RunTree::new();
+    let record = AuditRecord::new(
+        1,
+        TIMESTAMP,
+        tree.run_id,
+        0,
+        AuditKind::RunCreated,
+        object(&[]),
+        "0".repeat(64),
+    )
+    .unwrap();
+    fs::write(
+        tree.root.join("audit.jsonl"),
+        record.canonical_line().unwrap(),
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    Ledger::open_with(
+        tree.root.clone(),
+        tree.run_id,
+        CountingReplayClock(Arc::clone(&calls)),
+        NoFaults,
+    )
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 7);
+}
+
+#[test]
+fn append_waits_for_an_inflight_background_commit_before_advancing() {
+    let tree = RunTree::new();
+    let clock = TestClock::new();
+    let faults = BlockingCommitFaults::default();
+    let mut ledger = Ledger::open_with(
+        tree.root.clone(),
+        tree.run_id,
+        clock.clone(),
+        faults.clone(),
+    )
+    .unwrap();
+    let first = next_record(&ledger, AuditKind::RunCreated, object(&[]));
+    ledger.append(first, AppendDurability::Streaming).unwrap();
+    let second = next_record(
+        &ledger,
+        AuditKind::ThreadBound,
+        object(&[("thread_id", string("thread-1"))]),
+    );
+    clock.advance(100);
+    faults.wait_until_entered();
+
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let result = ledger
+            .append(second, AppendDurability::Required)
+            .map(|()| ledger);
+        finished_tx.send(()).unwrap();
+        result
+    });
+    assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+    faults.release();
+    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let ledger = worker.join().unwrap().unwrap();
+    assert_eq!(ledger.head().unwrap().sequence, 2);
+    assert_eq!(ledger.durable_records().unwrap().len(), 2);
 }
 
 #[test]
@@ -130,12 +422,20 @@ fn failed_background_commit_poison_is_retained_and_drop_retries_pending_work() {
             .contains(&FaultBarrier::BeforeLedgerFileSync)
     });
     thread::sleep(Duration::from_millis(10));
+    assert!(ledger.head().is_err());
+    assert!(ledger.projection().is_err());
+    assert!(ledger.durable_records().is_err());
+    assert!(
+        ledger
+            .events_after(0, EventProjection::Minimal, false)
+            .is_err()
+    );
     assert!(ledger.flush().is_err());
     drop(ledger);
 
     let reopened =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(reopened.durable_records().len(), 1);
+    assert_eq!(reopened.durable_records().unwrap().len(), 1);
     assert_eq!(read_state(&tree.root).ledger_head.sequence, 1);
 }
 
@@ -218,7 +518,7 @@ fn fault_before_effect_never_executes_the_effect_but_leaves_durable_intent() {
     drop(ledger);
     let reopened =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(reopened.durable_records().len(), 1);
+    assert_eq!(reopened.durable_records().unwrap().len(), 1);
 }
 
 #[test]
@@ -239,9 +539,9 @@ fn torn_tail_is_preserved_repaired_and_idempotent() {
 
     let repaired =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(repaired.durable_records().len(), 2);
+    assert_eq!(repaired.durable_records().unwrap().len(), 2);
     assert_eq!(
-        repaired.durable_records()[1].kind(),
+        repaired.durable_records().unwrap()[1].kind(),
         AuditKind::LedgerTailRepaired
     );
     let expected = format!("tail-2-{}.bin", sha256_hex(tail));
@@ -252,7 +552,56 @@ fn torn_tail_is_preserved_repaired_and_idempotent() {
     drop(repaired);
     let again =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(again.durable_records().len(), 2);
+    assert_eq!(again.durable_records().unwrap().len(), 2);
+}
+
+#[test]
+fn multiple_pending_recovery_evidence_files_are_recorded_deterministically() {
+    let tree = RunTree::new();
+    for bytes in [
+        b"first pending tail".as_slice(),
+        b"second pending tail".as_slice(),
+    ] {
+        let name = format!("tail-1-{}.bin", sha256_hex(bytes));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tree.root.join("recovery").join(name))
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+    let ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    assert_eq!(ledger.durable_records().unwrap().len(), 2);
+    assert!(
+        ledger
+            .durable_records()
+            .unwrap()
+            .iter()
+            .all(|record| record.kind() == AuditKind::LedgerTailRepaired)
+    );
+    let evidence_names = ledger
+        .durable_records()
+        .unwrap()
+        .iter()
+        .map(|record| match record.payload() {
+            LosslessJson::Object(entries) => entries
+                .iter()
+                .find_map(|(key, value)| {
+                    (key == "evidence_file")
+                        .then_some(value)
+                        .and_then(|value| match value {
+                            LosslessJson::String(value) => Some(value.clone()),
+                            _ => None,
+                        })
+                })
+                .unwrap(),
+            _ => panic!("repair payload is not an object"),
+        })
+        .collect::<Vec<_>>();
+    assert!(evidence_names.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[test]
@@ -275,7 +624,7 @@ fn stale_atomic_evidence_temporary_is_removed_during_repair() {
 
     let repaired =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(repaired.durable_records().len(), 1);
+    assert_eq!(repaired.durable_records().unwrap().len(), 1);
     assert!(!temporary.exists());
     assert_eq!(fs::read_dir(tree.root.join("recovery")).unwrap().count(), 1);
 }
@@ -317,10 +666,11 @@ fn a_torn_repair_record_is_repaired_once_without_sequence_collision() {
 
     let repaired =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(repaired.durable_records().len(), 2);
+    assert_eq!(repaired.durable_records().unwrap().len(), 2);
     assert!(
         repaired
             .durable_records()
+            .unwrap()
             .iter()
             .all(|record| record.kind() == AuditKind::LedgerTailRepaired)
     );
@@ -329,7 +679,7 @@ fn a_torn_repair_record_is_repaired_once_without_sequence_collision() {
 
     let reopened =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(reopened.durable_records().len(), 2);
+    assert_eq!(reopened.durable_records().unwrap().len(), 2);
     assert_eq!(fs::read_dir(tree.root.join("recovery")).unwrap().count(), 2);
 }
 
@@ -340,7 +690,7 @@ fn a_record_that_fails_replay_is_rejected_before_write() {
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
     let invalid = next_record(&ledger, AuditKind::LifecycleTransition, object(&[]));
     assert!(ledger.append(invalid, AppendDurability::Required).is_err());
-    assert_eq!(ledger.durable_records().len(), 0);
+    assert_eq!(ledger.durable_records().unwrap().len(), 0);
     ledger.flush().unwrap();
     let valid = next_record(&ledger, AuditKind::RunCreated, object(&[]));
     ledger.append(valid, AppendDurability::Required).unwrap();
@@ -348,7 +698,7 @@ fn a_record_that_fails_replay_is_rejected_before_write() {
 
     let reopened =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(reopened.durable_records().len(), 1);
+    assert_eq!(reopened.durable_records().unwrap().len(), 1);
 }
 
 #[test]
@@ -521,7 +871,10 @@ fn missing_stale_and_ahead_projections_rebuild_from_the_ledger() {
     fs::remove_file(tree.root.join("state.json")).unwrap();
     let rebuilt =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(rebuilt.projection().thread_id.as_deref(), Some("thread-1"));
+    assert_eq!(
+        rebuilt.projection().unwrap().thread_id.as_deref(),
+        Some("thread-1")
+    );
     drop(rebuilt);
 
     let stale = RunStateProjection {
@@ -532,9 +885,9 @@ fn missing_stale_and_ahead_projections_rebuild_from_the_ledger() {
     write_state(&tree.root, &stale);
     let rebuilt_stale =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    assert_eq!(rebuilt_stale.durable_records().len(), 2);
+    assert_eq!(rebuilt_stale.durable_records().unwrap().len(), 2);
     assert_eq!(
-        rebuilt_stale.projection().thread_id.as_deref(),
+        rebuilt_stale.projection().unwrap().thread_id.as_deref(),
         Some("thread-1")
     );
     drop(rebuilt_stale);
@@ -546,13 +899,24 @@ fn missing_stale_and_ahead_projections_rebuild_from_the_ledger() {
     let rewound =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
     assert_eq!(
-        rewound.durable_records().last().unwrap().kind(),
+        rewound.durable_records().unwrap().last().unwrap().kind(),
         AuditKind::ProjectionRewound
     );
     assert_eq!(
         read_state(&tree.root).ledger_head.sequence,
-        rewound.durable_records().len() as u64
+        rewound.durable_records().unwrap().len() as u64
     );
+}
+
+#[test]
+fn rust_published_empty_state_matches_the_checked_fixture() {
+    let tree = RunTree::new();
+    let ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let expected =
+        fs::read("docs/protocol/examples/ledger-state.rust-produced.valid.json").unwrap();
+    assert_eq!(fs::read(tree.root.join("state.json")).unwrap(), expected);
+    drop(ledger);
 }
 
 #[test]
@@ -584,9 +948,9 @@ fn every_ledger_repair_projection_and_effect_crash_barrier_recovers() {
         );
         let recovered =
             Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-        assert_eq!(recovered.durable_records().len(), 1, "{barrier:?}");
+        assert_eq!(recovered.durable_records().unwrap().len(), 1, "{barrier:?}");
         assert_eq!(
-            recovered.durable_records()[0].kind(),
+            recovered.durable_records().unwrap()[0].kind(),
             AuditKind::LedgerTailRepaired
         );
     }
@@ -612,7 +976,11 @@ fn every_ledger_repair_projection_and_effect_crash_barrier_recovers() {
         let recovered =
             Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
         let expected = usize::from(barrier != FaultBarrier::BeforeLedgerAppend);
-        assert_eq!(recovered.durable_records().len(), expected, "{barrier:?}");
+        assert_eq!(
+            recovered.durable_records().unwrap().len(),
+            expected,
+            "{barrier:?}"
+        );
     }
 
     let projection_barriers = [
@@ -636,7 +1004,7 @@ fn every_ledger_repair_projection_and_effect_crash_barrier_recovers() {
         let recovered =
             Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
         assert_eq!(
-            recovered.projection().ledger_head.sequence,
+            recovered.projection().unwrap().ledger_head.sequence,
             0,
             "{barrier:?}"
         );
@@ -659,7 +1027,7 @@ fn every_ledger_repair_projection_and_effect_crash_barrier_recovers() {
         drop(ledger);
         let recovered =
             Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-        assert_eq!(recovered.durable_records().len(), 1, "{barrier:?}");
+        assert_eq!(recovered.durable_records().unwrap().len(), 1, "{barrier:?}");
     }
 }
 
@@ -686,7 +1054,7 @@ fn replay_projects_turn_interaction_writer_and_reconciliation_state() {
         let record = next_record(&ledger, kind, payload);
         ledger.append(record, AppendDurability::Required).unwrap();
     }
-    let waiting = ledger.projection();
+    let waiting = ledger.projection().unwrap();
     assert_eq!(
         waiting.lifecycle,
         dolgorae::domain::RunLifecycle::WaitingInteraction
@@ -714,7 +1082,7 @@ fn replay_projects_turn_interaction_writer_and_reconciliation_state() {
         let record = next_record(&ledger, kind, payload);
         ledger.append(record, AppendDurability::Required).unwrap();
     }
-    let final_state = ledger.projection();
+    let final_state = ledger.projection().unwrap();
     assert_eq!(final_state.lifecycle, dolgorae::domain::RunLifecycle::Idle);
     assert!(final_state.pending_requests.is_empty());
     assert_eq!(final_state.active_turn_id, None);
@@ -730,7 +1098,7 @@ fn replay_projects_turn_interaction_writer_and_reconciliation_state() {
         .append(reconciliation, AppendDurability::Required)
         .unwrap();
     assert_eq!(
-        ledger.projection().lifecycle,
+        ledger.projection().unwrap().lifecycle,
         dolgorae::domain::RunLifecycle::ReconciliationRequired
     );
 }
@@ -836,12 +1204,20 @@ fn client_events_are_validated_at_append_and_share_one_sparse_cursor_domain() {
     assert_eq!(operational.len(), 2);
     assert!(
         ledger
-            .events_after(ledger.head().sequence + 1, EventProjection::Minimal, false)
+            .events_after(
+                ledger.head().unwrap().sequence + 1,
+                EventProjection::Minimal,
+                false
+            )
             .is_err()
     );
     assert!(
         ledger
-            .events_after(ledger.head().sequence, EventProjection::Minimal, false)
+            .events_after(
+                ledger.head().unwrap().sequence,
+                EventProjection::Minimal,
+                false
+            )
             .unwrap()
             .is_empty()
     );
@@ -861,7 +1237,7 @@ fn client_events_are_validated_at_append_and_share_one_sparse_cursor_domain() {
             .append_client_event(invalid, 1, AppendDurability::Required)
             .is_err()
     );
-    assert_eq!(ledger.durable_records().len(), 2);
+    assert_eq!(ledger.durable_records().unwrap().len(), 2);
 }
 
 #[test]
@@ -958,7 +1334,7 @@ fn client_events_reject_unrepresentable_unknown_and_schema_invalid_fields() {
     )
     .unwrap();
     assert!(ledger.append(audit, AppendDurability::Required).is_err());
-    assert_eq!(ledger.durable_records().len(), 0);
+    assert_eq!(ledger.durable_records().unwrap().len(), 0);
 }
 
 #[test]
@@ -988,6 +1364,38 @@ fn observer_delivery_is_bounded_and_resumable_by_sparse_cursor() {
         .unwrap();
     assert_eq!(first.len(), MAX_EVENT_DELIVERIES);
     let cursor = first.last().unwrap().record.cursor.parse::<u64>().unwrap();
+    let second = ledger
+        .events_after(cursor, EventProjection::Operational, true)
+        .unwrap();
+    assert_eq!(second.len(), 1);
+}
+
+#[test]
+fn observer_delivery_splits_and_resumes_at_the_four_mibibyte_boundary() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    for _ in 0..4 {
+        let event = event(
+            &ledger,
+            tree.run_id,
+            Some("thread-1"),
+            Some("turn-1"),
+            ClientEventData::ResponseFinal(ResponseEventPayload {
+                response: FinalResponse::Inline {
+                    text: "x".repeat(1024 * 1024),
+                },
+            }),
+        );
+        ledger
+            .append_client_event(event, 1, AppendDurability::Required)
+            .unwrap();
+    }
+    let first = ledger
+        .events_after(0, EventProjection::Operational, true)
+        .unwrap();
+    assert_eq!(first.len(), 3);
+    let cursor = first.last().unwrap().record.cursor.parse().unwrap();
     let second = ledger
         .events_after(cursor, EventProjection::Operational, true)
         .unwrap();
@@ -1052,6 +1460,53 @@ fn reasoning_content_is_replaced_by_bounded_suppression_metadata() {
         )
         .unwrap();
     assert_eq!(prefix_kind, AuditKind::ReasoningContentSuppressed);
+    for (method, payload, sentinel) in [
+        (
+            "item/plan/delta",
+            br#"{"delta":"PRIVATE PLAN DELTA"}"#.as_slice(),
+            "PRIVATE PLAN DELTA",
+        ),
+        (
+            "turn/plan/updated",
+            br#"{"plan":"PRIVATE TURN PLAN"}"#.as_slice(),
+            "PRIVATE TURN PLAN",
+        ),
+        (
+            "item/completed",
+            br#"{"params":{"item":{"type":"plan","text":"PRIVATE PLAN ITEM"}}}"#.as_slice(),
+            "PRIVATE PLAN ITEM",
+        ),
+    ] {
+        let kind = ledger
+            .append_app_server_message(
+                AuditKind::AppServerNotification,
+                method,
+                payload,
+                1,
+                AppendDurability::Required,
+            )
+            .unwrap();
+        assert_eq!(kind, AuditKind::ReasoningContentSuppressed);
+        assert!(
+            !String::from_utf8(fs::read(tree.root.join("audit.jsonl")).unwrap())
+                .unwrap()
+                .contains(sentinel)
+        );
+    }
+    let oversized = vec![b' '; dolgorae::jcs::RAW_PAYLOAD_LIMIT + 1];
+    let before = ledger.next_sequence();
+    assert!(
+        ledger
+            .append_app_server_message(
+                AuditKind::AppServerNotification,
+                "item/started",
+                &oversized,
+                1,
+                AppendDurability::Required,
+            )
+            .is_err()
+    );
+    assert_eq!(ledger.next_sequence(), before);
     let ordinary_kind = ledger
         .append_app_server_message(
             AuditKind::AppServerNotification,
@@ -1082,6 +1537,41 @@ fn reasoning_content_is_replaced_by_bounded_suppression_metadata() {
                 1,
                 AppendDurability::Required,
             )
+            .is_err()
+    );
+}
+
+#[test]
+fn client_event_numbers_stop_at_the_exact_jcs_safe_boundary() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let accepted = event(
+        &ledger,
+        tree.run_id,
+        Some("thread-1"),
+        Some("turn-1"),
+        ClientEventData::UsageReported(UsagePayload {
+            input_tokens: (1_u64 << 53) - 1,
+            output_tokens: 0,
+        }),
+    );
+    ledger
+        .append_client_event(accepted, 1, AppendDurability::Required)
+        .unwrap();
+    let rejected = event(
+        &ledger,
+        tree.run_id,
+        Some("thread-1"),
+        Some("turn-1"),
+        ClientEventData::UsageReported(UsagePayload {
+            input_tokens: 1_u64 << 53,
+            output_tokens: 0,
+        }),
+    );
+    assert!(
+        ledger
+            .append_client_event(rejected, 1, AppendDurability::Required)
             .is_err()
     );
 }

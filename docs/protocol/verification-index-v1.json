@@ -170,6 +170,9 @@
         "typed errors and timeouts",
         "exact projection membership",
         "append-time typed client-event normalization and 32-envelope or 4 MiB bounded sparse shared-cursor delivery",
+        "five-minute and aggregate ledger replay bounds with incremental projection and cursor-indexed paging",
+        "calendar, UTF-8 byte, and JCS-safe integer parity across Rust and checked client-event tooling",
+        "receipt-side reasoning and internal-planning non-retention before the raw parse limit",
         "deterministic final-response extraction",
         "multi-client routing",
         "turn results",
@@ -206,6 +209,7 @@
       "catches": [
         "sandbox mapping",
         "durable writer authority",
+        "exclusive writable Run-ledger lease before replay or mutation",
         "threadless first write",
         "global lock hierarchy",
         "independent effective policy and writer authority",

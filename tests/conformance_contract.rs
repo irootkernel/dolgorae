@@ -5,13 +5,16 @@ use dolgorae::conformance::{
     lifecycle_transition_allowed, verify_ledger_records,
 };
 use dolgorae::domain::RunLifecycle;
-use dolgorae::fault::NoFaults;
+use dolgorae::fault::{FaultInjector, NoFaults};
 use dolgorae::jcs::{LosslessJson, canonicalize, parse};
-use dolgorae::ledger::{AppendDurability, Ledger, LedgerClock, LedgerError};
+use dolgorae::ledger::{AppendDurability, Ledger, LedgerClock, LedgerError, REPLAY_BUDGET_MILLIS};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const TIMESTAMP: &str = "2026-08-21T12:34:56.123456Z";
@@ -22,6 +25,45 @@ struct TestClock(AtomicU64);
 impl LedgerClock for TestClock {
     fn monotonic_millis(&self) -> u64 {
         self.0.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn timestamp(&self) -> String {
+        TIMESTAMP.to_owned()
+    }
+}
+
+struct ConformanceReplayTimeoutClock(AtomicU64);
+
+impl LedgerClock for ConformanceReplayTimeoutClock {
+    fn monotonic_millis(&self) -> u64 {
+        if self.0.fetch_add(1, Ordering::SeqCst) < 12 {
+            0
+        } else {
+            REPLAY_BUDGET_MILLIS
+        }
+    }
+
+    fn timestamp(&self) -> String {
+        TIMESTAMP.to_owned()
+    }
+}
+
+#[derive(Clone)]
+struct SharedClock(Arc<AtomicU64>);
+
+impl SharedClock {
+    fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    fn advance(&self, millis: u64) {
+        self.0.fetch_add(millis, Ordering::SeqCst);
+    }
+}
+
+impl LedgerClock for SharedClock {
+    fn monotonic_millis(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 
     fn timestamp(&self) -> String {
@@ -102,16 +144,16 @@ fn payload(input: &str) -> LosslessJson {
     parse(input).unwrap()
 }
 
-fn next_record(
-    ledger: &ConformantLedger<TestClock, NoFaults>,
+fn next_record<C: LedgerClock + 'static, F: FaultInjector + 'static>(
+    ledger: &ConformantLedger<C, F>,
     kind: AuditKind,
     payload: LosslessJson,
 ) -> AuditRecord {
     AuditRecord::new(
         ledger.inner().next_sequence(),
         TIMESTAMP,
-        ledger.inner().projection().run_id,
-        ledger.inner().projection().run_generation,
+        ledger.inner().projection().unwrap().run_id,
+        ledger.inner().projection().unwrap().run_generation,
         kind,
         payload,
         ledger.inner().previous_hash(),
@@ -158,9 +200,72 @@ fn virgin_and_allocated_ledgers_reconstruct_without_a_worker() {
     let reopened = tree.ledger();
     assert_eq!(reopened.verify().unwrap().record_count, 3);
     assert_eq!(
-        reopened.inner().projection().default_effort.as_deref(),
+        reopened
+            .inner()
+            .projection()
+            .unwrap()
+            .default_effort
+            .as_deref(),
         Some("medium")
     );
+}
+
+#[test]
+fn conformant_replay_consumes_the_ledgers_total_open_budget() {
+    let tree = RunTree::new();
+    let mut ledger = tree.ledger();
+    bootstrap(&mut ledger, tree.run_id);
+    drop(ledger);
+
+    let error = match ConformantLedger::open_with(
+        &tree.root,
+        tree.run_id,
+        ConformanceReplayTimeoutClock(AtomicU64::new(0)),
+        NoFaults,
+    ) {
+        Ok(_) => panic!("conformance replay unexpectedly exceeded its budget"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        ConformanceError::Ledger(LedgerError::OperationTimeout(_))
+    ));
+}
+
+#[test]
+fn streaming_conformance_reports_only_the_durable_prefix() {
+    let tree = RunTree::new();
+    let mut bootstrap_ledger = tree.ledger();
+    bootstrap(&mut bootstrap_ledger, tree.run_id);
+    drop(bootstrap_ledger);
+
+    let clock = SharedClock::new();
+    let mut ledger =
+        ConformantLedger::open_with(&tree.root, tree.run_id, clock.clone(), NoFaults).unwrap();
+    let record = next_record(
+        &ledger,
+        AuditKind::LifecycleTransition,
+        payload(r#"{"previous":"starting","current":"idle","terminal_seal":false}"#),
+    );
+    ledger.append(record, AppendDurability::Streaming).unwrap();
+    assert_eq!(ledger.verify().unwrap().record_count, 3);
+
+    clock.advance(100);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while ledger.verify().unwrap().record_count != 4 {
+        assert!(
+            Instant::now() < deadline,
+            "streaming commit did not publish"
+        );
+        thread::yield_now();
+    }
+    assert_eq!(ledger.verify().unwrap().lifecycle, RunLifecycle::Idle);
+    assert_eq!(
+        ledger.seal_closed(TIMESTAMP, "clean").unwrap().record_count,
+        6
+    );
+    drop(ledger);
+    assert_eq!(tree.ledger().verify().unwrap().record_count, 6);
 }
 
 #[test]
@@ -206,6 +311,7 @@ fn bootstrap_resumes_each_exact_durable_prefix() {
     )
     .unwrap();
     assert_eq!(recovered.bootstrap(&request).unwrap().record_count, 3);
+    drop(recovered);
     assert_eq!(tree.ledger().verify().unwrap().record_count, 3);
 }
 
@@ -355,7 +461,7 @@ fn implicit_edges_and_dangling_terminal_evidence_fail_closed() {
         AuditKind::CleanupResult,
         payload(r#"{"outcome":"worker absent"}"#),
     );
-    let mut dangling = ledger.inner().durable_records().to_vec();
+    let mut dangling = ledger.inner().durable_records().unwrap().to_vec();
     dangling.push(cleanup);
     assert!(matches!(
         verify_ledger_records(tree.run_id, &dangling),
@@ -408,7 +514,7 @@ fn start_failed_requires_exact_bootstrap_authority_and_is_terminal() {
         evidence.hash(),
     )
     .unwrap();
-    let mut history = ledger.inner().durable_records().to_vec();
+    let mut history = ledger.inner().durable_records().unwrap().to_vec();
     history.extend([evidence, seal]);
     let report = verify_ledger_records(tree.run_id, &history).unwrap();
     assert_eq!(report.lifecycle, RunLifecycle::StartFailed);
@@ -455,7 +561,7 @@ fn invalid_terminal_or_nonterminal_seals_are_refused_before_write() {
         ledger.append(false_seal, AppendDurability::Required),
         Err(ConformanceError::InvalidHistory(_))
     ));
-    assert_eq!(ledger.inner().durable_records().len(), 3);
+    assert_eq!(ledger.inner().durable_records().unwrap().len(), 3);
 }
 
 #[test]
@@ -612,7 +718,7 @@ fn delete_escape_rejects_an_incomplete_terminal_seal_payload() {
     ledger.append(idle, AppendDurability::Required).unwrap();
     ledger.seal_closed(TIMESTAMP, "worker absent").unwrap();
 
-    let records = ledger.inner().durable_records().to_vec();
+    let records = ledger.inner().durable_records().unwrap().to_vec();
     let previous = &records[records.len() - 2];
     let final_record = &records[records.len() - 1];
     let malformed = AuditRecord::new(
@@ -632,7 +738,7 @@ fn delete_escape_rejects_an_incomplete_terminal_seal_payload() {
     audit.extend(malformed.canonical_line().unwrap());
     fs::write(tree.root.join("audit.jsonl"), audit).unwrap();
 
-    let mut state = ledger.inner().projection();
+    let mut state = ledger.inner().projection().unwrap();
     state.ledger_head.sequence = malformed.sequence();
     state.ledger_head.hash = malformed.hash().to_owned();
     let state_json = serde_json::to_string(&state).unwrap();

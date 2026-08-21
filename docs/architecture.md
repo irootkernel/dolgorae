@@ -1244,6 +1244,21 @@ result, or access/lifecycle change. Manifest creation and atomic state
 replacement synchronize their containing directories. V1 claims process- and
 OS-crash durability after these barriers, not power-loss durability.
 
+The writable audit handle also owns a nonblocking exclusive BSD `flock(2)` for
+its lifetime, so a second local writer fails before it can replay, repair, or
+append a competing successor. Replay is a pure projection operation separated
+from file durability and consumes at most 512 MiB, 1,000,000 records, and the
+normative five-minute worker budget. Append advances a checked projection with
+only the candidate record, rejects the first byte or record that would cross
+the replay ceilings, and advances a cached conformance state rather than
+revalidating the durable prefix. Sparse observer paging seeks to the first
+record after its cursor. The scan, pure projection, and initial conformance
+reconstruction share one deadline. Authoritative head, projection, durable
+record, and event-page reads are fallible and surface scheduler poison instead
+of substituting stale state. These boundaries keep persistence ordering
+independent from projection semantics and prevent repeated whole-history append
+or paging work.
+
 Any malformed or invalid newline-terminated record, including the final record,
 a complete record with a broken hash, or any sequence discontinuity is an
 audit-integrity failure. Only nonempty bytes after the file's last newline are
@@ -1268,6 +1283,14 @@ only as an opaque event and is not claimed as reconstructable audit. Reasoning
 text, summaries, deltas, and internal planning streams are discarded before
 representation. Their method, byte length, digest, and suppression reason are
 the only durable accounting.
+
+Receipt classification is versioned with the pinned protocol surface. V1
+suppresses `item/reasoning/*`, `item/plan/*`, `turn/plan/*`, and reasoning or
+plan items carried by `item/started` and `item/completed`. The raw 2 MiB limit
+is enforced before classification parses any payload. Normalized client-event
+integers stay within the exact JCS-safe interval, and checked tooling enforces
+calendar-valid timestamps and every declared UTF-8 byte bound with the same
+semantics as Rust.
 
 Client events are normalized into discriminator-bound durable records and
 schema-validated before their ledger append. A record owns the canonical
