@@ -80,6 +80,8 @@ pub enum AuditError {
     InvalidTimestamp,
     InvalidHash,
     InvalidPayload,
+    InvalidStructure,
+    NonCanonical,
     Canonicalization(JcsError),
 }
 
@@ -95,6 +97,8 @@ impl std::fmt::Display for AuditError {
             }
             Self::InvalidPayload => formatter
                 .write_str("payload_unrepresentable must contain only bounded non-secret metadata"),
+            Self::InvalidStructure => formatter.write_str("audit record structure is invalid"),
+            Self::NonCanonical => formatter.write_str("audit record line is not canonical JCS"),
             Self::Canonicalization(error) => error.fmt(formatter),
         }
     }
@@ -109,6 +113,82 @@ impl From<JcsError> for AuditError {
 }
 
 impl AuditRecord {
+    pub fn from_canonical_line(line: &[u8]) -> Result<Self, AuditError> {
+        if line.is_empty() || line.contains(&b'\n') || line.contains(&b'\r') {
+            return Err(AuditError::InvalidStructure);
+        }
+        let text = std::str::from_utf8(line).map_err(|_| AuditError::InvalidStructure)?;
+        let value = crate::jcs::parse(text)?;
+        if canonicalize(&value)? != line {
+            return Err(AuditError::NonCanonical);
+        }
+        let LosslessJson::Object(entries) = value else {
+            return Err(AuditError::InvalidStructure);
+        };
+        if entries.len() != 9 {
+            return Err(AuditError::InvalidStructure);
+        }
+        let field = |name: &str| {
+            entries
+                .iter()
+                .find_map(|(key, value)| (key == name).then_some(value))
+                .ok_or(AuditError::InvalidStructure)
+        };
+        let number = |name: &str| match field(name)? {
+            LosslessJson::Number(value) => value
+                .parse::<u64>()
+                .map_err(|_| AuditError::InvalidStructure),
+            _ => Err(AuditError::InvalidStructure),
+        };
+        let string = |name: &str| match field(name)? {
+            LosslessJson::String(value) => Ok(value.clone()),
+            _ => Err(AuditError::InvalidStructure),
+        };
+        if number("schema_version")? != 1 {
+            return Err(AuditError::InvalidStructure);
+        }
+        let sequence = number("sequence")?;
+        if sequence == 0 {
+            return Err(AuditError::InvalidSequence);
+        }
+        let timestamp = string("timestamp")?;
+        if !is_microsecond_utc_timestamp(&timestamp) {
+            return Err(AuditError::InvalidTimestamp);
+        }
+        let run_id =
+            Uuid::parse_str(&string("run_id")?).map_err(|_| AuditError::InvalidStructure)?;
+        if run_id.get_version_num() != 7 {
+            return Err(AuditError::InvalidStructure);
+        }
+        let run_generation = number("run_generation")?;
+        let kind = serde_json::from_value::<AuditKind>(serde_json::Value::String(string("kind")?))
+            .map_err(|_| AuditError::InvalidStructure)?;
+        let payload = field("payload")?.clone();
+        let previous_hash = string("previous_hash")?;
+        let hash = string("hash")?;
+        if !is_sha256(&previous_hash) || !is_sha256(&hash) {
+            return Err(AuditError::InvalidHash);
+        }
+        if kind == AuditKind::PayloadUnrepresentable && !is_unrepresentable_payload(&payload) {
+            return Err(AuditError::InvalidPayload);
+        }
+        let record = Self {
+            schema_version: 1,
+            sequence,
+            timestamp,
+            run_id,
+            run_generation,
+            kind,
+            payload,
+            previous_hash,
+            hash,
+        };
+        if !record.verify_hash() {
+            return Err(AuditError::InvalidHash);
+        }
+        Ok(record)
+    }
+
     pub fn new(
         sequence: u64,
         timestamp: impl Into<String>,
@@ -219,6 +299,31 @@ impl AuditRecord {
     #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub const fn run_id(&self) -> Uuid {
+        self.run_id
+    }
+
+    #[must_use]
+    pub const fn run_generation(&self) -> u64 {
+        self.run_generation
+    }
+
+    #[must_use]
+    pub fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+
+    #[must_use]
+    pub fn previous_hash(&self) -> &str {
+        &self.previous_hash
     }
 
     #[must_use]

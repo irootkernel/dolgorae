@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "run_id": "018f0c6a-7b01-7abc-8def-0123456789ab",
+  "lifecycle": "waiting_interaction",
+  "run_generation": 2,
+  "thread_id": "thread-1",
+  "active_turn_id": "turn-1",
+  "latest_turn_id": "turn-1",
+  "pending_requests": ["request-1", "request-2"],
+  "access": "read",
+  "writer_authority": "none",
+  "default_effort": "high",
+  "last_event_cursor": "7",
+  "ledger_head": {
+    "sequence": 9,
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

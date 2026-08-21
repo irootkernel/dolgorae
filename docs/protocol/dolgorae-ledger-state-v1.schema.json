@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/ledger-state/v1",
+  "title": "Dolgorae disposable Run ledger projection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-semanticValidator": "tools/validators/validate_task003b_ledger.py#validate_state",
+  "required": [
+    "schema_version",
+    "run_id",
+    "lifecycle",
+    "run_generation",
+    "thread_id",
+    "active_turn_id",
+    "latest_turn_id",
+    "pending_requests",
+    "access",
+    "writer_authority",
+    "default_effort",
+    "last_event_cursor",
+    "ledger_head"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "$ref": "#/$defs/uuid7" },
+    "lifecycle": {
+      "enum": [
+        "starting", "idle", "running", "waiting_interaction",
+        "reconciliation_required", "paused", "closed", "start_failed",
+        "outcome_unknown"
+      ]
+    },
+    "run_generation": { "type": "integer", "minimum": 0 },
+    "thread_id": { "type": ["string", "null"], "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "active_turn_id": { "type": ["string", "null"], "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "latest_turn_id": { "type": ["string", "null"], "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "pending_requests": {
+      "type": "array",
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 }
+    },
+    "access": { "enum": ["read", "write", "transitioning", "unsupported", "unknown"] },
+    "writer_authority": {
+      "enum": ["none", "reserved", "active", "handoff_prepared", "releasing", "blocked_unknown"]
+    },
+    "default_effort": { "type": ["string", "null"], "minLength": 1, "x-maxUtf8Bytes": 64 },
+    "last_event_cursor": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+        { "type": "null" }
+      ]
+    },
+    "ledger_head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "hash"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "sequence": { "const": 0 } }, "required": ["sequence"] },
+          "then": { "properties": { "hash": { "const": "0000000000000000000000000000000000000000000000000000000000000000" } } }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "lifecycle": { "enum": ["closed", "start_failed", "outcome_unknown"] } },
+        "required": ["lifecycle"]
+      },
+      "then": { "properties": { "active_turn_id": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "writer_authority": { "const": "active" } }, "required": ["writer_authority"] },
+      "then": { "properties": { "access": { "const": "write" } } }
+    }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

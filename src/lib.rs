@@ -5,6 +5,7 @@ pub mod cli;
 pub mod domain;
 pub mod fault;
 pub mod jcs;
+pub mod ledger;
 pub mod machine;
 pub mod protocol;
 pub mod providers;
