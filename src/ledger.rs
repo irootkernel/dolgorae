@@ -545,6 +545,39 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         record: AuditRecord,
         durability: AppendDurability,
     ) -> Result<(), LedgerError> {
+        if matches!(
+            record.kind(),
+            AuditKind::StartFailed | AuditKind::CleanupResult | AuditKind::LifecycleTransition
+        ) {
+            return Err(LedgerError::InvalidRecord(
+                "lifecycle evidence and transitions require the conformant authority boundary"
+                    .to_owned(),
+            ));
+        }
+        self.append_impl(record, durability)
+    }
+
+    pub(crate) fn append_conformance_record(
+        &mut self,
+        record: AuditRecord,
+        durability: AppendDurability,
+    ) -> Result<(), LedgerError> {
+        if !matches!(
+            record.kind(),
+            AuditKind::StartFailed | AuditKind::CleanupResult | AuditKind::LifecycleTransition
+        ) {
+            return Err(LedgerError::InvalidRecord(
+                "conformance append accepts only lifecycle evidence or transitions".to_owned(),
+            ));
+        }
+        self.append_impl(record, durability)
+    }
+
+    fn append_impl(
+        &mut self,
+        record: AuditRecord,
+        durability: AppendDurability,
+    ) -> Result<(), LedgerError> {
         self.refresh_scheduled()?;
         if self.poisoned {
             return Err(LedgerError::Integrity(

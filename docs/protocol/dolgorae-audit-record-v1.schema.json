@@ -75,6 +75,38 @@
   "allOf": [
     {
       "if": {
+        "properties": { "kind": { "const": "idempotency_reserved" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "https://dolgorae.local/schema/idempotency-intent/v1" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "lifecycle_transition" } },
+        "required": ["kind"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/lifecycle_transition" } } }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "start_failed" } },
+        "required": ["kind"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/start_failed" } } }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "cleanup_result" } },
+        "required": ["kind"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/cleanup_result" } } }
+    },
+    {
+      "if": {
         "properties": { "kind": { "const": "payload_unrepresentable" } },
         "required": ["kind"]
       },
@@ -83,6 +115,53 @@
   ],
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "lifecycle": {
+      "enum": [
+        "starting", "idle", "running", "waiting_interaction",
+        "reconciliation_required", "paused", "closed", "start_failed",
+        "outcome_unknown"
+      ]
+    },
+    "lifecycle_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["previous", "current", "terminal_seal"],
+      "properties": {
+        "previous": { "$ref": "#/$defs/lifecycle" },
+        "current": { "$ref": "#/$defs/lifecycle" },
+        "terminal_seal": { "type": "boolean" },
+        "interrupt_terminal_confirmed": { "const": true }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "previous": { "enum": ["running", "waiting_interaction"] },
+              "current": { "enum": ["paused", "closed"] }
+            },
+            "required": ["previous", "current"]
+          },
+          "then": { "required": ["interrupt_terminal_confirmed"] },
+          "else": { "not": { "required": ["interrupt_terminal_confirmed"] } }
+        }
+      ]
+    },
+    "start_failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 1024 }
+      }
+    },
+    "cleanup_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome"],
+      "properties": {
+        "outcome": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 1024 }
+      }
+    },
     "unrepresentable_payload": {
       "type": "object",
       "additionalProperties": false,

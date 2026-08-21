@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "record_kinds": [
+    "workspace_initialized",
+    "run_created",
+    "write_continuation_created",
+    "turn_intent",
+    "thread_bound",
+    "turn_started",
+    "turn_terminal",
+    "lifecycle_transition",
+    "run_generation_started",
+    "run_generation_stopped",
+    "app_server_request",
+    "app_server_response",
+    "app_server_notification",
+    "approval_requested",
+    "approval_decided",
+    "interaction_opened",
+    "interaction_resolved",
+    "client_event",
+    "controller_reset",
+    "reasoning_content_suppressed",
+    "writer_acquired",
+    "writer_released",
+    "writer_handoff_requested",
+    "writer_handoff_cancelled",
+    "writer_handoff_completed",
+    "profile_observed",
+    "idempotency_reserved",
+    "reconciliation",
+    "cleanup_intent",
+    "cleanup_result",
+    "ledger_tail_repaired",
+    "projection_rewound",
+    "payload_unrepresentable",
+    "start_failed",
+    "outcome_unknown"
+  ],
+  "bootstrap_prefixes": [
+    ["workspace_initialized", "idempotency_reserved", "run_created"],
+    ["workspace_initialized", "idempotency_reserved", "write_continuation_created"]
+  ],
+  "lifecycle_transitions": [
+    ["starting", "idle"],
+    ["starting", "start_failed"],
+    ["idle", "running"],
+    ["idle", "paused"],
+    ["idle", "closed"],
+    ["running", "idle"],
+    ["running", "waiting_interaction"],
+    ["running", "reconciliation_required"],
+    ["running", "outcome_unknown"],
+    ["running", "paused"],
+    ["running", "closed"],
+    ["waiting_interaction", "running"],
+    ["waiting_interaction", "idle"],
+    ["waiting_interaction", "reconciliation_required"],
+    ["waiting_interaction", "outcome_unknown"],
+    ["waiting_interaction", "paused"],
+    ["waiting_interaction", "closed"],
+    ["reconciliation_required", "paused"],
+    ["reconciliation_required", "outcome_unknown"],
+    ["paused", "idle"],
+    ["paused", "closed"],
+    ["outcome_unknown", "reconciliation_required"],
+    ["outcome_unknown", "paused"],
+    ["outcome_unknown", "closed"]
+  ],
+  "terminal_seals": {
+    "closed": {
+      "evidence_kind": "cleanup_result",
+      "seal_kind": "lifecycle_transition"
+    },
+    "start_failed": {
+      "evidence_kind": "start_failed",
+      "seal_kind": "lifecycle_transition"
+    }
+  }
+}

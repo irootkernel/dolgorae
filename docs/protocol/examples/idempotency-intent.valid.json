@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "operation": "start_run",
+  "idempotency_key": "start-primary-001",
+  "normalized_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "run_id": "018f0c6a-7b01-7abc-8def-0123456789ab"
+}

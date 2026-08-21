@@ -61,6 +61,44 @@ audit_kinds! {
     OutcomeUnknown => "outcome_unknown"
 }
 
+pub const AUDIT_KINDS: &[AuditKind] = &[
+    AuditKind::WorkspaceInitialized,
+    AuditKind::RunCreated,
+    AuditKind::WriteContinuationCreated,
+    AuditKind::TurnIntent,
+    AuditKind::ThreadBound,
+    AuditKind::TurnStarted,
+    AuditKind::TurnTerminal,
+    AuditKind::LifecycleTransition,
+    AuditKind::RunGenerationStarted,
+    AuditKind::RunGenerationStopped,
+    AuditKind::AppServerRequest,
+    AuditKind::AppServerResponse,
+    AuditKind::AppServerNotification,
+    AuditKind::ApprovalRequested,
+    AuditKind::ApprovalDecided,
+    AuditKind::InteractionOpened,
+    AuditKind::InteractionResolved,
+    AuditKind::ClientEvent,
+    AuditKind::ControllerReset,
+    AuditKind::ReasoningContentSuppressed,
+    AuditKind::WriterAcquired,
+    AuditKind::WriterReleased,
+    AuditKind::WriterHandoffRequested,
+    AuditKind::WriterHandoffCancelled,
+    AuditKind::WriterHandoffCompleted,
+    AuditKind::ProfileObserved,
+    AuditKind::IdempotencyReserved,
+    AuditKind::Reconciliation,
+    AuditKind::CleanupIntent,
+    AuditKind::CleanupResult,
+    AuditKind::LedgerTailRepaired,
+    AuditKind::ProjectionRewound,
+    AuditKind::PayloadUnrepresentable,
+    AuditKind::StartFailed,
+    AuditKind::OutcomeUnknown,
+];
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuditRecord {
     schema_version: u32,

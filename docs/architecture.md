@@ -1195,6 +1195,29 @@ hash scheme and genesis. Closed and start-failed runs append a final seal event.
 lag is detectable during normal operation; verification still scans the ledger
 from genesis.
 
+The v1 bootstrap prefix is exactly `workspace_initialized`,
+`idempotency_reserved`, then `run_created` or
+`write_continuation_created`. The checked idempotency-intent object binds the
+operation, caller key, normalized semantic-identity digest, and allocated Run
+ID. A short-lived reservation guard prevents concurrent allocation before the
+intent is appended; dropping an unaccepted guard releases it, while acceptance
+makes the key-to-Run result permanent for exact replay. Replay indexes every
+durable intent by operation class and key and rejects a different digest or Run
+ID under the same key. Bootstrap is restartable from each exact durable prefix;
+a mismatching or overlong prefix fails closed.
+
+Terminal sealing reuses the closed record-kind vocabulary. `start_failed` or
+`cleanup_result` supplies the terminal evidence and the immediately following
+`lifecycle_transition` is the final seal. Its `previous` state must equal replay,
+its `current` state is `start_failed` or `closed`, and `terminal_seal:true` is
+permitted only there. Replay rejects an invalid edge, missing evidence,
+duplicate bootstrap, dangling terminal evidence, record after seal, or a
+canonical parse/serialize result that differs from the stored bytes. Turn,
+interaction, reconciliation, and unknown-outcome records must imply an allowed
+edge rather than assigning lifecycle unconditionally. A direct running/waiting
+interrupt transition to paused/closed additionally carries the checked
+`interrupt_terminal_confirmed:true` fact.
+
 Inbound JSON is parsed with duplicate-member rejection and number lexemes held
 only through adaptation. The in-repo canonicalizer uses UTF-16 key order and
 ECMAScript shortest binary64 rendering and is pinned by RFC 8785 plus Dolgorae

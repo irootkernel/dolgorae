@@ -1,8 +1,9 @@
 # Dolgorae Roadmap
 
 Status: Ordered implementation roadmap. `EPIC-000` and `TASK-000-H` are
-`COMPLETE`; `EPIC-001` and `TASK-003-C` are `ACTIVE`; `TASK-001`, `TASK-002`,
-`TASK-003-A`, and `TASK-003-B` are `COMPLETE`. `EPIC-002A` is the first user-usable product
+`COMPLETE`; `EPIC-001` is `ACTIVE`; `TASK-001`, `TASK-002`, `TASK-003-A`,
+`TASK-003-B`, and `TASK-003-C` are `COMPLETE`. No Task is active while the
+EPIC-001 hardening and acceptance gates run. `EPIC-002A` is the first user-usable product
 slice. Completing it unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -17,9 +18,10 @@ transport-independent Dolgorae orchestration core and Brokered Hierarchy, live
 Primary control-plane integration, and finally the durable Collaboration Plane. `TASK-009-E0` remains the live run-bound
 transport probe and occurs only after the Brokered Hierarchy core is complete.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
-matches the accepted product contract. `TASK-003-C` is the active implementation
-task after completion of TASK-003-B's durable ledger, repair, replay, projection,
-and observer-publication contract.
+matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
+and ledger-conformance contract after TASK-003-B's durable ledger, repair,
+replay, projection, and observer-publication work. EPIC-001 remains active until
+its deferred-feedback hardening and Epic-level acceptance checks close.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -587,7 +589,7 @@ durable ledger record.
 
 ### TASK-003-C: Lifecycle Seals and Ledger Conformance
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Implement bootstrap records, idempotency-intent schema, `start_failed` authority,
 terminal seals, closed record-kind enum, canonical fixed-point verification, and

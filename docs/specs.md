@@ -2128,7 +2128,9 @@ With `--interrupt`, Dolgorae first answers an outstanding supported approval wit
 evidence permits the direct paused/closed transition; expiry records and emits
 `OUTCOME_UNKNOWN` and uses the corresponding `outcome_unknown` edge before
 stopping or closing. Pause is resumable; close is not. Neither action reverts
-workspace changes.
+workspace changes. The direct `running|waiting_interaction -> paused|closed`
+ledger transition carries `interrupt_terminal_confirmed:true`; conformance
+rejects that field on any other edge and rejects either direct edge without it.
 
 After worker loss, an idle run may be recovered by starting a new process
 generation and using `thread/resume`. Recovery of `paused` performs only
@@ -2422,6 +2424,40 @@ The v1 audit-kind enum is closed:
 schema change; an unknown kind fails ledger verification rather than flowing
 through `events` as an open object.
 
+An allocated Run's v1 ledger bootstrap is closed and reconstructable without a
+worker or Codex process. Its first three records MUST be, in order,
+`workspace_initialized`, `idempotency_reserved`, and exactly one of
+`run_created` or `write_continuation_created`. The first record binds the
+workspace ID; the second validates against
+[`dolgorae-idempotency-intent-v1.schema.json`](protocol/dolgorae-idempotency-intent-v1.schema.json)
+and binds the normalized operation identity and allocated Run ID; the third
+publishes the initial Run state. No later record may repeat
+`workspace_initialized` or either allocation kind. A later operation may append
+another `idempotency_reserved` record with its own checked intent.
+A durable `(operation, idempotency_key)` may occur more than once only with the
+same normalized identity digest and Run ID; a conflicting replay is an
+audit-integrity failure.
+A process-local reservation that has not appended `idempotency_reserved` and
+has not published the Run MUST be released when its guard is abandoned; an
+accepted reservation is permanent and exact replay returns its original Run.
+
+Terminal history is also closed. `start_failed` evidence is legal only while
+the Run is `starting` and only for the byte-0 bootstrap writer authorized by
+SPEC-008. A normal close requires a preceding `cleanup_result`. In either case
+the final record MUST be a `lifecycle_transition` whose `current` value is
+`start_failed` or `closed`, whose `previous` value equals the reconstructed
+state, and whose `terminal_seal` value is `true`. A terminal transition without
+its required evidence, a nonterminal transition carrying `terminal_seal`, or
+any record after a terminal seal is an audit-integrity failure. Verification
+also rejects either terminal-evidence record when it is not immediately followed
+by its matching seal, including a crash after fsyncing only `cleanup_result`.
+Implicit lifecycle effects of turn, interaction, reconciliation, and
+`outcome_unknown` records are checked against the same closed transition table;
+they cannot move a Run from `starting` into an active state. Verification
+reconstructs the lifecycle from the closed transition table and requires every
+stored record to survive parse, hash verification, and canonical serialization
+as an exact byte-for-byte fixed point.
+
 Inbound JSON rejects duplicate object members and preserves number lexemes until
 numeric adaptation. Direct deserialization into `serde_json::Value` or a typed
 struct is forbidden. The approved ingest path is a duplicate-detecting custom
@@ -2562,6 +2598,13 @@ state-changing command allowed after audit integrity failure and appends no
 record to a ledger it cannot trust. It permanently
 deletes the Dolgorae Application Support Run directory only. It MUST NOT delete the Codex thread from
 `CODEX_HOME`, and Dolgorae MUST NOT later auto-import that orphaned thread.
+When verification fails, this escape additionally requires the final complete
+ledger line to remain an independently canonical, self-hashed terminal seal and
+the existing mode-0600 `state.json` to identify that exact sequence/hash, Run,
+and terminal lifecycle. The broken earlier chain remains reported and no other
+mutation is permitted. The confirmed delete path revalidates the exact
+mode-0700 Run directory beneath the secure workspace `runs/` directory
+immediately before removal.
 
 ## SPEC-011: Agent Instruction and Side-Effect Policy
 

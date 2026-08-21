@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod cli;
+pub mod conformance;
 pub mod domain;
 pub mod fault;
 pub mod jcs;

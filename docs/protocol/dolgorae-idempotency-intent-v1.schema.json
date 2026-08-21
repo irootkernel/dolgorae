@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/idempotency-intent/v1",
+  "title": "Dolgorae durable idempotency intent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-semanticValidator": "tools/validators/validate_task003c_conformance.py#validate_idempotency_intent",
+  "required": [
+    "schema_version",
+    "operation",
+    "idempotency_key",
+    "normalized_identity_sha256",
+    "run_id"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "operation": {
+      "enum": [
+        "start_run",
+        "fork_run",
+        "submit_turn",
+        "resolve_interaction",
+        "create_write_continuation"
+      ]
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 256
+    },
+    "normalized_identity_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}
