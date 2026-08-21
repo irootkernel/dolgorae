@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -553,6 +554,40 @@ fn has(args: &[OsString], flag: &str) -> bool {
     args.iter().any(|arg| {
         arg == OsStr::new(flag) || arg.to_string_lossy().starts_with(&format!("{flag}="))
     })
+}
+
+pub fn option_path(args: &[OsString], flag: &str) -> Result<Option<PathBuf>, String> {
+    let mut found = None;
+    let mut index = 0;
+    while index < args.len() {
+        let token = &args[index];
+        if token == OsStr::new(flag) {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("{flag} requires a value"))?;
+            if found.replace(PathBuf::from(value)).is_some() {
+                return Err(format!("{flag} may be supplied only once"));
+            }
+            index += 2;
+            continue;
+        }
+        let bytes = token.as_encoded_bytes();
+        let flag_bytes = flag.as_bytes();
+        if bytes.starts_with(flag_bytes) && bytes.get(flag_bytes.len()) == Some(&b'=') {
+            let value = &bytes[flag_bytes.len() + 1..];
+            if value.is_empty() {
+                return Err(format!("{flag} requires a value"));
+            }
+            if found
+                .replace(PathBuf::from(OsString::from_vec(value.to_vec())))
+                .is_some()
+            {
+                return Err(format!("{flag} may be supplied only once"));
+            }
+        }
+        index += 1;
+    }
+    Ok(found)
 }
 
 struct LeafSpec {

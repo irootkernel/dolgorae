@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
 use clap::{CommandFactory, Parser};
-use dolgorae::cli::{Cli, Command, RuntimeCommand};
+use dolgorae::cli::{Cli, Command, RunCommand, RuntimeCommand, WorkspaceCommand, option_path};
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{CoreSemanticService, SemanticCommand, SemanticService};
+use dolgorae::workspace::WorkspaceMode;
 use serde::Serialize;
 use serde_json::json;
 use std::ffi::OsString;
@@ -80,41 +81,65 @@ fn render_version(human: bool) -> ExitCode {
 }
 
 fn execute(cli: Cli) -> ExitCode {
-    match cli.command {
+    let command_name = cli.command.machine_name();
+    let semantic_command = match &cli.command {
         Command::Runtime {
             command: RuntimeCommand::Capabilities,
-        } => {
-            if cli.human {
-                println!(
-                    "Dolgorae {} (Machine CLI contract available; runtime features pending)",
-                    env!("CARGO_PKG_VERSION")
-                );
+        } => SemanticCommand::RuntimeCapabilities,
+        Command::Init(args) => SemanticCommand::Initialize {
+            path: args.path.clone(),
+            mode: if args.non_git {
+                WorkspaceMode::NonGit
             } else {
-                let service = CoreSemanticService;
-                match service.execute(&SemanticCommand::RuntimeCapabilities) {
-                    Ok(result) => render_json(&SuccessEnvelope::new(
-                        "runtime.capabilities",
-                        serde_json::to_value(result).expect("typed semantic result"),
-                    )),
-                    Err(error) => return render_failure(false, "runtime.capabilities", error),
+                WorkspaceMode::Git
+            },
+        },
+        Command::Workspace {
+            command: WorkspaceCommand::Inspect(args),
+        } => match option_path(&args.args, "--workspace") {
+            Ok(workspace) => SemanticCommand::WorkspaceInspect { workspace },
+            Err(reason) => {
+                return render_failure(
+                    cli.human,
+                    command_name,
+                    MachineError::invalid_argument("--workspace", reason),
+                );
+            }
+        },
+        Command::Run(run) if matches!(run.command, RunCommand::Start(_)) => {
+            let RunCommand::Start(leaf) = &run.command else {
+                unreachable!("guard proves run start")
+            };
+            match option_path(&leaf.args, "--workspace") {
+                Ok(workspace) => SemanticCommand::RunStartPreflight { workspace },
+                Err(reason) => {
+                    return render_failure(
+                        cli.human,
+                        command_name,
+                        MachineError::invalid_argument("--workspace", reason),
+                    );
                 }
             }
-            ExitCode::SUCCESS
         }
-        command => {
-            let command_name = command.machine_name();
-            let service = CoreSemanticService;
-            match service.execute(&SemanticCommand::Future {
-                dotted_name: command_name.to_owned(),
-            }) {
-                Ok(data) => render_json(&SuccessEnvelope::new(
-                    command_name,
-                    serde_json::to_value(data).expect("typed semantic result"),
-                )),
-                Err(error) => return render_failure(cli.human, command_name, error),
+        _ => SemanticCommand::Future {
+            dotted_name: command_name.to_owned(),
+        },
+    };
+    let service = CoreSemanticService;
+    match service.execute(&semantic_command) {
+        Ok(result) => {
+            let data = serde_json::to_value(result).expect("typed semantic result");
+            if cli.human {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data).expect("typed semantic result")
+                );
+            } else {
+                render_json(&SuccessEnvelope::new(command_name, data));
             }
             ExitCode::SUCCESS
         }
+        Err(error) => render_failure(cli.human, command_name, error),
     }
 }
 

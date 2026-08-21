@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod providers;
 pub mod runtime;
 pub mod semantic;
+pub mod workspace;
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]

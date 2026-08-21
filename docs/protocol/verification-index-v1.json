@@ -49,6 +49,7 @@
     "SPEC-003": {
       "tasks": [
         "TASK-000-H",
+        "TASK-002",
         "TASK-005",
         "TASK-006-A",
         "TASK-006-B",
@@ -56,6 +57,7 @@
         "TASK-006-E1"
       ],
       "catches": [
+        "strict machine-local Runtime Profile registry schema and initial empty registry",
         "project-local profiles",
         "restorable launch snapshots",
         "process-static configuration",

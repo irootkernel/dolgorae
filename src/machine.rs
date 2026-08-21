@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 use uuid::{Timestamp, Uuid};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,13 +35,114 @@ pub struct MachineError {
 
 impl MachineError {
     #[must_use]
-    pub fn invalid_argument(argument: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+        details: Value,
+    ) -> Self {
         Self {
-            code: "INVALID_ARGUMENT".to_owned(),
-            message: "invalid command arguments".to_owned(),
-            retryable: false,
-            details: serde_json::json!({"argument": argument.into(), "reason": reason.into()}),
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            details,
         }
+    }
+
+    #[must_use]
+    pub fn invalid_argument(argument: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::new(
+            "INVALID_ARGUMENT",
+            "invalid command arguments",
+            false,
+            serde_json::json!({"argument": argument.into(), "reason": reason.into()}),
+        )
+    }
+
+    #[must_use]
+    pub fn workspace_not_initialized(path: impl AsRef<Path>) -> Self {
+        Self::new(
+            "WORKSPACE_NOT_INITIALIZED",
+            "workspace is not initialized",
+            false,
+            serde_json::json!({"workspace_path": path_json(path.as_ref())}),
+        )
+    }
+
+    #[must_use]
+    pub fn config_invalid(path: impl AsRef<Path>, reason: impl Into<String>) -> Self {
+        Self::new(
+            "CONFIG_INVALID",
+            "workspace configuration is invalid",
+            false,
+            serde_json::json!({"path": path_json(path.as_ref()), "reason": reason.into()}),
+        )
+    }
+
+    #[must_use]
+    pub fn profile_config_invalid(path: impl AsRef<Path>, reason: impl Into<String>) -> Self {
+        Self::new(
+            "PROFILE_CONFIG_INVALID",
+            "profile configuration is invalid",
+            false,
+            serde_json::json!({"path": path_json(path.as_ref()), "reason": reason.into()}),
+        )
+    }
+
+    #[must_use]
+    pub fn initialization_conflict(path: impl AsRef<Path>, reason: impl Into<String>) -> Self {
+        Self::new(
+            "WORKSPACE_INITIALIZATION_CONFLICT",
+            "workspace initialization conflicts with existing state",
+            false,
+            serde_json::json!({"workspace_path": path_json(path.as_ref()), "reason": reason.into()}),
+        )
+    }
+
+    #[must_use]
+    pub fn runtime_path_invalid(path: impl AsRef<Path>, reason: impl Into<String>) -> Self {
+        Self::new(
+            "RUNTIME_PATH_INVALID",
+            "runtime path is unsafe or unsupported",
+            false,
+            serde_json::json!({"path": path_json(path.as_ref()), "reason": reason.into()}),
+        )
+    }
+
+    #[must_use]
+    pub fn runtime_path_collision(
+        path: impl AsRef<Path>,
+        expected: crate::workspace::FileIdentity,
+        observed: crate::workspace::FileIdentity,
+    ) -> Self {
+        Self::new(
+            "RUNTIME_PATH_COLLISION",
+            "runtime path identity changed",
+            false,
+            serde_json::json!({
+                "path": path_json(path.as_ref()),
+                "expected_identity": expected,
+                "observed_identity": observed
+            }),
+        )
+    }
+
+    #[must_use]
+    pub fn runtime_path_collision_missing(
+        path: impl AsRef<Path>,
+        expected: crate::workspace::FileIdentity,
+        observed: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            "RUNTIME_PATH_COLLISION",
+            "runtime path is missing or replaced",
+            false,
+            serde_json::json!({
+                "path": path_json(path.as_ref()),
+                "expected_identity": expected,
+                "observed_identity": {"error": observed.into()}
+            }),
+        )
     }
 
     #[must_use]
@@ -83,6 +185,18 @@ impl MachineError {
             | "ARTIFACT_INTEGRITY_FAILURE" => 8,
             _ => 4,
         }
+    }
+}
+
+fn path_json(path: &Path) -> Value {
+    use base64::Engine as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    match path.as_os_str().to_str() {
+        Some(value) => Value::String(value.to_owned()),
+        None => serde_json::json!({
+            "$dolgorae_path_bytes": base64::engine::general_purpose::STANDARD
+                .encode(path.as_os_str().as_bytes())
+        }),
     }
 }
 

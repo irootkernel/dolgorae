@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/workspace-record/v1",
+  "title": "Dolgorae machine-local workspace record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workspace_id",
+    "canonical_path",
+    "mode",
+    "initial_git_baseline",
+    "state_root_identity",
+    "lock_root_identity"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/sha256"
+    },
+    "canonical_path": {
+      "$ref": "#/$defs/path"
+    },
+    "mode": {
+      "enum": [
+        "git",
+        "non_git"
+      ]
+    },
+    "initial_git_baseline": {
+      "$ref": "#/$defs/git_baseline"
+    },
+    "state_root_identity": {
+      "$ref": "#/$defs/file_identity"
+    },
+    "lock_root_identity": {
+      "$ref": "#/$defs/file_identity"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "$dolgorae_path_bytes"
+          ],
+          "properties": {
+            "$dolgorae_path_bytes": {
+              "type": "string",
+              "contentEncoding": "base64",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          }
+        }
+      ]
+    },
+    "file_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "inode"
+      ],
+      "properties": {
+        "device": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "git_baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "head",
+        "branch",
+        "tracked_changes",
+        "untracked_paths"
+      ],
+      "properties": {
+        "head": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branch": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tracked_changes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "untracked_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        }
+      }
+    }
+  }
+}
