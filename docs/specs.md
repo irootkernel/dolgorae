@@ -3180,7 +3180,7 @@ The required-subset manifest has two independent eligibility fields.
 `architecture_contract_eligible` is owned by TASK-000-D and becomes true only
 after checked artifacts, reproducible pinned evidence, the self-contained
 package, and a no-P0/P1 independent architecture review agree.
-`production_runtime_eligible` is owned by TASK-015 and remains false until the
+`production_runtime_eligible` is owned by TASK-031 and remains false until the
 implemented two-profile runtime passes every production smoke, migration,
 cleanup, interaction, artifact, and review gate. Architecture closure never
 promotes production eligibility.
@@ -3635,7 +3635,7 @@ streaming, Controller interaction handling, basic writer status/acquire/release,
 Controller verification, and artifact metadata/bounded chunk retrieval.
 Timeline, profile diagnostics, advanced Run operations, writer handoff, delete,
 verification, and write continuation remain unavailable and unadvertised until
-`TASK-010-A`. A client
+`TASK-026`. A client
 MUST fail closed rather than call an unadvertised method. `MILESTONE-PA1`
 requires the complete descriptor method set.
 
@@ -3971,17 +3971,17 @@ and passes for the release candidate.
 
 | Runtime case ID | Owner | Required test | Test path |
 |---|---|---|---|
-| `slow_consumer_isolation` | `TASK-009-D1A` | `multi_run_pressure_e2e` | `tests/e2e/test_slow_consumer_isolation.py` |
-| `protected_interaction_lost_response` | `TASK-009-D1A` | `secret_canary_and_fault_barrier` | `tests/e2e/test_protected_interaction_lost_response.py` |
-| `gateway_restart` | `TASK-009-D1A` | `active_run_restart_e2e` | `tests/e2e/test_gateway_restart.py` |
-| `socket_ownership` | `TASK-009-D1A` | `macos_uds_attack_matrix` | `tests/e2e/test_socket_ownership.py` |
-| `private_boundary` | `TASK-009-E1` | `real_gul_harness` | `tests/e2e/test_private_boundary.py` |
-| `run_configuration_restart` | `TASK-009-D1A` | `accepted_configuration_restart_e2e` | `tests/e2e/test_run_configuration_restart.py` |
-| `start_run_allocation_replay` | `TASK-009-D1A` | `allocation_loss_conflict_and_tombstone_e2e` | `tests/e2e/test_start_run_allocation_replay.py` |
-| `interaction_size_and_secret_barrier` | `TASK-009-D1A` | `preparse_bound_and_no_secret_replay_e2e` | `tests/e2e/test_interaction_size_and_secret_barrier.py` |
-| `event_revision_action_barrier` | `TASK-009-D1A` | `stale_aggregate_action_e2e` | `tests/e2e/test_event_revision_action_barrier.py` |
-| `lossless_non_utf8_path` | `TASK-013` | `opaque_path_cross_adapter_e2e` | `tests/e2e/test_lossless_non_utf8_path.py` |
-| `threadless_first_write_runtime` | `TASK-009-D1A` | `threadless_submit_writer_activation_e2e` | `tests/e2e/test_threadless_first_write_runtime.py` |
+| `slow_consumer_isolation` | `TASK-020` | `multi_run_pressure_e2e` | `tests/e2e/test_slow_consumer_isolation.py` |
+| `protected_interaction_lost_response` | `TASK-020` | `secret_canary_and_fault_barrier` | `tests/e2e/test_protected_interaction_lost_response.py` |
+| `gateway_restart` | `TASK-020` | `active_run_restart_e2e` | `tests/e2e/test_gateway_restart.py` |
+| `socket_ownership` | `TASK-020` | `macos_uds_attack_matrix` | `tests/e2e/test_socket_ownership.py` |
+| `private_boundary` | `TASK-023` | `real_gul_harness` | `tests/e2e/test_private_boundary.py` |
+| `run_configuration_restart` | `TASK-020` | `accepted_configuration_restart_e2e` | `tests/e2e/test_run_configuration_restart.py` |
+| `start_run_allocation_replay` | `TASK-020` | `allocation_loss_conflict_and_tombstone_e2e` | `tests/e2e/test_start_run_allocation_replay.py` |
+| `interaction_size_and_secret_barrier` | `TASK-020` | `preparse_bound_and_no_secret_replay_e2e` | `tests/e2e/test_interaction_size_and_secret_barrier.py` |
+| `event_revision_action_barrier` | `TASK-020` | `stale_aggregate_action_e2e` | `tests/e2e/test_event_revision_action_barrier.py` |
+| `lossless_non_utf8_path` | `TASK-029` | `opaque_path_cross_adapter_e2e` | `tests/e2e/test_lossless_non_utf8_path.py` |
+| `threadless_first_write_runtime` | `TASK-020` | `threadless_submit_writer_activation_e2e` | `tests/e2e/test_threadless_first_write_runtime.py` |
 
 ## External Protocol References
 

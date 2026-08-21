@@ -1804,7 +1804,7 @@ adapter with a tool invoked from inside a Dolgorae Run.
 
 ### Decision
 
-Insert `EPIC-002A` immediately after the independent Run, Codex App Server,
+Insert `EPIC-003` immediately after the independent Run, Codex App Server,
 thread, Turn, and Controller foundations. Its completion is the first usable
 milestone, `MILESTONE-SR1`.
 
@@ -1830,7 +1830,7 @@ Specialist collaboration.
 
 ### Consequences
 
-- Codex CLI can dogfood independent Specialist review as soon as `EPIC-002A`
+- Codex CLI can dogfood independent Specialist review as soon as `EPIC-003`
   completes.
 - The early feature is a real product slice, not a disposable alternate
   architecture.
@@ -1882,17 +1882,17 @@ work would unnecessarily delay the main control-plane milestone.
 Split the former gateway Task into two delivery stages without changing the
 checked Protobuf source or descriptor.
 
-`TASK-009-D1A`, before the durable Brokered Hierarchy core, implements the
+`TASK-020`, before the durable Brokered Hierarchy core, implements the
 foreground `dolgorae serve` process, private UDS and peer-UID boundary,
 singleton record and lock, reconstructable `ControlPlaneRuntime`, pinned gRPC
 code generation, and the checked minimum public-v1 method path needed by a live
 Gul Orchestrated Session. It routes each implemented method to the shared
 semantic service and advertises only those methods in capabilities.
 
-`TASK-010-A` later completes the remaining descriptor methods and extended
+`TASK-026` later completes the remaining descriptor methods and extended
 observation/operator-safe conformance. Generated stubs may exist before a method
 is implemented, but an unadvertised method is unavailable and must fail closed.
-`MILESTONE-BH1` requires `TASK-009-D1A`, the durable hierarchy core, and live
+`MILESTONE-BH1` requires `TASK-020`, the durable hierarchy core, and live
 Primary-tool integration. It therefore denotes actual Gul use, not a
 Gul-shaped fake harness.
 
@@ -1917,7 +1917,7 @@ Gul-shaped fake harness.
 
 - Downgrade BH1 to a Gul-shaped harness: rejected because the milestone is
   explicitly a user-usable Gul control plane.
-- Move all of EPIC-004 before the hierarchy core: rejected because the minimum
+- Move all of EPIC-009 before the hierarchy core: rejected because the minimum
   Run path is sufficient and the remaining operator surface does not determine
   hierarchy semantics.
 - Advertise every descriptor method and return placeholder success: rejected
@@ -1952,7 +1952,7 @@ repeat the same value on every attempt. Dolgorae persists the value and
 normalized request digest before opening the engagement; exact replay returns
 the original review identity and changed input conflicts.
 
-Add `TASK-006-E0` before the external MCP adapter. It selects exactly one of two
+Add `TASK-011` before the external MCP adapter. It selects exactly one of two
 checked dispositions: replay-safe metadata or MCP unavailable. Replay-safe mode
 requires the pinned host to preserve the same trusted reference across every
 supported retry and reconnect boundary. If that behavior is not proven, SR1

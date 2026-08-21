@@ -374,9 +374,9 @@ authoritative global in-memory Run registry. Dirty sets, activation leases, and
 scheduler caches are reconstructable from SQLite.
 
 Gateway delivery is staged without changing the frozen Protobuf descriptor.
-`TASK-009-D1A` implements the 24-method path required by `MILESTONE-BH1`,
+`TASK-020` implements the 24-method path required by `MILESTONE-BH1`,
 including metadata-only artifact lookup and bounded artifact reads, and
-advertises only that method set through capabilities. `TASK-010-A` completes
+advertises only that method set through capabilities. `TASK-026` completes
 the remaining timeline, diagnostics, advanced Run, writer-handoff, delete,
 verification, and write-continuation methods and
 then advertises the complete descriptor method inventory. An unadvertised
