@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -27,7 +28,28 @@ def run(binary: pathlib.Path, arguments: list[str], home: pathlib.Path) -> subpr
     )
 
 
+def git(repository: pathlib.Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def require_supported_git() -> None:
+    completed = subprocess.run(
+        ["git", "--version"], check=True, capture_output=True, text=True
+    )
+    match = re.match(r"git version (\d+)\.(\d+)", completed.stdout)
+    if match is None or tuple(map(int, match.groups())) < (2, 39):
+        raise AssertionError(
+            f"Git 2.39 or later is required for E2E, got {completed.stdout.strip()!r}"
+        )
+
+
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
+    require_supported_git()
     machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
     workspace_record = validator(protocol_root, "dolgorae-workspace-record-v1.schema.json")
     portable_policy = validator(
@@ -44,12 +66,15 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         application_support.mkdir(parents=True, mode=0o700)
         repository = root / "repository"
         repository.mkdir(mode=0o700)
-        subprocess.run(
-            ["git", "-C", str(repository), "init", "-b", "main"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        git(repository, "init", "-b", "main")
+        git(repository, "config", "user.name", "Dolgorae E2E")
+        git(repository, "config", "user.email", "dolgorae@example.invalid")
+        (repository / "tracked.txt").write_text("initial\n", encoding="utf-8")
+        git(repository, "add", "tracked.txt")
+        git(repository, "commit", "-m", "initial")
+        linked = root / "linked"
+        git(repository, "worktree", "add", "-b", "linked", str(linked))
+        (repository / "tracked.txt").write_text("dirty\n", encoding="utf-8")
         (repository / "untracked.txt").write_text("preserve\n", encoding="utf-8")
 
         initialized = run(binary, ["init", str(repository)], home)
@@ -71,8 +96,21 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(repeated_envelope, machine, "repeated-init Machine envelope")
         if repeated_envelope["data"]["created"] is not False:
             raise AssertionError("repeated initialization did not report created:false")
+        if (repository / "tracked.txt").read_text(encoding="utf-8") != "dirty\n":
+            raise AssertionError("initialization changed a pre-existing tracked modification")
         if (repository / "untracked.txt").read_text(encoding="utf-8") != "preserve\n":
             raise AssertionError("initialization changed a pre-existing untracked file")
+
+        linked_initialized = run(binary, ["init", str(linked)], home)
+        if linked_initialized.returncode != 0 or linked_initialized.stderr:
+            raise AssertionError(
+                f"linked worktree init failed: {linked_initialized.stdout!r} "
+                f"{linked_initialized.stderr!r}"
+            )
+        linked_envelope = json.loads(linked_initialized.stdout)
+        assert_valid(linked_envelope, machine, "linked-worktree Machine envelope")
+        if linked_envelope["data"]["workspace_id"] == workspace_id:
+            raise AssertionError("distinct Git worktrees received the same workspace ID")
 
         nested = repository / "nested" / "directory"
         nested.mkdir(parents=True)
@@ -93,14 +131,13 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if inspected_envelope["data"]["workspace_id"] != workspace_id:
             raise AssertionError("upward discovery selected the wrong workspace")
 
-        state_root = (
-            application_support
-            / "Dolgorae"
-            / "workspaces"
-            / workspace_id
-        )
+        state_root = application_support / "Dolgorae" / "workspaces" / workspace_id
         record = json.loads((state_root / "workspace.json").read_text(encoding="utf-8"))
         assert_valid(record, workspace_record, "workspace record")
+        if record["initial_git_baseline"]["tracked_changes"] != ["tracked.txt"]:
+            raise AssertionError("workspace record did not preserve the tracked Git baseline")
+        if record["initial_git_baseline"]["untracked_paths"] != ["untracked.txt"]:
+            raise AssertionError("workspace record did not preserve the untracked Git baseline")
         policy_text = (repository / ".dolgorae" / "config.yaml").read_text(
             encoding="utf-8"
         )
@@ -169,6 +206,19 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if replaced_envelope["error"]["code"] != "RUNTIME_PATH_COLLISION":
             raise AssertionError("replaced lock root returned the wrong error")
 
+        git_inside = root / "git-inside"
+        git_inside.mkdir(mode=0o700)
+        git(git_inside, "init", "-b", "main")
+        non_git = run(binary, ["init", "--non-git", str(git_inside)], home)
+        if non_git.returncode != 4:
+            raise AssertionError(
+                f"--non-git inside Git returned {non_git.returncode}: {non_git.stdout}"
+            )
+        non_git_envelope = json.loads(non_git.stdout)
+        assert_valid(non_git_envelope, machine, "non-git-inside-Git Machine envelope")
+        if non_git_envelope["error"]["code"] != "WORKSPACE_INITIALIZATION_CONFLICT":
+            raise AssertionError("--non-git inside Git returned the wrong error")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -179,7 +229,7 @@ def main() -> int:
     arguments = parser.parse_args()
     validate(arguments.binary.resolve(), arguments.protocol_root.resolve())
     print(
-        "Workspace CLI validation passed: init, repeat, schemas, modes, preservation, refusal, lock identity"
+        "Workspace CLI validation passed: Git baseline, worktrees, schemas, isolation, refusals"
     )
     return 0
 

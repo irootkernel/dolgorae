@@ -18,7 +18,7 @@ document/schema checks and black-box CLI tests.
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r tools/validation/requirements.txt
-PYTHON_BIN=.venv/bin/python tools/check.sh
+make PYTHON_BIN=.venv/bin/python test
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the validation layout and contribution

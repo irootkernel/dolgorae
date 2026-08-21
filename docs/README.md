@@ -23,5 +23,6 @@ tests, and roadmap entries.
 
 Rust unit and integration tests own product semantics. Python is intentionally
 limited to small JSON/schema and Markdown checks plus black-box tests of the
-compiled Rust executable. Run the complete repository gate with
-`tools/check.sh`; setup instructions are in [CONTRIBUTING.md](../CONTRIBUTING.md).
+compiled Rust executable. Run the complete repository gate with `make test`;
+its ordered prepare, unit, integration, and E2E layers are documented in
+[CONTRIBUTING.md](../CONTRIBUTING.md).

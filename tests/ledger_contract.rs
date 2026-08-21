@@ -261,14 +261,19 @@ fn child_process_cannot_acquire_an_owned_ledger() {
     let tree = RunTree::new();
     let owner =
         Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
-    let status = Command::new(std::env::current_exe().unwrap())
+    let output = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("writer_lock_child_probe")
         .env("DOLGORAE_LEDGER_LOCK_PROBE_ROOT", &tree.root)
         .env("DOLGORAE_LEDGER_LOCK_PROBE_RUN_ID", tree.run_id.to_string())
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success());
+    assert!(
+        output.status.success(),
+        "child lock probe failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     drop(owner);
 }
 

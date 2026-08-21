@@ -2,16 +2,13 @@
 
 use dolgorae::workspace::{
     PlatformFilesystem, SystemGitRunner, SystemWorkspacePlatform, WorkspaceMode, WorkspacePlatform,
-    WorkspaceRecord, WorkspaceService, workspace_id,
+    WorkspaceService, workspace_id,
 };
-use serde_json::Value;
 use std::fs;
 use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _, symlink};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 struct TestTree(PathBuf);
 
@@ -44,26 +41,6 @@ impl Drop for TestTree {
 fn make_dir(path: &Path) {
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700).recursive(true).create(path).unwrap();
-}
-
-fn git(root: &Path, arguments: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git command failed: {arguments:?}");
-}
-
-fn init_git(root: &Path) {
-    make_dir(root);
-    git(root, &["init", "-b", "main"]);
-    git(root, &["config", "user.name", "Dolgorae Test"]);
-    git(root, &["config", "user.email", "dolgorae@example.invalid"]);
-    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
-    git(root, &["add", "tracked.txt"]);
-    git(root, &["commit", "-m", "initial"]);
 }
 
 #[test]
@@ -113,50 +90,6 @@ fn non_git_initialization_discovers_upward_and_is_idempotent() {
         fs::read_to_string(workspace.join(".dolgorae/config.yaml")).unwrap(),
         "mode: non_git\nschema_version: 1\n"
     );
-}
-
-#[test]
-fn git_baseline_preserves_dirty_and_untracked_files_and_worktrees_are_distinct() {
-    let tree = TestTree::new();
-    let workspace = tree.path("primary");
-    let linked = tree.path("linked");
-    init_git(&workspace);
-    fs::write(workspace.join("tracked.txt"), "dirty\n").unwrap();
-    fs::write(workspace.join("untracked.txt"), "keep\n").unwrap();
-    git(
-        &workspace,
-        &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
-    );
-    make_dir(&tree.path("support"));
-    let service = WorkspaceService::new(
-        SystemWorkspacePlatform,
-        SystemGitRunner,
-        tree.path("support/Dolgorae"),
-    );
-
-    let primary = service
-        .initialize(Some(&workspace.join(".")), WorkspaceMode::Git)
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
-        "dirty\n"
-    );
-    assert_eq!(
-        fs::read_to_string(workspace.join("untracked.txt")).unwrap(),
-        "keep\n"
-    );
-    let record_path = tree
-        .path("support/Dolgorae/workspaces")
-        .join(&primary.workspace_id)
-        .join("workspace.json");
-    let record: WorkspaceRecord = serde_json::from_slice(&fs::read(record_path).unwrap()).unwrap();
-    assert_eq!(record.initial_git_baseline.tracked_changes.len(), 1);
-    assert_eq!(record.initial_git_baseline.untracked_paths.len(), 1);
-
-    let linked_view = service
-        .initialize(Some(&linked), WorkspaceMode::Git)
-        .unwrap();
-    assert_ne!(primary.workspace_id, linked_view.workspace_id);
 }
 
 #[test]
@@ -447,45 +380,61 @@ fn libc_realpath_normalizes_symlinks_and_obeys_volume_case_semantics() {
 }
 
 #[test]
-fn live_data_volume_firmlink_is_substituted_only_for_equal_identity() {
+fn data_volume_alias_is_substituted_only_for_equal_identity() {
     let data_users = PathBuf::from("/System/Volumes/Data/Users");
-    if !data_users.exists() {
-        return;
-    }
-    let normalized = dolgorae::workspace::normalize_data_volume_alias(data_users, |path| {
-        fs::symlink_metadata(path)
-            .ok()
-            .map(|metadata| dolgorae::workspace::FileIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            })
+    let users = PathBuf::from("/Users");
+    let shared_identity = dolgorae::workspace::FileIdentity {
+        device: 42,
+        inode: 7,
+    };
+    let normalized = dolgorae::workspace::normalize_data_volume_alias(data_users.clone(), |path| {
+        (path == data_users || path == users).then_some(shared_identity)
     })
     .unwrap();
     assert_eq!(normalized, Path::new("/Users"));
 
-    let data_root = PathBuf::from("/System/Volumes/Data");
-    let normalized_root =
-        dolgorae::workspace::normalize_data_volume_alias(data_root.clone(), |path| {
-            fs::symlink_metadata(path)
-                .ok()
-                .map(|metadata| dolgorae::workspace::FileIdentity {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                })
+    let unchanged = dolgorae::workspace::normalize_data_volume_alias(data_users.clone(), |path| {
+        (path == data_users).then_some(shared_identity)
+    })
+    .unwrap();
+    assert_eq!(unchanged, data_users);
+}
+
+#[derive(Clone)]
+struct GitWorktree(PathBuf);
+
+impl dolgorae::workspace::GitRunner for GitWorktree {
+    fn output(
+        &self,
+        arguments: &[std::ffi::OsString],
+    ) -> Result<std::process::Output, std::io::Error> {
+        let stdout = if arguments == [std::ffi::OsString::from("--version")] {
+            b"git version 2.39.0\n".to_vec()
+        } else if arguments
+            .windows(2)
+            .any(|values| values[0] == "rev-parse" && values[1] == "--show-toplevel")
+        {
+            format!("{}\n", self.0.display()).into_bytes()
+        } else {
+            panic!("unexpected fake Git arguments: {arguments:?}")
+        };
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout,
+            stderr: Vec::new(),
         })
-        .unwrap();
-    assert_eq!(normalized_root, data_root);
+    }
 }
 
 #[test]
 fn explicit_non_git_initialization_is_refused_inside_git() {
     let tree = TestTree::new();
     let repository = tree.path("repository");
-    init_git(&repository);
+    make_dir(&repository);
     make_dir(&tree.path("support"));
     let service = WorkspaceService::new(
         SystemWorkspacePlatform,
-        SystemGitRunner,
+        GitWorktree(repository.clone()),
         tree.path("support/Dolgorae"),
     );
     let error = service
@@ -574,57 +523,4 @@ fn non_utf8_path_encoding_and_workspace_digest_are_lossless() {
         workspace_id(&path),
         workspace_id(Path::new("/tmp/workspace"))
     );
-}
-
-#[test]
-fn machine_cli_initializes_and_refuses_uninitialized_start() {
-    let tree = TestTree::new();
-    let home = tree.path("home");
-    make_dir(&home.join("Library/Application Support"));
-    let workspace = tree.path("repo");
-    init_git(&workspace);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_dolgorae"))
-        .env("HOME", &home)
-        .args(["init", workspace.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["command"], "init");
-    assert_eq!(envelope["data"]["created"], true);
-
-    let uninitialized = tree.path("uninitialized");
-    make_dir(&uninitialized);
-    let output = Command::new(env!("CARGO_BIN_EXE_dolgorae"))
-        .env("HOME", &home)
-        .args([
-            "run",
-            "start",
-            "--workspace",
-            uninitialized.to_str().unwrap(),
-            "--profile",
-            "default",
-            "--control-mode",
-            "direct-interactive",
-            "--execution-lane",
-            "shared-readonly",
-            "--required-assurance",
-            "best-effort-personal-alpha",
-            "--require-capability",
-            "workspace",
-            "--purpose",
-            "implementation",
-            "--idempotency-key",
-            "test",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(3));
-    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "WORKSPACE_NOT_INITIALIZED");
 }
