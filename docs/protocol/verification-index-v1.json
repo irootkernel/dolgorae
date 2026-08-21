@@ -284,6 +284,9 @@
       ],
       "catches": [
         "JSON ingest",
+        "RFC 8785 canonical bytes, lossless-number adaptation, duplicate rejection, marker escaping, and normative redaction",
+        "immutable Run manifest identity, capability snapshot, audit constants, and secure publication",
+        "closed audit record kinds, canonical record hash, and bounded payload representation",
         "audit durability",
         "reasoning non-retention",
         "safe projection",

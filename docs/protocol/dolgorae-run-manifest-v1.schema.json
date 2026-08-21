@@ -1,0 +1,355 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/run-manifest/v1",
+  "title": "Dolgorae immutable Run manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-semanticValidator": "tools/validators/validate_task003a_records.py#validate_manifest",
+  "required": [
+    "schema_version",
+    "run_id",
+    "workspace_id",
+    "canonical_workspace",
+    "workspace_mode",
+    "start_baseline",
+    "created_at",
+    "initial_access",
+    "control_mode",
+    "execution_lane",
+    "requested_assurance",
+    "achieved_assurance",
+    "profile",
+    "agent_configuration",
+    "profile_capability_snapshot",
+    "app_server",
+    "dolgorae",
+    "model",
+    "initial_reasoning_effort",
+    "default_reasoning_effort",
+    "instructions",
+    "controller",
+    "purpose",
+    "parent_ref",
+    "required_capabilities",
+    "thread_id",
+    "fork_provenance",
+    "aggregate_binding",
+    "audit",
+    "compatibility"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "$ref": "#/$defs/uuid_v7" },
+    "workspace_id": { "$ref": "#/$defs/sha256" },
+    "canonical_workspace": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/path" },
+    "workspace_mode": { "enum": ["git", "non_git"] },
+    "start_baseline": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/git_baseline" },
+    "created_at": { "$ref": "#/$defs/microsecond_timestamp" },
+    "initial_access": { "enum": ["read", "write", "transitioning", "unsupported", "unknown"] },
+    "control_mode": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/control_mode" },
+    "execution_lane": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane" },
+    "requested_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+    "achieved_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+    "profile": { "$ref": "#/$defs/profile" },
+    "agent_configuration": { "$ref": "#/$defs/agent_configuration" },
+    "profile_capability_snapshot": { "$ref": "#/$defs/profile_capability_snapshot" },
+    "app_server": { "$ref": "#/$defs/app_server" },
+    "dolgorae": { "$ref": "#/$defs/dolgorae" },
+    "model": { "type": "string", "minLength": 1 },
+    "initial_reasoning_effort": { "type": "string", "minLength": 1 },
+    "default_reasoning_effort": { "type": "string", "minLength": 1 },
+    "instructions": { "$ref": "#/$defs/instructions" },
+    "controller": { "$ref": "#/$defs/controller_binding" },
+    "purpose": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose" },
+    "parent_ref": {
+      "oneOf": [
+        { "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/parent_ref" },
+        { "type": "null" }
+      ]
+    },
+    "required_capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "thread_id": { "type": ["string", "null"], "minLength": 1 },
+    "fork_provenance": {
+      "oneOf": [{ "$ref": "#/$defs/fork_provenance" }, { "type": "null" }]
+    },
+    "aggregate_binding": {
+      "oneOf": [{ "$ref": "#/$defs/aggregate_binding" }, { "type": "null" }]
+    },
+    "audit": { "$ref": "#/$defs/audit" },
+    "compatibility": { "enum": ["pending", "accepted", "rejected"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "control_mode": { "const": "direct_interactive" } }, "required": ["control_mode"] },
+      "then": { "properties": { "parent_ref": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "execution_lane": { "const": "shared_readonly" } }, "required": ["execution_lane"] },
+      "then": { "properties": { "initial_access": { "const": "read" } } }
+    },
+    {
+      "if": { "properties": { "control_mode": { "const": "direct_interactive" } }, "required": ["control_mode"] },
+      "then": {
+        "properties": {
+          "controller": {
+            "properties": {
+              "identity": { "properties": { "kind": { "enum": ["human_cli", "interactive_client"] } } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "control_mode": { "const": "managed_agent" } }, "required": ["control_mode"] },
+      "then": {
+        "properties": {
+          "controller": {
+            "properties": {
+              "identity": { "properties": { "kind": { "enum": ["workflow_orchestrator", "automation"] } } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "compatibility": { "const": "accepted" } }, "required": ["compatibility"] },
+      "then": {
+        "properties": {
+          "app_server": {
+            "properties": {
+              "version": { "type": "string", "minLength": 1 },
+              "schema_status": { "const": "accepted" },
+              "actual_codex_home": { "type": "string", "pattern": "^/" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "compatibility": { "const": "pending" } }, "required": ["compatibility"] },
+      "then": {
+        "properties": {
+          "app_server": {
+            "properties": {
+              "version": { "type": "null" },
+              "schema_status": { "type": "null" },
+              "actual_codex_home": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "compatibility": { "const": "rejected" } }, "required": ["compatibility"] },
+      "then": { "properties": { "app_server": { "properties": { "schema_status": { "const": "rejected" } } } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregate_binding": {
+            "properties": { "member_kind": { "const": "specialist" } },
+            "required": ["member_kind"]
+          }
+        },
+        "required": ["aggregate_binding"]
+      },
+      "then": {
+        "properties": {
+          "aggregate_binding": {
+            "properties": {
+              "role_reference": { "type": "string" },
+              "role_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+              "agent_configuration_sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid_v7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "microsecond_timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "profile_name", "canonical_codex_home", "normalized_argv",
+        "launch_cwd_policy", "derived_launch_cwd", "sanitized_environment", "enabled_features",
+        "disabled_features", "process_static_configuration", "initial_configuration_observation",
+        "executable_identity", "codex_version", "app_server_schema_sha256",
+        "compatibility_manifest_sha256", "launch_contract_sha256", "initial_server_key"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "profile_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "canonical_codex_home": { "type": "string", "pattern": "^/" },
+        "normalized_argv": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "launch_cwd_policy": { "const": "profile_state_directory_v1" },
+        "derived_launch_cwd": { "type": "string", "pattern": "^/" },
+        "sanitized_environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "enabled_features": { "$ref": "#/$defs/sorted_unique_strings" },
+        "disabled_features": { "$ref": "#/$defs/sorted_unique_strings" },
+        "process_static_configuration": { "type": "object" },
+        "initial_configuration_observation": { "type": "object" },
+        "executable_identity": { "$ref": "#/$defs/executable_identity" },
+        "codex_version": { "type": "string", "minLength": 1 },
+        "app_server_schema_sha256": { "$ref": "#/$defs/sha256" },
+        "compatibility_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "launch_contract_sha256": { "$ref": "#/$defs/sha256" },
+        "initial_server_key": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "executable_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolved_path", "device", "inode", "sha256"],
+      "properties": {
+        "resolved_path": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/path" },
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sorted_unique_strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "agent_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "runtime_profile", "runtime_profile_snapshot_sha256", "model",
+        "default_effort", "purpose", "required_capabilities", "role_reference",
+        "normalized_instructions", "instructions", "execution_lane", "required_assurance",
+        "native_subagent_policy"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "runtime_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "runtime_profile_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+        "model": { "type": "string", "minLength": 1 },
+        "default_effort": { "type": "string", "minLength": 1 },
+        "purpose": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose" },
+        "required_capabilities": { "$ref": "#/$defs/sorted_unique_strings" },
+        "role_reference": { "type": ["string", "null"], "minLength": 1 },
+        "normalized_instructions": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 65536 },
+        "instructions": { "$ref": "#/$defs/instructions" },
+        "execution_lane": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane" },
+        "required_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+        "native_subagent_policy": { "const": "enabled" }
+      }
+    },
+    "profile_capability_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "profile_name", "server_key", "server_epoch", "app_server_version", "schema_sha256", "capabilities"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "profile_name": { "type": "string", "minLength": 1 },
+        "server_key": { "$ref": "#/$defs/sha256" },
+        "server_epoch": { "type": "integer", "minimum": 1 },
+        "app_server_version": { "type": "string", "minLength": 1 },
+        "schema_sha256": { "$ref": "#/$defs/sha256" },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": { "enum": ["supported", "recognized_unsupported", "unavailable", "unverified"] }
+        }
+      }
+    },
+    "app_server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "schema_status", "actual_codex_home"],
+      "properties": {
+        "version": { "type": ["string", "null"], "minLength": 1 },
+        "schema_status": { "type": ["string", "null"], "enum": ["accepted", "rejected", "pending", null] },
+        "actual_codex_home": { "type": ["string", "null"], "pattern": "^/" }
+      }
+    },
+    "dolgorae": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "binary_sha256", "ipc_protocol_version"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "binary_sha256": { "$ref": "#/$defs/sha256" },
+        "ipc_protocol_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "common_prefix_version", "mode_prefix_version", "purpose_prefix_version", "normalized_byte_length", "normalized_sha256"],
+      "properties": {
+        "schema": { "const": "dolgorae.instructions/v1" },
+        "common_prefix_version": { "const": 1 },
+        "mode_prefix_version": { "const": 1 },
+        "purpose_prefix_version": { "const": 1 },
+        "normalized_byte_length": { "type": "integer", "minimum": 0 },
+        "normalized_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "controller_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "capability_sha256"],
+      "properties": {
+        "identity": { "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/controller" },
+        "capability_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "fork_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_run_id", "source_turn_id", "source_thread_id", "last_confirmed_boundary"],
+      "properties": {
+        "source_run_id": { "$ref": "#/$defs/uuid_v7" },
+        "source_turn_id": { "type": "string", "minLength": 1 },
+        "source_thread_id": { "type": "string", "minLength": 1 },
+        "last_confirmed_boundary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "aggregate_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aggregate_kind", "aggregate_id", "operation_id", "member_kind", "policy_sha256", "role_reference", "role_snapshot_sha256", "agent_configuration_sha256"],
+      "properties": {
+        "aggregate_kind": { "enum": ["orchestrated_session", "external_specialist_engagement"] },
+        "aggregate_id": { "$ref": "#/$defs/uuid_v7" },
+        "operation_id": { "$ref": "#/$defs/uuid_v7" },
+        "member_kind": { "enum": ["primary", "specialist"] },
+        "policy_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "role_reference": { "type": ["string", "null"], "minLength": 1 },
+        "role_snapshot_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "agent_configuration_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash_scheme", "genesis_previous_hash", "raw_payload_limit", "represented_payload_limit"],
+      "properties": {
+        "hash_scheme": { "const": "sha256-jcs-v1" },
+        "genesis_previous_hash": { "const": "0000000000000000000000000000000000000000000000000000000000000000" },
+        "raw_payload_limit": { "const": 2097152 },
+        "represented_payload_limit": { "const": 3145728 }
+      }
+    }
+  }
+}

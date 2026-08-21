@@ -1226,7 +1226,7 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, MachineError> {
     fs::read(path).map_err(|error| MachineError::config_invalid(path, error.to_string()))
 }
 
-fn create_directory(path: &Path, mode: u32) -> Result<(), std::io::Error> {
+pub(crate) fn create_directory(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     let mut builder = fs::DirBuilder::new();
     builder.mode(mode);
     builder.create(path)?;
@@ -1238,7 +1238,7 @@ fn create_directory(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn atomic_create(
+pub(crate) fn atomic_create(
     platform: &impl WorkspacePlatform,
     destination: &Path,
     bytes: &[u8],
@@ -1264,7 +1264,7 @@ fn atomic_create(
     sync_directory(parent)
 }
 
-fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     File::open(path)?.sync_all()
 }
 
@@ -1276,7 +1276,7 @@ fn file_identity(path: &Path) -> Result<FileIdentity, std::io::Error> {
     })
 }
 
-fn verify_secure_directory(path: &Path, uid: u32) -> Result<(), MachineError> {
+pub(crate) fn verify_secure_directory(path: &Path, uid: u32) -> Result<(), MachineError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| MachineError::runtime_path_invalid(path, error.to_string()))?;
     if !metadata.file_type().is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
@@ -1288,7 +1288,7 @@ fn verify_secure_directory(path: &Path, uid: u32) -> Result<(), MachineError> {
     Ok(())
 }
 
-fn verify_secure_file(path: &Path, uid: u32) -> Result<(), MachineError> {
+pub(crate) fn verify_secure_file(path: &Path, uid: u32) -> Result<(), MachineError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| MachineError::runtime_path_invalid(path, error.to_string()))?;
     if !metadata.file_type().is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o600

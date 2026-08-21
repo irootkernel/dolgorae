@@ -1,8 +1,12 @@
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
+use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
 use std::fmt::Write as _;
+
+pub const RAW_PAYLOAD_LIMIT: usize = 2 * 1024 * 1024;
+pub const REPRESENTED_PAYLOAD_LIMIT: usize = 3 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LosslessJson {
@@ -19,6 +23,25 @@ pub enum JcsError {
     Json(serde_json::Error),
     DuplicateKey(String),
     InvalidNumber(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnrepresentablePayload {
+    pub observed_byte_length: u64,
+    pub raw_sha256: String,
+    pub json_pointer: Option<String>,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PayloadRepresentation {
+    Represented {
+        value: LosslessJson,
+        canonical_bytes: Vec<u8>,
+        observed_byte_length: u64,
+        raw_sha256: String,
+    },
+    Unrepresentable(UnrepresentablePayload),
 }
 
 impl std::fmt::Display for JcsError {
@@ -48,7 +71,9 @@ fn parse_raw(raw: &RawValue) -> Result<LosslessJson, JcsError> {
     let source = raw.get().trim_start();
     match source.as_bytes().first().copied() {
         Some(b'{') => Ok(LosslessJson::Object(
-            serde_json::from_str::<RawObject>(source)?.0,
+            serde_json::from_str::<RawObject>(source)
+                .map_err(classify_json_error)?
+                .0,
         )),
         Some(b'[') => {
             let values = serde_json::from_str::<Vec<Box<RawValue>>>(source)?;
@@ -75,6 +100,17 @@ fn parse_raw(raw: &RawValue) -> Result<LosslessJson, JcsError> {
             std::io::ErrorKind::InvalidData,
             "empty JSON",
         )))),
+    }
+}
+
+fn classify_json_error(error: serde_json::Error) -> JcsError {
+    let message = error.to_string();
+    let prefix = "duplicate object key: ";
+    if let Some(rest) = message.strip_prefix(prefix) {
+        let key = rest.split(" at line ").next().unwrap_or(rest);
+        JcsError::DuplicateKey(key.to_owned())
+    } else {
+        JcsError::Json(error)
     }
 }
 
@@ -167,6 +203,266 @@ pub fn canonicalize(value: &LosslessJson) -> Result<Vec<u8>, JcsError> {
     Ok(output.into_bytes())
 }
 
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn represent_payload(input: &[u8]) -> PayloadRepresentation {
+    let observed_byte_length = u64::try_from(input.len()).unwrap_or(u64::MAX);
+    let raw_sha256 = sha256_hex(input);
+    if input.len() > RAW_PAYLOAD_LIMIT {
+        return PayloadRepresentation::Unrepresentable(UnrepresentablePayload {
+            observed_byte_length,
+            raw_sha256,
+            json_pointer: None,
+            reason: "raw_payload_too_large",
+        });
+    }
+    let text = match std::str::from_utf8(input) {
+        Ok(text) => text,
+        Err(_) => {
+            return PayloadRepresentation::Unrepresentable(UnrepresentablePayload {
+                observed_byte_length,
+                raw_sha256,
+                json_pointer: None,
+                reason: "payload_not_utf8",
+            });
+        }
+    };
+    let parsed = match parse(text) {
+        Ok(value) => value,
+        Err(JcsError::DuplicateKey(_)) => {
+            return PayloadRepresentation::Unrepresentable(UnrepresentablePayload {
+                observed_byte_length,
+                raw_sha256,
+                json_pointer: None,
+                reason: "duplicate_object_member",
+            });
+        }
+        Err(_) => {
+            return PayloadRepresentation::Unrepresentable(UnrepresentablePayload {
+                observed_byte_length,
+                raw_sha256,
+                json_pointer: None,
+                reason: "invalid_json",
+            });
+        }
+    };
+    let value = prepare_payload(parsed);
+    let canonical_bytes = match canonicalize(&value) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return PayloadRepresentation::Unrepresentable(UnrepresentablePayload {
+                observed_byte_length,
+                raw_sha256,
+                json_pointer: None,
+                reason: "canonicalization_failed",
+            });
+        }
+    };
+    if canonical_bytes.len() > REPRESENTED_PAYLOAD_LIMIT {
+        return PayloadRepresentation::Unrepresentable(UnrepresentablePayload {
+            observed_byte_length,
+            raw_sha256,
+            json_pointer: None,
+            reason: "represented_payload_too_large",
+        });
+    }
+    PayloadRepresentation::Represented {
+        value,
+        canonical_bytes,
+        observed_byte_length,
+        raw_sha256,
+    }
+}
+
+#[must_use]
+pub fn prepare_payload(value: LosslessJson) -> LosslessJson {
+    adapt_numbers(redact(escape_marker_keys(value)))
+}
+
+fn escape_marker_keys(value: LosslessJson) -> LosslessJson {
+    match value {
+        LosslessJson::Array(values) => {
+            LosslessJson::Array(values.into_iter().map(escape_marker_keys).collect())
+        }
+        LosslessJson::Object(entries) => LosslessJson::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = if is_inbound_marker_key(&key) {
+                        format!("${key}")
+                    } else {
+                        key
+                    };
+                    (key, escape_marker_keys(value))
+                })
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn is_inbound_marker_key(key: &str) -> bool {
+    let dollars = key.bytes().take_while(|byte| *byte == b'$').count();
+    dollars > 0 && key[dollars..].starts_with("dolgorae_")
+}
+
+fn redact(value: LosslessJson) -> LosslessJson {
+    match value {
+        LosslessJson::Array(values) => {
+            LosslessJson::Array(values.into_iter().map(redact).collect())
+        }
+        LosslessJson::Object(entries) => LosslessJson::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    if is_secret_key(&key) {
+                        let original_type = json_type(&value).to_owned();
+                        (key, redacted_marker(original_type))
+                    } else {
+                        (key, redact(value))
+                    }
+                })
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn redacted_marker(original_type: String) -> LosslessJson {
+    LosslessJson::Object(vec![(
+        "$dolgorae_redacted".to_owned(),
+        LosslessJson::Object(vec![
+            (
+                "reason".to_owned(),
+                LosslessJson::String("secret_key".to_owned()),
+            ),
+            (
+                "original_type".to_owned(),
+                LosslessJson::String(original_type),
+            ),
+        ]),
+    )])
+}
+
+const SECRET_SEQUENCES: &[&[&str]] = &[
+    &["authorization"],
+    &["proxy", "authorization"],
+    &["cookie"],
+    &["set", "cookie"],
+    &["password"],
+    &["secret"],
+    &["client", "secret"],
+    &["api", "key"],
+    &["access", "token"],
+    &["refresh", "token"],
+    &["id", "token"],
+    &["session", "token"],
+    &["session", "key"],
+    &["bearer", "token"],
+    &["auth", "token"],
+    &["api", "token"],
+    &["oauth", "token"],
+    &["security", "token"],
+    &["private", "key"],
+    &["secret", "key"],
+    &["signing", "key"],
+    &["signing", "secret"],
+    &["encryption", "key"],
+    &["api", "secret"],
+    &["credential"],
+    &["passphrase"],
+    &["passwd"],
+];
+
+fn is_secret_key(key: &str) -> bool {
+    if !key.is_ascii() {
+        return false;
+    }
+    let tokens = matching_tokens(key);
+    if tokens.is_empty() {
+        return false;
+    }
+    SECRET_SEQUENCES.iter().any(|secret| {
+        tokens.windows(secret.len()).any(|window| {
+            window.iter().enumerate().all(|(index, candidate)| {
+                candidate == secret[index]
+                    || (index + 1 == window.len()
+                        && candidate.strip_suffix('s') == Some(secret[index]))
+            })
+        }) || (tokens.concat() == secret.concat())
+    })
+}
+
+fn matching_tokens(key: &str) -> Vec<String> {
+    let bytes = key.as_bytes();
+    let mut raw = Vec::new();
+    let mut start = 0;
+    for index in 0..=bytes.len() {
+        let separator = index == bytes.len() || matches!(bytes[index], b'-' | b'_');
+        let camel_boundary = index > start
+            && index < bytes.len()
+            && bytes[index].is_ascii_uppercase()
+            && (bytes[index - 1].is_ascii_lowercase()
+                || bytes[index - 1].is_ascii_digit()
+                || (bytes[index - 1].is_ascii_uppercase()
+                    && bytes.get(index + 1).is_some_and(u8::is_ascii_lowercase)));
+        if separator || camel_boundary {
+            if start < index {
+                raw.push(key[start..index].to_ascii_lowercase());
+            }
+            start = index + usize::from(separator);
+        }
+    }
+    raw.into_iter()
+        .filter_map(|mut token| {
+            while token.ends_with(|character: char| character.is_ascii_digit()) {
+                token.pop();
+            }
+            (!token.is_empty()).then_some(token)
+        })
+        .collect()
+}
+
+fn json_type(value: &LosslessJson) -> &'static str {
+    match value {
+        LosslessJson::Null => "null",
+        LosslessJson::Bool(_) => "boolean",
+        LosslessJson::Number(_) => "number",
+        LosslessJson::String(_) => "string",
+        LosslessJson::Array(_) => "array",
+        LosslessJson::Object(_) => "object",
+    }
+}
+
+fn adapt_numbers(value: LosslessJson) -> LosslessJson {
+    match value {
+        LosslessJson::Number(number) => match adapt_number(&number) {
+            Ok(rendered) if rendered.starts_with('{') => LosslessJson::Object(vec![(
+                "$dolgorae_number".to_owned(),
+                LosslessJson::String(number),
+            )]),
+            Ok(rendered) => LosslessJson::Number(rendered),
+            Err(_) => LosslessJson::Object(vec![(
+                "$dolgorae_number".to_owned(),
+                LosslessJson::String(number),
+            )]),
+        },
+        LosslessJson::Array(values) => {
+            LosslessJson::Array(values.into_iter().map(adapt_numbers).collect())
+        }
+        LosslessJson::Object(entries) => LosslessJson::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key, adapt_numbers(value)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 fn write_canonical(value: &LosslessJson, output: &mut String) -> Result<(), JcsError> {
     match value {
         LosslessJson::Null => output.push_str("null"),
@@ -186,6 +482,13 @@ fn write_canonical(value: &LosslessJson, output: &mut String) -> Result<(), JcsE
         LosslessJson::Object(entries) => {
             let mut entries = entries.iter().collect::<Vec<_>>();
             entries.sort_by(|left, right| left.0.encode_utf16().cmp(right.0.encode_utf16()));
+            if let Some(duplicate) = entries
+                .windows(2)
+                .find(|pair| pair[0].0 == pair[1].0)
+                .map(|pair| pair[0].0.clone())
+            {
+                return Err(JcsError::DuplicateKey(duplicate));
+            }
             output.push('{');
             for (index, (key, value)) in entries.into_iter().enumerate() {
                 if index > 0 {
@@ -318,6 +621,13 @@ mod tests {
     fn rejects_duplicate_decoded_keys_at_every_depth() {
         assert!(parse(r#"{"a":1,"\u0061":2}"#).is_err());
         assert!(parse(r#"[{"a":1,"a":2}]"#).is_err());
+        assert!(matches!(
+            canonicalize(&LosslessJson::Object(vec![
+                ("a".to_owned(), LosslessJson::Number("1".to_owned())),
+                ("a".to_owned(), LosslessJson::Number("2".to_owned())),
+            ])),
+            Err(JcsError::DuplicateKey(key)) if key == "a"
+        ));
     }
 
     #[test]
