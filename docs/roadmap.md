@@ -1,7 +1,7 @@
 # Dolgorae Roadmap
 
 Status: Ordered implementation roadmap. `EPIC-000` and `TASK-000-H` are
-`COMPLETE`; `EPIC-001` and `TASK-001` are `ACTIVE`. `EPIC-002A` is the first user-usable product
+`COMPLETE`; `EPIC-001` and `TASK-002` are `ACTIVE`; `TASK-001` is `COMPLETE`. `EPIC-002A` is the first user-usable product
 slice. Completing it unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -16,8 +16,8 @@ transport-independent Dolgorae orchestration core and Brokered Hierarchy, live
 Primary control-plane integration, and finally the durable Collaboration Plane. `TASK-009-E0` remains the live run-bound
 transport probe and occurs only after the Brokered Hierarchy core is complete.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
-matches the accepted product contract. `TASK-001` is the active implementation
-task after completion of the full pre-implementation stabilization gate.
+matches the accepted product contract. `TASK-002` is the active implementation
+task after completion of TASK-001's Rust CLI and core-contract foundation.
 
 This document owns execution order and delivery status. Product requirements
 remain authoritative in [specs.md](specs.md); this roadmap must not redefine
@@ -513,7 +513,7 @@ and audit-first run storage on which every process operation depends.
 
 ### TASK-001: Rust CLI and Core Contract
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Implement the Rust 2024 binary skeleton, command parser, UUIDv7 identities,
 stable JSON success/error envelopes, exit-status mapping, typed lifecycle, aggregate, control-mode, purpose, execution-lane,
@@ -536,7 +536,7 @@ fault barrier are addressable without sleeping.
 
 ### TASK-002: Workspace Initialization and Discovery
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Implement Git and explicit non-Git initialization, per-worktree canonical
 workspace identity, upward `.dolgorae` discovery, minimal policy files, generated

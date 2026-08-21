@@ -1,0 +1,32 @@
+[package]
+name = "dolgorae"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+build = "build.rs"
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+data-encoding = "2.9"
+libc = "0.2"
+prost = "0.14"
+prost-types = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+serde_yaml_ng = "0.10"
+sha2 = "0.10"
+uuid = { version = "1", features = ["serde", "v7"] }
+
+[build-dependencies]
+prost-build = "0.14"
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "deny"
