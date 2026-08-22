@@ -1,7 +1,7 @@
 use crate::audit::{GENESIS_PREVIOUS_HASH, HASH_SCHEME, is_microsecond_utc_timestamp};
 use crate::domain::{
     Access, AggregateKind, Assurance, ControlMode, ControllerIdentity, ControllerKind,
-    ExecutionLane, Purpose,
+    ExecutionLane, Purpose, RunLifecycle,
 };
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
@@ -229,6 +229,149 @@ pub struct RunDirectory {
     pub recovery: PathBuf,
 }
 
+/// One workspace-scoped allocation key and the Run it is bound to.
+///
+/// specs.md: "Run allocation reserves its key before publishing a Run ...
+/// Response loss is reconciled by retrying the identical allocation key, which
+/// returns the original Run; changed normalized input is
+/// `IDEMPOTENCY_CONFLICT` and can never allocate another Run under that key."
+/// The reservation therefore lives beside the Runs rather than inside one:
+/// a Run that was never published has no ledger to record its own key in.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartReservation {
+    pub schema_version: u32,
+    pub operation: String,
+    pub idempotency_key: String,
+    pub normalized_identity_sha256: String,
+    pub run_id: Uuid,
+}
+
+/// The workspace's durable index of `run start` allocation keys.
+pub struct StartReservationStore<P> {
+    platform: P,
+    state_root: PathBuf,
+}
+
+impl<P: WorkspacePlatform> StartReservationStore<P> {
+    #[must_use]
+    pub fn new(platform: P, state_root: impl Into<PathBuf>) -> Self {
+        Self {
+            platform,
+            state_root: state_root.into(),
+        }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.state_root.join("idempotency").join("run-start")
+    }
+
+    /// The file one key is recorded in.
+    ///
+    /// Named by the key's digest, never by the key itself: an idempotency key
+    /// is caller-supplied text and a pathname is not a safe place for it.
+    fn path(&self, idempotency_key: &str) -> PathBuf {
+        self.root()
+            .join(format!("{}.json", sha256_hex(idempotency_key.as_bytes())))
+    }
+
+    /// The reservation this key already holds, if any.
+    pub fn load(&self, idempotency_key: &str) -> Result<Option<StartReservation>, MachineError> {
+        let path = self.path(idempotency_key);
+        if fs::symlink_metadata(&path).is_err() {
+            return Ok(None);
+        }
+        verify_secure_file(&path, self.platform.current_uid())?;
+        let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;
+        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+            return Err(reservation_invalid("reservation exceeds its bound"));
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| reservation_invalid("reservation is not UTF-8"))?;
+        let canonical =
+            canonicalize(&parse(text).map_err(|_| reservation_invalid("reservation is not JSON"))?)
+                .map_err(|_| reservation_invalid("reservation is not canonicalizable"))?;
+        let reservation: StartReservation = serde_json::from_slice(&canonical)
+            .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+        if reservation.schema_version != 1
+            || reservation.operation != "start_run"
+            || reservation.idempotency_key != idempotency_key
+            || !is_sha256(&reservation.normalized_identity_sha256)
+            || reservation.run_id.get_version_num() != 7
+        {
+            return Err(reservation_invalid(
+                "reservation does not describe this key",
+            ));
+        }
+        Ok(Some(reservation))
+    }
+
+    /// Reserve one key for one Run, before that Run is published.
+    ///
+    /// The write is exclusive, so two concurrent allocations under one key
+    /// cannot both win; the loser reads the winner's reservation and resolves
+    /// against it exactly as a retry does.
+    pub fn reserve(
+        &self,
+        reservation: &StartReservation,
+    ) -> Result<StartReservation, MachineError> {
+        let uid = self.platform.current_uid();
+        verify_secure_directory(&self.state_root, uid)?;
+        let root = self.root();
+        for directory in [self.state_root.join("idempotency"), root.clone()] {
+            match create_directory(&directory, 0o700) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(run_path_error(&directory, error.to_string())),
+            }
+            verify_secure_directory(&directory, uid)?;
+        }
+        let path = self.path(&reservation.idempotency_key);
+        let mut bytes = canonicalize(
+            &parse(
+                &serde_json::to_string(reservation)
+                    .map_err(|_| reservation_invalid("reservation is unrepresentable"))?,
+            )
+            .map_err(|_| reservation_invalid("reservation is unrepresentable"))?,
+        )
+        .map_err(|_| reservation_invalid("reservation is unrepresentable"))?;
+        bytes.push(b'\n');
+        match atomic_create(&self.platform, &path, &bytes, 0o600) {
+            Ok(()) => Ok(reservation.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self
+                .load(&reservation.idempotency_key)?
+                .ok_or_else(|| reservation_invalid("reservation vanished")),
+            Err(error) => Err(run_path_error(&path, error.to_string())),
+        }
+    }
+}
+
+/// A reservation file that cannot be trusted is durable-state corruption, not
+/// a fact about the caller's arguments.
+fn reservation_invalid(reason: &str) -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        "run allocation reservation is unreadable",
+        false,
+        serde_json::json!({"invariant": reason}),
+    )
+}
+
+/// The registered refusal for a key reused with different normalized input.
+#[must_use]
+pub fn idempotency_conflict(run_id: Uuid, recorded: &str, observed: &str) -> MachineError {
+    MachineError::new(
+        "IDEMPOTENCY_CONFLICT",
+        "idempotency key was reused with different normalized input",
+        false,
+        serde_json::json!({
+            "run_id": run_id,
+            "recorded_input_digest": recorded,
+            "observed_input_digest": observed,
+        }),
+    )
+}
+
 pub struct RunStore<P> {
     platform: P,
     state_root: PathBuf,
@@ -250,11 +393,21 @@ impl<P: WorkspacePlatform> RunStore<P> {
         verify_secure_directory(&runs, self.platform.current_uid())?;
         let root = runs.join(manifest.run_id.to_string());
         if fs::symlink_metadata(&root).is_ok() {
+            // The published Run's own lifecycle, not a guess: a Run whose
+            // worker has committed no projection yet reads as `starting`,
+            // which is exactly what it is.
+            let state = self
+                .load_state_projection(manifest.run_id)
+                .map_or(RunLifecycle::Starting, |projection| projection.lifecycle);
             return Err(MachineError::new(
                 "RUN_STATE_CONFLICT",
                 "run identity already has durable state",
                 false,
-                serde_json::json!({"run_id": manifest.run_id}),
+                serde_json::json!({
+                    "run_id": manifest.run_id,
+                    "state": state,
+                    "operation": "run.start",
+                }),
             ));
         }
 
@@ -289,55 +442,98 @@ impl<P: WorkspacePlatform> RunStore<P> {
             )
         })?;
         if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
-            return Err(MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
+            return Err(run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
                 "run manifest exceeds the bounded representation",
-                false,
-                serde_json::json!({"run_id": run_id}),
             ));
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
+            run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
                 "run manifest is not UTF-8",
-                false,
-                serde_json::json!({"run_id": run_id}),
             )
         })?;
         let canonical = canonicalize(&parse(text).map_err(|_| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
+            run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
                 "run manifest is invalid",
-                false,
-                serde_json::json!({"run_id": run_id}),
             )
         })?)
         .map_err(|_| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
+            run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
                 "run manifest is not canonicalizable",
-                false,
-                serde_json::json!({"run_id": run_id}),
             )
         })?;
         let manifest: RunManifest = serde_json::from_slice(&canonical).map_err(|_| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
+            run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
                 "run manifest schema is invalid",
-                false,
-                serde_json::json!({"run_id": run_id}),
             )
         })?;
         validate_manifest(&manifest)?;
         if manifest.run_id != run_id {
-            return Err(MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
+            return Err(run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
                 "run directory identity does not match its manifest",
-                false,
-                serde_json::json!({"run_id": run_id}),
             ));
         }
         Ok(manifest)
+    }
+
+    /// Read the Run's durable state projection without taking the ledger.
+    ///
+    /// The worker holds the ledger's exclusive lock for as long as the Run
+    /// lives, so an observer reads `state.json` — the projection the ledger
+    /// commits — instead of reopening the ledger behind the worker's back. A
+    /// Run whose worker has not committed one yet reads as `starting`, which
+    /// is what it is.
+    pub fn load_state_projection(
+        &self,
+        run_id: Uuid,
+    ) -> Result<crate::projection::RunStateProjection, MachineError> {
+        let uid = self.platform.current_uid();
+        let path = self
+            .state_root
+            .join("runs")
+            .join(run_id.to_string())
+            .join("state.json");
+        if fs::symlink_metadata(&path).is_err() {
+            return Ok(crate::projection::RunStateProjection::starting(run_id));
+        }
+        verify_secure_file(&path, uid)?;
+        // `RUN_STATE_INVARIANT_VIOLATION` names a closed set of writer, epoch,
+        // and lineage invariants; an unreadable durable projection is none of
+        // them, so it is reported as the internal invariant failure it is.
+        let invalid = || {
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "run state projection is unreadable",
+                false,
+                serde_json::json!({
+                    "invariant": format!("run {run_id} state projection is unreadable"),
+                }),
+            )
+        };
+        let bytes = fs::read(&path).map_err(|_| invalid())?;
+        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+            return Err(invalid());
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+        let canonical =
+            canonicalize(&parse(text).map_err(|_| invalid())?).map_err(|_| invalid())?;
+        let projection: crate::projection::RunStateProjection =
+            serde_json::from_slice(&canonical).map_err(|_| invalid())?;
+        if projection.run_id != run_id {
+            return Err(invalid());
+        }
+        Ok(projection)
     }
 
     pub fn load_controller_binding(&self, run_id: Uuid) -> Result<ControllerBinding, MachineError> {
@@ -378,27 +574,24 @@ impl<P: WorkspacePlatform> RunStore<P> {
             .map_err(|error| run_path_error(&recovery, error.to_string()))?;
 
         let serialized = serde_json::to_string(manifest).map_err(|error| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
-                "run manifest serialization failed",
-                false,
-                serde_json::json!({"reason": error.to_string()}),
+            run_state_invariant(
+                manifest.run_id,
+                RunStateInvariant::StateVariantMismatch,
+                format!("run manifest serialization failed: {error}"),
             )
         })?;
         let mut manifest_bytes = canonicalize(&parse(&serialized).map_err(|error| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
-                "run manifest is not canonicalizable",
-                false,
-                serde_json::json!({"reason": error.to_string()}),
+            run_state_invariant(
+                manifest.run_id,
+                RunStateInvariant::StateVariantMismatch,
+                format!("run manifest is not canonicalizable: {error}"),
             )
         })?)
         .map_err(|error| {
-            MachineError::new(
-                "RUN_STATE_INVARIANT_VIOLATION",
-                "run manifest is not canonicalizable",
-                false,
-                serde_json::json!({"reason": error.to_string()}),
+            run_state_invariant(
+                manifest.run_id,
+                RunStateInvariant::StateVariantMismatch,
+                format!("run manifest is not canonicalizable: {error}"),
             )
         })?;
         manifest_bytes.push(b'\n');
@@ -450,13 +643,55 @@ pub fn controller_capability_digest(capability: &[u8; 32]) -> String {
     sha256_hex(&preimage)
 }
 
+/// The closed set of run-state invariants the checked error contract names.
+///
+/// `RUN_STATE_INVARIANT_VIOLATION` carries `reason` from a fixed enumeration
+/// and always requires the same recovery, so the specific field that
+/// disagreed travels in the message rather than being invented as a detail
+/// member the contract forbids.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunStateInvariant {
+    AssuranceOrderInvalid,
+    StateVariantMismatch,
+    SharedServerEpochMismatch,
+}
+
+impl RunStateInvariant {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AssuranceOrderInvalid => "assurance_order_invalid",
+            Self::StateVariantMismatch => "state_variant_mismatch",
+            Self::SharedServerEpochMismatch => "shared_server_epoch_mismatch",
+        }
+    }
+}
+
+/// The checked `RUN_STATE_INVARIANT_VIOLATION` for one run.
+#[must_use]
+pub fn run_state_invariant(
+    run_id: Uuid,
+    reason: RunStateInvariant,
+    message: impl Into<String>,
+) -> MachineError {
+    MachineError::new(
+        "RUN_STATE_INVARIANT_VIOLATION",
+        message,
+        false,
+        serde_json::json!({
+            "run_id": run_id,
+            "reason": reason.as_str(),
+            "required_action": "reconcile_run_state",
+        }),
+    )
+}
+
 fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
     let invalid = |reason: &str| {
-        MachineError::new(
-            "RUN_STATE_INVARIANT_VIOLATION",
-            "run manifest violates fixed semantics",
-            false,
-            serde_json::json!({"run_id": manifest.run_id, "reason": reason}),
+        run_state_invariant(
+            manifest.run_id,
+            RunStateInvariant::StateVariantMismatch,
+            reason,
         )
     };
     if manifest.schema_version != 1 || manifest.run_id.get_version_num() != 7 {
@@ -500,7 +735,9 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
         return Err(invalid("shared_readonly runs must begin with read access"));
     }
     if assurance_rank(manifest.achieved_assurance) < assurance_rank(manifest.requested_assurance) {
-        return Err(invalid(
+        return Err(run_state_invariant(
+            manifest.run_id,
+            RunStateInvariant::AssuranceOrderInvalid,
             "achieved assurance cannot be below requested assurance",
         ));
     }
@@ -509,10 +746,17 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
     if manifest.profile.profile_name != manifest.profile_capability_snapshot.profile_name {
         return Err(invalid("profile snapshot names disagree"));
     }
-    if manifest.profile_capability_snapshot.schema_version != 1
-        || !is_sha256(&manifest.profile_capability_snapshot.server_key)
+    if !is_sha256(&manifest.profile_capability_snapshot.server_key)
         || manifest.profile_capability_snapshot.server_key != manifest.profile.initial_server_key
         || manifest.profile_capability_snapshot.server_epoch == 0
+    {
+        return Err(run_state_invariant(
+            manifest.run_id,
+            RunStateInvariant::SharedServerEpochMismatch,
+            "profile capability snapshot server key or epoch is invalid",
+        ));
+    }
+    if manifest.profile_capability_snapshot.schema_version != 1
         || manifest
             .profile_capability_snapshot
             .app_server_version

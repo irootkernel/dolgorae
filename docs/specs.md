@@ -3152,8 +3152,10 @@ that requires quiescence.
 Dolgorae uses the stable app-server API surface plus the narrowly pinned
 `item/tool/requestUserInput` capability. A connection that requires tested
 user-input may advertise `experimentalApi`; all other experimental requests
-remain unsupported and are not implied by that carrier. Dolgorae validates
-0.149.0 as tested. For an
+remain unsupported and are not implied by that carrier. Dolgorae validates the
+0.149.0 required schema subset and TASK-005 profile handshake/lifecycle surface
+as tested. Production-runtime eligibility and native/dedicated-lane behavioral
+observations remain separately gated and cannot inherit 0.147.0 evidence. For an
 unlisted newer version, Dolgorae may run the version as `unverified` only when:
 
 1. `codex app-server generate-json-schema` is available;
@@ -3220,7 +3222,7 @@ It exposes `background_execution_control` as a closed object containing
 (`dedicated_lane_process_census`, `hybrid`, or null). A profile becomes
 `supported` only after same-home shared/dedicated concurrency, fixed residency,
 closed-generation history, identity census, cleanup, and unrelated-process
-non-signalling pass live probes. Codex 0.147.0 uses
+non-signalling pass live probes. The historical Codex 0.147.0 campaign used
 `dedicated_lane_process_census`; a future pinned, complete native terminal API
 may upgrade the mechanism to `hybrid` but is not a release prerequisite.
 It also exposes profile-specific `native_subagents` as a closed object containing
@@ -3230,7 +3232,9 @@ supported lifecycle or quiescence; the pinned probe must observe the two exact
 native item families, child identity, parent relationship, ordered
 active-to-terminal lifecycle, persisted history, restart behavior, and cleanup.
 A binary-level query without a profile reports lifecycle and quiescence as
-`unverified`. The exact 0.147.0 enabled probe passed that complete gate. Disable
+`unverified`. The exact 0.147.0 enabled probe passed that complete gate; the
+0.149.0 profile reports those native lifecycle and quiescence capabilities as
+`unverified` until the same gate is rerun. Disable
 enforcement is `unavailable` because the diagnostic disabled case still created
 a child. A later pin must rerun the same gate; a policy change still
 requires operator-authorized profile migration. Binary-level support
@@ -3547,9 +3551,11 @@ Assurance levels are ordered `best_effort_personal_alpha`,
 MUST compare `required_assurance` with the profile snapshot before allocating a
 Run ID, lane, thread, or server. Failure is `ASSURANCE_LEVEL_UNAVAILABLE`.
 Requested and achieved levels are durable Run state. Codex 0.149.0 is capped at
-`best_effort_personal_alpha`: same-home, policy transition, multi-workspace,
-closed-generation history, and Dolgorae process-census cleanup tests passed.
-Background-terminal completeness failed. The prior native-subagent semantic
+`best_effort_personal_alpha` conservatively; it does not inherit the following
+historical 0.147.0 campaign as 0.149.0 evidence. In that historical campaign,
+same-home, policy transition, multi-workspace, closed-generation history, and
+Dolgorae process-census cleanup tests passed, while background-terminal
+completeness failed. The prior native-subagent semantic
 result contradicted its retained wire shapes and is withdrawn. The corrected
 campaign recognized `subAgentActivity` and `collabAgentToolCall` per case and
 proved enabled parent/child identity, active-to-terminal lifecycle, persisted

@@ -8,9 +8,10 @@ use dolgorae::jcs::{
 };
 use dolgorae::run::{
     AgentConfigurationSnapshot, AppServerFacts, AuditPolicy, CapabilityState, CompatibilityVerdict,
-    ControllerBinding, DolgoraeBuild, ExecutableIdentity, InstructionSnapshot,
-    ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore,
-    controller_capability_digest, launch_contract_digest, runtime_profile_snapshot_digest,
+    ControllerBinding, DolgoraeBuild, ExecutableIdentity, InstructionSnapshot, ParentReference,
+    ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore, StartReservation,
+    StartReservationStore, controller_capability_digest, launch_contract_digest,
+    runtime_profile_snapshot_digest,
 };
 use dolgorae::workspace::{GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode};
 use serde_json::Value;
@@ -212,7 +213,7 @@ fn manifest_rejects_mutable_or_inconsistent_identity() {
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
 
     let mut manifest = sample_manifest();
-    manifest.parent_ref = Some(dolgorae::run::ParentReference {
+    manifest.parent_ref = Some(ParentReference {
         namespace: "external".to_owned(),
         kind: "task".to_owned(),
         id: "42".to_owned(),
@@ -268,6 +269,85 @@ fn manifest_rejects_mutable_or_inconsistent_identity() {
     manifest.profile.codex_version = "0.148.0".to_owned();
     assert_eq!(
         store.publish(&manifest).unwrap_err().code,
+        "RUN_STATE_INVARIANT_VIOLATION"
+    );
+}
+
+/// specs.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
+/// limited to 128, 64, and 256 UTF-8 bytes, and reject NUL/control
+/// characters", and a `direct_interactive` Primary Run "MUST NOT carry a
+/// parent reference".  The record layer is the last place that can refuse one,
+/// so it keeps exactly the references a Run may hold and no others — and a
+/// kept reference has to survive publication, or the Run's own record would
+/// disagree with the allocation identity it was reserved under.
+#[test]
+fn public_parent_metadata_survives_publication_only_within_its_bounds() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+
+    let brokered = |parent: ParentReference| {
+        let mut manifest = sample_manifest();
+        manifest.control_mode = ControlMode::ManagedAgent;
+        manifest.controller.identity.kind = ControllerKind::Automation;
+        manifest.parent_ref = Some(parent);
+        manifest
+    };
+    let bounded = ParentReference {
+        namespace: "external.tracker.v1".to_owned(),
+        kind: "task".to_owned(),
+        id: "TASK-003".to_owned(),
+    };
+    let manifest = brokered(bounded.clone());
+    store.publish(&manifest).unwrap();
+    assert_eq!(
+        store.load_manifest(manifest.run_id).unwrap().parent_ref,
+        Some(bounded.clone())
+    );
+
+    for parent in [
+        ParentReference {
+            namespace: "n".repeat(129),
+            ..bounded.clone()
+        },
+        ParentReference {
+            kind: "k".repeat(65),
+            ..bounded.clone()
+        },
+        // 86 characters, 258 UTF-8 bytes: the bound counts bytes, not chars.
+        ParentReference {
+            id: "\u{fe0f}".repeat(86),
+            ..bounded.clone()
+        },
+        ParentReference {
+            namespace: String::new(),
+            ..bounded.clone()
+        },
+        ParentReference {
+            id: "with\u{7}control".to_owned(),
+            ..bounded.clone()
+        },
+        // A reserved namespace names the durable aggregate registry, and only
+        // an authoritative aggregate binding may speak for it.
+        ParentReference {
+            namespace: "dolgorae.orchestrated-session.v1".to_owned(),
+            ..bounded.clone()
+        },
+    ] {
+        assert_eq!(
+            store.publish(&brokered(parent)).unwrap_err().code,
+            "RUN_STATE_INVARIANT_VIOLATION"
+        );
+    }
+
+    // The prohibition is about the control mode, not about the metadata:
+    // the same reference a brokered Run keeps is refused outright here.
+    let mut direct = sample_manifest();
+    direct.parent_ref = Some(bounded);
+    assert_eq!(
+        store.publish(&direct).unwrap_err().code,
         "RUN_STATE_INVARIANT_VIOLATION"
     );
 }
@@ -435,4 +515,111 @@ impl Drop for TestTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// specs.md: "Run allocation reserves its key before publishing a Run ...
+/// Response loss is reconciled by retrying the identical allocation key, which
+/// returns the original Run; changed normalized input is
+/// `IDEMPOTENCY_CONFLICT` and can never allocate another Run under that key."
+#[test]
+fn one_allocation_key_binds_one_run_across_response_loss_and_input_drift() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    assert!(store.load("k1").unwrap().is_none());
+
+    let run_id = Uuid::now_v7();
+    let reservation = StartReservation {
+        schema_version: 1,
+        operation: "start_run".to_owned(),
+        idempotency_key: "k1".to_owned(),
+        normalized_identity_sha256: "a".repeat(64),
+        run_id,
+    };
+    assert_eq!(store.reserve(&reservation).unwrap(), reservation);
+
+    // The reservation is durable before any Run is published, so a caller that
+    // lost the response — or crashed before publishing — resolves back to the
+    // same Run identity rather than allocating a second one.
+    let mut second = reservation.clone();
+    second.run_id = Uuid::now_v7();
+    assert_eq!(store.reserve(&second).unwrap().run_id, run_id);
+    assert_eq!(store.load("k1").unwrap().unwrap(), reservation);
+
+    // Reused with different normalized input, the key still names the original
+    // Run and never allocates another.
+    let mut drifted = reservation.clone();
+    drifted.normalized_identity_sha256 = "b".repeat(64);
+    drifted.run_id = Uuid::now_v7();
+    let held = store.reserve(&drifted).unwrap();
+    assert_eq!(held.run_id, run_id);
+    assert_eq!(held.normalized_identity_sha256, "a".repeat(64));
+
+    // The key never becomes a pathname; the index is named by its digest.
+    let index = state_root.join("idempotency").join("run-start");
+    let files: Vec<String> = fs::read_dir(&index)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert!(!files[0].contains("k1"), "{files:?}");
+    assert_eq!(
+        fs::symlink_metadata(index.join(&files[0]))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let mut other = reservation.clone();
+    other.idempotency_key = "k2".to_owned();
+    other.run_id = Uuid::now_v7();
+    assert_eq!(store.reserve(&other).unwrap(), other);
+    assert_eq!(store.load("k1").unwrap().unwrap().run_id, run_id);
+}
+
+/// The checked error contract closes `RUN_STATE_INVARIANT_VIOLATION`'s reason
+/// vocabulary and requires the same recovery action of every emission, and it
+/// requires `RUN_STATE_CONFLICT` to name the state and operation it refused.
+#[test]
+fn run_state_refusals_carry_exactly_the_members_their_contract_requires() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+
+    let mut manifest = sample_manifest();
+    manifest.achieved_assurance = Assurance::BestEffortPersonalAlpha;
+    manifest.requested_assurance = Assurance::StrongProcessContainment;
+    let invariant = store.publish(&manifest).unwrap_err();
+    assert_eq!(invariant.code, "RUN_STATE_INVARIANT_VIOLATION");
+    assert_eq!(invariant.details["reason"], "assurance_order_invalid");
+    assert_eq!(invariant.details["required_action"], "reconcile_run_state");
+    assert_eq!(
+        invariant.details["run_id"],
+        serde_json::json!(manifest.run_id)
+    );
+    assert_eq!(
+        invariant.details.as_object().unwrap().len(),
+        3,
+        "the contract forbids members it does not name"
+    );
+
+    let mut manifest = sample_manifest();
+    manifest.profile_capability_snapshot.server_epoch = 0;
+    let epoch = store.publish(&manifest).unwrap_err();
+    assert_eq!(epoch.details["reason"], "shared_server_epoch_mismatch");
+
+    let manifest = sample_manifest();
+    store.publish(&manifest).unwrap();
+    let conflict = store.publish(&manifest).unwrap_err();
+    assert_eq!(conflict.code, "RUN_STATE_CONFLICT");
+    assert_eq!(
+        conflict.details["run_id"],
+        serde_json::json!(manifest.run_id)
+    );
+    assert_eq!(conflict.details["state"], "starting");
+    assert_eq!(conflict.details["operation"], "run.start");
 }

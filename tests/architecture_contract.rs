@@ -94,12 +94,48 @@ fn source_module_dependencies_match_the_approved_graph() {
         ("projection", &["audit", "domain", "jcs"][..]),
         ("protocol", &[][..]),
         ("providers", &[][..]),
+        // `run` names `projection` because the Run record and the Run's
+        // durable state projection are two halves of the same durable state: an
+        // observer that may not take the ledger still has to read the
+        // projection the ledger commits beside the manifest.
         (
             "run",
-            &["audit", "domain", "jcs", "machine", "workspace"][..],
+            &[
+                "audit",
+                "domain",
+                "jcs",
+                "machine",
+                "projection",
+                "workspace",
+            ][..],
         ),
         ("runtime", &["protocol"][..]),
-        ("semantic", &["machine", "runtime", "workspace"][..]),
+        // `semantic` is the adapter-independent composition layer: it is the one
+        // module allowed to name several subsystems at once, because deciding
+        // how a Run starts and how a Run verb reaches its worker is exactly its
+        // job.  Adapters (cli, main) still carry no product logic.
+        (
+            "semantic",
+            &[
+                "app_server",
+                "cli",
+                "conformance",
+                "controller",
+                "darwin",
+                "domain",
+                "event",
+                "jcs",
+                "ledger",
+                "machine",
+                "profile",
+                "projection",
+                "run",
+                "runtime",
+                "turn",
+                "worker",
+                "workspace",
+            ][..],
+        ),
         (
             "turn",
             &[
@@ -113,15 +149,32 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         ("workspace", &["darwin", "jcs", "machine"][..]),
+        // `worker` names `controller` because ADR-016 makes the hidden worker
+        // the authoritative consumer of a Controller credential: it rereads
+        // the descriptor it received over SCM_RIGHTS and revalidates it under
+        // the Run mutation lock immediately before effects. That authority
+        // check cannot be delegated to a caller without giving up the very
+        // property the ADR requires.
+        //
+        // It names `profile` because a foreign-thread observation "is never a
+        // Run event and uses the separate profile diagnostic schema"
+        // (specs.md), and the worker is the only place that knows both the
+        // Run's coordinator and, from its own session bootstrap, which Runtime
+        // Profile the Run is pinned to. `turn` stays free of it: the
+        // coordinator is handed a writer rather than deriving one.
         (
             "worker",
             &[
+                "app_server",
                 "conformance",
+                "controller",
                 "darwin",
                 "event",
                 "fault",
                 "ledger",
                 "machine",
+                "profile",
+                "turn",
             ][..],
         ),
     ]);
@@ -216,22 +269,58 @@ fn collect_python_files(directory: &Path, output: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn python_is_limited_to_validators_and_black_box_e2e() {
+fn python_is_limited_to_validators_fixtures_and_black_box_e2e() {
     let root = repository_root();
     let validator_root = root.join("tools/validators");
+    // ADR-014 places exactly one Python fixture outside the validators: the
+    // shared fake app-server, whose independence from the Rust ingest path is
+    // the point of it existing.
+    let fake_app_server_root = root.join("tools/fake_app_server");
     let e2e_root = root.join("tests/e2e");
     let mut files = Vec::new();
     collect_python_files(&root, &mut files);
     for path in files {
         assert!(
-            path.starts_with(&validator_root) || path.starts_with(&e2e_root),
-            "Python is limited to tools/validators and tests/e2e: {}",
+            path.starts_with(&validator_root)
+                || path.starts_with(&fake_app_server_root)
+                || path.starts_with(&e2e_root),
+            "Python is limited to tools/validators, tools/fake_app_server, and tests/e2e: {}",
             path.display()
         );
-        if path.starts_with(&e2e_root) {
+        if path.starts_with(&e2e_root) || path.starts_with(&fake_app_server_root) {
             let source = fs::read_to_string(&path).unwrap();
             assert!(!source.contains("import dolgorae"));
             assert!(!source.contains("from dolgorae"));
+        }
+    }
+}
+
+#[test]
+fn the_shared_fake_app_server_shares_no_parser_with_the_product() {
+    let root = repository_root().join("tools/fake_app_server");
+    let mut files = Vec::new();
+    collect_python_files(&root, &mut files);
+    assert!(
+        files.iter().any(|path| path.ends_with("jsonlite.py")),
+        "the fake app-server must carry its own strict JSON reader"
+    );
+    for path in files {
+        if path.ends_with("jsonlite.py") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        for forbidden in [
+            "import json\n",
+            "import json ",
+            "from json import",
+            "json.loads",
+            "json.dumps",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{} reaches for the stdlib JSON module; ADR-014 requires parser diversity",
+                path.display()
+            );
         }
     }
 }

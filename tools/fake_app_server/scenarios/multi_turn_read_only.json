@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "name": "multi_turn_read_only",
+  "description": "One Thread, three Turns, an approval interaction, and an interrupt.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "thread/start",
+      "respond": {"result": {"thread": {"id": "thread-alpha"}}}
+    },
+    {
+      "method": "turn/start",
+      "occurrence": 1,
+      "respond": {"result": {"turn": {"id": "turn-1"}}},
+      "emit": [
+        {
+          "kind": "notification",
+          "method": "item/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turnId": "turn-1",
+            "item": {"type": "reasoning", "id": "item-1"}
+          }
+        },
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turn": {
+              "id": "turn-1",
+              "status": "completed",
+              "usage": {"inputTokens": 12, "outputTokens": 7},
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "phase": "final_answer",
+                  "threadId": "thread-alpha",
+                  "turnId": "turn-1",
+                  "status": "completed",
+                  "text": "first answer"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "turn/start",
+      "occurrence": 2,
+      "respond": {"result": {"turn": {"id": "turn-2"}}},
+      "emit": [
+        {
+          "kind": "request",
+          "id": 7001,
+          "method": "item/commandExecution/requestApproval",
+          "params": {
+            "threadId": "thread-alpha",
+            "turnId": "turn-2",
+            "command": ["git", "status"]
+          }
+        },
+        {
+          "kind": "notification",
+          "await_reply": true,
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turn": {
+              "id": "turn-2",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "phase": "final_answer",
+                  "threadId": "thread-alpha",
+                  "turnId": "turn-2",
+                  "status": "completed",
+                  "text": "second answer"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "turn/start",
+      "occurrence": 3,
+      "respond": {"result": {"turn": {"id": "turn-3"}}}
+    },
+    {
+      "method": "turn/interrupt",
+      "respond": {"result": {"interrupted": true}},
+      "emit": [
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turn": {"id": "turn-3", "status": "interrupted", "items": []}
+          }
+        }
+      ]
+    }
+  ]
+}

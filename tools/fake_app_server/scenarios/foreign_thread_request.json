@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "name": "foreign_thread_request",
+  "description": "A shared app-server asks this connection to decide something for another Thread.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {"result": {"codexHome": "${codex_home}"}}
+    },
+    {
+      "method": "thread/start",
+      "respond": {"result": {"thread": {"id": "thread-alpha"}}}
+    },
+    {
+      "method": "turn/start",
+      "respond": {"result": {"turn": {"id": "turn-1"}}},
+      "emit": [
+        {
+          "kind": "request",
+          "id": 9101,
+          "method": "item/commandExecution/requestApproval",
+          "params": {
+            "threadId": "thread-foreign",
+            "turnId": "turn-foreign",
+            "command": ["rm", "-rf", "/"]
+          }
+        },
+        {
+          "kind": "notification",
+          "method": "item/completed",
+          "params": {
+            "threadId": "thread-foreign",
+            "turnId": "turn-foreign",
+            "item": {"type": "reasoning", "id": "foreign-item"}
+          }
+        },
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turn": {
+              "id": "turn-1",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "phase": "final_answer",
+                  "threadId": "thread-alpha",
+                  "turnId": "turn-1",
+                  "status": "completed",
+                  "text": "own answer"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

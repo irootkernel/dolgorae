@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "name": "model_list_shape_faults",
+  "description": "Five model/list replies that arrive intact and disagree with the pinned Codex 0.149 shapes, one per call.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 1,
+      "respond": {
+        "result": {
+          "models": [],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 2,
+      "respond": {
+        "result": {
+          "data": [],
+          "nextCursor": 7
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 3,
+      "respond": {
+        "result": {
+          "data": [{"model": "gpt-5.6", "isDefault": true}],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 4,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [{"effort": "medium"}]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 5,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [{"reasoningEffort": ""}]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    }
+  ]
+}

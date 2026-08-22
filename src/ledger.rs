@@ -648,38 +648,13 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 "event cursor {after} is beyond durable ledger head {durable_head}"
             )));
         }
-        let mut deliveries = Vec::new();
-        let mut delivery_bytes = 0_usize;
-        let durable_records = self.durable_records()?;
-        let first = durable_records.partition_point(|record| record.sequence() <= after);
-        for record in &durable_records[first..] {
-            if record.kind() != AuditKind::ClientEvent {
-                continue;
-            }
-            let event = event_from_payload(record.payload())?;
-            if projection == EventProjection::Minimal && !event.data.minimal() {
-                continue;
-            }
-            let delivery = EventDelivery {
-                schema_version: 1,
-                kind: "event".to_owned(),
-                projection: projection.clone(),
-                replay: replay_delivery,
-                record: event,
-            };
-            let encoded_length = serde_json::to_vec(&delivery)
-                .map_err(|error| LedgerError::InvalidEvent(error.to_string()))?
-                .len();
-            if !deliveries.is_empty()
-                && (deliveries.len() == MAX_EVENT_DELIVERIES
-                    || delivery_bytes.saturating_add(encoded_length) > MAX_EVENT_DELIVERY_BYTES)
-            {
-                break;
-            }
-            delivery_bytes = delivery_bytes.saturating_add(encoded_length);
-            deliveries.push(delivery);
-        }
-        Ok(deliveries)
+        deliveries_after(
+            self.durable_records()?,
+            after,
+            projection,
+            replay_delivery,
+            MAX_EVENT_DELIVERIES,
+        )
     }
 
     fn validate_next(&self, record: &AuditRecord) -> Result<(), LedgerError> {
@@ -1291,6 +1266,177 @@ fn projection_event_cursor(record: &AuditRecord) -> Result<String, String> {
 }
 fn event_from_payload(payload: &LosslessJson) -> Result<ClientEventRecord, LedgerError> {
     crate::event::from_payload(payload).map_err(|error| LedgerError::Integrity(error.to_string()))
+}
+
+/// One bounded page of client-event deliveries strictly after `after`.
+///
+/// Shared by the writer-side ledger and the observer read below, so an
+/// observer that never takes the ledger lock still applies the same projection
+/// membership, count bound, and byte bound as the worker does.
+fn deliveries_after(
+    records: &[AuditRecord],
+    after: u64,
+    projection: EventProjection,
+    replay_delivery: bool,
+    max_deliveries: usize,
+) -> Result<Vec<EventDelivery>, LedgerError> {
+    let mut deliveries = Vec::new();
+    let mut delivery_bytes = 0_usize;
+    let first = records.partition_point(|record| record.sequence() <= after);
+    for record in &records[first..] {
+        if record.kind() != AuditKind::ClientEvent {
+            continue;
+        }
+        let event = event_from_payload(record.payload())?;
+        if projection == EventProjection::Minimal && !event.data.minimal() {
+            continue;
+        }
+        let delivery = EventDelivery {
+            schema_version: 1,
+            kind: "event".to_owned(),
+            projection: projection.clone(),
+            replay: replay_delivery,
+            record: event,
+        };
+        let encoded_length = serde_json::to_vec(&delivery)
+            .map_err(|error| LedgerError::InvalidEvent(error.to_string()))?
+            .len();
+        if !deliveries.is_empty()
+            && (deliveries.len() == max_deliveries
+                || delivery_bytes.saturating_add(encoded_length) > MAX_EVENT_DELIVERY_BYTES)
+        {
+            break;
+        }
+        delivery_bytes = delivery_bytes.saturating_add(encoded_length);
+        deliveries.push(delivery);
+    }
+    Ok(deliveries)
+}
+
+/// Read one page of durable events without owning the Run's ledger.
+///
+/// specs.md: projection-only `status`, `events`, and `verify` "read the
+/// fsynced ledger/runtime projection directly and do not start, attach,
+/// recover, or contend on the per-run startup lock". So this opens
+/// `audit.jsonl` read-only, takes no advisory lock, repairs nothing, and stops
+/// at `head` — the sequence the fsynced projection commits — which is exactly
+/// the durable prefix a live worker would have served. A torn or unterminated
+/// tail past that head is another process's in-flight append, not corruption,
+/// so it is ignored rather than reported.
+pub struct ObservedLedger {
+    records: Vec<AuditRecord>,
+    head: u64,
+}
+
+impl ObservedLedger {
+    pub fn open(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
+        Ok(Self {
+            records: observe_records(root, run_id, head)?,
+            head,
+        })
+    }
+
+    #[must_use]
+    pub const fn head(&self) -> u64 {
+        self.head
+    }
+
+    /// The payload of the last durable `turn_terminal` record, if this Run
+    /// has one.
+    ///
+    /// specs.md has a Master read `run status.data.last_terminal` for the
+    /// response, usage, and cursor behind an exit-7 envelope. The ledger is
+    /// where that fact is durable, so an observer with no live worker
+    /// reconstructs the terminal Turn from the record rather than from a
+    /// worker's process memory.
+    pub fn last_terminal(&self) -> Result<Option<serde_json::Value>, LedgerError> {
+        let Some(record) = self
+            .records
+            .iter()
+            .rev()
+            .find(|record| record.kind() == AuditKind::TurnTerminal)
+        else {
+            return Ok(None);
+        };
+        let bytes = canonicalize(record.payload())
+            .map_err(|error| LedgerError::Integrity(error.to_string()))?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| LedgerError::Integrity(error.to_string()))
+    }
+
+    /// One page of durable deliveries strictly after `after`, bounded exactly
+    /// as the worker's own page is so both paths page identically.
+    pub fn events_after(
+        &self,
+        after: u64,
+        projection: EventProjection,
+    ) -> Result<Vec<EventDelivery>, LedgerError> {
+        deliveries_after(&self.records, after, projection, true, MAX_EVENT_DELIVERIES)
+    }
+}
+
+/// The durable record prefix through `head`, verified as it is read.
+fn observe_records(root: &Path, run_id: Uuid, head: u64) -> Result<Vec<AuditRecord>, LedgerError> {
+    if run_id.get_version_num() != 7 {
+        return Err(LedgerError::InvalidRecord(
+            "run identity must be UUIDv7".to_owned(),
+        ));
+    }
+    let audit_path = root.join("audit.jsonl");
+    let uid = current_uid();
+    verify_secure_directory(root, uid).map_err(machine_as_security)?;
+    verify_secure_file(&audit_path, uid).map_err(machine_as_security)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .open(&audit_path)
+        .map_err(|error| io_at("open audit ledger", &audit_path, error))?;
+    if file
+        .metadata()
+        .map_err(|error| io_at("inspect audit ledger", &audit_path, error))?
+        .len()
+        > MAX_LEDGER_BYTES
+    {
+        return Err(LedgerError::Integrity(format!(
+            "audit ledger exceeds the {MAX_LEDGER_BYTES}-byte replay bound"
+        )));
+    }
+    let mut reader = BufReader::new(file);
+    let mut records: Vec<AuditRecord> = Vec::new();
+    while records.len() < usize::try_from(head).unwrap_or(usize::MAX) {
+        let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? else {
+            break;
+        };
+        if !terminated {
+            break;
+        }
+        line.pop();
+        let index = records.len();
+        let record = AuditRecord::from_canonical_line(&line).map_err(|error| {
+            LedgerError::Integrity(format!("line {} is invalid: {error}", index + 1))
+        })?;
+        let expected_sequence = u64::try_from(index).expect("record count fits u64") + 1;
+        let expected_previous = records
+            .last()
+            .map_or(GENESIS_PREVIOUS_HASH, AuditRecord::hash);
+        if record.sequence() != expected_sequence
+            || record.previous_hash() != expected_previous
+            || record.run_id() != run_id
+        {
+            return Err(LedgerError::Integrity(format!(
+                "line {} does not continue this run's durable chain",
+                index + 1
+            )));
+        }
+        records.push(record);
+    }
+    if u64::try_from(records.len()).unwrap_or(u64::MAX) < head {
+        return Err(LedgerError::Integrity(format!(
+            "durable ledger holds {} records below the committed head {head}",
+            records.len()
+        )));
+    }
+    Ok(records)
 }
 
 fn is_reasoning_message(method: &str, raw: &[u8]) -> bool {

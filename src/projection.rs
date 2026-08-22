@@ -51,6 +51,12 @@ pub struct RunStateProjection {
 }
 
 impl RunStateProjection {
+    /// The projection a Run has before its worker has committed one.
+    #[must_use]
+    pub fn starting(run_id: Uuid) -> Self {
+        Self::empty(run_id)
+    }
+
     pub(crate) fn empty(run_id: Uuid) -> Self {
         Self {
             schema_version: 1,

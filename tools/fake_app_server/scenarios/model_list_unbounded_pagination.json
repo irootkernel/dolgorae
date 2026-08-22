@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "model_list_unbounded_pagination",
+  "description": "model/list hands out one more cursor forever and never names the wanted model.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "respond": {
+        "result": {
+          "data": [],
+          "nextCursor": "one-more-page"
+        }
+      }
+    }
+  ]
+}

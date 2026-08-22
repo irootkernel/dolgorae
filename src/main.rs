@@ -8,7 +8,10 @@ use dolgorae::cli::{
     WorkspaceCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
-use dolgorae::semantic::{CoreSemanticService, SemanticCommand, SemanticService};
+use dolgorae::semantic::{
+    CoreSemanticService, RunVerb as SemanticRunVerb, SemanticCommand, SemanticResult,
+    SemanticService,
+};
 use dolgorae::workspace::WorkspaceMode;
 use serde::Serialize;
 use serde_json::json;
@@ -104,13 +107,16 @@ fn execute(cli: Cli) -> ExitCode {
             return match dolgorae::worker::run_hidden_worker(&args.bootstrap) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
-                    let machine = error.machine_error();
+                    // The hidden worker answers on fd 3 with a code, never a
+                    // machine envelope, so it reports the code alone rather
+                    // than fabricating a Run identity to attach details to.
+                    let code = error.code();
                     let _ = dolgorae::worker::write_startup_handoff(
                         &dolgorae::worker::StartupHandoff::Failed {
-                            code: machine.code.clone(),
+                            code: code.to_owned(),
                         },
                     );
-                    ExitCode::from(machine.exit_status())
+                    ExitCode::from(dolgorae::machine::exit_status_for(code))
                 }
             };
         }
@@ -166,10 +172,8 @@ fn execute(cli: Cli) -> ExitCode {
             arguments.push(OsString::from("--operator-fd"));
             arguments.push(OsString::from(fd.to_string()));
         }
-        return match dolgorae::controller::execute(
-            dolgorae::controller::CredentialOperation::RunReset,
-            &arguments,
-        ) {
+        return match dolgorae::controller::reset_run(&arguments, &dolgorae::semantic::LiveRunReset)
+        {
             Ok(data) => {
                 if cli.human {
                     println!(
@@ -318,19 +322,11 @@ fn execute(cli: Cli) -> ExitCode {
                 );
             }
         },
-        Command::Run(run) if matches!(run.command, RunCommand::Start(_)) => {
-            let RunCommand::Start(leaf) = &run.command else {
-                unreachable!("guard proves run start")
-            };
-            match option_path(&leaf.args, "--workspace") {
-                Ok(workspace) => SemanticCommand::RunStartPreflight { workspace },
-                Err(reason) => {
-                    return render_failure(
-                        cli.human,
-                        command_name,
-                        MachineError::invalid_argument("--workspace", reason),
-                    );
-                }
+        Command::Run(run) if run_verb(&run.command).is_some() => {
+            let (verb, leaf) = run_verb(&run.command).expect("guard proves a supported run verb");
+            SemanticCommand::Run {
+                verb,
+                args: run_arguments(run, leaf),
             }
         }
         Command::Profile { .. } => unreachable!("profile handled before semantic dispatch"),
@@ -340,6 +336,22 @@ fn execute(cli: Cli) -> ExitCode {
     };
     let service = CoreSemanticService;
     match service.execute(&semantic_command) {
+        // `run events` is the one command family that emits more than one
+        // machine object: SPEC-006 has it emit one envelope per durable record
+        // through the head captured at command start, then the `end` frame.
+        Ok(SemanticResult::RunStream(objects)) => {
+            for data in objects {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed semantic result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Ok(result) => {
             let data = serde_json::to_value(result).expect("typed semantic result");
             if cli.human {
@@ -354,6 +366,38 @@ fn execute(cli: Cli) -> ExitCode {
         }
         Err(error) => render_failure(cli.human, command_name, error),
     }
+}
+
+/// The `run` verbs this slice executes, paired with their leaf arguments; every
+/// other verb still resolves to the roadmap-owned future command.
+fn run_verb(command: &RunCommand) -> Option<(SemanticRunVerb, &[OsString])> {
+    Some(match command {
+        RunCommand::Start(leaf) => (SemanticRunVerb::Start, leaf.args.as_slice()),
+        RunCommand::Status(leaf) => (SemanticRunVerb::Status, leaf.args.as_slice()),
+        RunCommand::Send(leaf) => (SemanticRunVerb::Send, leaf.args.as_slice()),
+        RunCommand::Submit(leaf) => (SemanticRunVerb::Submit, leaf.args.as_slice()),
+        RunCommand::Wait(leaf) => (SemanticRunVerb::Wait, leaf.args.as_slice()),
+        RunCommand::Events(leaf) => (SemanticRunVerb::Events, leaf.args.as_slice()),
+        RunCommand::Respond(leaf) => (SemanticRunVerb::Respond, leaf.args.as_slice()),
+        RunCommand::Interrupt(leaf) => (SemanticRunVerb::Interrupt, leaf.args.as_slice()),
+        RunCommand::Close(leaf) => (SemanticRunVerb::Close, leaf.args.as_slice()),
+        _ => return None,
+    })
+}
+
+/// Merge the credential carrier options that sit on the `run` group into the
+/// leaf arguments, so one parser sees the whole request.
+fn run_arguments(run: &dolgorae::cli::RunArgs, leaf: &[OsString]) -> Vec<OsString> {
+    let mut arguments = leaf.to_vec();
+    if let Some(path) = &run.controller_file {
+        arguments.push(OsString::from("--controller-file"));
+        arguments.push(path.as_os_str().to_owned());
+    }
+    if let Some(fd) = run.controller_fd {
+        arguments.push(OsString::from("--controller-fd"));
+        arguments.push(OsString::from(fd.to_string()));
+    }
+    arguments
 }
 
 fn render_failure(human: bool, command: &str, error: MachineError) -> ExitCode {

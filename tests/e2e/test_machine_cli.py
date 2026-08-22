@@ -30,6 +30,26 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(instance, machine, f"output for {arguments}")
         if not completed.stdout.endswith("\n"):
             raise AssertionError(f"machine output lacks final LF for {arguments}")
+        if arguments == ("runtime", "capabilities"):
+            features = instance["data"]["features"]
+            # The worker now revalidates the SCM_RIGHTS Controller descriptor
+            # against the reset-journal-reconciled binding under the Run
+            # mutation lock before every mutating effect, so this flag is
+            # advertised true.
+            if features["worker_controller_revalidation"] is not True:
+                raise AssertionError(
+                    "worker_controller_revalidation must be true once the "
+                    "worker performs authoritative credential revalidation"
+                )
+            # safe_client_projection stays false: no production caller reads a
+            # complete client-safe observation (Controller metadata plus
+            # pending interactions) yet, so advertising it would claim
+            # observer behavior the runtime does not implement.
+            if features["safe_client_projection"] is not False:
+                raise AssertionError(
+                    "safe_client_projection must stay false until a real "
+                    "safe-observer projection caller exists"
+                )
 
     home = pathlib.Path(os.environ["HOME"])
     controller = home / "controller.json"

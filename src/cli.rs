@@ -822,9 +822,14 @@ fn leaf_spec(command: &str) -> LeafSpec {
             0,
             0,
         ),
+        // SPEC-005 grammar: `run [--controller-file <path> | --controller-fd
+        // <fd>] start ...`.  `run start` MUST bind a Controller credential, so
+        // the carrier the group accepts has to reach this leaf.
         "run.start" => spec(
             &[
                 "--workspace",
+                "--controller-file",
+                "--controller-fd",
                 "--profile",
                 "--control-mode",
                 "--execution-lane",
@@ -863,10 +868,16 @@ fn leaf_spec(command: &str) -> LeafSpec {
         | "run.resume"
         | "run.recover"
         | "run.reconcile"
-        | "run.close"
         | "run.verify"
         | "run.controller.verify" => spec(C, &[], &[], 1, 1),
-        "run.send" | "run.submit" => spec(
+        // specs.md: "Pause and close reject running or waiting runs unless
+        // `--interrupt` is present."  The switch has to exist before it can be
+        // required.
+        "run.close" => spec(C, &["--interrupt"], &[], 1, 1),
+        // SPEC-005 grammar: only `send` carries `--timeout`.  `submit` returns
+        // as soon as app-server accepts the Turn, so there is no nonterminal
+        // wait for a caller bound to shorten and the option does not exist.
+        "run.send" => spec(
             &[
                 "--workspace",
                 "--message",
@@ -874,6 +885,21 @@ fn leaf_spec(command: &str) -> LeafSpec {
                 "--effort",
                 "--idempotency-key",
                 "--timeout",
+                "--controller-file",
+                "--controller-fd",
+            ],
+            &["--write"],
+            &["--idempotency-key"],
+            1,
+            1,
+        ),
+        "run.submit" => spec(
+            &[
+                "--workspace",
+                "--message",
+                "--image",
+                "--effort",
+                "--idempotency-key",
                 "--controller-file",
                 "--controller-fd",
             ],
@@ -1194,19 +1220,41 @@ fn validate_option_value(flag: &str, value: &str) -> Result<(), String> {
     if ["--socket", "--codex-home"].contains(&flag) && !std::path::Path::new(value).is_absolute() {
         return Err(format!("{flag} requires an absolute path"));
     }
-    if flag == "--timeout" && !valid_duration(value) {
-        return Err("--timeout requires a positive duration such as 500ms, 30s, or 2m".to_owned());
+    if flag == "--timeout" && duration_milliseconds(value).is_none() {
+        return Err(
+            "--timeout requires a positive duration of at most 24h, such as 500ms, 30s, or 2m"
+                .to_owned(),
+        );
     }
     Ok(())
 }
 
-fn valid_duration(value: &str) -> bool {
-    for suffix in ["ms", "s", "m", "h"] {
-        if let Some(number) = value.strip_suffix(suffix) {
-            return number.parse::<u64>().is_ok_and(|number| number > 0);
+/// specs.md fixes the whole `<duration>` grammar: "a positive base-10 integer
+/// followed immediately by `ms`, `s`, `m`, or `h`.  Fractions, compound
+/// durations, zero, negative values, and values greater than 24 hours are
+/// rejected with `INVALID_ARGUMENT`."
+///
+/// The digits are checked here rather than delegated to the integer parser,
+/// which accepts a leading `+` and would let `+5s` through a grammar that has
+/// no sign in it at all.  The value is returned so the semantic layer measures
+/// the same duration the grammar accepted instead of re-deriving it.
+#[must_use]
+pub fn duration_milliseconds(value: &str) -> Option<u64> {
+    const MAXIMUM_MILLISECONDS: u64 = 24 * 60 * 60 * 1_000;
+    for (suffix, factor) in [("ms", 1_u64), ("s", 1_000), ("m", 60_000), ("h", 3_600_000)] {
+        let Some(digits) = value.strip_suffix(suffix) else {
+            continue;
+        };
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
         }
+        let milliseconds = digits.parse::<u64>().ok()?.checked_mul(factor)?;
+        if milliseconds == 0 || milliseconds > MAXIMUM_MILLISECONDS {
+            return None;
+        }
+        return Some(milliseconds);
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -1243,6 +1291,100 @@ mod tests {
         assert!(validate_argument_contract(&cli.command).is_err());
         let args = ["dolgorae", "run", "start", "--parent-id", "x"].map(OsString::from);
         let cli = Cli::try_parse_from(args).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_err());
+    }
+
+    /// specs.md: "`<duration>` is a positive base-10 integer followed
+    /// immediately by `ms`, `s`, `m`, or `h`.  Fractions, compound durations,
+    /// zero, negative values, and values greater than 24 hours are rejected."
+    #[test]
+    fn the_duration_grammar_is_digits_a_unit_and_at_most_one_day() {
+        for (value, milliseconds) in [
+            ("1ms", 1_u64),
+            ("500ms", 500),
+            ("30s", 30_000),
+            ("2m", 120_000),
+            ("24h", 86_400_000),
+            ("86400000ms", 86_400_000),
+        ] {
+            assert_eq!(duration_milliseconds(value), Some(milliseconds), "{value}");
+        }
+        for value in [
+            "",
+            "0s",
+            "0ms",
+            "-5s",
+            "+5s",
+            " 5s",
+            "5s ",
+            "1.5s",
+            "1h30m",
+            "5",
+            "s",
+            "ms",
+            "1d",
+            "1S",
+            "25h",
+            "1441m",
+            "86400001ms",
+            "١٠s",
+            "18446744073709551616s",
+            "9223372036854775807h",
+        ] {
+            assert_eq!(duration_milliseconds(value), None, "{value}");
+        }
+    }
+
+    /// SPEC-005 gives `--timeout` to `send` and `wait` alone: `submit` returns
+    /// on acceptance, so it has no nonterminal wait for a caller to bound.
+    #[test]
+    fn only_send_and_wait_accept_a_caller_timeout() {
+        let accepted = [
+            vec![
+                "dolgorae",
+                "run",
+                "send",
+                "r",
+                "--idempotency-key",
+                "k",
+                "--timeout",
+                "30s",
+            ],
+            vec!["dolgorae", "run", "wait", "r", "t", "--timeout", "30s"],
+        ];
+        for argv in accepted {
+            let cli = Cli::try_parse_from(argv.iter().map(OsString::from)).unwrap();
+            validate_argument_contract(&cli.command).unwrap();
+        }
+        let cli = Cli::try_parse_from(
+            [
+                "dolgorae",
+                "run",
+                "submit",
+                "r",
+                "--idempotency-key",
+                "k",
+                "--timeout",
+                "30s",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
+        assert!(validate_argument_contract(&cli.command).is_err());
+        let cli = Cli::try_parse_from(
+            [
+                "dolgorae",
+                "run",
+                "send",
+                "r",
+                "--idempotency-key",
+                "k",
+                "--timeout",
+                "25h",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
         assert!(validate_argument_contract(&cli.command).is_err());
     }
 

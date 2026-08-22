@@ -2,10 +2,10 @@
   "schema_version": 1,
   "target_version": "0.149.0",
   "architecture_contract_eligible": true,
-  "production_runtime_eligible": true,
+  "production_runtime_eligible": false,
   "eligibility_owners": {
     "architecture_contract_eligible": "TASK-000-D",
-    "production_runtime_eligible": "TASK-005"
+    "production_runtime_eligible": "TASK-031"
   },
   "architecture_contract_requirements": {
     "runtime_baseline": "0.149.0",
@@ -297,18 +297,18 @@
     "access_policy_transition": "passed_task000g_live_probe",
     "thread_scoped_background_terminal_api": "experimental_schema_present_live_completeness_failed_zero_entries",
     "writer_background_execution_policy": "dedicated_lane_process_census_best_effort_personal_alpha",
-    "same_home_basic_coexistence": "passed_task000g_live_probe",
-    "same_home_bounded_storage_integrity": "passed_task000i_live_probe",
+    "same_home_basic_coexistence": "historical_0.147.0_passed_task000g_live_probe",
+    "same_home_bounded_storage_integrity": "historical_0.147.0_passed_task000i_live_probe",
     "same_home_long_duration": "unverified",
     "forced_authentication_refresh": "unverified",
     "configuration_classification": "verified_task005_closed_manifest_and_snapshot_separation",
     "same_thread_cross_server_migration": "rejected_unsubscribe_left_source_loaded_and_resume_failed_active_writer",
-    "sticky_dedicated_policy_transition": "passed_task000g_live_probe",
-    "multi_workspace_concurrent_writers": "passed_task000g_live_probe",
-    "closed_generation_history_barrier": "passed_task000g_live_probe",
-    "native_subagent_enabled_lifecycle": "passed_task000h_enabled_profile",
-    "native_subagent_disable_enforcement": "unavailable_task000h_disabled_request_created_child",
-    "native_subagent_quiescence_tracking": "supported_for_enabled_profile_with_pinned_shapes_and_fail_closed_unknown_state",
+    "sticky_dedicated_policy_transition": "historical_0.147.0_passed_task000g_live_probe;0.149.0_unverified",
+    "multi_workspace_concurrent_writers": "historical_0.147.0_passed_task000g_live_probe;0.149.0_unverified",
+    "closed_generation_history_barrier": "historical_0.147.0_passed_task000g_live_probe;0.149.0_unverified",
+    "native_subagent_enabled_lifecycle": "historical_0.147.0_passed_task000h_enabled_profile;0.149.0_unverified",
+    "native_subagent_disable_enforcement": "historical_0.147.0_unavailable_task000h_disabled_request_created_child;0.149.0_unverified",
+    "native_subagent_quiescence_tracking": "0.149.0_unverified_fail_closed",
     "command_execution_process_id": "opaque_correlation_hint_only",
     "dedicated_lane_process_identity": "boot_pid_ppid_uid_pgid_session_start_executable"
   }

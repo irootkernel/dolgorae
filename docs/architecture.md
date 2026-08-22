@@ -477,7 +477,8 @@ is held, the socket is bound, and the runtime identity is atomically persisted
 and directory-fsynced; the CLI then releases byte 0. A later `ready` object
 means replay and compatibility validation completed. A structured failure may
 replace either acknowledgement. The bound wait is ten seconds; the ready wait
-is the larger operation-specific startup budget. EOF before an expected object
+is 330 seconds, covering the normative five-minute replay budget plus the
+bounded session handshake. EOF before an expected object
 is `TRANSPORT_FAILURE`; timeout never authorizes signalling the worker. The CLI
 parent keeps byte 0; the child's inherited byte-0 startup-lock fd is
 `FD_CLOEXEC` before `__worker` re-exec and is not fd 3. Startup status fd 3 is
@@ -988,9 +989,15 @@ the volatile socket: an existing path without an exact matching record fails
 with `RUNTIME_PATH_COLLISION`, and only the byte-0 winner may unlink it after
 the recorded generation is proved absent. Every request also contains the
 full workspace identity, run ID, expected worker generation, and boot UUID.
-Ordinary requests additionally carry Dolgorae version, CLI binary digest, and the
-current mutation protocol version so cross-run and unsafe version-skewed
-connections fail closed. A separate version-frozen control protocol v1 accepts
+Before it sends any ordinary request the CLI compares its own Dolgorae version,
+executable digest, and mutation protocol version against the three that record
+published, so a cross-run or version-skewed connection fails closed with
+`DOLGORAE_PROTOCOL_MISMATCH` rather than mutating under another build's
+semantics. That comparison is an early rejection, not the authority: a build
+that predates it would simply not perform it. Every ordinary request therefore
+also carries the caller's own version, mutation protocol version, and
+executable digest, and the worker refuses a request whose declared build is not
+its own under the same code. A separate version-frozen control protocol v1 accepts
 only `hello`, bounded `status`, and `shutdown` across binary-digest changes.
 Those operations validate workspace, run, generation, boot, and live process
 identity; all other requests reject version skew. `shutdown` is identity-bound
@@ -1119,6 +1126,8 @@ All machine-local configuration and mutable authority are outside the workspace:
       local.yaml
       specialist-policies/
       runs/
+      idempotency/
+        run-start/
       runtime/
         locks/
         runs/
@@ -1132,7 +1141,12 @@ All machine-local configuration and mutable authority are outside the workspace:
 ```
 
 `workspace.json` binds the full workspace ID to the lossless canonical path and
-initialization mode. Both the canonical workspace and its Application Support
+initialization mode. `idempotency/run-start/` is the workspace-scoped allocation
+index: one mode-0600 record per `run start` key, named by the key's digest
+rather than the key itself, holding the normalized allocation digest and the Run
+identity it is bound to. It is fsynced before the Run directory is published, so
+a response lost after allocation is reconciled by retrying the identical key
+instead of allocating a second Run. Both the canonical workspace and its Application Support
 state root must satisfy the v1 local-APFS requirement. The state root is
 current-uid-owned mode 0700, mutable files are mode 0600, and no path below it
 is included in a Codex writable root or model-visible projection.
@@ -1199,6 +1213,15 @@ hash scheme and genesis. Closed and start-failed runs append a final seal event.
 `state.json` stores the last projected sequence/hash so truncation or projection
 lag is detectable during normal operation; verification still scans the ledger
 from genesis.
+
+A `turn_terminal` record carries the whole terminal Turn — thread, turn, status,
+reasoning effort, usage, and the final response the notification's authoritative
+items supplied — rather than its identity alone. `run status.data.last_terminal`
+is therefore reconstructable from durable authority after the worker that
+observed it has stopped, which is what a projection-only `status` reads. The
+record is appended before any history round trip, so a server that omitted its
+items still yields a durable terminal, with the response absent rather than the
+terminal lost.
 
 The v1 bootstrap prefix is exactly `workspace_initialized`,
 `idempotency_reserved`, then `run_created` or
@@ -1574,10 +1597,13 @@ enumeration, and fault-barrier interfaces. RFC 8785 canonicalization is an
 in-repository safe module rather than an unspecified serializer dependency.
 
 The approved safe-Rust mechanisms are `clap` for CLI parsing, `uuid` for
-UUIDv7, `sha2` for SHA-256, `base64` plus `data-encoding` for the pinned base
-alphabets, `serde_yaml_ng` 0.10 behind duplicate/unknown-key rejecting typed
-configuration adapters, and `serde_json` only behind the duplicate-detecting `RawValue` ingest visitor
-owned by SPEC-010. JCS serialization remains in-repository. Cargo.lock pins
+UUIDv7, `sha2` for SHA-256, `sha1` only for the RFC 6455 WebSocket accept-key
+derivation, `base64` plus `data-encoding` for the pinned base alphabets,
+`serde_yaml_ng` 0.10 behind duplicate/unknown-key rejecting typed configuration
+adapters, `toml` only for bounded mode-0600 Codex configuration classification,
+`zeroize` for in-memory credential carriers, and `serde_json` only behind the
+duplicate-detecting `RawValue` ingest visitor owned by SPEC-010. JCS
+serialization remains in-repository. Cargo.lock pins
 exact versions; adding a runtime dependency or changing one of these mechanism
 bindings requires an ADR amendment and conformance fixture.
 

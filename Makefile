@@ -10,6 +10,8 @@ INT_TESTS := \
 	--test conformance_contract \
 	--test ledger_contract \
 	--test run_record_contract \
+	--test worker_controller_authority \
+	--test worker_turn_drain \
 	--test workspace_contract
 
 .PHONY: test test-prepare test-unit test-int test-e2e \

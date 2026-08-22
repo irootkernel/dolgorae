@@ -147,44 +147,54 @@ impl MachineError {
 
     #[must_use]
     pub fn exit_status(&self) -> u8 {
-        match self.code.as_str() {
-            "INVALID_ARGUMENT"
-            | "CONTROL_MODE_REQUIRED"
-            | "PURPOSE_REQUIRED"
-            | "EXECUTION_LANE_REQUIRED"
-            | "ARTIFACT_RANGE_INVALID"
-            | "EVENT_CURSOR_INVALID" => 2,
-            "WORKSPACE_NOT_INITIALIZED"
-            | "CONFIG_INVALID"
-            | "PROFILE_CONFIG_INVALID"
-            | "PROFILE_NOT_FOUND"
-            | "RUN_NOT_FOUND"
-            | "THREAD_NOT_FOUND"
-            | "TURN_NOT_FOUND"
-            | "INTERACTION_NOT_FOUND"
-            | "ARTIFACT_NOT_FOUND" => 3,
-            "PROFILE_MISMATCH"
-            | "COMPATIBILITY_REJECTED"
-            | "DOLGORAE_PROTOCOL_MISMATCH"
-            | "PROTOCOL_VERSION_UNSUPPORTED"
-            | "UNSUPPORTED_SCHEMA_VERSION"
-            | "SAME_HOME_MULTI_SERVER_UNSAFE" => 5,
-            "TRANSPORT_FAILURE"
-            | "OPERATION_TIMEOUT"
-            | "PROTOCOL_FRAME_TOO_LARGE"
-            | "RPC_SOCKET_UNSAFE"
-            | "SERVER_SHUTDOWN"
-            | "RUNTIME_PATH_INVALID"
-            | "RUNTIME_PATH_COLLISION"
-            | "REDACTION_FAILURE"
-            | "DEDICATED_SERVER_START_FAILED"
-            | "INTERNAL_ERROR" => 6,
-            "TURN_FAILED" | "TURN_INTERRUPTED" => 7,
-            "RUN_STATE_INVARIANT_VIOLATION"
-            | "AUDIT_INTEGRITY_FAILURE"
-            | "ARTIFACT_INTEGRITY_FAILURE" => 8,
-            _ => 4,
-        }
+        exit_status_for(&self.code)
+    }
+}
+
+/// The process exit status one registered error code maps to.
+///
+/// Kept as a function of the code alone because a caller that only has a code
+/// — the hidden worker's fd-3 handoff — must not have to fabricate an error
+/// envelope to learn how to exit.
+#[must_use]
+pub fn exit_status_for(code: &str) -> u8 {
+    match code {
+        "INVALID_ARGUMENT"
+        | "CONTROL_MODE_REQUIRED"
+        | "PURPOSE_REQUIRED"
+        | "EXECUTION_LANE_REQUIRED"
+        | "ARTIFACT_RANGE_INVALID"
+        | "EVENT_CURSOR_INVALID" => 2,
+        "WORKSPACE_NOT_INITIALIZED"
+        | "CONFIG_INVALID"
+        | "PROFILE_CONFIG_INVALID"
+        | "PROFILE_NOT_FOUND"
+        | "RUN_NOT_FOUND"
+        | "THREAD_NOT_FOUND"
+        | "TURN_NOT_FOUND"
+        | "INTERACTION_NOT_FOUND"
+        | "ARTIFACT_NOT_FOUND" => 3,
+        "PROFILE_MISMATCH"
+        | "COMPATIBILITY_REJECTED"
+        | "DOLGORAE_PROTOCOL_MISMATCH"
+        | "PROTOCOL_VERSION_UNSUPPORTED"
+        | "UNSUPPORTED_SCHEMA_VERSION"
+        | "SAME_HOME_MULTI_SERVER_UNSAFE" => 5,
+        "TRANSPORT_FAILURE"
+        | "OPERATION_TIMEOUT"
+        | "PROTOCOL_FRAME_TOO_LARGE"
+        | "RPC_SOCKET_UNSAFE"
+        | "SERVER_SHUTDOWN"
+        | "RUNTIME_PATH_INVALID"
+        | "RUNTIME_PATH_COLLISION"
+        | "REDACTION_FAILURE"
+        | "DEDICATED_SERVER_START_FAILED"
+        | "INTERNAL_ERROR" => 6,
+        "TURN_FAILED" | "TURN_INTERRUPTED" => 7,
+        "RUN_STATE_INVARIANT_VIOLATION"
+        | "AUDIT_INTEGRITY_FAILURE"
+        | "ARTIFACT_INTEGRITY_FAILURE" => 8,
+        _ => 4,
     }
 }
 

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "name": "model_list_paginated",
+  "description": "model/list pages its catalogue and names the wanted model only on the last page.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 1,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.4",
+              "isDefault": false,
+              "supportedReasoningEfforts": [{"reasoningEffort": "low"}]
+            }
+          ],
+          "nextCursor": "page-2"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 2,
+      "respond": {
+        "result": {
+          "data": [],
+          "nextCursor": "page-3"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 3,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [
+                {"reasoningEffort": "medium"},
+                {"reasoningEffort": "low"},
+                {"reasoningEffort": "medium"},
+                {"reasoningEffort": "high"}
+              ]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    }
+  ]
+}

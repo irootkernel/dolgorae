@@ -251,7 +251,10 @@ fn run_start_profile_preflight_enforces_the_strict_launch_schema() {
 
     let executable = tree.path("bin/codex");
     make_dir(executable.parent().unwrap());
-    fs::write(&executable, "fake\n").unwrap();
+    // The profile contract now rejects interpreter/text wrappers before it
+    // validates global argv.  Use a native image under the required basename
+    // so this test continues to isolate argv-policy validation.
+    fs::copy("/bin/sh", &executable).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(
         &local,

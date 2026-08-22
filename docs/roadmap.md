@@ -625,6 +625,9 @@ generation-level access instruction replacement, verified socket cleanup,
 start-failed bootstrap authority, terminal seals, and final-state restrictions.
 Worker cleanup covers its worker, connection, and an owned Dedicated Run Server's
 recorded command descendants; the shared singleton is excluded.
+This task owns live control-socket self-heal only after TASK-017 supplies the
+four-verdict process-identity proof; TASK-004's primitive continues to fail
+closed rather than unlink an unverified live pathname.
 
 Verification: idle/running/waiting pause/close matrices, interrupt terminal
 deadline and outcome-unknown landing, control-v1 pause/close/recover under
@@ -643,6 +646,9 @@ provisional identity, kqueue continuity, persisted member snapshots,
 reparent/group/session changes, fail-closed worker attachment, permanent
 lock-inode rules, and no-force cleanup continuation. Treat
 `CommandExecution.processId` as an opaque correlation hint.
+Replace TASK-004's private boot marker with the Darwin
+`kern.bootsessionuuid` provider, add the boot identity to Profile Server state,
+and make profile reset treat a non-matching recorded generation as absent.
 
 Verification: every identity read failure; ESRCH/live/zombie/reaped/recycled PID;
 leader-first and leaderless persisted-member cleanup; new group members;

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "name": "shutdown_interrupt",
+  "description": "One Thread and one Turn that runs until the worker interrupts it on shutdown.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "thread/start",
+      "respond": {"result": {"thread": {"id": "thread-alpha"}}}
+    },
+    {
+      "method": "turn/start",
+      "occurrence": 1,
+      "respond": {"result": {"turn": {"id": "turn-1"}}}
+    },
+    {
+      "method": "turn/interrupt",
+      "respond": {"result": {"interrupted": true}},
+      "emit": [
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turn": {"id": "turn-1", "status": "interrupted", "items": []}
+          }
+        }
+      ]
+    }
+  ]
+}

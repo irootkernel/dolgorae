@@ -86,7 +86,7 @@ pub struct GitBaseline {
 }
 
 impl GitBaseline {
-    const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             head: None,
             branch: None,
@@ -392,6 +392,24 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         let current = std::env::current_dir()
             .map_err(|error| MachineError::workspace_not_initialized(error.to_string()))?;
         self.discover_from_internal(&current, explicit, true)
+    }
+
+    /// Capture the working tree exactly when a Run is allocated.
+    ///
+    /// Workspace initialization records its own historical baseline, but a
+    /// Run must pin the current tree so later observations can distinguish
+    /// pre-existing changes from work performed during that Run.
+    pub fn capture_run_baseline(
+        &self,
+        workspace: &WorkspaceView,
+    ) -> Result<GitBaseline, MachineError> {
+        match workspace.mode {
+            WorkspaceMode::Git => {
+                let root = workspace.canonical_path.to_path_buf()?;
+                self.capture_git_baseline(&root)
+            }
+            WorkspaceMode::NonGit => Ok(GitBaseline::empty()),
+        }
     }
 
     pub fn discover_from(
@@ -1183,22 +1201,7 @@ fn validate_profile_argv(
     profile_name: &str,
     argv: &[String],
 ) -> Result<(), MachineError> {
-    let executable = Path::new(&argv[0]);
-    let metadata = fs::metadata(executable).map_err(|error| {
-        MachineError::profile_config_invalid(
-            registry_path,
-            format!("profile {profile_name:?} executable: {error}"),
-        )
-    })?;
-    if !metadata.is_file()
-        || metadata.mode() & 0o111 == 0
-        || executable.file_name() != Some(std::ffi::OsStr::new("codex"))
-    {
-        return Err(MachineError::profile_config_invalid(
-            registry_path,
-            format!("profile {profile_name:?} argv[0] is not an executable Codex binary"),
-        ));
-    }
+    validate_direct_executable(registry_path, profile_name, Path::new(&argv[0]))?;
 
     let mut index = 1;
     while index < argv.len() {
@@ -1236,6 +1239,111 @@ fn validate_profile_argv(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+/// The Mach-O and universal-binary magics a directly executable native image
+/// starts with, in both byte orders and both widths.
+const NATIVE_IMAGE_MAGICS: [[u8; 4]; 6] = [
+    [0xfe, 0xed, 0xfa, 0xce],
+    [0xce, 0xfa, 0xed, 0xfe],
+    [0xfe, 0xed, 0xfa, 0xcf],
+    [0xcf, 0xfa, 0xed, 0xfe],
+    [0xca, 0xfe, 0xba, 0xbe],
+    [0xbe, 0xba, 0xfe, 0xca],
+];
+
+/// Enforces the direct-executable boundary on `argv[0]`.
+///
+/// SPEC-013 requires `argv[0]` to be "an absolute regular Codex executable"
+/// and says v1 "rejects shell interpreters, arbitrary wrappers"; ADR-016
+/// rejects the wrapper command outright because "its environment mutation,
+/// descendant ownership, and launch identity cannot be deterministic in v1".
+/// Checking only that the file exists, carries an executable bit, and is
+/// *named* `codex` enforces none of that: a two-line `#!/bin/sh` script named
+/// `codex`, or a symlink named `codex` pointing at `/usr/bin/env`, satisfies
+/// every one of those conditions and is exactly the interpreter-and-wrapper
+/// launch the contract excludes. The consequence is not cosmetic — SPEC-013's
+/// spawn-image rule ("because v1 forbids wrappers, this image MUST be the
+/// configured Codex executable") is unprovable the moment the kernel execs an
+/// interpreter instead of the recorded image, and the launched process's
+/// environment and process group belong to the wrapper rather than to the
+/// launch contract.
+///
+/// So the boundary is the file itself:
+///
+/// * the path and the target it resolves to are both named `codex`, which is
+///   what stops a `codex`-named symlink from pointing at an arbitrary program;
+/// * the target is a regular file with an executable bit and no setuid or
+///   setgid bit, because a privileged image is a different launch identity
+///   than the one recorded;
+/// * the first bytes are a native Mach-O or universal-binary magic and are not
+///   a `#!` interpreter line, which is what separates a directly executable
+///   image from a script the kernel would hand to an interpreter.
+///
+/// This is a check on the launch boundary, not a proof of provenance: a
+/// compiled program that merely re-execs something else is still a native
+/// image. Proving the running image is the recorded one is the spawn-image and
+/// process-census work TASK-017 owns; this closes the boundary the registry
+/// itself is responsible for.
+fn validate_direct_executable(
+    registry_path: &Path,
+    profile_name: &str,
+    executable: &Path,
+) -> Result<(), MachineError> {
+    let invalid = |reason: &str| {
+        MachineError::profile_config_invalid(
+            registry_path,
+            format!("profile {profile_name:?} argv[0] is not a direct Codex executable: {reason}"),
+        )
+    };
+    let codex = Some(std::ffi::OsStr::new("codex"));
+    if executable.file_name() != codex {
+        return Err(invalid("the configured path is not named codex"));
+    }
+    let resolved = fs::canonicalize(executable).map_err(|error| {
+        MachineError::profile_config_invalid(
+            registry_path,
+            format!("profile {profile_name:?} executable: {error}"),
+        )
+    })?;
+    if resolved.file_name() != codex {
+        return Err(invalid(
+            "the configured path resolves to a differently named program",
+        ));
+    }
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        MachineError::profile_config_invalid(
+            registry_path,
+            format!("profile {profile_name:?} executable: {error}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(invalid("the resolved image is not a regular file"));
+    }
+    if metadata.mode() & 0o111 == 0 {
+        return Err(invalid("the resolved image carries no executable bit"));
+    }
+    if metadata.mode() & 0o6000 != 0 {
+        return Err(invalid("the resolved image is setuid or setgid"));
+    }
+    let mut header = [0_u8; 4];
+    let read = File::open(&resolved)
+        .and_then(|mut file| file.read(&mut header))
+        .map_err(|error| {
+            MachineError::profile_config_invalid(
+                registry_path,
+                format!("profile {profile_name:?} executable: {error}"),
+            )
+        })?;
+    if read >= 2 && &header[..2] == b"#!" {
+        return Err(invalid(
+            "the resolved image is an interpreter script, not a direct executable",
+        ));
+    }
+    if read < 4 || !NATIVE_IMAGE_MAGICS.contains(&header) {
+        return Err(invalid("the resolved image is not a native executable"));
     }
     Ok(())
 }
@@ -1353,6 +1461,49 @@ mod tests {
     }
 
     #[test]
+    fn run_baseline_captures_the_current_tree_not_the_initialization_snapshot() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-run-baseline-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let git = |arguments: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(arguments)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {arguments:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@dolgorae.local"]);
+        git(&["config", "user.name", "Dolgorae Test"]);
+        fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        fs::write(root.join("untracked.txt"), "new\n").unwrap();
+
+        let service = WorkspaceService::system().unwrap();
+        let view = WorkspaceView {
+            workspace_id: workspace_id(&root),
+            canonical_path: LosslessPath::from_path(&root),
+            mode: WorkspaceMode::Git,
+            created: false,
+        };
+        let baseline = service.capture_run_baseline(&view).unwrap();
+        assert!(baseline.head.is_some());
+        assert_eq!(
+            baseline.tracked_changes,
+            vec![LosslessPath::from_path(Path::new("tracked.txt"))]
+        );
+        assert_eq!(
+            baseline.untracked_paths,
+            vec![LosslessPath::from_path(Path::new("untracked.txt"))]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn firmlink_substitution_requires_matching_identity() {
         let identity = FileIdentity {
             device: 1,
@@ -1391,5 +1542,107 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// SPEC-013 requires `argv[0]` to be a direct Codex executable and
+    /// "rejects shell interpreters, arbitrary wrappers"; ADR-016 excludes the
+    /// wrapper command because its environment, descendants, and launch
+    /// identity are not deterministic. Existence plus an executable bit plus
+    /// the name `codex` enforced none of that.
+    #[test]
+    fn argv0_must_be_a_direct_native_codex_image_not_a_script_or_a_wrapper() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-direct-argv0-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let registry = root.join("local.yaml");
+        let check = |path: &Path| validate_direct_executable(&registry, "default", path);
+
+        // A native image is what the contract asks for. /bin/sh is one, so a
+        // copy of it stands in for a real Codex binary here; what this proves
+        // is the file-format boundary, not provenance.
+        let native = root.join("codex");
+        fs::copy("/bin/sh", &native).unwrap();
+        fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
+        check(&native).expect("a native executable named codex is accepted");
+
+        // A shell script named codex: the kernel execs an interpreter, so the
+        // spawn image can never be the configured executable.
+        let script = root.join("script");
+        fs::create_dir(&script).unwrap();
+        let scripted = script.join("codex");
+        fs::write(&scripted, b"#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+        fs::set_permissions(&scripted, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = check(&scripted).unwrap_err();
+        assert_eq!(error.code, "PROFILE_CONFIG_INVALID");
+        assert!(
+            error.details["reason"]
+                .as_str()
+                .unwrap()
+                .contains("interpreter script"),
+            "{error:?}"
+        );
+
+        // A symlink named codex pointing at an arbitrary program: the name
+        // check alone passed this, and the launched program was /bin/echo.
+        let wrapper = root.join("wrapper");
+        fs::create_dir(&wrapper).unwrap();
+        let linked = wrapper.join("codex");
+        std::os::unix::fs::symlink("/bin/echo", &linked).unwrap();
+        let error = check(&linked).unwrap_err();
+        assert!(
+            error.details["reason"]
+                .as_str()
+                .unwrap()
+                .contains("differently named program"),
+            "{error:?}"
+        );
+
+        // A symlink to a native codex image is still direct: the resolved
+        // program is the same executable under the same name.
+        let aliased = wrapper.join("alias");
+        fs::create_dir(&aliased).unwrap();
+        std::os::unix::fs::symlink(&native, aliased.join("codex")).unwrap();
+        check(&aliased.join("codex")).expect("a symlink to the codex image stays direct");
+
+        // Text with no shebang is still not a native image.
+        let text = root.join("text");
+        fs::create_dir(&text).unwrap();
+        let texted = text.join("codex");
+        fs::write(&texted, b"not an executable at all\n").unwrap();
+        fs::set_permissions(&texted, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            check(&texted).unwrap_err().details["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not a native executable")
+        );
+
+        // A native image with no executable bit, and one that is setuid.
+        let bits = root.join("bits");
+        fs::create_dir(&bits).unwrap();
+        let unexecutable = bits.join("codex");
+        fs::copy("/bin/sh", &unexecutable).unwrap();
+        fs::set_permissions(&unexecutable, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            check(&unexecutable).unwrap_err().details["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no executable bit")
+        );
+        fs::set_permissions(&unexecutable, fs::Permissions::from_mode(0o4755)).unwrap();
+        assert!(
+            check(&unexecutable).unwrap_err().details["reason"]
+                .as_str()
+                .unwrap()
+                .contains("setuid or setgid")
+        );
+
+        // A directory named codex, and a path that is not named codex at all.
+        let directory = root.join("directory");
+        fs::create_dir_all(directory.join("codex")).unwrap();
+        assert!(check(&directory.join("codex")).is_err());
+        assert!(check(Path::new("/bin/sh")).is_err());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

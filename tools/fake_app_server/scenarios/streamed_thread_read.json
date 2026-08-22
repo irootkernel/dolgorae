@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "streamed_thread_read",
+  "description": "A terminal Turn with no inline items, read back from a Thread history far larger than one message bound.",
+  "codex_home": "/tmp/codex-home",
+  "fragment_bytes": 65536,
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {"result": {"codexHome": "${codex_home}"}}
+    },
+    {
+      "method": "thread/start",
+      "respond": {"result": {"thread": {"id": "thread-alpha"}}}
+    },
+    {
+      "method": "turn/start",
+      "respond": {"result": {"turn": {"id": "turn-1"}}},
+      "emit": [
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-alpha",
+            "turn": {"id": "turn-1", "status": "completed"}
+          }
+        }
+      ]
+    },
+    {
+      "method": "thread/read",
+      "respond": {
+        "generate": {
+          "kind": "thread_read",
+          "decoy_turns": 40,
+          "decoy_filler_bytes": 1048576,
+          "target_text_bytes": 4096,
+          "nest_under_thread": true
+        }
+      }
+    }
+  ]
+}

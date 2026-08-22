@@ -34,6 +34,27 @@ pub struct LiveProcessIdentity {
     pub fingerprint: String,
 }
 
+/// The account and platform runtime fields a launched Runtime Profile needs,
+/// read from the platform's own authorities rather than from this process's
+/// environment.
+///
+/// ADR-016 assembles the launch environment "from the account fields required
+/// for login" and "platform runtime fields". `getenv` reports what whoever
+/// started Dolgorae chose to export, which is a caller-controlled input and
+/// not an account fact: an inherited `HOME` or `SHELL` would silently
+/// redirect the launched Codex's login identity, and an inherited `TMPDIR`
+/// would place its scratch state outside the per-uid directory the platform
+/// owns. The account database (`getpwuid_r`) and the platform temporary
+/// directory service (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) are those
+/// authorities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountEnvironment {
+    pub home: PathBuf,
+    pub user: String,
+    pub shell: PathBuf,
+    pub temporary_directory: PathBuf,
+}
+
 impl DarwinSystem {
     pub fn duplicate_fd_cloexec(self, fd: RawFd) -> Result<OwnedFd, std::io::Error> {
         // SAFETY: fcntl borrows the caller's descriptor and returns a distinct
@@ -48,50 +69,36 @@ impl DarwinSystem {
     }
 
     pub fn send_fd(self, socket: &UnixStream, fd: RawFd) -> Result<(), std::io::Error> {
-        let mut byte = [0_u8; 1];
-        let mut io = libc::iovec {
-            iov_base: byte.as_mut_ptr().cast(),
-            iov_len: byte.len(),
-        };
-        let control_len = usize::try_from(unsafe {
-            // SAFETY: CMSG_SPACE is a pure size calculation for one descriptor.
-            libc::CMSG_SPACE(u32::try_from(std::mem::size_of::<RawFd>()).expect("fd size"))
-        })
-        .expect("control size");
-        let mut control = vec![0_u8; control_len];
-        let message = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut io,
-            msg_iovlen: 1,
-            msg_control: control.as_mut_ptr().cast(),
-            msg_controllen: u32::try_from(control.len()).expect("control size"),
-            msg_flags: 0,
-        };
-        // SAFETY: message points to live iovec/control storage. The first control
-        // header has enough CMSG_SPACE for exactly one RawFd.
-        unsafe {
-            let header = libc::CMSG_FIRSTHDR(&message);
-            if header.is_null() {
-                return Err(std::io::Error::other("SCM_RIGHTS header unavailable"));
-            }
-            (*header).cmsg_level = libc::SOL_SOCKET;
-            (*header).cmsg_type = libc::SCM_RIGHTS;
-            (*header).cmsg_len =
-                libc::CMSG_LEN(u32::try_from(std::mem::size_of::<RawFd>()).expect("fd size"));
-            std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<RawFd>(), fd);
-            if libc::sendmsg(socket.as_raw_fd(), &message, 0) != 1 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        Ok(())
+        self.send_byte_with_optional_fd(socket, 0, Some(fd))
     }
 
     pub fn receive_fd(self, socket: &UnixStream) -> Result<OwnedFd, std::io::Error> {
-        let mut byte = [0_u8; 1];
+        match self.receive_byte_with_optional_fd(socket)? {
+            (_, Some(descriptor)) => Ok(descriptor),
+            (_, None) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SCM_RIGHTS descriptor is missing",
+            )),
+        }
+    }
+
+    /// Send exactly one stream byte, attaching `fd` as an `SCM_RIGHTS` control
+    /// message when one is supplied.
+    ///
+    /// On `SOCK_STREAM` the control message is bound to the byte it travels
+    /// with, so a caller that must hand a descriptor to a framed protocol sends
+    /// the frame's first byte through here and the remainder through ordinary
+    /// writes.
+    pub fn send_byte_with_optional_fd(
+        self,
+        socket: &UnixStream,
+        byte: u8,
+        fd: Option<RawFd>,
+    ) -> Result<(), std::io::Error> {
+        let mut payload = [byte; 1];
         let mut io = libc::iovec {
-            iov_base: byte.as_mut_ptr().cast(),
-            iov_len: byte.len(),
+            iov_base: payload.as_mut_ptr().cast(),
+            iov_len: payload.len(),
         };
         let control_len = usize::try_from(unsafe {
             // SAFETY: CMSG_SPACE is a pure size calculation for one descriptor.
@@ -104,39 +111,114 @@ impl DarwinSystem {
             msg_namelen: 0,
             msg_iov: &mut io,
             msg_iovlen: 1,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        if fd.is_some() {
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = u32::try_from(control.len()).expect("control size");
+        }
+        // SAFETY: message points to live iovec storage, and the control buffer is
+        // attached only when it holds enough CMSG_SPACE for exactly one RawFd.
+        unsafe {
+            if let Some(descriptor) = fd {
+                let header = libc::CMSG_FIRSTHDR(&message);
+                if header.is_null() {
+                    return Err(std::io::Error::other("SCM_RIGHTS header unavailable"));
+                }
+                (*header).cmsg_level = libc::SOL_SOCKET;
+                (*header).cmsg_type = libc::SCM_RIGHTS;
+                (*header).cmsg_len =
+                    libc::CMSG_LEN(u32::try_from(std::mem::size_of::<RawFd>()).expect("fd size"));
+                std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
+            }
+            if libc::sendmsg(socket.as_raw_fd(), &message, 0) != 1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive exactly one stream byte plus at most one `SCM_RIGHTS`
+    /// descriptor.
+    ///
+    /// The read is bounded to a single byte so it can never cross the boundary
+    /// the control message is attached to, and a sender that supplies truncated
+    /// or multiple descriptors is refused after every descriptor it passed is
+    /// closed.
+    pub fn receive_byte_with_optional_fd(
+        self,
+        socket: &UnixStream,
+    ) -> Result<(u8, Option<OwnedFd>), std::io::Error> {
+        let mut payload = [0_u8; 1];
+        let mut io = libc::iovec {
+            iov_base: payload.as_mut_ptr().cast(),
+            iov_len: payload.len(),
+        };
+        let control_len = usize::try_from(unsafe {
+            // SAFETY: CMSG_SPACE is a pure size calculation for two descriptors,
+            // so an oversupplying sender is observed rather than truncated away.
+            libc::CMSG_SPACE(u32::try_from(2 * std::mem::size_of::<RawFd>()).expect("fd size"))
+        })
+        .expect("control size");
+        let mut control = vec![0_u8; control_len];
+        let mut message = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut io,
+            msg_iovlen: 1,
             msg_control: control.as_mut_ptr().cast(),
             msg_controllen: u32::try_from(control.len()).expect("control size"),
             msg_flags: 0,
         };
-        // SAFETY: recvmsg writes only into the live iovec/control buffers. A
-        // successful SCM_RIGHTS message transfers ownership of the received fd.
+        // SAFETY: recvmsg writes only into the live iovec/control buffers. Every
+        // descriptor the kernel installed is owned here exactly once and closed
+        // on any refusal, so no received descriptor leaks.
         unsafe {
             if libc::recvmsg(socket.as_raw_fd(), &mut message, 0) != 1 {
                 return Err(std::io::Error::last_os_error());
             }
-            let header = libc::CMSG_FIRSTHDR(&message);
-            if header.is_null()
-                || (*header).cmsg_level != libc::SOL_SOCKET
-                || (*header).cmsg_type != libc::SCM_RIGHTS
-            {
+            let mut received = Vec::new();
+            let mut header = libc::CMSG_FIRSTHDR(&message);
+            while !header.is_null() {
+                if (*header).cmsg_level == libc::SOL_SOCKET
+                    && (*header).cmsg_type == libc::SCM_RIGHTS
+                {
+                    let payload_len = usize::try_from((*header).cmsg_len)
+                        .unwrap_or(0)
+                        .saturating_sub(
+                            usize::try_from(libc::CMSG_LEN(0)).expect("cmsg header size"),
+                        );
+                    let count = payload_len / std::mem::size_of::<RawFd>();
+                    let data = libc::CMSG_DATA(header).cast::<RawFd>();
+                    for index in 0..count {
+                        received.push(std::ptr::read_unaligned(data.add(index)));
+                    }
+                }
+                header = libc::CMSG_NXTHDR(&message, header);
+            }
+            let truncated = message.msg_flags & libc::MSG_CTRUNC != 0;
+            if truncated || received.len() > 1 || received.iter().any(|fd| *fd < 0) {
+                for descriptor in received {
+                    if descriptor >= 0 {
+                        libc::close(descriptor);
+                    }
+                }
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "SCM_RIGHTS descriptor is missing",
+                    "SCM_RIGHTS control message is invalid",
                 ));
             }
-            let fd = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
-            if fd < 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "SCM_RIGHTS descriptor is invalid",
-                ));
-            }
-            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+            let Some(descriptor) = received.first().copied() else {
+                return Ok((payload[0], None));
+            };
+            if libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
                 let error = std::io::Error::last_os_error();
-                libc::close(fd);
+                libc::close(descriptor);
                 return Err(error);
             }
-            Ok(OwnedFd::from_raw_fd(fd))
+            Ok((payload[0], Some(OwnedFd::from_raw_fd(descriptor))))
         }
     }
 
@@ -183,6 +265,132 @@ impl DarwinSystem {
     pub fn current_uid(self) -> u32 {
         // SAFETY: getuid takes no pointers and returns the calling process uid.
         unsafe { libc::getuid() }
+    }
+
+    /// Reads the calling account's login fields and the platform's per-uid
+    /// temporary directory. See [`AccountEnvironment`] for why these come
+    /// from the platform rather than from the caller's environment.
+    pub fn account_environment(self) -> Result<AccountEnvironment, std::io::Error> {
+        let (home, user, shell) = self.account_record(self.current_uid())?;
+        Ok(AccountEnvironment {
+            home,
+            user,
+            shell,
+            temporary_directory: self.user_temporary_directory()?,
+        })
+    }
+
+    fn account_record(self, uid: u32) -> Result<(PathBuf, String, PathBuf), std::io::Error> {
+        // SAFETY: sysconf takes no pointers and reports the reentrant
+        // getpwuid_r buffer hint, or -1 when the platform declines to state one.
+        let hint = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+        let mut length = usize::try_from(hint).unwrap_or(4096).clamp(1024, 64 * 1024);
+        loop {
+            let mut buffer = vec![0_u8; length];
+            let mut record = MaybeUninit::<libc::passwd>::uninit();
+            let mut found: *mut libc::passwd = std::ptr::null_mut();
+            // SAFETY: record points to writable storage for one passwd
+            // structure, buffer is a live allocation of exactly `length`
+            // bytes that the call fills and the structure borrows from, and
+            // found points to one live pointer. The buffer outlives every
+            // read of the returned structure below.
+            let code = unsafe {
+                libc::getpwuid_r(
+                    uid,
+                    record.as_mut_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    length,
+                    std::ptr::addr_of_mut!(found),
+                )
+            };
+            if code == libc::ERANGE && length < 64 * 1024 {
+                length *= 2;
+                continue;
+            }
+            if code != 0 {
+                return Err(std::io::Error::from_raw_os_error(code));
+            }
+            if found.is_null() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "account record is absent from the account database",
+                ));
+            }
+            // SAFETY: getpwuid_r returned success with a non-null result, so
+            // it initialized the structure and pointed its string members
+            // into `buffer`, which is still live.
+            let record = unsafe { record.assume_init() };
+            let home = unsafe { Self::account_field(record.pw_dir) }?;
+            let user = unsafe { Self::account_field(record.pw_name) }?;
+            let shell = unsafe { Self::account_field(record.pw_shell) }?;
+            let user = String::from_utf8(user.into_vec()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "account login name is not UTF-8",
+                )
+            })?;
+            return Ok((PathBuf::from(home), user, PathBuf::from(shell)));
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `field` must be null or a valid NUL-terminated string that outlives
+    /// this call.
+    unsafe fn account_field(field: *const libc::c_char) -> Result<OsString, std::io::Error> {
+        if field.is_null() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "account record field is absent",
+            ));
+        }
+        // SAFETY: the caller guarantees a valid NUL-terminated string; the
+        // bytes are copied before this function returns.
+        let bytes = unsafe { CStr::from_ptr(field) }.to_bytes().to_vec();
+        if bytes.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "account record field is empty",
+            ));
+        }
+        Ok(OsString::from_vec(bytes))
+    }
+
+    fn user_temporary_directory(self) -> Result<PathBuf, std::io::Error> {
+        // SAFETY: a zero length with a null buffer asks confstr only for the
+        // size it would write, which is the documented sizing call.
+        let length =
+            unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
+        if length == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "platform temporary directory is unavailable",
+            ));
+        }
+        let mut buffer = vec![0_u8; length];
+        // SAFETY: buffer is a live allocation of exactly `length` bytes and
+        // confstr writes at most that many, NUL terminator included.
+        let written = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buffer.as_mut_ptr().cast(),
+                length,
+            )
+        };
+        if written == 0 || written > length {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "platform temporary directory is unavailable",
+            ));
+        }
+        buffer.truncate(written.saturating_sub(1));
+        if buffer.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "platform temporary directory is empty",
+            ));
+        }
+        Ok(PathBuf::from(OsString::from_vec(buffer)))
     }
 
     pub fn rename_exclusive(self, source: &Path, destination: &Path) -> Result<(), std::io::Error> {
@@ -257,12 +465,33 @@ impl DarwinSystem {
         // performs only async-signal-safe operations before exec.
         unsafe {
             command.pre_exec(move || {
-                if libc::setsid() == -1
-                    || libc::dup2(stdout_read_fd, 3) == -1
-                    || libc::dup2(stderr_read_fd, 4) == -1
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Stage both read ends above the fixed drainer descriptors
+                // before placing them. Two fixed targets carry two hazards a
+                // single descriptor never faces: a source that already sits on
+                // the *other* target is clobbered before it is placed, and
+                // `dup2(fd, fd)` is a no-op that leaves FD_CLOEXEC set, so a
+                // source that already sits on its own target disappears at
+                // exec and the drainer finds nothing on /dev/fd/3. Which
+                // descriptors the sources land on is decided by whatever the
+                // parent happened to have free, so neither hazard can be ruled
+                // out from here. `F_DUPFD` (not `F_DUPFD_CLOEXEC`) is what
+                // makes the staged copies survive the exec.
+                let staged_stdout = libc::fcntl(stdout_read_fd, libc::F_DUPFD, 10);
+                let staged_stderr = libc::fcntl(stderr_read_fd, libc::F_DUPFD, 10);
+                if staged_stdout == -1
+                    || staged_stderr == -1
+                    || libc::dup2(staged_stdout, 3) == -1
+                    || libc::dup2(staged_stderr, 4) == -1
+                    || libc::fcntl(3, libc::F_SETFD, 0) == -1
+                    || libc::fcntl(4, libc::F_SETFD, 0) == -1
                 {
                     return Err(std::io::Error::last_os_error());
                 }
+                libc::close(staged_stdout);
+                libc::close(staged_stderr);
                 libc::umask(0o077);
                 let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
                 if libc::sigemptyset(empty.as_mut_ptr()) == -1
@@ -678,6 +907,103 @@ mod tests {
     }
 
     #[test]
+    fn one_byte_transfer_carries_at_most_one_descriptor_and_survives_its_absence() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let temporary = std::env::temp_dir().join(format!(
+            "dolgorae-scm-{}-{}",
+            std::process::id(),
+            DarwinSystem.now().as_nanos()
+        ));
+        std::fs::write(&temporary, b"carried").unwrap();
+        let carried = std::fs::File::open(&temporary).unwrap();
+
+        DarwinSystem
+            .send_byte_with_optional_fd(&sender, b'{', Some(carried.as_raw_fd()))
+            .unwrap();
+        let (byte, received) = DarwinSystem
+            .receive_byte_with_optional_fd(&receiver)
+            .unwrap();
+        assert_eq!(byte, b'{');
+        let mut contents = String::new();
+        std::fs::File::from(received.expect("descriptor was not delivered"))
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert_eq!(contents, "carried");
+
+        // A caller that passes no descriptor still delivers its byte, so an
+        // observer request stays byte-identical to an ordinary write.
+        DarwinSystem
+            .send_byte_with_optional_fd(&sender, b'[', None)
+            .unwrap();
+        let (byte, received) = DarwinSystem
+            .receive_byte_with_optional_fd(&receiver)
+            .unwrap();
+        assert_eq!(byte, b'[');
+        assert!(received.is_none());
+
+        // An ordinary write is received the same way, which is what lets a
+        // credential-free caller keep using plain framing.
+        std::io::Write::write_all(&mut (&sender), b"xy").unwrap();
+        assert_eq!(
+            DarwinSystem
+                .receive_byte_with_optional_fd(&receiver)
+                .unwrap()
+                .0,
+            b'x'
+        );
+        let mut remainder = [0_u8; 1];
+        std::io::Read::read_exact(&mut (&receiver), &mut remainder).unwrap();
+        assert_eq!(&remainder, b"y");
+        std::fs::remove_file(&temporary).unwrap();
+    }
+
+    #[test]
+    fn a_sender_that_oversupplies_descriptors_is_refused_without_leaking_them() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let (spare_one, spare_two) = UnixStream::pair().unwrap();
+        let mut payload = [b'!'; 1];
+        let mut io = libc::iovec {
+            iov_base: payload.as_mut_ptr().cast(),
+            iov_len: payload.len(),
+        };
+        let descriptors = [spare_one.as_raw_fd(), spare_two.as_raw_fd()];
+        // SAFETY: the control buffer is sized by CMSG_SPACE for exactly the two
+        // descriptors written into it, and every pointer stays live across the
+        // sendmsg call.
+        unsafe {
+            let control_len = usize::try_from(libc::CMSG_SPACE(
+                u32::try_from(std::mem::size_of_val(&descriptors)).unwrap(),
+            ))
+            .unwrap();
+            let mut control = vec![0_u8; control_len];
+            let message = libc::msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut io,
+                msg_iovlen: 1,
+                msg_control: control.as_mut_ptr().cast(),
+                msg_controllen: u32::try_from(control.len()).unwrap(),
+                msg_flags: 0,
+            };
+            let header = libc::CMSG_FIRSTHDR(&message);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len =
+                libc::CMSG_LEN(u32::try_from(std::mem::size_of_val(&descriptors)).unwrap());
+            std::ptr::copy_nonoverlapping(
+                descriptors.as_ptr(),
+                libc::CMSG_DATA(header).cast::<RawFd>(),
+                descriptors.len(),
+            );
+            assert_eq!(libc::sendmsg(sender.as_raw_fd(), &message, 0), 1);
+        }
+        let refused = DarwinSystem
+            .receive_byte_with_optional_fd(&receiver)
+            .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn detached_spawn_preserves_only_the_fd3_startup_channel() {
         let mut command = Command::new("/bin/sh");
         command.args([
@@ -689,5 +1015,26 @@ mod tests {
         startup.read_to_string(&mut message).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(message, "ready");
+    }
+
+    /// The launched profile's reserved names are account and platform facts.
+    /// This is the adapter that has to produce them without consulting the
+    /// caller's environment at all.
+    #[test]
+    fn the_account_environment_comes_from_the_account_database_and_the_platform() {
+        let account = DarwinSystem.account_environment().unwrap();
+
+        assert!(account.home.is_absolute(), "{:?}", account.home);
+        assert!(account.shell.is_absolute(), "{:?}", account.shell);
+        assert!(
+            account.temporary_directory.is_absolute(),
+            "{:?}",
+            account.temporary_directory
+        );
+        assert!(!account.user.is_empty());
+        assert!(!account.user.contains('\0'));
+        // Reading it twice is the same answer: it is a lookup, not a
+        // snapshot of mutable process state.
+        assert_eq!(DarwinSystem.account_environment().unwrap(), account);
     }
 }

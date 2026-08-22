@@ -4,8 +4,8 @@ use dolgorae::jcs::{LosslessJson, sha256_hex};
 use dolgorae::ledger::{
     AppendDurability, ArtifactMetadata, ClientEventData, ClientEventRecord, EventProjection,
     FinalResponse, Ledger, LedgerClock, LedgerError, MAX_AUDIT_LINE_BYTES, MAX_EVENT_DELIVERIES,
-    MAX_STATE_BYTES, REPLAY_BUDGET_MILLIS, ResponseEventPayload, RunStateProjection,
-    RuntimeErrorPayload, UsagePayload, WorkspaceChangesPayload,
+    MAX_STATE_BYTES, ObservedLedger, REPLAY_BUDGET_MILLIS, ResponseEventPayload,
+    RunStateProjection, RuntimeErrorPayload, UsagePayload, WorkspaceChangesPayload,
 };
 use dolgorae::workspace::LosslessPath;
 use std::fs::{self, OpenOptions};
@@ -1686,4 +1686,154 @@ impl Drop for RunTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// SPEC-006: projection-only `events` reads the fsynced ledger directly, pages
+/// through the head captured at command start, and never contends for the
+/// ledger the worker owns.
+#[test]
+fn an_observer_pages_the_durable_ledger_through_the_head_it_captured() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    for _ in 0..(MAX_EVENT_DELIVERIES + 8) {
+        let usage = event(
+            &ledger,
+            tree.run_id,
+            Some("thread-1"),
+            Some("turn-1"),
+            ClientEventData::UsageReported(UsagePayload {
+                input_tokens: 12,
+                output_tokens: 4,
+            }),
+        );
+        ledger
+            .append_client_event(usage, 1, AppendDurability::Required)
+            .unwrap();
+    }
+    let head = ledger.head().unwrap().sequence;
+
+    // The writer still holds the ledger's exclusive lock here; the observer
+    // opens the same bytes read-only and answers anyway.
+    let observer = ObservedLedger::open(&tree.root, tree.run_id, head).unwrap();
+    assert_eq!(observer.head(), head);
+    let mut cursor = 0_u64;
+    let mut seen = 0_usize;
+    loop {
+        let page = observer
+            .events_after(cursor, EventProjection::Operational)
+            .unwrap();
+        assert!(page.len() <= MAX_EVENT_DELIVERIES);
+        let Some(last) = page.last() else { break };
+        seen += page.len();
+        let next = last.record.cursor.parse::<u64>().unwrap();
+        assert!(next > cursor && next <= head);
+        cursor = next;
+    }
+    assert_eq!(seen, MAX_EVENT_DELIVERIES + 8);
+
+    // Records committed after the head was captured belong to the next
+    // command, not to this one.
+    let later = event(
+        &ledger,
+        tree.run_id,
+        Some("thread-1"),
+        Some("turn-1"),
+        ClientEventData::UsageReported(UsagePayload {
+            input_tokens: 1,
+            output_tokens: 1,
+        }),
+    );
+    ledger
+        .append_client_event(later, 1, AppendDurability::Required)
+        .unwrap();
+    assert!(ledger.head().unwrap().sequence > head);
+    let held = ObservedLedger::open(&tree.root, tree.run_id, head).unwrap();
+    let mut total = 0_usize;
+    let mut cursor = 0_u64;
+    while let Some(last) = held
+        .events_after(cursor, EventProjection::Operational)
+        .unwrap()
+        .last()
+        .cloned()
+    {
+        total += held
+            .events_after(cursor, EventProjection::Operational)
+            .unwrap()
+            .len();
+        cursor = last.record.cursor.parse::<u64>().unwrap();
+    }
+    assert_eq!(total, MAX_EVENT_DELIVERIES + 8);
+}
+
+/// The Run's last terminal Turn is durable evidence, not a worker's memory:
+/// specs.md sends a Master to `run status.data.last_terminal` for the
+/// response, usage, and cursor behind an intentionally minimal exit-7
+/// envelope, and a stopped or restarted worker has none of that in process.
+#[test]
+fn an_observer_reconstructs_the_last_terminal_turn_from_the_ledger() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    assert!(
+        ObservedLedger::open(&tree.root, tree.run_id, 0)
+            .unwrap()
+            .last_terminal()
+            .unwrap()
+            .is_none(),
+        "a Run with no terminal publishes none"
+    );
+    for (turn, status) in [("turn-1", "completed"), ("turn-2", "interrupted")] {
+        ledger
+            .append_required_payload(
+                AuditKind::TurnStarted,
+                &serde_json::json!({"turn_id": turn}),
+                1,
+            )
+            .unwrap();
+        ledger
+            .append_required_payload(
+                AuditKind::TurnTerminal,
+                &serde_json::json!({
+                    "thread_id": "thread-1",
+                    "turn_id": turn,
+                    "status": status,
+                    "effort": "medium",
+                    "final_response": {"kind": "inline", "text": "answered"},
+                    "usage": {"inputTokens": 12, "outputTokens": 7},
+                }),
+                1,
+            )
+            .unwrap();
+    }
+    let head = ledger.head().unwrap().sequence;
+    let terminal = ObservedLedger::open(&tree.root, tree.run_id, head)
+        .unwrap()
+        .last_terminal()
+        .unwrap()
+        .expect("the ledger records a terminal turn");
+    assert_eq!(terminal["turn_id"], "turn-2");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["thread_id"], "thread-1");
+    assert_eq!(terminal["effort"], "medium");
+    assert_eq!(terminal["usage"]["outputTokens"], 7);
+    assert_eq!(terminal["final_response"]["text"], "answered");
+}
+
+/// A projection head the durable bytes cannot account for is an integrity
+/// failure, not an empty answer.
+#[test]
+fn an_observer_refuses_a_head_the_durable_bytes_do_not_reach() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+    ledger
+        .append_required_payload(AuditKind::RunCreated, &serde_json::json!({}), 1)
+        .unwrap();
+    let head = ledger.head().unwrap().sequence;
+    assert!(ObservedLedger::open(&tree.root, tree.run_id, head).is_ok());
+    assert!(matches!(
+        ObservedLedger::open(&tree.root, tree.run_id, head + 5),
+        Err(LedgerError::Integrity(_))
+    ));
 }

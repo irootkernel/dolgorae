@@ -194,10 +194,21 @@ impl RuntimeFeatures {
     pub const fn task_007() -> Self {
         let mut features = Self::task_005();
         features.controller_binding = true;
+        // Every mutating run control request (send, submit, respond,
+        // interrupt, close) now carries the caller's already-open Controller
+        // descriptor to the worker over SCM_RIGHTS, and the worker rereads and
+        // revalidates it against the reset-journal-reconciled current binding
+        // while holding the Run mutation lock, immediately before effects.
         features.worker_controller_revalidation = true;
         features.operator_capability = true;
         features.operator_controller_reset = true;
-        features.safe_client_projection = true;
+        // safe_client_projection stays false: ADR-016 defines it as the
+        // *complete* client-safe projection an unauthenticated same-uid
+        // observer may read, including Controller metadata and pending
+        // interactions. `SafeRunObservation` still has no production
+        // constructor, and pending interactions cannot be served without
+        // extending the frozen control-v1 `status` response or adding a new
+        // observer operation. Flip true only once that observer read exists.
         features
     }
 }
@@ -310,7 +321,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_007_advertises_completed_authority_behavior_without_public_socket() {
+    fn task_007_advertises_only_genuinely_implemented_authority_behavior() {
+        // worker_controller_revalidation is true because src/worker.rs refuses
+        // every mutating control request whose SCM_RIGHTS credential does not
+        // authorize the Run's current binding; safe_client_projection stays
+        // false because no production caller reads a complete client-safe
+        // observation yet.
         let capabilities = serde_json::to_value(capabilities()).unwrap();
         assert_eq!(capabilities["features"]["persistent_runs"], false);
         assert_eq!(
@@ -326,7 +342,7 @@ mod tests {
         );
         assert_eq!(capabilities["features"]["operator_capability"], true);
         assert_eq!(capabilities["features"]["operator_controller_reset"], true);
-        assert_eq!(capabilities["features"]["safe_client_projection"], true);
+        assert_eq!(capabilities["features"]["safe_client_projection"], false);
         assert_eq!(capabilities["features"]["public_local_socket"], false);
         assert_eq!(capabilities["supported_transports"], json!(["machine_cli"]));
     }

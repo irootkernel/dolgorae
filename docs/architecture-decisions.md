@@ -684,13 +684,28 @@ manifest-validated declarative scenarios.
 
 Project configuration uses pinned `serde_yaml_ng` 0.10 behind typed adapters
 that reject duplicate and unknown keys. YAML values are never used as untyped
-protocol or ledger input.
+protocol or ledger input. EPIC-002 admits three additional narrowly bound
+safe-Rust mechanisms: `sha1` only for RFC 6455's mandated WebSocket accept-key
+calculation, `toml` only for bounded private Codex configuration inputs that are
+immediately converted into the closed profile classification, and `zeroize`
+only for secret credential buffers. They do not replace Dolgorae's SHA-256/JCS,
+owned JSON ingest, or typed YAML boundaries.
+
+The dependency conformance fixtures are executable and named: the WebSocket
+upgrade accept-key and framing cases in `app_server::tests`, the closed TOML
+classification and invalid-input cases in `profile::tests` plus the Profile CLI
+matrix, and the carrier zeroization/strict-ingest boundary in
+`controller::tests::strict_controller_creation_and_authorization_hide_secret`.
+Changing any of those mechanism bindings requires this ADR and its named
+fixture set to change together.
 
 ### Consequences
 
 - Duplicate rejection and number preservation occur at ingest, before JCS.
 - Fake/production parser diversity reduces self-confirming conformance tests.
 - TASK-006 consumes the TASK-004 fixture rather than creating a second core.
+- The three EPIC-002 dependencies have one purpose each and cannot become
+  general parsing, hashing, or secret-storage authorities by incidental reuse.
 
 ## ADR-015: Share One Reader Server and Isolate Each Active Writer in a Capsule
 

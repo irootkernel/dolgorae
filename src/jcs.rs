@@ -377,6 +377,17 @@ const SECRET_SEQUENCES: &[&[&str]] = &[
     &["passwd"],
 ];
 
+/// Whether `key` reads as a secret-bearing member name.
+///
+/// Exposed so a non-JSON redaction path — the profile log drainer's plain-text
+/// lines — can ask exactly the question this module's JSON redactor asks,
+/// instead of carrying a second copy of [`SECRET_SEQUENCES`] that can drift
+/// away from this one.
+#[must_use]
+pub fn is_secret_payload_key(key: &str) -> bool {
+    is_secret_key(key)
+}
+
 fn is_secret_key(key: &str) -> bool {
     if !key.is_ascii() {
         return false;

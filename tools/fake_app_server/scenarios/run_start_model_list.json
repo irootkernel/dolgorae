@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "name": "run_start_model_list",
+  "description": "The whole model/list surface one `run start` walks: the profile probe's catalogue, the effort resolution that follows it, and a worker attach that is refused once so membership order is observable.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {
+            "experimentalApi": false
+          }
+        }
+      }
+    },
+    {
+      "method": "initialize",
+      "occurrence": 3,
+      "respond": {
+        "error": {
+          "code": -32000,
+          "message": "this connection is refused so the worker never publishes"
+        }
+      }
+    },
+    {
+      "method": "account/read",
+      "respond": {
+        "result": {
+          "requiresOpenaiAuth": false
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 1,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.4",
+              "isDefault": false,
+              "supportedReasoningEfforts": [
+                {
+                  "reasoningEffort": "low"
+                }
+              ]
+            }
+          ],
+          "nextCursor": "page-2"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 2,
+      "respond": {
+        "result": {
+          "data": [],
+          "nextCursor": "page-3"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 3,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [
+                {
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "reasoningEffort": "low"
+                },
+                {
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "reasoningEffort": "high"
+                }
+              ]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 4,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.4",
+              "isDefault": false,
+              "supportedReasoningEfforts": [
+                {
+                  "reasoningEffort": "low"
+                }
+              ]
+            }
+          ],
+          "nextCursor": "page-2"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 5,
+      "respond": {
+        "result": {
+          "data": [],
+          "nextCursor": "page-3"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 6,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [
+                {
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "reasoningEffort": "low"
+                },
+                {
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "reasoningEffort": "high"
+                }
+              ]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 7,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.4",
+              "isDefault": false,
+              "supportedReasoningEfforts": [
+                {
+                  "reasoningEffort": "low"
+                }
+              ]
+            }
+          ],
+          "nextCursor": "page-2"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 8,
+      "respond": {
+        "result": {
+          "data": [],
+          "nextCursor": "page-3"
+        }
+      }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 9,
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [
+                {
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "reasoningEffort": "low"
+                },
+                {
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "reasoningEffort": "high"
+                }
+              ]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "thread/read",
+      "respond": {
+        "error": {
+          "code": -32600,
+          "message": "thread not found"
+        }
+      }
+    }
+  ]
+}

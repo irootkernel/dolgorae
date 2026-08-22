@@ -577,6 +577,169 @@
         }
       }
     },
+    "profile_capabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "enum": ["supported", "recognized_unsupported", "unavailable", "unverified"]
+      }
+    },
+    "profile_view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "argv", "codex_home", "environment", "native_subagents"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "codex_home": { "$ref": "#/$defs/path" },
+        "environment": { "type": "object", "additionalProperties": { "type": "string" } },
+        "native_subagents": { "const": "enabled" }
+      }
+    },
+    "profile_show_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "argv", "codex_home", "environment", "native_subagents", "capabilities"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "codex_home": { "$ref": "#/$defs/path" },
+        "environment": { "type": "object", "additionalProperties": { "type": "string" } },
+        "native_subagents": { "const": "enabled" },
+        "capabilities": { "$ref": "#/$defs/profile_capabilities" }
+      }
+    },
+    "profile_doctor_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile", "compatibility", "codex_version", "expected_codex_home",
+        "schema_bundle_sha256", "manifest_sha256", "server_key", "launch_probe",
+        "server_started", "server_epoch", "default_model", "models", "capabilities",
+        "diagnostics"
+      ],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "compatibility": { "enum": ["tested", "unverified", "rejected"] },
+        "codex_version": { "type": ["string", "null"] },
+        "expected_codex_home": { "$ref": "#/$defs/path" },
+        "schema_bundle_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "manifest_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "server_key": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "launch_probe": { "type": "boolean" },
+        "server_started": { "type": "boolean" },
+        "server_epoch": { "type": ["integer", "null"], "minimum": 1 },
+        "default_model": { "type": ["string", "null"] },
+        "models": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "capabilities": { "$ref": "#/$defs/profile_capabilities" },
+        "diagnostics": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "profile_list_result": {
+      "type": "object", "additionalProperties": false, "required": ["profiles"],
+      "properties": { "profiles": { "type": "array", "items": { "$ref": "#/$defs/profile_view" } } }
+    },
+    "profile_server_status_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "server_key", "lifecycle", "state"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "server_key": { "$ref": "#/$defs/sha256" },
+        "lifecycle": { "enum": ["stopped", "starting", "ready", "degraded", "stopping", "restarting", "migrating", "migration_blocked"] },
+        "state": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/profile-server-state/v1" }, { "type": "null" }] }
+      }
+    },
+    "profile_server_started_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "started", "state"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "started": { "const": true },
+        "state": { "$ref": "https://dolgorae.local/schema/profile-server-state/v1" }
+      }
+    },
+    "profile_server_restarted_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "restarted", "state"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "restarted": { "const": true },
+        "state": { "$ref": "https://dolgorae.local/schema/profile-server-state/v1" }
+      }
+    },
+    "profile_server_stopped_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "server_key", "stopped"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "server_key": { "$ref": "#/$defs/sha256" },
+        "stopped": { "type": "boolean" }
+      }
+    },
+    "profile_server_migrated_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "migrated", "migration_id", "server_key", "server_epoch"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "migrated": { "const": true },
+        "migration_id": { "$ref": "#/$defs/uuid" },
+        "server_key": { "$ref": "#/$defs/sha256" },
+        "server_epoch": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "profile_simple_result": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["profile", "removed"],
+          "properties": { "profile": { "type": "string", "minLength": 1 }, "removed": { "const": true } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["profile", "reset", "migration_repaired"],
+          "properties": {
+            "profile": { "type": "string", "minLength": 1 },
+            "reset": { "const": true },
+            "migration_repaired": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["profile", "revision", "tombstoned"],
+          "properties": {
+            "profile": { "type": "string", "minLength": 1 },
+            "revision": { "type": "integer", "minimum": 1 },
+            "tombstoned": { "const": true }
+          }
+        }
+      ]
+    },
+    "profile_diagnostic_page": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "server_key", "projection", "events", "items", "next_cursor", "has_more"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "server_key": { "$ref": "#/$defs/sha256" },
+        "projection": { "enum": ["minimal", "operational"] },
+        "events": { "type": "boolean" },
+        "items": { "type": "array", "items": { "type": "object" } },
+        "next_cursor": { "type": "integer", "minimum": 0 },
+        "has_more": { "type": "boolean" }
+      }
+    },
+    "profile_operation_result": {
+      "oneOf": [
+        { "$ref": "#/$defs/profile_view" },
+        { "$ref": "#/$defs/profile_show_result" },
+        { "$ref": "#/$defs/profile_doctor_result" },
+        { "$ref": "#/$defs/profile_list_result" },
+        { "$ref": "#/$defs/profile_server_status_result" },
+        { "$ref": "#/$defs/profile_server_started_result" },
+        { "$ref": "#/$defs/profile_server_restarted_result" },
+        { "$ref": "#/$defs/profile_server_stopped_result" },
+        { "$ref": "#/$defs/profile_server_migrated_result" },
+        { "$ref": "#/$defs/profile_simple_result" },
+        { "$ref": "#/$defs/profile_diagnostic_page" }
+      ]
+    },
     "accepted_generation_contract": {
       "type": "object",
       "additionalProperties": false,
@@ -665,9 +828,9 @@
       "required": [
         "profile",
         "server_key",
-        "membership_revision",
-        "valid_prefix_revision",
         "complete",
+        "revision",
+        "records",
         "orphans"
       ],
       "properties": {
@@ -682,11 +845,11 @@
           ],
           "pattern": "^[0-9a-f]{64}$"
         },
-        "membership_revision": {
+        "revision": {
           "type": "integer",
           "minimum": 0
         },
-        "valid_prefix_revision": {
+        "records": {
           "type": "integer",
           "minimum": 0
         },
@@ -1850,12 +2013,16 @@
       ]
     },
     "data": {
-      "oneOf": [
+      "$comment": "anyOf, not oneOf: the SPEC-006 stream terminator {kind:end,cursor} is byte-identical in event_data and profile_event_data, so exclusivity would make the mandated end frame unrepresentable. Which $def a command must use is pinned by the per-command if/then branches under success.",
+      "anyOf": [
         {
           "$ref": "#/$defs/workspace"
         },
         {
           "$ref": "#/$defs/profile"
+        },
+        {
+          "$ref": "#/$defs/profile_operation_result"
         },
         {
           "$ref": "#/$defs/run"
@@ -2237,38 +2404,47 @@
           }
         },
         {
-          "if": {
-            "properties": {
-              "command": {
-                "enum": [
-                  "profile.add",
-                  "profile.show",
-                  "profile.doctor",
-                  "profile.server.status",
-                  "profile.server.start",
-                  "profile.server.stop",
-                  "profile.server.restart",
-                  "profile.server.migrate",
-                  "profile.state.reset"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "data": {
-                "$ref": "#/$defs/profile"
-              }
-            }
-          }
+          "if": { "properties": { "command": { "const": "profile.add" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_view" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.show" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_show_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.doctor" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_doctor_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.server.status" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_server_status_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.server.start" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_server_started_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.server.stop" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_server_stopped_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.server.restart" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_server_restarted_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.server.migrate" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_server_migrated_result" } } }
+        },
+        {
+          "if": { "properties": { "command": { "enum": ["profile.remove", "profile.state.reset"] } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_simple_result" } } }
         },
         {
           "if": {
             "properties": {
               "command": {
                 "enum": [
-                  "profile.membership.verify",
-                  "profile.membership.tombstone_orphan"
+                  "profile.membership.verify"
                 ]
               }
             }
@@ -2280,6 +2456,10 @@
               }
             }
           }
+        },
+        {
+          "if": { "properties": { "command": { "const": "profile.membership.tombstone_orphan" } } },
+          "then": { "properties": { "data": { "$ref": "#/$defs/profile_simple_result" } } }
         },
         {
           "if": {
@@ -2294,14 +2474,12 @@
               "data": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "items"
-                ],
+                "required": ["profiles"],
                 "properties": {
-                  "items": {
+                  "profiles": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/$defs/profile"
+                      "$ref": "#/$defs/profile_view"
                     }
                   }
                 }
@@ -2320,23 +2498,7 @@
           "then": {
             "properties": {
               "data": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "items",
-                  "next_cursor"
-                ],
-                "properties": {
-                  "items": {
-                    "type": "array",
-                    "items": {
-                      "$ref": "https://dolgorae.local/schema/profile-event/v1"
-                    }
-                  },
-                  "next_cursor": {
-                    "$ref": "#/$defs/cursor_zero"
-                  }
-                }
+                "$ref": "#/$defs/profile_diagnostic_page"
               }
             }
           }
