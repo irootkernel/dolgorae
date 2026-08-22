@@ -624,7 +624,6 @@ fn spec(
 fn leaf_spec(command: &str) -> LeafSpec {
     const W: &[&str] = &["--workspace"];
     const C: &[&str] = &["--workspace", "--controller-file", "--controller-fd"];
-    const O: &[&str] = &["--workspace", "--operator-file", "--operator-fd"];
     match command {
         "serve" => spec(&["--socket", "--ready-fd"], &[], &["--socket"], 0, 0),
         "engagement.call" => spec(
@@ -725,7 +724,18 @@ fn leaf_spec(command: &str) -> LeafSpec {
         "profile.show" | "profile.remove" | "profile.membership.verify" => spec(W, &[], &[], 1, 1),
         "profile.doctor" => spec(W, &["--launch-probe", "--leave-running"], &[], 1, 1),
         "profile.server.status" | "profile.server.start" => spec(W, &[], &[], 1, 1),
-        "profile.server.stop" | "profile.server.restart" => spec(O, &["--interrupt"], &[], 1, 1),
+        "profile.server.stop" | "profile.server.restart" => spec(
+            &[
+                "--workspace",
+                "--operator-file",
+                "--operator-fd",
+                "--confirm-server-key",
+            ],
+            &["--interrupt"],
+            &[],
+            1,
+            1,
+        ),
         "profile.server.migrate" => spec(
             &[
                 "--workspace",

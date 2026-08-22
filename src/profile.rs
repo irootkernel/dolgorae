@@ -1,0 +1,3314 @@
+//! Machine-local Runtime Profile registry and Codex App Server lifecycle.
+
+use crate::darwin::DarwinSystem;
+use crate::jcs::{PayloadRepresentation, canonicalize, parse, represent_payload};
+use crate::machine::MachineError;
+use crate::workspace::{
+    LocalProfileRegistry, NativeSubagents, RuntimeProfile, WorkspaceService, parse_local_profiles,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read as _, Write as _};
+use std::os::unix::fs::{
+    FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
+use std::os::unix::io::AsRawFd as _;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+const MANIFEST: &str = include_str!("../docs/protocol/codex-0.149.0-required-subset.json");
+const SUPPORTED_CODEX_VERSION: &str = "0.149.0";
+const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
+const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ProfileView {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub codex_home: String,
+    pub environment: BTreeMap<String, String>,
+    pub native_subagents: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableIdentity {
+    pub resolved_path: String,
+    pub device: u64,
+    pub inode: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSnapshot {
+    pub schema_version: u32,
+    pub profile_name: String,
+    pub canonical_codex_home: String,
+    pub normalized_argv: Vec<String>,
+    pub launch_cwd_policy: String,
+    pub derived_launch_cwd: String,
+    pub sanitized_environment: BTreeMap<String, String>,
+    pub enabled_features: Vec<String>,
+    pub disabled_features: Vec<String>,
+    pub process_static_configuration: BTreeMap<String, Value>,
+    pub initial_configuration_observation: BTreeMap<String, Value>,
+    pub executable_identity: ExecutableIdentity,
+    pub codex_version: String,
+    pub schema_bundle_sha256: String,
+    pub compatibility_manifest_sha256: String,
+    pub launch_contract_sha256: String,
+    pub compatibility_verdict: CompatibilityVerdict,
+    pub server_key: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityVerdict {
+    Tested,
+    Unverified,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileCapabilityState {
+    Supported,
+    RecognizedUnsupported,
+    Unavailable,
+    Unverified,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerState {
+    pub schema_version: u32,
+    pub server_key: String,
+    pub lifecycle: String,
+    pub server_epoch: u64,
+    pub epoch_id: Uuid,
+    pub pid: u32,
+    pub pgid: u32,
+    pub uid: u32,
+    pub process_fingerprint: String,
+    pub drainer_pid: u32,
+    pub drainer_pgid: u32,
+    pub drainer_uid: u32,
+    pub drainer_fingerprint: String,
+    pub socket_path: String,
+    pub socket_device: u64,
+    pub socket_inode: u64,
+    pub membership_revision: u64,
+    pub default_model: String,
+    pub models: Vec<String>,
+    pub capabilities: BTreeMap<String, ProfileCapabilityState>,
+    pub snapshot: ProfileSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HomeActive {
+    schema_version: u32,
+    canonical_codex_home: String,
+    server_key: String,
+    server_epoch: u64,
+    lifecycle: String,
+    pid: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipRecord {
+    schema_version: u32,
+    revision: u64,
+    kind: String,
+    workspace_id: String,
+    run_id: Option<String>,
+    previous_sha256: String,
+    record_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipIndex {
+    schema_version: u32,
+    revision: u64,
+    journal_sha256: String,
+    active_members: BTreeMap<String, MembershipRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DoctorResult {
+    pub profile: String,
+    pub compatibility: CompatibilityVerdict,
+    pub codex_version: Option<String>,
+    pub expected_codex_home: String,
+    pub schema_bundle_sha256: Option<String>,
+    pub manifest_sha256: Option<String>,
+    pub server_key: Option<String>,
+    pub launch_probe: bool,
+    pub server_started: bool,
+    pub server_epoch: Option<u64>,
+    pub default_model: Option<String>,
+    pub models: Vec<String>,
+    pub capabilities: BTreeMap<String, ProfileCapabilityState>,
+    pub diagnostics: Vec<Value>,
+}
+
+struct Context {
+    workspace_id: String,
+    registry_path: PathBuf,
+    application_support_root: PathBuf,
+}
+
+#[derive(Debug)]
+struct ConfigurationSnapshot {
+    launch: BTreeMap<String, Value>,
+    observation: BTreeMap<String, Value>,
+}
+
+struct ProbeResult {
+    default_model: String,
+    models: Vec<String>,
+    capabilities: BTreeMap<String, ProfileCapabilityState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileOperation {
+    Add,
+    List,
+    Show,
+    Remove,
+    Doctor,
+    ServerStatus,
+    ServerStart,
+    ServerStop,
+    ServerRestart,
+    ServerMigrate,
+    MembershipVerify,
+    MembershipTombstoneOrphan,
+    StateReset,
+    DiagnosticsList,
+    Events,
+}
+
+pub const PROFILE_LOG_DRAINER_COMMAND: &str = "__profile-log-drainer";
+
+pub fn execute(operation: ProfileOperation, arguments: &[OsString]) -> Result<Value, MachineError> {
+    let parsed = Parsed::new(arguments, operation)?;
+    match operation {
+        ProfileOperation::Add => add(&parsed),
+        ProfileOperation::List => list(&parsed),
+        ProfileOperation::Show => show(&parsed),
+        ProfileOperation::Remove => remove(&parsed),
+        ProfileOperation::Doctor => doctor(&parsed),
+        ProfileOperation::ServerStatus => server_status(&parsed),
+        ProfileOperation::ServerStart => server_start(&parsed),
+        ProfileOperation::ServerStop => server_stop(&parsed, false),
+        ProfileOperation::ServerRestart => server_restart(&parsed),
+        ProfileOperation::ServerMigrate => server_migrate(&parsed),
+        ProfileOperation::MembershipVerify => membership_verify(&parsed),
+        ProfileOperation::MembershipTombstoneOrphan => membership_tombstone(&parsed),
+        ProfileOperation::StateReset => state_reset(&parsed),
+        ProfileOperation::DiagnosticsList => diagnostics(&parsed, false),
+        ProfileOperation::Events => diagnostics(&parsed, true),
+    }
+}
+
+pub fn run_log_drainer(root: &Path) -> Result<(), MachineError> {
+    verify_private_directory(root)?;
+    let log_path = root.join("server.log");
+    if log_path.exists() {
+        verify_private_regular_file(&log_path, 0o600)?;
+    } else {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&log_path)
+            .map_err(io_error)?;
+        verify_private_regular_file(&log_path, 0o600)?;
+    }
+    let stdout = File::open("/dev/fd/3").map_err(io_error)?;
+    let stderr = File::open("/dev/fd/4").map_err(io_error)?;
+    let (sender, receiver) = std::sync::mpsc::channel::<(&'static str, Option<Vec<u8>>)>();
+    for (name, mut source) in [("stdout", stdout), ("stderr", stderr)] {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match source.read(&mut buffer) {
+                    Ok(0) | Err(_) => {
+                        let _ = sender.send((name, None));
+                        break;
+                    }
+                    Ok(count) => {
+                        if sender.send((name, Some(buffer[..count].to_vec()))).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    drop(sender);
+    let mut buffers = BTreeMap::from([("stdout", Vec::new()), ("stderr", Vec::new())]);
+    let mut ended = BTreeSet::new();
+    let mut sink_available = true;
+    while ended.len() < 2 {
+        let (name, chunk) = receiver
+            .recv()
+            .map_err(|_| transport("profile log drainer channels closed early"))?;
+        let buffer = buffers.get_mut(name).expect("known stream");
+        let Some(chunk) = chunk else {
+            if !buffer.is_empty() && sink_available {
+                sink_available = write_log_line(root, name, buffer).is_ok();
+            }
+            buffer.clear();
+            ended.insert(name);
+            continue;
+        };
+        buffer.extend_from_slice(&chunk);
+        while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line = buffer.drain(..=index).collect::<Vec<_>>();
+            if sink_available {
+                sink_available = write_log_line(root, name, &line).is_ok();
+            }
+        }
+        if buffer.len() > usize::try_from(MAX_LOG_BYTES).expect("1 MiB fits usize") {
+            if sink_available {
+                sink_available =
+                    write_log_line(root, name, b"[DOLGORAE_LOG_LINE_DROPPED]\n").is_ok();
+            }
+            buffer.clear();
+        }
+    }
+    if !sink_available {
+        let _ = append_diagnostic(root, "log_sink_degraded", json!({}));
+    }
+    Ok(())
+}
+
+fn write_log_line(root: &Path, stream: &str, raw: &[u8]) -> Result<(), MachineError> {
+    let rendered = String::from_utf8_lossy(raw);
+    let body = match represent_payload(rendered.as_bytes()) {
+        PayloadRepresentation::Represented {
+            canonical_bytes, ..
+        } => format!("[{stream}] {}\n", String::from_utf8_lossy(&canonical_bytes)),
+        PayloadRepresentation::Unrepresentable(_) => {
+            format!("[{stream}] [DOLGORAE_LOG_LINE_DROPPED]\n")
+        }
+    };
+    let path = root.join("server.log");
+    let current = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+    if current.saturating_add(body.len() as u64) > MAX_LOG_BYTES {
+        let rotated = root.join("server.log.1");
+        if rotated.exists() {
+            fs::remove_file(&rotated).map_err(io_error)?;
+        }
+        if path.exists() {
+            fs::rename(&path, &rotated).map_err(io_error)?;
+            fs::set_permissions(&rotated, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
+        }
+    }
+    let mut sink = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(io_error)?;
+    verify_private_regular_file(&path, 0o600)?;
+    sink.write_all(body.as_bytes()).map_err(io_error)
+}
+
+fn add(parsed: &Parsed) -> Result<Value, MachineError> {
+    let name = parsed.required_positional(0, "profile name")?;
+    let context = context(parsed.path("--workspace")?.as_deref())?;
+    let codex_home = parsed.required("--codex-home")?;
+    if !Path::new(&codex_home).is_absolute() {
+        return Err(MachineError::profile_config_invalid(
+            &context.registry_path,
+            "--codex-home must be absolute",
+        ));
+    }
+    if parsed.required("--native-subagents")? != "enabled" {
+        return Err(MachineError::new(
+            "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE",
+            "public Runtime Profiles require native subagents enabled",
+            false,
+            json!({"profile": name}),
+        ));
+    }
+    let argv = parsed.trailing.clone();
+    if argv.is_empty() {
+        return Err(MachineError::invalid_argument(
+            "argv",
+            "a direct Codex executable is required after --",
+        ));
+    }
+    let environment = parsed.environment()?;
+    let _config_lock = config_lock(&context)?;
+    let mut registry = load_registry(&context)?;
+    if registry.profiles.contains_key(&name) {
+        return Err(MachineError::new(
+            "PROFILE_ALREADY_EXISTS",
+            "profile already exists",
+            false,
+            json!({"profile": name}),
+        ));
+    }
+    registry.profiles.insert(
+        name.clone(),
+        RuntimeProfile {
+            argv,
+            codex_home,
+            environment,
+            native_subagents: NativeSubagents::Enabled,
+        },
+    );
+    store_registry(&context, &registry)?;
+    let validated = parse_local_profiles(&context.registry_path)?;
+    let profile = validated.profiles.get(&name).expect("stored profile");
+    serde_json::to_value(profile_view(&name, profile)).map_err(internal)
+}
+
+fn list(parsed: &Parsed) -> Result<Value, MachineError> {
+    parsed.reject_positionals_and_trailing()?;
+    let context = context(parsed.path("--workspace")?.as_deref())?;
+    let registry = load_registry(&context)?;
+    let profiles = registry
+        .profiles
+        .iter()
+        .map(|(name, profile)| profile_view(name, profile))
+        .collect::<Vec<_>>();
+    Ok(json!({"profiles": profiles}))
+}
+
+fn show(parsed: &Parsed) -> Result<Value, MachineError> {
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let _ = context;
+    serde_json::to_value(profile_view(&name, &profile)).map_err(internal)
+}
+
+fn remove(parsed: &Parsed) -> Result<Value, MachineError> {
+    let name = parsed.required_positional(0, "profile name")?;
+    let context = context(parsed.path("--workspace")?.as_deref())?;
+    let _config_lock = config_lock(&context)?;
+    let mut registry = load_registry(&context)?;
+    if registry.profiles.remove(&name).is_none() {
+        return Err(profile_not_found(&name));
+    }
+    store_registry(&context, &registry)?;
+    Ok(json!({"profile": name, "removed": true}))
+}
+
+fn doctor(parsed: &Parsed) -> Result<Value, MachineError> {
+    let launch_probe = parsed.flag("--launch-probe");
+    let leave_running = parsed.flag("--leave-running");
+    if leave_running && !launch_probe {
+        return Err(MachineError::invalid_argument(
+            "--leave-running",
+            "--leave-running requires --launch-probe",
+        ));
+    }
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = match snapshot_for(&context, &name, &profile) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.code == "COMPATIBILITY_REJECTED" => {
+            return serde_json::to_value(DoctorResult {
+                profile: name,
+                compatibility: CompatibilityVerdict::Rejected,
+                codex_version: None,
+                expected_codex_home: profile.codex_home,
+                schema_bundle_sha256: None,
+                manifest_sha256: Some(sha256_hex(MANIFEST.as_bytes())),
+                server_key: None,
+                launch_probe,
+                server_started: false,
+                server_epoch: None,
+                default_model: None,
+                models: Vec::new(),
+                capabilities: BTreeMap::new(),
+                diagnostics: vec![json!({
+                    "code": error.code,
+                    "message": error.message,
+                    "details": error.details,
+                })],
+            })
+            .map_err(internal);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut started = false;
+    let mut probed_state = None;
+    if launch_probe {
+        let state_path = profile_state_path(&context, &snapshot);
+        probed_state = read_state_if_running(&state_path)?;
+        if probed_state.is_none() {
+            probed_state = Some(start_snapshot(&context, &snapshot)?);
+            started = true;
+        }
+        if started && !leave_running {
+            stop_snapshot(&context, &snapshot, false)?;
+        }
+    }
+    serde_json::to_value(DoctorResult {
+        profile: name,
+        compatibility: snapshot.compatibility_verdict,
+        codex_version: Some(snapshot.codex_version.clone()),
+        expected_codex_home: snapshot.canonical_codex_home.clone(),
+        schema_bundle_sha256: Some(snapshot.schema_bundle_sha256.clone()),
+        manifest_sha256: Some(snapshot.compatibility_manifest_sha256.clone()),
+        server_key: Some(snapshot.server_key.clone()),
+        launch_probe,
+        server_started: launch_probe && (leave_running || !started),
+        server_epoch: probed_state.as_ref().map(|state| state.server_epoch),
+        default_model: probed_state
+            .as_ref()
+            .map(|state| state.default_model.clone()),
+        models: probed_state
+            .as_ref()
+            .map_or_else(Vec::new, |state| state.models.clone()),
+        capabilities: probed_state
+            .as_ref()
+            .map_or_else(BTreeMap::new, |state| state.capabilities.clone()),
+        diagnostics: if snapshot.compatibility_verdict == CompatibilityVerdict::Unverified {
+            vec![json!({
+                "code": "CODEX_VERSION_UNVERIFIED",
+                "message": "the compatible newer Codex version is not the tested baseline",
+            })]
+        } else {
+            Vec::new()
+        },
+    })
+    .map_err(internal)
+}
+
+fn server_status(parsed: &Parsed) -> Result<Value, MachineError> {
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let state = read_state_if_running(&profile_state_path(&context, &snapshot))?;
+    Ok(json!({
+        "profile": name,
+        "server_key": snapshot.server_key,
+        "lifecycle": state.as_ref().map_or("stopped", |value| value.lifecycle.as_str()),
+        "state": state,
+    }))
+}
+
+fn server_start(parsed: &Parsed) -> Result<Value, MachineError> {
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let state = start_snapshot(&context, &snapshot)?;
+    Ok(json!({"profile": name, "started": true, "state": state}))
+}
+
+fn server_stop(parsed: &Parsed, allow_without_operator: bool) -> Result<Value, MachineError> {
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    if !allow_without_operator {
+        parsed.require_operator()?;
+    }
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let interrupt = parsed.flag("--interrupt");
+    require_interrupt_confirmation(parsed, &snapshot, interrupt)?;
+    let stopped = stop_snapshot(&context, &snapshot, interrupt)?;
+    Ok(json!({"profile": name, "server_key": snapshot.server_key, "stopped": stopped}))
+}
+
+fn server_restart(parsed: &Parsed) -> Result<Value, MachineError> {
+    parsed.require_operator()?;
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let interrupt = parsed.flag("--interrupt");
+    require_interrupt_confirmation(parsed, &snapshot, interrupt)?;
+    stop_snapshot(&context, &snapshot, interrupt)?;
+    let state = start_snapshot(&context, &snapshot)?;
+    Ok(json!({"profile": name, "restarted": true, "state": state}))
+}
+
+fn require_interrupt_confirmation(
+    parsed: &Parsed,
+    snapshot: &ProfileSnapshot,
+    interrupt: bool,
+) -> Result<(), MachineError> {
+    if interrupt && parsed.required("--confirm-server-key")? != snapshot.server_key {
+        return Err(MachineError::new(
+            "PROFILE_CONFIRMATION_MISMATCH",
+            "--interrupt requires the exact server key confirmation",
+            false,
+            json!({"server_key": snapshot.server_key}),
+        ));
+    }
+    Ok(())
+}
+
+fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
+    parsed.require_operator()?;
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let old = parsed.required("--confirm-old-server-key")?;
+    let new = parsed.required("--confirm-new-server-key")?;
+    if new != snapshot.server_key || old == new {
+        return Err(MachineError::new(
+            "PROFILE_MIGRATION_MISMATCH",
+            "confirmed server keys do not describe a migration",
+            false,
+            json!({"old_server_key": old, "new_server_key": new}),
+        ));
+    }
+    let old_root = context.application_support_root.join("profiles").join(&old);
+    let old_state = read_state_if_running(&old_root.join("state.json"))?.ok_or_else(|| {
+        MachineError::new(
+            "PROFILE_MIGRATION_SOURCE_UNAVAILABLE",
+            "the confirmed old server is not running",
+            false,
+            json!({"old_server_key": old}),
+        )
+    })?;
+    if old_state.server_key != old
+        || old_state.snapshot.canonical_codex_home != snapshot.canonical_codex_home
+    {
+        return Err(MachineError::new(
+            "PROFILE_MIGRATION_MISMATCH",
+            "old and new contracts do not share the confirmed account home",
+            false,
+            json!({}),
+        ));
+    }
+    let old_records = replay_membership(&old_root.join("membership.jsonl"))?;
+    let old_index = derive_membership_index(&old_root, &old_records)?;
+    verify_membership_index(&old_root, &old_index)?;
+    let orphans = membership_orphans(&context, &old_state.snapshot, &old_index)?;
+    if !orphans.is_empty() {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "migration source membership is incomplete",
+            false,
+            json!({"orphans": orphans}),
+        ));
+    }
+    if !old_index.active_members.is_empty() && !parsed.flag("--interrupt") {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_LIVE",
+            "migration with live members requires explicit --interrupt",
+            false,
+            json!({"members": old_index.active_members.len()}),
+        ));
+    }
+    let migration_id = Uuid::now_v7();
+    let home_root = home_root(&context, &snapshot.canonical_codex_home)?;
+    let migration_path = home_root.join("migration.json");
+    let mut migration = json!({
+        "schema_version": 1,
+        "migration_id": migration_id,
+        "old_server_key": old,
+        "new_server_key": new,
+        "old_epoch": old_state.server_epoch,
+        "new_epoch": null,
+        "old_version": old_state.snapshot.codex_version,
+        "new_version": snapshot.codex_version,
+        "old_executable_sha256": old_state.snapshot.executable_identity.sha256,
+        "new_executable_sha256": snapshot.executable_identity.sha256,
+        "old_schema_sha256": old_state.snapshot.schema_bundle_sha256,
+        "new_schema_sha256": snapshot.schema_bundle_sha256,
+        "old_manifest_sha256": old_state.snapshot.compatibility_manifest_sha256,
+        "new_manifest_sha256": snapshot.compatibility_manifest_sha256,
+        "phase": "prepared",
+    });
+    atomic_replace(
+        &migration_path,
+        &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+    )?;
+    if let Err(error) = stop_snapshot(&context, &old_state.snapshot, parsed.flag("--interrupt")) {
+        migration["phase"] = Value::String("rolled_back".to_owned());
+        migration["failure"] = Value::String(error.code.clone());
+        atomic_replace(
+            &migration_path,
+            &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+        )?;
+        return Err(error);
+    }
+    migration["phase"] = Value::String("applying".to_owned());
+    atomic_replace(
+        &migration_path,
+        &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+    )?;
+    let new_state = match start_snapshot_for_migration(&context, &snapshot, migration_id) {
+        Ok(state) => state,
+        Err(error) => {
+            let restored =
+                start_snapshot_for_migration(&context, &old_state.snapshot, migration_id);
+            migration["phase"] = Value::String(
+                if restored.is_ok() {
+                    "rolled_back"
+                } else {
+                    "migration_blocked"
+                }
+                .to_owned(),
+            );
+            migration["failure"] = Value::String(error.code.clone());
+            atomic_replace(
+                &migration_path,
+                &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+            )?;
+            return Err(error);
+        }
+    };
+    migration["new_epoch"] = Value::from(new_state.server_epoch);
+    migration["phase"] = Value::String("committed".to_owned());
+    atomic_replace(
+        &migration_path,
+        &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+    )?;
+    Ok(json!({
+        "profile": name,
+        "migrated": true,
+        "migration_id": migration_id,
+        "server_key": new,
+        "server_epoch": new_state.server_epoch,
+    }))
+}
+
+fn membership_verify(parsed: &Parsed) -> Result<Value, MachineError> {
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let root = profile_root(&context, &snapshot);
+    let records = replay_membership(&root.join("membership.jsonl"))?;
+    let index = derive_membership_index(&root, &records)?;
+    verify_membership_index(&root, &index)?;
+    let orphans = membership_orphans(&context, &snapshot, &index)?;
+    Ok(json!({
+        "profile": name,
+        "server_key": snapshot.server_key,
+        "complete": orphans.is_empty(),
+        "revision": records.last().map_or(0, |record| record.revision),
+        "records": records.len(),
+        "orphans": orphans,
+    }))
+}
+
+fn membership_tombstone(parsed: &Parsed) -> Result<Value, MachineError> {
+    parsed.require_operator()?;
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    if parsed.required("--confirm-server-key")? != snapshot.server_key {
+        return Err(MachineError::new(
+            "PROFILE_MISMATCH",
+            "server-key confirmation differs",
+            false,
+            json!({"profile": name}),
+        ));
+    }
+    let workspace = parsed.required("--confirm-workspace-id")?;
+    let run = parsed.required("--confirm-run-id")?;
+    let root = profile_root(&context, &snapshot);
+    let records = replay_membership(&root.join("membership.jsonl"))?;
+    let index = derive_membership_index(&root, &records)?;
+    let orphans = membership_orphans(&context, &snapshot, &index)?;
+    if !orphans
+        .iter()
+        .any(|value| value["workspace_id"] == workspace && value["run_id"] == run)
+    {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_NOT_ORPHANED",
+            "the confirmed member is not a verified orphan",
+            false,
+            json!({"workspace_id": workspace, "run_id": run}),
+        ));
+    }
+    let revision = append_membership(
+        &root.join("membership.jsonl"),
+        "tombstone_orphan",
+        &workspace,
+        Some(run),
+    )?;
+    let state_path = root.join("state.json");
+    if let Some(mut state) = read_state(&state_path)? {
+        state.membership_revision = revision;
+        atomic_replace(
+            &state_path,
+            &serde_json::to_vec_pretty(&state).map_err(internal)?,
+        )?;
+    }
+    Ok(json!({"profile": name, "revision": revision, "tombstoned": true}))
+}
+
+fn state_reset(parsed: &Parsed) -> Result<Value, MachineError> {
+    parsed.require_operator()?;
+    if !parsed.flag("--require-server-absence") {
+        return Err(MachineError::invalid_argument(
+            "--require-server-absence",
+            "state reset requires explicit server absence proof",
+        ));
+    }
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    if parsed.required("--confirm-server-key")? != snapshot.server_key {
+        return Err(MachineError::new(
+            "PROFILE_MISMATCH",
+            "server-key confirmation differs",
+            false,
+            json!({"profile": name}),
+        ));
+    }
+    let state_path = profile_state_path(&context, &snapshot);
+    if read_state_if_running(&state_path)?.is_some() {
+        return Err(MachineError::new(
+            "PROFILE_SERVER_RUNNING",
+            "profile server is still running",
+            false,
+            json!({"profile": name}),
+        ));
+    }
+    if let Some(state) = read_state(&state_path)?
+        && (process_exists(state.drainer_pid) || Path::new(&state.socket_path).exists())
+    {
+        return Err(MachineError::new(
+            "PROFILE_SERVER_RUNNING",
+            "profile process, drainer, or socket absence is not proven",
+            false,
+            json!({"profile": name}),
+        ));
+    }
+    if state_path.exists() {
+        fs::remove_file(&state_path).map_err(io_error)?;
+        sync_parent(&state_path)?;
+    }
+    let home = home_root(&context, &snapshot.canonical_codex_home)?;
+    if home.exists() {
+        let _home_lock = lock_file(&home.join("home.lock"))?;
+        clear_home_active(&home.join("active.json"), &snapshot.server_key)?;
+    }
+    Ok(json!({"profile": name, "reset": true}))
+}
+
+fn diagnostics(parsed: &Parsed, events: bool) -> Result<Value, MachineError> {
+    if parsed.flag("--follow") {
+        return Err(MachineError::invalid_argument(
+            "--follow",
+            "follow delivery is owned by the TASK-006 connection runtime",
+        ));
+    }
+    let projection = parsed
+        .values
+        .get("--projection")
+        .and_then(|values| values.last())
+        .map_or("minimal", String::as_str);
+    if projection == "operational" {
+        parsed.require_operator()?;
+    } else if projection != "minimal" {
+        return Err(MachineError::invalid_argument(
+            "--projection",
+            "projection must be minimal or operational",
+        ));
+    }
+    let after = parsed
+        .values
+        .get("--after")
+        .and_then(|values| values.last())
+        .map_or(Ok(0_usize), |value| value.parse::<usize>())
+        .map_err(|_| MachineError::invalid_argument("--after", "cursor must be an integer"))?;
+    let limit = parsed
+        .values
+        .get("--limit")
+        .and_then(|values| values.last())
+        .map_or(Ok(100_usize), |value| value.parse::<usize>())
+        .map_err(|_| MachineError::invalid_argument("--limit", "limit must be an integer"))?;
+    if limit == 0 || limit > 1000 {
+        return Err(MachineError::invalid_argument(
+            "--limit",
+            "limit must be between 1 and 1000",
+        ));
+    }
+    let (context, name, profile, _) = selected_profile_from(parsed)?;
+    let snapshot = snapshot_for(&context, &name, &profile)?;
+    let path = profile_root(&context, &snapshot).join("diagnostics.jsonl");
+    let bytes = if path.exists() {
+        fs::read(&path).map_err(io_error)?
+    } else {
+        Vec::new()
+    };
+    if bytes.len() as u64 > MAX_DIAGNOSTIC_BYTES {
+        return Err(transport("profile diagnostic journal exceeds 8 MiB"));
+    }
+    let total = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .count();
+    let values = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .skip(after)
+        .take(limit)
+        .map(|line| serde_json::from_slice::<Value>(line).map_err(internal))
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = after + values.len();
+    Ok(json!({
+        "profile": name,
+        "server_key": snapshot.server_key,
+        "projection": projection,
+        "events": events,
+        "items": values,
+        "next_cursor": next_cursor,
+        "has_more": total > next_cursor,
+    }))
+}
+
+fn selected_profile_from(
+    parsed: &Parsed,
+) -> Result<(Context, String, RuntimeProfile, Parsed), MachineError> {
+    let name = parsed.required_positional(0, "profile name")?;
+    let context = context(parsed.path("--workspace")?.as_deref())?;
+    let registry = load_registry(&context)?;
+    let profile = registry
+        .profiles
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| profile_not_found(&name))?;
+    Ok((context, name, profile, parsed.clone()))
+}
+
+fn context(workspace: Option<&Path>) -> Result<Context, MachineError> {
+    let service = WorkspaceService::system()?;
+    let view = service.discover(workspace)?;
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| MachineError::runtime_path_invalid("HOME", "HOME is not set"))?;
+    let application_support_root = fs::canonicalize(home)
+        .map_err(io_error)?
+        .join("Library/Application Support/Dolgorae");
+    let state_root = application_support_root
+        .join("workspaces")
+        .join(&view.workspace_id);
+    Ok(Context {
+        workspace_id: view.workspace_id,
+        registry_path: state_root.join("local.yaml"),
+        application_support_root,
+    })
+}
+
+fn load_registry(context: &Context) -> Result<LocalProfileRegistry, MachineError> {
+    verify_private_regular_file(&context.registry_path, 0o600)?;
+    parse_local_profiles(&context.registry_path)
+}
+
+fn store_registry(context: &Context, registry: &LocalProfileRegistry) -> Result<(), MachineError> {
+    let bytes = serde_yaml_ng::to_string(registry)
+        .map_err(internal)?
+        .into_bytes();
+    if bytes.len() as u64 > MAX_REGISTRY_BYTES {
+        return Err(MachineError::profile_config_invalid(
+            &context.registry_path,
+            "profile registry exceeds 1 MiB",
+        ));
+    }
+    let parent = context
+        .registry_path
+        .parent()
+        .ok_or_else(|| transport("profile registry has no parent"))?;
+    verify_private_regular_file(&context.registry_path, 0o600)?;
+    let temporary = parent.join(format!(".local-{}.yaml", Uuid::now_v7()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(io_error)?;
+    file.write_all(&bytes).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    if let Err(error) = parse_local_profiles(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    fs::rename(&temporary, &context.registry_path).map_err(io_error)?;
+    sync_parent(&context.registry_path)
+}
+
+fn config_lock(context: &Context) -> Result<File, MachineError> {
+    let parent = context
+        .registry_path
+        .parent()
+        .ok_or_else(|| transport("profile registry has no parent"))?;
+    verify_private_directory(parent)?;
+    lock_file(&parent.join("local.lock"))
+}
+
+fn profile_view(name: &str, profile: &RuntimeProfile) -> ProfileView {
+    ProfileView {
+        name: name.to_owned(),
+        argv: profile.argv.clone(),
+        codex_home: profile.codex_home.clone(),
+        environment: profile.environment.clone(),
+        native_subagents: "enabled".to_owned(),
+    }
+}
+
+fn snapshot_for(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+) -> Result<ProfileSnapshot, MachineError> {
+    let executable = Path::new(&profile.argv[0]);
+    let canonical_executable = fs::canonicalize(executable).map_err(|error| {
+        MachineError::profile_config_invalid(&context.registry_path, error.to_string())
+    })?;
+    let metadata = fs::metadata(&canonical_executable).map_err(io_error)?;
+    let executable_identity = ExecutableIdentity {
+        resolved_path: path_utf8(&canonical_executable)?.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        sha256: file_sha256(&canonical_executable)?,
+    };
+    let canonical_codex_home = fs::canonicalize(&profile.codex_home).map_err(|error| {
+        MachineError::profile_config_invalid(&context.registry_path, format!("CODEX_HOME: {error}"))
+    })?;
+    let canonical_codex_home = path_utf8(&canonical_codex_home)?.to_owned();
+    let version = codex_version(profile, &canonical_executable)?;
+    let schema_root = generate_schema(profile, &canonical_executable)?;
+    let result = (|| {
+        compare_required_subset(&schema_root.join("stable"))?;
+        let schema_bundle_sha256 = directory_sha256(&schema_root.join("stable"))?;
+        verify_exact_bundle_digests(&schema_root, &version, &schema_bundle_sha256)?;
+        let compatibility_manifest_sha256 = sha256_hex(MANIFEST.as_bytes());
+        let verdict = version_verdict(&version)?;
+        let normalized_argv = normalized_argv(profile, &canonical_executable)?;
+        let mut sanitized_environment = prepared_environment(profile)?;
+        sanitized_environment.insert("CODEX_HOME".to_owned(), canonical_codex_home.clone());
+        let enabled_features = vec!["multi_agent".to_owned()];
+        let disabled_features = Vec::new();
+        let configuration = configuration_snapshot(profile, &canonical_codex_home)?;
+        let process_static_configuration = configuration.launch;
+        let initial_configuration_observation = configuration.observation;
+        let launch_contract = json!({
+            "schema_version": 1,
+            "canonical_codex_home": canonical_codex_home,
+            "normalized_argv": normalized_argv,
+            "launch_cwd_policy": "profile_state_directory_v1",
+            "launch_mode": "app_server_unix_socket_v1",
+            "sanitized_environment": sanitized_environment,
+            "executable_identity": executable_identity,
+            "process_static_configuration": process_static_configuration,
+            "codex_version": version,
+            "app_server_schema_sha256": schema_bundle_sha256,
+            "compatibility_manifest_sha256": compatibility_manifest_sha256,
+            "enabled_features": enabled_features,
+            "disabled_features": disabled_features,
+        });
+        let launch_contract_sha256 = canonical_sha256(&launch_contract)?;
+        let server_key =
+            domain_separated_sha256(b"dolgorae-profile-server-key-v1\0", &launch_contract)?;
+        let derived_launch_cwd = context
+            .application_support_root
+            .join("profiles")
+            .join(&server_key);
+        Ok(ProfileSnapshot {
+            schema_version: 1,
+            profile_name: name.to_owned(),
+            canonical_codex_home,
+            normalized_argv,
+            launch_cwd_policy: "profile_state_directory_v1".to_owned(),
+            derived_launch_cwd: path_utf8(&derived_launch_cwd)?.to_owned(),
+            sanitized_environment,
+            enabled_features,
+            disabled_features,
+            process_static_configuration,
+            initial_configuration_observation,
+            executable_identity,
+            codex_version: version,
+            schema_bundle_sha256,
+            compatibility_manifest_sha256,
+            launch_contract_sha256,
+            compatibility_verdict: verdict,
+            server_key,
+        })
+    })();
+    let _ = fs::remove_dir_all(&schema_root);
+    result
+}
+
+fn configuration_snapshot(
+    profile: &RuntimeProfile,
+    canonical_codex_home: &str,
+) -> Result<ConfigurationSnapshot, MachineError> {
+    let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
+    let classes = manifest["profile_launch"]["configuration_fields"]
+        .as_object()
+        .ok_or_else(|| compatibility("configuration classification manifest is missing"))?;
+    let mut classification = BTreeMap::<String, String>::new();
+    for category in [
+        "process_static",
+        "operator_migratable",
+        "runtime_mutable",
+        "ignored",
+    ] {
+        let names = classes[category]
+            .as_array()
+            .ok_or_else(|| compatibility("configuration classification category is invalid"))?;
+        for name in names {
+            let name = name
+                .as_str()
+                .ok_or_else(|| compatibility("configuration field name is invalid"))?;
+            if classification
+                .insert(name.to_owned(), category.to_owned())
+                .is_some()
+            {
+                return Err(compatibility("configuration field is classified twice"));
+            }
+        }
+    }
+    let home = Path::new(canonical_codex_home);
+    let mut effective = read_toml_table_if_present(&home.join("config.toml"))?;
+    let selected = selected_codex_profile(&profile.argv);
+    if let Some(selected) = selected {
+        if let Some(profiles) = effective.remove("profiles")
+            && let Some(table) = profiles
+                .as_table()
+                .and_then(|profiles| profiles.get(selected))
+                .and_then(toml::Value::as_table)
+        {
+            for (key, value) in table {
+                effective.insert(key.clone(), value.clone());
+            }
+        }
+        let selected_path = home.join(format!("{selected}.config.toml"));
+        for (key, value) in read_toml_table_if_present(&selected_path)? {
+            effective.insert(key, value);
+        }
+    }
+    for name in effective.keys() {
+        if name.contains("include") || !classification.contains_key(name) {
+            return Err(compatibility(format!(
+                "configuration field {name:?} has no closed classification"
+            )));
+        }
+    }
+    let mut launch = BTreeMap::new();
+    let mut observation = BTreeMap::new();
+    for (name, category) in classification {
+        let value = effective
+            .get(&name)
+            .map(toml_to_json)
+            .transpose()?
+            .unwrap_or(Value::Null);
+        match category.as_str() {
+            "process_static" | "operator_migratable" => {
+                launch.insert(name, value);
+            }
+            "runtime_mutable" | "ignored" => {
+                observation.insert(name, value);
+            }
+            _ => return Err(compatibility("unknown configuration classification")),
+        }
+    }
+    Ok(ConfigurationSnapshot {
+        launch,
+        observation,
+    })
+}
+
+fn read_toml_table_if_present(
+    path: &Path,
+) -> Result<toml::map::Map<String, toml::Value>, MachineError> {
+    if !path.exists() {
+        return Ok(toml::map::Map::new());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != DarwinSystem.current_uid()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() > MAX_REGISTRY_BYTES
+    {
+        return Err(compatibility(format!(
+            "configuration input is not a bounded regular file: {}",
+            path.display()
+        )));
+    }
+    let text = fs::read_to_string(path).map_err(|_| {
+        compatibility(format!(
+            "configuration input is unreadable: {}",
+            path.display()
+        ))
+    })?;
+    text.parse::<toml::Table>().map_err(|_| {
+        compatibility(format!(
+            "configuration input is invalid: {}",
+            path.display()
+        ))
+    })
+}
+
+fn selected_codex_profile(argv: &[String]) -> Option<&str> {
+    argv.windows(2)
+        .find(|pair| pair[0] == "--profile")
+        .map(|pair| pair[1].as_str())
+}
+
+fn toml_to_json(value: &toml::Value) -> Result<Value, MachineError> {
+    serde_json::to_value(value).map_err(internal)
+}
+
+fn codex_version(profile: &RuntimeProfile, executable: &Path) -> Result<String, MachineError> {
+    let mut command = Command::new(executable);
+    command.arg("--version");
+    apply_environment(&mut command, &prepared_environment(profile)?);
+    let output = command.output().map_err(transport)?;
+    if !output.status.success() || output.stdout.len() > 4096 {
+        return Err(compatibility(
+            "Codex --version failed or exceeded its bound",
+        ));
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|_| compatibility("Codex version is not UTF-8"))?;
+    let version = text.split_whitespace().last().unwrap_or_default();
+    if version.is_empty() {
+        return Err(compatibility("Codex version is missing"));
+    }
+    Ok(version.to_owned())
+}
+
+fn version_verdict(version: &str) -> Result<CompatibilityVerdict, MachineError> {
+    let actual = parse_version(version)?;
+    let supported = parse_version(SUPPORTED_CODEX_VERSION)?;
+    if actual < supported {
+        return Err(compatibility(
+            "Codex version is older than the supported baseline",
+        ));
+    }
+    Ok(if actual == supported {
+        CompatibilityVerdict::Tested
+    } else {
+        CompatibilityVerdict::Unverified
+    })
+}
+
+fn parse_version(value: &str) -> Result<(u64, u64, u64), MachineError> {
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(compatibility("Codex version is not semantic x.y.z"));
+    }
+    Ok((
+        parts[0]
+            .parse()
+            .map_err(|_| compatibility("invalid Codex major version"))?,
+        parts[1]
+            .parse()
+            .map_err(|_| compatibility("invalid Codex minor version"))?,
+        parts[2]
+            .parse()
+            .map_err(|_| compatibility("invalid Codex patch version"))?,
+    ))
+}
+
+fn generate_schema(profile: &RuntimeProfile, executable: &Path) -> Result<PathBuf, MachineError> {
+    let root = std::env::temp_dir().join(format!("dolgorae-schema-{}", Uuid::now_v7()));
+    secure_dir(&root)?;
+    let stable = root.join("stable");
+    let experimental = root.join("experimental");
+    for (destination, include_experimental) in [(&stable, false), (&experimental, true)] {
+        let mut command = Command::new(executable);
+        for argument in profile.argv.iter().skip(1) {
+            command.arg(argument);
+        }
+        command.args([
+            "--enable",
+            "multi_agent",
+            "app-server",
+            "generate-json-schema",
+            "--out",
+        ]);
+        command.arg(destination);
+        if include_experimental {
+            command.arg("--experimental");
+        }
+        apply_environment(&mut command, &prepared_environment(profile)?);
+        let status = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(transport)?;
+        if !status.success() {
+            let _ = fs::remove_dir_all(&root);
+            return Err(compatibility("Codex schema generation failed"));
+        }
+    }
+    Ok(root)
+}
+
+fn compare_required_subset(stable: &Path) -> Result<(), MachineError> {
+    let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
+    let constraints = manifest["schema_constraints"]
+        .as_array()
+        .ok_or_else(|| compatibility("required-subset manifest lacks schema_constraints"))?;
+    for constraint in constraints {
+        let file = constraint["file"]
+            .as_str()
+            .ok_or_else(|| compatibility("constraint file is invalid"))?;
+        let pointer = constraint["pointer"]
+            .as_str()
+            .ok_or_else(|| compatibility("constraint pointer is invalid"))?;
+        let source = stable.join(file);
+        let document = read_json(&source)?;
+        let value = resolve_pointer(&source, &document, pointer)?;
+        verify_constraint(file, pointer, value.as_ref(), constraint)?;
+    }
+    Ok(())
+}
+
+fn verify_constraint(
+    file: &str,
+    pointer: &str,
+    value: Option<&Value>,
+    constraint: &Value,
+) -> Result<(), MachineError> {
+    let fail = || {
+        compatibility(format!(
+            "required schema constraint failed at {file}#{pointer}"
+        ))
+    };
+    if constraint.get("absent") == Some(&Value::Bool(true)) {
+        return if value.is_none() { Ok(()) } else { Err(fail()) };
+    }
+    let value = value.ok_or_else(fail)?;
+    if let Some(expected) = constraint.get("equals")
+        && value != expected
+    {
+        return Err(fail());
+    }
+    if let Some(required) = constraint.get("contains").and_then(Value::as_array) {
+        let actual = value.as_array().ok_or_else(fail)?;
+        if required.iter().any(|item| !actual.contains(item)) {
+            return Err(fail());
+        }
+    }
+    if let Some(required) = constraint
+        .get("one_of_enum_contains")
+        .and_then(Value::as_array)
+    {
+        let branches = value
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .or_else(|| value.as_array())
+            .ok_or_else(fail)?;
+        let actual = branches
+            .iter()
+            .filter_map(|branch| branch.get("enum"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .collect::<Vec<_>>();
+        if required.iter().any(|item| !actual.contains(&item)) {
+            return Err(fail());
+        }
+    }
+    if let Some(spec) = constraint.get("one_of_property_enum_contains") {
+        let property = spec["property"].as_str().ok_or_else(fail)?;
+        let required = spec["values"].as_array().ok_or_else(fail)?;
+        let branches = value
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .or_else(|| value.as_array())
+            .ok_or_else(fail)?;
+        let actual = branches
+            .iter()
+            .filter_map(|branch| branch.get("properties"))
+            .filter_map(|properties| properties.get(property))
+            .filter_map(|node| node.get("enum").or_else(|| node.get("const")))
+            .flat_map(enum_or_scalar)
+            .collect::<Vec<_>>();
+        if required.iter().any(|item| !actual.contains(&item)) {
+            return Err(fail());
+        }
+    }
+    if let Some(spec) = constraint.get("one_of_title_required_contains") {
+        let title = spec["title"].as_str().ok_or_else(fail)?;
+        let required = spec["required"].as_array().ok_or_else(fail)?;
+        let branches = value
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .or_else(|| value.as_array())
+            .ok_or_else(fail)?;
+        let branch = branches
+            .iter()
+            .find(|branch| branch["title"] == title)
+            .ok_or_else(fail)?;
+        let actual = branch["required"].as_array().ok_or_else(fail)?;
+        if required.iter().any(|item| !actual.contains(item)) {
+            return Err(fail());
+        }
+    }
+    if let Some(spec) = constraint.get("one_of_title_property_contains") {
+        let title = spec["title"].as_str().ok_or_else(fail)?;
+        let required = spec["properties"].as_array().ok_or_else(fail)?;
+        let branches = value
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .or_else(|| value.as_array())
+            .ok_or_else(fail)?;
+        let branch = branches
+            .iter()
+            .find(|branch| branch["title"] == title)
+            .ok_or_else(fail)?;
+        let actual = branch["properties"].as_object().ok_or_else(fail)?;
+        if required
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|item| !actual.contains_key(item))
+        {
+            return Err(fail());
+        }
+    }
+    Ok(())
+}
+
+fn enum_or_scalar(value: &Value) -> Vec<&Value> {
+    value
+        .as_array()
+        .map_or_else(|| vec![value], |array| array.iter().collect())
+}
+
+fn resolve_pointer(
+    source: &Path,
+    document: &Value,
+    pointer: &str,
+) -> Result<Option<Value>, MachineError> {
+    let Some(value) = document.pointer(pointer) else {
+        return Ok(None);
+    };
+    resolve_refs(source, document, value.clone(), &mut BTreeSet::new()).map(Some)
+}
+
+fn resolve_refs(
+    source: &Path,
+    document: &Value,
+    value: Value,
+    visited: &mut BTreeSet<String>,
+) -> Result<Value, MachineError> {
+    let Some(reference) = value.get("$ref").and_then(Value::as_str) else {
+        return Ok(value);
+    };
+    let identity = format!("{}#{reference}", source.display());
+    if !visited.insert(identity) {
+        return Err(compatibility("schema contains a cyclic $ref"));
+    }
+    let (target_file, fragment) = reference.split_once('#').unwrap_or((reference, ""));
+    let (target_source, target_document) = if target_file.is_empty() {
+        (source.to_path_buf(), document.clone())
+    } else {
+        let target = source
+            .parent()
+            .ok_or_else(|| compatibility("schema source has no parent"))?
+            .join(target_file);
+        let loaded = read_json(&target)?;
+        (target, loaded)
+    };
+    let pointer = if fragment.is_empty() { "" } else { fragment };
+    let target = target_document
+        .pointer(pointer)
+        .cloned()
+        .ok_or_else(|| compatibility(format!("unresolved schema $ref {reference}")))?;
+    resolve_refs(&target_source, &target_document, target, visited)
+}
+
+fn verify_exact_bundle_digests(
+    root: &Path,
+    version: &str,
+    stable_digest: &str,
+) -> Result<(), MachineError> {
+    if version != SUPPORTED_CODEX_VERSION {
+        return Ok(());
+    }
+    let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
+    let expected_stable = manifest["stable_schema_bundle_sha256"]
+        .as_str()
+        .ok_or_else(|| compatibility("manifest stable bundle digest is missing"))?;
+    let expected_experimental = manifest["experimental_schema_bundle_sha256"]
+        .as_str()
+        .ok_or_else(|| compatibility("manifest experimental bundle digest is missing"))?;
+    let actual_experimental = directory_sha256(&root.join("experimental"))?;
+    if stable_digest != expected_stable || actual_experimental != expected_experimental {
+        return Err(compatibility(
+            "exact-version schema bundle digest differs from the checked manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_argv(
+    profile: &RuntimeProfile,
+    executable: &Path,
+) -> Result<Vec<String>, MachineError> {
+    let mut argv = vec![path_utf8(executable)?.to_owned()];
+    argv.extend(profile.argv.iter().skip(1).cloned());
+    if !argv.iter().any(|argument| argument == "--strict-config") {
+        argv.push("--strict-config".to_owned());
+    }
+    argv.extend(["--enable".to_owned(), "multi_agent".to_owned()]);
+    Ok(argv)
+}
+
+fn prepared_environment(
+    profile: &RuntimeProfile,
+) -> Result<BTreeMap<String, String>, MachineError> {
+    validate_locale(&profile.environment["LANG"])?;
+    validate_locale(&profile.environment["LC_ALL"])?;
+    let mut environment = profile.environment.clone();
+    environment.insert("CODEX_HOME".to_owned(), profile.codex_home.clone());
+    for name in ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"] {
+        let value = std::env::var(name).map_err(|_| {
+            MachineError::profile_config_invalid(
+                name,
+                format!("required account environment {name} is unavailable"),
+            )
+        })?;
+        if value.is_empty() {
+            return Err(MachineError::profile_config_invalid(
+                name,
+                "environment value is empty",
+            ));
+        }
+        environment.insert(name.to_owned(), value);
+    }
+    Ok(environment)
+}
+
+fn validate_locale(locale: &str) -> Result<(), MachineError> {
+    let output = Command::new("/usr/bin/locale")
+        .arg("-a")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .map_err(transport)?;
+    if !output.status.success()
+        || !output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .any(|candidate| candidate == locale.as_bytes())
+    {
+        return Err(MachineError::profile_config_invalid(
+            "locale",
+            format!("locale {locale:?} is not available from the platform locale database"),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_environment(command: &mut Command, environment: &BTreeMap<String, String>) {
+    command.env_clear();
+    command.envs(environment);
+}
+
+fn start_snapshot(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+) -> Result<ServerState, MachineError> {
+    start_snapshot_inner(context, snapshot, None)
+}
+
+fn start_snapshot_for_migration(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    migration_id: Uuid,
+) -> Result<ServerState, MachineError> {
+    start_snapshot_inner(context, snapshot, Some(migration_id))
+}
+
+fn start_snapshot_inner(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    migration_id: Option<Uuid>,
+) -> Result<ServerState, MachineError> {
+    if snapshot.compatibility_verdict == CompatibilityVerdict::Rejected {
+        return Err(compatibility("rejected profile cannot start"));
+    }
+    let root = profile_root(context, snapshot);
+    secure_dir(&root)?;
+    let home_root = home_root(context, &snapshot.canonical_codex_home)?;
+    secure_dir(&home_root)?;
+    let home_lock = lock_file(&home_root.join("home.lock"))?;
+    let lock = lock_file(&root.join("server.lock"))?;
+    verify_migration_fence(&home_root.join("migration.json"), migration_id)?;
+    let state_path = root.join("state.json");
+    if let Some(state) = read_state_if_running(&state_path)? {
+        let active = read_home_active(&home_root.join("active.json"))?.ok_or_else(|| {
+            MachineError::new(
+                "PROFILE_IDENTITY_INCOMPLETE",
+                "running profile lacks its home active contract",
+                false,
+                json!({"server_key": snapshot.server_key}),
+            )
+        })?;
+        if active.server_key != state.server_key
+            || active.server_epoch != state.server_epoch
+            || active.pid != Some(state.pid)
+            || active.lifecycle != "ready"
+        {
+            return Err(MachineError::new(
+                "PROFILE_IDENTITY_INCOMPLETE",
+                "running profile and home active contract disagree",
+                false,
+                json!({"server_key": snapshot.server_key}),
+            ));
+        }
+        drop(lock);
+        drop(home_lock);
+        return Ok(state);
+    }
+    let active_path = home_root.join("active.json");
+    if let Some(active) = read_home_active(&active_path)?
+        && active.server_key != snapshot.server_key
+    {
+        return Err(MachineError::new(
+            "PROFILE_LAUNCH_CONFLICT",
+            "another launch contract is active for this CODEX_HOME",
+            false,
+            json!({"active_server_key": active.server_key, "requested_server_key": snapshot.server_key}),
+        ));
+    }
+    let socket = socket_path(&snapshot.server_key)?;
+    if let Ok(metadata) = fs::symlink_metadata(&socket) {
+        if !metadata.file_type().is_socket() {
+            return Err(MachineError::new(
+                "PROFILE_SOCKET_COLLISION",
+                "profile socket path is occupied",
+                false,
+                json!({"path": socket}),
+            ));
+        }
+        let stale = read_state(&state_path)?.ok_or_else(|| {
+            MachineError::new(
+                "PROFILE_SOCKET_COLLISION",
+                "profile socket lacks an identity-complete stale record",
+                false,
+                json!({"path": socket}),
+            )
+        })?;
+        if stale.server_key != snapshot.server_key
+            || stale.socket_path != path_utf8(&socket)?
+            || stale.socket_device != metadata.dev()
+            || stale.socket_inode != metadata.ino()
+            || process_exists(stale.pid)
+        {
+            return Err(MachineError::new(
+                "PROFILE_SOCKET_COLLISION",
+                "profile socket does not match the verified stale identity",
+                false,
+                json!({"path": socket}),
+            ));
+        }
+        fs::remove_file(&socket).map_err(io_error)?;
+    }
+    let epoch = reserve_epoch(&root.join("epoch"))?;
+    write_home_active(
+        &active_path,
+        &HomeActive {
+            schema_version: 1,
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            server_key: snapshot.server_key.clone(),
+            server_epoch: epoch,
+            lifecycle: "starting".to_owned(),
+            pid: None,
+        },
+    )?;
+    let (stdout_read, stdout_write) = UnixStream::pair().map_err(io_error)?;
+    let (stderr_read, stderr_write) = UnixStream::pair().map_err(io_error)?;
+    let mut drainer_command = Command::new(std::env::current_exe().map_err(io_error)?);
+    drainer_command
+        .arg(PROFILE_LOG_DRAINER_COMMAND)
+        .arg("--root")
+        .arg(&root)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut drainer = DarwinSystem
+        .spawn_detached_with_log_fds(
+            &mut drainer_command,
+            stdout_read.as_raw_fd(),
+            stderr_read.as_raw_fd(),
+        )
+        .map_err(transport)?;
+    let drainer_pid = drainer.id();
+    drop(stdout_read);
+    drop(stderr_read);
+    let drainer_identity = match wait_for_drainer_identity(drainer_pid) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = drainer.kill();
+            let _ = drainer.wait();
+            clear_home_active(&active_path, &snapshot.server_key)?;
+            return Err(transport(error));
+        }
+    };
+    std::mem::forget(drainer);
+    let mut command = Command::new(&snapshot.normalized_argv[0]);
+    command.args(&snapshot.normalized_argv[1..]);
+    command.args(["app-server", "--listen"]);
+    command.arg(format!("unix://{}", path_utf8(&socket)?));
+    command.current_dir(&snapshot.derived_launch_cwd);
+    apply_environment(&mut command, &snapshot.sanitized_environment);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::os::fd::OwnedFd::from(stdout_write)))
+        .stderr(Stdio::from(std::os::fd::OwnedFd::from(stderr_write)));
+    let mut child = match DarwinSystem.spawn_detached(&mut command) {
+        Ok(child) => child,
+        Err(error) => {
+            cleanup_verified_process(&drainer_identity);
+            clear_home_active(&active_path, &snapshot.server_key)?;
+            return Err(transport(error));
+        }
+    };
+    let pid = child.id();
+    let mut process_identity = match wait_for_app_identity(pid) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            cleanup_verified_process(&drainer_identity);
+            clear_home_active(&active_path, &snapshot.server_key)?;
+            return Err(transport(error));
+        }
+    };
+    std::mem::forget(child);
+    write_home_active(
+        &active_path,
+        &HomeActive {
+            schema_version: 1,
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            server_key: snapshot.server_key.clone(),
+            server_epoch: epoch,
+            lifecycle: "starting".to_owned(),
+            pid: Some(pid),
+        },
+    )?;
+    if let Err(error) = wait_for_socket(&socket, pid) {
+        cleanup_failed_start(&socket, &process_identity, &drainer_identity);
+        clear_home_active(&active_path, &snapshot.server_key)?;
+        return Err(error);
+    }
+    process_identity = match wait_for_app_identity(pid) {
+        Ok(identity) => identity,
+        Err(error) => {
+            cleanup_failed_start(&socket, &process_identity, &drainer_identity);
+            clear_home_active(&active_path, &snapshot.server_key)?;
+            return Err(transport(error));
+        }
+    };
+    if process_identity.uid != DarwinSystem.current_uid()
+        || process_identity.process_group_id != pid
+    {
+        cleanup_failed_start(&socket, &process_identity, &drainer_identity);
+        clear_home_active(&active_path, &snapshot.server_key)?;
+        return Err(transport("app-server process identity is invalid"));
+    }
+    let post_start = (|| -> Result<ServerState, MachineError> {
+        let metadata = fs::symlink_metadata(&socket).map_err(io_error)?;
+        if !metadata.file_type().is_socket() {
+            return Err(transport("app-server did not bind a Unix socket"));
+        }
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
+        let probe = probe_server(&socket, &snapshot.canonical_codex_home)?;
+        let membership_path = root.join("membership.jsonl");
+        append_membership(
+            &membership_path,
+            "server_started",
+            &context.workspace_id,
+            None,
+        )?;
+        let membership_revision = replay_membership(&membership_path)?
+            .last()
+            .map_or(0, |record| record.revision);
+        let state = ServerState {
+            schema_version: 1,
+            server_key: snapshot.server_key.clone(),
+            lifecycle: "ready".to_owned(),
+            server_epoch: epoch,
+            epoch_id: Uuid::now_v7(),
+            pid,
+            pgid: pid,
+            uid: process_identity.uid,
+            process_fingerprint: process_identity.fingerprint.clone(),
+            drainer_pid,
+            drainer_pgid: drainer_pid,
+            drainer_uid: drainer_identity.uid,
+            drainer_fingerprint: drainer_identity.fingerprint.clone(),
+            socket_path: path_utf8(&socket)?.to_owned(),
+            socket_device: metadata.dev(),
+            socket_inode: metadata.ino(),
+            membership_revision,
+            default_model: probe.default_model,
+            models: probe.models,
+            capabilities: probe.capabilities,
+            snapshot: snapshot.clone(),
+        };
+        atomic_replace(
+            &state_path,
+            &serde_json::to_vec_pretty(&state).map_err(internal)?,
+        )?;
+        write_home_active(
+            &active_path,
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                server_key: snapshot.server_key.clone(),
+                server_epoch: epoch,
+                lifecycle: "ready".to_owned(),
+                pid: Some(pid),
+            },
+        )?;
+        append_diagnostic(&root, "server_ready", json!({"pid": pid, "epoch": epoch}))?;
+        Ok(state)
+    })();
+    let state = match post_start {
+        Ok(state) => state,
+        Err(error) => {
+            cleanup_failed_start(&socket, &process_identity, &drainer_identity);
+            clear_home_active(&active_path, &snapshot.server_key)?;
+            return Err(error);
+        }
+    };
+    drop(lock);
+    drop(home_lock);
+    Ok(state)
+}
+
+fn wait_for_drainer_identity(
+    pid: u32,
+) -> Result<crate::darwin::LiveProcessIdentity, std::io::Error> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = None;
+    loop {
+        if let Ok(identity) = DarwinSystem.live_process_identity(pid)
+            && identity.process_group_id == pid
+            && identity.fingerprint.contains("__profile-log-drainer")
+        {
+            if previous.as_ref() == Some(&identity) {
+                return Ok(identity);
+            }
+            previous = Some(identity);
+        } else {
+            previous = None;
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "profile log drainer did not establish a stable identity",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_app_identity(pid: u32) -> Result<crate::darwin::LiveProcessIdentity, std::io::Error> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = None;
+    loop {
+        if let Ok(identity) = DarwinSystem.live_process_identity(pid)
+            && identity.process_group_id == pid
+            && identity.fingerprint.contains("app-server")
+        {
+            if previous.as_ref() == Some(&identity) {
+                return Ok(identity);
+            }
+            previous = Some(identity);
+        } else {
+            previous = None;
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "app-server did not establish a stable identity",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn verify_migration_fence(path: &Path, authorized: Option<Uuid>) -> Result<(), MachineError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    verify_private_regular_file(path, 0o600)?;
+    let value: Value = serde_json::from_slice(&fs::read(path).map_err(io_error)?)
+        .map_err(|_| transport("migration transaction is invalid"))?;
+    let phase = value["phase"].as_str().unwrap_or_default();
+    if !matches!(phase, "prepared" | "applying") {
+        return Ok(());
+    }
+    let recorded = value["migration_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok());
+    if recorded == authorized {
+        return Ok(());
+    }
+    Err(MachineError::new(
+        "PROFILE_MIGRATION_IN_PROGRESS",
+        "the CODEX_HOME is fenced by an active migration",
+        true,
+        json!({"migration_id": value["migration_id"]}),
+    ))
+}
+
+fn stop_snapshot(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    interrupt: bool,
+) -> Result<bool, MachineError> {
+    let root = profile_root(context, snapshot);
+    secure_dir(&root)?;
+    let home_root = home_root(context, &snapshot.canonical_codex_home)?;
+    secure_dir(&home_root)?;
+    let home_lock = lock_file(&home_root.join("home.lock"))?;
+    let lock = lock_file(&root.join("server.lock"))?;
+    let state_path = root.join("state.json");
+    let Some(state) = read_state_if_running(&state_path)? else {
+        return Ok(false);
+    };
+    if state.server_key != snapshot.server_key
+        || state.pid != state.pgid
+        || state.uid != DarwinSystem.current_uid()
+        || state.drainer_pid != state.drainer_pgid
+        || state.drainer_uid != DarwinSystem.current_uid()
+    {
+        return Err(MachineError::new(
+            "PROFILE_IDENTITY_INCOMPLETE",
+            "profile process identity is incomplete",
+            false,
+            json!({"server_key": snapshot.server_key}),
+        ));
+    }
+    verify_live_process_identity(&state)?;
+    let membership = replay_membership(&root.join("membership.jsonl"))?;
+    if membership.last().map_or(0, |record| record.revision) != state.membership_revision {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "membership journal and server state revisions differ",
+            false,
+            json!({"server_key": snapshot.server_key}),
+        ));
+    }
+    if interrupt {
+        append_diagnostic(&root, "operator_interrupt", json!({"pid": state.pid}))?;
+    }
+    DarwinSystem
+        .signal_process_group(state.pgid, libc::SIGTERM)
+        .map_err(transport)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_exists(state.pid) && Instant::now() < deadline {
+        if DarwinSystem.reap_child_nonblocking(state.pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if process_exists(state.pid) {
+        verify_live_process_identity(&state)?;
+        DarwinSystem
+            .signal_process_group(state.pgid, libc::SIGKILL)
+            .map_err(transport)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_exists(state.pid) && Instant::now() < deadline {
+            if DarwinSystem.reap_child_nonblocking(state.pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    let _ = DarwinSystem.reap_child_nonblocking(state.pid);
+    if process_exists(state.pid) {
+        return Err(transport("profile process group did not terminate"));
+    }
+    stop_drainer(&state)?;
+    let socket = Path::new(&state.socket_path);
+    if let Ok(metadata) = fs::symlink_metadata(socket) {
+        if metadata.dev() != state.socket_device
+            || metadata.ino() != state.socket_inode
+            || !metadata.file_type().is_socket()
+        {
+            return Err(MachineError::new(
+                "PROFILE_SOCKET_COLLISION",
+                "profile socket identity changed",
+                false,
+                json!({"path": state.socket_path}),
+            ));
+        }
+        fs::remove_file(socket).map_err(io_error)?;
+    }
+    fs::remove_file(&state_path).map_err(io_error)?;
+    sync_parent(&state_path)?;
+    clear_home_active(&home_root.join("active.json"), &snapshot.server_key)?;
+    append_diagnostic(
+        &root,
+        "server_stopped",
+        json!({"pid": state.pid, "epoch": state.server_epoch}),
+    )?;
+    drop(lock);
+    drop(home_lock);
+    Ok(true)
+}
+
+fn verify_live_process_identity(state: &ServerState) -> Result<(), MachineError> {
+    let live = DarwinSystem.live_process_identity(state.pid).map_err(|_| {
+        MachineError::new(
+            "PROFILE_IDENTITY_INCOMPLETE",
+            "profile process identity is unavailable",
+            false,
+            json!({"server_key": state.server_key}),
+        )
+    })?;
+    if live.uid != state.uid
+        || live.process_group_id != state.pgid
+        || live.fingerprint != state.process_fingerprint
+    {
+        return Err(MachineError::new(
+            "PROFILE_IDENTITY_INCOMPLETE",
+            "profile process identity changed",
+            false,
+            json!({"server_key": state.server_key}),
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_failed_start(
+    socket: &Path,
+    process: &crate::darwin::LiveProcessIdentity,
+    drainer: &crate::darwin::LiveProcessIdentity,
+) {
+    cleanup_verified_process(process);
+    let _ = DarwinSystem.reap_child_nonblocking(process.process_group_id);
+    cleanup_verified_process(drainer);
+    if let Ok(metadata) = fs::symlink_metadata(socket)
+        && metadata.file_type().is_socket()
+        && metadata.uid() == DarwinSystem.current_uid()
+    {
+        let _ = fs::remove_file(socket);
+    }
+}
+
+fn cleanup_verified_process(expected: &crate::darwin::LiveProcessIdentity) {
+    let pid = expected.process_group_id;
+    let verified = DarwinSystem
+        .live_process_identity(pid)
+        .is_ok_and(|live| live == *expected);
+    if !verified {
+        return;
+    }
+    let _ = DarwinSystem.signal_process_group(pid, libc::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while process_exists(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if process_exists(pid)
+        && DarwinSystem
+            .live_process_identity(pid)
+            .is_ok_and(|live| live == *expected)
+    {
+        let _ = DarwinSystem.signal_process_group(pid, libc::SIGKILL);
+    }
+}
+
+fn stop_drainer(state: &ServerState) -> Result<(), MachineError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while process_exists(state.drainer_pid) && Instant::now() < deadline {
+        if DarwinSystem.reap_child_nonblocking(state.drainer_pid) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if !process_exists(state.drainer_pid) {
+        return Ok(());
+    }
+    let live = DarwinSystem
+        .live_process_identity(state.drainer_pid)
+        .map_err(transport)?;
+    if live.uid != state.drainer_uid
+        || live.process_group_id != state.drainer_pgid
+        || live.fingerprint != state.drainer_fingerprint
+    {
+        return Err(MachineError::new(
+            "PROFILE_IDENTITY_INCOMPLETE",
+            "profile log drainer identity changed",
+            false,
+            json!({"server_key": state.server_key}),
+        ));
+    }
+    DarwinSystem
+        .signal_process_group(state.drainer_pgid, libc::SIGTERM)
+        .map_err(transport)
+}
+
+fn read_state_if_running(path: &Path) -> Result<Option<ServerState>, MachineError> {
+    let Some(state) = read_state(path)? else {
+        return Ok(None);
+    };
+    if process_exists(state.pid) {
+        Ok(Some(state))
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_state(path: &Path) -> Result<Option<ServerState>, MachineError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(io_error)?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        MachineError::new(
+            "PROFILE_STATE_INVALID",
+            "profile state is invalid",
+            false,
+            json!({"reason": error.to_string()}),
+        )
+    })
+}
+
+fn process_exists(pid: u32) -> bool {
+    DarwinSystem.process_exists(pid)
+}
+
+fn wait_for_socket(path: &Path, pid: u32) -> Result<(), MachineError> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            return Ok(());
+        }
+        if !process_exists(pid) {
+            return Err(transport("app-server exited before binding its socket"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(MachineError::new(
+        "OPERATION_TIMEOUT",
+        "profile server startup timed out",
+        false,
+        json!({"timeout_seconds": 10}),
+    ))
+}
+
+fn probe_server(socket: &Path, expected_codex_home: &str) -> Result<ProbeResult, MachineError> {
+    let mut stream = UnixStream::connect(socket).map_err(transport)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(transport)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(transport)?;
+    let key = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        Uuid::now_v7().as_bytes(),
+    );
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+    .map_err(transport)?;
+    stream.flush().map_err(transport)?;
+    let response = read_http_upgrade(&mut stream)?;
+    let lower = response.to_ascii_lowercase();
+    if !response.starts_with("HTTP/1.1 101 ")
+        || !lower.contains("upgrade: websocket")
+        || !lower.contains("connection: upgrade")
+    {
+        return Err(transport("app-server rejected WebSocket upgrade"));
+    }
+    websocket_json(
+        &mut stream,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "dolgorae", "title": "Dolgorae", "version": env!("CARGO_PKG_VERSION")},
+                "capabilities": {"experimentalApi": false, "optOutNotificationMethods": []}
+            }
+        }),
+    )?;
+    let initialized = websocket_response(&mut stream, 1)?;
+    if initialized["codexHome"].as_str() != Some(expected_codex_home) {
+        return Err(MachineError::new(
+            "PROFILE_MISMATCH",
+            "app-server codexHome differs from the immutable profile snapshot",
+            false,
+            json!({"expected_codex_home": expected_codex_home, "actual_codex_home": initialized["codexHome"]}),
+        ));
+    }
+    websocket_json(&mut stream, &json!({"method":"initialized","params":{}}))?;
+    websocket_json(
+        &mut stream,
+        &json!({"id":2,"method":"account/read","params":{"refreshToken":false}}),
+    )?;
+    let account = websocket_response(&mut stream, 2)?;
+    if !account["requiresOpenaiAuth"].is_boolean() {
+        return Err(compatibility("account/read lacks requiresOpenaiAuth"));
+    }
+    let mut cursor = Value::Null;
+    let mut request_id = 3_u64;
+    let mut models = BTreeSet::new();
+    let mut default_count = 0_usize;
+    let mut default_model = None;
+    loop {
+        websocket_json(
+            &mut stream,
+            &json!({"id":request_id,"method":"model/list","params":{"cursor":cursor,"limit":100}}),
+        )?;
+        let page = websocket_response(&mut stream, request_id)?;
+        let data = page["data"]
+            .as_array()
+            .ok_or_else(|| compatibility("model/list response lacks data"))?;
+        for model in data {
+            let name = model["model"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| compatibility("model/list item lacks model identity"))?;
+            if !models.insert(name.to_owned()) {
+                return Err(compatibility("model/list returned a duplicate model"));
+            }
+            if model["isDefault"].as_bool() == Some(true) {
+                default_count += 1;
+                default_model = Some(name.to_owned());
+            }
+            if !model["supportedReasoningEfforts"].is_array() {
+                return Err(compatibility("model/list item lacks reasoning efforts"));
+            }
+        }
+        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.is_null() {
+            break;
+        }
+        if !cursor.is_string() || request_id >= 1000 {
+            return Err(compatibility(
+                "model/list pagination is invalid or unbounded",
+            ));
+        }
+        request_id += 1;
+    }
+    if models.is_empty() || default_count != 1 {
+        return Err(compatibility(
+            "model/list must contain exactly one default model",
+        ));
+    }
+    let absent_id = request_id + 1;
+    websocket_json(
+        &mut stream,
+        &json!({
+            "id": absent_id,
+            "method": "thread/read",
+            "params": {"threadId": Uuid::now_v7(), "includeTurns": true}
+        }),
+    )?;
+    websocket_expected_error(&mut stream, absent_id, -32600)?;
+    websocket_close(&mut stream)?;
+    let mut capabilities = BTreeMap::new();
+    for name in [
+        "account_read",
+        "app_server_initialize",
+        "early_response_id",
+        "model_list",
+        "thread_absence_error",
+    ] {
+        capabilities.insert(name.to_owned(), ProfileCapabilityState::Supported);
+    }
+    capabilities.insert(
+        "native_subagent_lifecycle".to_owned(),
+        ProfileCapabilityState::Unverified,
+    );
+    Ok(ProbeResult {
+        default_model: default_model.expect("exactly one default model"),
+        models: models.into_iter().collect(),
+        capabilities,
+    })
+}
+
+fn websocket_expected_error(
+    stream: &mut UnixStream,
+    id: u64,
+    expected_code: i64,
+) -> Result<(), MachineError> {
+    for _ in 0..4096 {
+        let message = websocket_message(stream)?;
+        if message.len() > 128 && !message[..128].windows(4).any(|bytes| bytes == b"\"id\"") {
+            return Err(compatibility(
+                "probe response did not expose its correlation ID within the early bound",
+            ));
+        }
+        let value: Value = serde_json::from_slice(&message)
+            .map_err(|_| transport("app-server emitted invalid JSON"))?;
+        if value["id"].as_u64() == Some(id) {
+            if value["error"]["code"].as_i64() != Some(expected_code) {
+                return Err(compatibility(
+                    "absent-thread probe returned an unexpected error",
+                ));
+            }
+            return Ok(());
+        }
+    }
+    Err(transport(
+        "app-server error response correlation bound exceeded",
+    ))
+}
+
+fn read_http_upgrade(stream: &mut UnixStream) -> Result<String, MachineError> {
+    let mut bytes = Vec::new();
+    let mut byte = [0_u8; 1];
+    while bytes.len() < 16 * 1024 {
+        stream.read_exact(&mut byte).map_err(transport)?;
+        bytes.push(byte[0]);
+        if bytes.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(bytes)
+                .map_err(|_| transport("WebSocket upgrade response is not UTF-8"));
+        }
+    }
+    Err(transport("WebSocket upgrade response exceeds 16 KiB"))
+}
+
+fn websocket_json(stream: &mut UnixStream, value: &Value) -> Result<(), MachineError> {
+    let bytes = serde_json::to_vec(value).map_err(internal)?;
+    websocket_frame(stream, 0x1, &bytes)
+}
+
+fn websocket_close(stream: &mut UnixStream) -> Result<(), MachineError> {
+    websocket_frame(stream, 0x8, &1000_u16.to_be_bytes())
+}
+
+fn websocket_frame(
+    stream: &mut UnixStream,
+    opcode: u8,
+    payload: &[u8],
+) -> Result<(), MachineError> {
+    if payload.len() > 8 * 1024 * 1024 {
+        return Err(transport("WebSocket probe frame exceeds 8 MiB"));
+    }
+    let mut header = vec![0x80 | opcode];
+    match payload.len() {
+        length @ 0..=125 => header.push(0x80 | u8::try_from(length).expect("bounded")),
+        length @ 126..=65_535 => {
+            header.push(0x80 | 126);
+            header.extend(u16::try_from(length).expect("bounded").to_be_bytes());
+        }
+        length => {
+            header.push(0x80 | 127);
+            header.extend(u64::try_from(length).expect("bounded").to_be_bytes());
+        }
+    }
+    let digest = Sha256::digest(Uuid::now_v7().as_bytes());
+    let mask = &digest[..4];
+    header.extend(mask);
+    stream.write_all(&header).map_err(transport)?;
+    let masked = payload
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ mask[index % 4])
+        .collect::<Vec<_>>();
+    stream.write_all(&masked).map_err(transport)?;
+    stream.flush().map_err(transport)
+}
+
+fn websocket_response(stream: &mut UnixStream, id: u64) -> Result<Value, MachineError> {
+    for _ in 0..4096 {
+        let message = websocket_message(stream)?;
+        let value: Value = serde_json::from_slice(&message)
+            .map_err(|_| transport("app-server emitted invalid JSON"))?;
+        if value["id"].as_u64() == Some(id) {
+            if let Some(error) = value.get("error") {
+                return Err(compatibility(format!(
+                    "app-server rejected probe request: {error}"
+                )));
+            }
+            return value
+                .get("result")
+                .cloned()
+                .ok_or_else(|| transport("app-server response lacks result"));
+        }
+    }
+    Err(transport("app-server response correlation bound exceeded"))
+}
+
+fn websocket_message(stream: &mut UnixStream) -> Result<Vec<u8>, MachineError> {
+    let mut message = Vec::new();
+    let mut expected_opcode = None;
+    loop {
+        let mut prefix = [0_u8; 2];
+        stream.read_exact(&mut prefix).map_err(transport)?;
+        let final_frame = prefix[0] & 0x80 != 0;
+        let opcode = prefix[0] & 0x0f;
+        if prefix[1] & 0x80 != 0 {
+            return Err(transport("server WebSocket frame is unexpectedly masked"));
+        }
+        let mut length = u64::from(prefix[1] & 0x7f);
+        if length == 126 {
+            let mut bytes = [0_u8; 2];
+            stream.read_exact(&mut bytes).map_err(transport)?;
+            length = u64::from(u16::from_be_bytes(bytes));
+        } else if length == 127 {
+            let mut bytes = [0_u8; 8];
+            stream.read_exact(&mut bytes).map_err(transport)?;
+            length = u64::from_be_bytes(bytes);
+        }
+        let length =
+            usize::try_from(length).map_err(|_| transport("WebSocket length is invalid"))?;
+        if length > 8 * 1024 * 1024 || message.len().saturating_add(length) > 8 * 1024 * 1024 {
+            return Err(transport("WebSocket message exceeds 8 MiB"));
+        }
+        let mut payload = vec![0_u8; length];
+        stream.read_exact(&mut payload).map_err(transport)?;
+        match opcode {
+            0x0 => {
+                if expected_opcode.is_none() {
+                    return Err(transport("unexpected continuation frame"));
+                }
+                message.extend(payload);
+            }
+            0x1 => {
+                if expected_opcode.replace(opcode).is_some() {
+                    return Err(transport("nested data frame"));
+                }
+                message.extend(payload);
+            }
+            0x8 => return Err(transport("app-server closed the probe connection")),
+            0x9 => websocket_frame(stream, 0xA, &payload)?,
+            0xA => {}
+            _ => return Err(transport("unsupported WebSocket probe opcode")),
+        }
+        if final_frame && matches!(opcode, 0x0 | 0x1) {
+            return Ok(message);
+        }
+    }
+}
+
+fn profile_root(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
+    context
+        .application_support_root
+        .join("profiles")
+        .join(&snapshot.server_key)
+}
+
+fn profile_state_path(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
+    profile_root(context, snapshot).join("state.json")
+}
+
+fn home_root(context: &Context, canonical_codex_home: &str) -> Result<PathBuf, MachineError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"dolgorae-home-v1\0");
+    hasher.update(canonical_codex_home.as_bytes());
+    Ok(context
+        .application_support_root
+        .join("homes")
+        .join(format!("{:x}", hasher.finalize())))
+}
+
+fn read_home_active(path: &Path) -> Result<Option<HomeActive>, MachineError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    verify_private_regular_file(path, 0o600)?;
+    let bytes = fs::read(path).map_err(io_error)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| transport("home active contract is invalid"))
+}
+
+fn write_home_active(path: &Path, active: &HomeActive) -> Result<(), MachineError> {
+    atomic_replace(path, &serde_json::to_vec_pretty(active).map_err(internal)?)
+}
+
+fn clear_home_active(path: &Path, server_key: &str) -> Result<(), MachineError> {
+    let Some(active) = read_home_active(path)? else {
+        return Ok(());
+    };
+    if active.server_key != server_key {
+        return Err(MachineError::new(
+            "PROFILE_LAUNCH_CONFLICT",
+            "home active contract changed during lifecycle operation",
+            false,
+            json!({"active_server_key": active.server_key, "expected_server_key": server_key}),
+        ));
+    }
+    fs::remove_file(path).map_err(io_error)?;
+    sync_parent(path)
+}
+
+fn socket_path(server_key: &str) -> Result<PathBuf, MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let root = PathBuf::from(format!("/tmp/dolgorae-{uid}/p"));
+    secure_dir(root.parent().expect("socket parent"))?;
+    secure_dir(&root)?;
+    let bytes = (0..40)
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&server_key[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| transport("server key is not hexadecimal"))?;
+    Ok(root.join(format!(
+        "{}.sock",
+        data_encoding::BASE32_NOPAD.encode(&bytes)
+    )))
+}
+
+fn reserve_epoch(path: &Path) -> Result<u64, MachineError> {
+    let current = if path.exists() {
+        fs::read_to_string(path)
+            .map_err(io_error)?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| transport("profile epoch is invalid"))?
+    } else {
+        0
+    };
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| transport("profile epoch exhausted"))?;
+    atomic_replace(path, format!("{next}\n").as_bytes())?;
+    Ok(next)
+}
+
+fn append_membership(
+    path: &Path,
+    kind: &str,
+    workspace_id: &str,
+    run_id: Option<String>,
+) -> Result<u64, MachineError> {
+    if path.exists() {
+        verify_private_regular_file(path, 0o600)?;
+    }
+    let records = replay_membership(path)?;
+    let revision = records.last().map_or(1, |record| record.revision + 1);
+    let previous = records
+        .last()
+        .map_or_else(|| "0".repeat(64), |record| record.record_sha256.clone());
+    let body = json!({"schema_version":1,"revision":revision,"kind":kind,"workspace_id":workspace_id,"run_id":run_id,"previous_sha256":previous});
+    let record = MembershipRecord {
+        schema_version: 1,
+        revision,
+        kind: kind.to_owned(),
+        workspace_id: workspace_id.to_owned(),
+        run_id: body["run_id"].as_str().map(str::to_owned),
+        previous_sha256: body["previous_sha256"].as_str().expect("string").to_owned(),
+        record_sha256: canonical_sha256(&body)?,
+    };
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(io_error)?;
+    serde_json::to_writer(&mut file, &record).map_err(internal)?;
+    file.write_all(b"\n").map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    sync_parent(path)?;
+    let records = replay_membership(path)?;
+    let root = path
+        .parent()
+        .ok_or_else(|| transport("membership journal has no parent"))?;
+    let index = derive_membership_index(root, &records)?;
+    atomic_replace(
+        &root.join("members.json"),
+        &serde_json::to_vec_pretty(&index).map_err(internal)?,
+    )?;
+    Ok(revision)
+}
+
+fn derive_membership_index(
+    root: &Path,
+    records: &[MembershipRecord],
+) -> Result<MembershipIndex, MachineError> {
+    let mut active_members = BTreeMap::new();
+    for record in records {
+        let Some(run_id) = record.run_id.as_ref() else {
+            continue;
+        };
+        let identity = format!("{}:{run_id}", record.workspace_id);
+        match record.kind.as_str() {
+            "run_registered" | "run_state_changed" => {
+                active_members.insert(identity, record.clone());
+            }
+            "run_removed" | "run_closed" | "tombstone_orphan" | "run_migrated" => {
+                active_members.remove(&identity);
+            }
+            _ => {}
+        }
+    }
+    let journal = root.join("membership.jsonl");
+    let journal_sha256 = if journal.exists() {
+        file_sha256(&journal)?
+    } else {
+        sha256_hex(&[])
+    };
+    Ok(MembershipIndex {
+        schema_version: 1,
+        revision: records.last().map_or(0, |record| record.revision),
+        journal_sha256,
+        active_members,
+    })
+}
+
+fn verify_membership_index(root: &Path, expected: &MembershipIndex) -> Result<(), MachineError> {
+    let path = root.join("members.json");
+    if !path.exists() {
+        if expected.revision == 0 {
+            return Ok(());
+        }
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "derived membership index is missing",
+            false,
+            json!({}),
+        ));
+    }
+    verify_private_regular_file(&path, 0o600)?;
+    let actual: MembershipIndex = serde_json::from_slice(&fs::read(&path).map_err(io_error)?)
+        .map_err(|_| transport("derived membership index is invalid"))?;
+    if actual != *expected {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "derived membership index disagrees with the journal",
+            false,
+            json!({}),
+        ));
+    }
+    Ok(())
+}
+
+fn membership_orphans(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    index: &MembershipIndex,
+) -> Result<Vec<Value>, MachineError> {
+    let mut orphans = Vec::new();
+    for record in index.active_members.values() {
+        let Some(run_id) = record.run_id.as_ref() else {
+            continue;
+        };
+        let manifest_path = context
+            .application_support_root
+            .join("workspaces")
+            .join(&record.workspace_id)
+            .join("runs")
+            .join(run_id)
+            .join("manifest.json");
+        let valid = fs::read(&manifest_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|manifest| {
+                manifest["workspace_id"] == record.workspace_id
+                    && manifest["run_id"] == *run_id
+                    && manifest["profile"]["initial_server_key"] == snapshot.server_key
+            });
+        if !valid {
+            orphans.push(json!({
+                "workspace_id": record.workspace_id,
+                "run_id": run_id,
+                "reason": "run authority is absent or disagrees",
+            }));
+        }
+    }
+    Ok(orphans)
+}
+
+fn replay_membership(path: &Path) -> Result<Vec<MembershipRecord>, MachineError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path).map_err(io_error)?;
+    if bytes.len() as u64 > MAX_DIAGNOSTIC_BYTES {
+        return Err(transport("membership journal exceeds 8 MiB"));
+    }
+    let mut records = Vec::new();
+    let mut previous = "0".repeat(64);
+    for (index, line) in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .enumerate()
+    {
+        let record: MembershipRecord = serde_json::from_slice(line).map_err(|_| {
+            MachineError::new(
+                "PROFILE_MEMBERSHIP_INCOMPLETE",
+                "membership journal is invalid",
+                false,
+                json!({"line": index + 1}),
+            )
+        })?;
+        let body = json!({"schema_version":record.schema_version,"revision":record.revision,"kind":record.kind,"workspace_id":record.workspace_id,"run_id":record.run_id,"previous_sha256":record.previous_sha256});
+        if record.revision != u64::try_from(index + 1).expect("bounded")
+            || record.previous_sha256 != previous
+            || record.record_sha256 != canonical_sha256(&body)?
+        {
+            return Err(MachineError::new(
+                "PROFILE_MEMBERSHIP_INCOMPLETE",
+                "membership hash chain is invalid",
+                false,
+                json!({"line": index + 1}),
+            ));
+        }
+        previous = record.record_sha256.clone();
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn append_diagnostic(root: &Path, kind: &str, details: Value) -> Result<(), MachineError> {
+    let path = root.join("diagnostics.jsonl");
+    if path.exists() {
+        verify_private_regular_file(&path, 0o600)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(io_error)?;
+    let value =
+        json!({"schema_version":1,"diagnostic_id":Uuid::now_v7(),"kind":kind,"details":details});
+    serde_json::to_writer(&mut file, &value).map_err(internal)?;
+    file.write_all(b"\n").map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    Ok(())
+}
+
+fn lock_file(path: &Path) -> Result<File, MachineError> {
+    if path.exists() {
+        verify_private_regular_file(path, 0o600)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(io_error)?;
+    verify_private_regular_file(path, 0o600)?;
+    DarwinSystem.lock_exclusive(&file).map_err(io_error)?;
+    Ok(file)
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), MachineError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| transport("path has no parent"))?;
+    secure_dir(parent)?;
+    if path.exists() {
+        verify_private_regular_file(path, 0o600)?;
+    }
+    let temporary = parent.join(format!(".tmp-{}", Uuid::now_v7()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(io_error)?;
+    file.write_all(bytes).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    fs::rename(&temporary, path).map_err(io_error)?;
+    sync_parent(path)
+}
+
+fn sync_parent(path: &Path) -> Result<(), MachineError> {
+    File::open(
+        path.parent()
+            .ok_or_else(|| transport("path has no parent"))?,
+    )
+    .and_then(|file| file.sync_all())
+    .map_err(io_error)
+}
+
+fn secure_dir(path: &Path) -> Result<(), MachineError> {
+    if path.exists() {
+        return verify_private_directory(path);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| MachineError::runtime_path_invalid(path, "directory has no parent"))?;
+    if !parent.exists() {
+        secure_dir(parent)?;
+    }
+    fs::create_dir(path).map_err(io_error)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    verify_private_directory(path)
+}
+
+fn verify_private_directory(path: &Path) -> Result<(), MachineError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != DarwinSystem.current_uid()
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(MachineError::runtime_path_invalid(
+            path,
+            "directory must be current-uid-owned mode 0700",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_private_regular_file(path: &Path, mode: u32) -> Result<(), MachineError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != DarwinSystem.current_uid()
+        || metadata.mode() & 0o777 != mode
+    {
+        return Err(MachineError::runtime_path_invalid(
+            path,
+            format!("file must be current-uid-owned mode {mode:04o}"),
+        ));
+    }
+    Ok(())
+}
+
+fn read_json(path: &Path) -> Result<Value, MachineError> {
+    let bytes = fs::read(path).map_err(|_| {
+        compatibility(format!(
+            "required schema file is missing: {}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        compatibility(format!(
+            "required schema file is invalid: {}",
+            path.display()
+        ))
+    })
+}
+
+fn directory_sha256(root: &Path) -> Result<String, MachineError> {
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    hasher.update(b"dolgorae-schema-bundle-v1\0");
+    for (relative, path) in files {
+        hasher.update(relative.as_bytes());
+        hasher.update([0]);
+        let bytes = fs::read(path).map_err(io_error)?;
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_files(
+    root: &Path,
+    current: &Path,
+    output: &mut Vec<(String, PathBuf)>,
+) -> Result<(), MachineError> {
+    for entry in fs::read_dir(current).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let path = entry.path();
+        let metadata = entry.metadata().map_err(io_error)?;
+        if metadata.is_dir() {
+            collect_files(root, &path, output)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| transport("schema path escaped root"))?;
+            output.push((path_utf8(relative)?.to_owned(), path));
+        } else {
+            return Err(compatibility("schema bundle contains a non-regular entry"));
+        }
+    }
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String, MachineError> {
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn canonical_sha256(value: &Value) -> Result<String, MachineError> {
+    let text = serde_json::to_string(value).map_err(internal)?;
+    let parsed = parse(&text).map_err(|error| internal(error.to_string()))?;
+    let bytes = canonicalize(&parsed).map_err(|error| internal(error.to_string()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn domain_separated_sha256(domain: &[u8], value: &Value) -> Result<String, MachineError> {
+    let text = serde_json::to_string(value).map_err(internal)?;
+    let parsed = parse(&text).map_err(|error| internal(error.to_string()))?;
+    let bytes = canonicalize(&parsed).map_err(|error| internal(error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn path_utf8(path: &Path) -> Result<&str, MachineError> {
+    path.to_str().ok_or_else(|| {
+        MachineError::profile_config_invalid(path, "TASK-005 profile paths must be UTF-8")
+    })
+}
+
+fn profile_not_found(name: &str) -> MachineError {
+    MachineError::new(
+        "PROFILE_NOT_FOUND",
+        "profile not found",
+        false,
+        json!({"profile": name}),
+    )
+}
+fn compatibility(reason: impl Into<String>) -> MachineError {
+    MachineError::new(
+        "COMPATIBILITY_REJECTED",
+        "Codex compatibility check failed",
+        false,
+        json!({"reason": reason.into()}),
+    )
+}
+fn transport(error: impl std::fmt::Display) -> MachineError {
+    MachineError::new(
+        "TRANSPORT_FAILURE",
+        "profile transport failed",
+        true,
+        json!({"reason": error.to_string()}),
+    )
+}
+fn io_error(error: std::io::Error) -> MachineError {
+    transport(error)
+}
+fn internal(error: impl std::fmt::Display) -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        "internal profile operation failed",
+        false,
+        json!({"reason": error.to_string()}),
+    )
+}
+
+#[derive(Clone, Debug)]
+struct Parsed {
+    positionals: Vec<String>,
+    values: BTreeMap<String, Vec<String>>,
+    flags: BTreeSet<String>,
+    trailing: Vec<String>,
+}
+
+impl Parsed {
+    fn new(arguments: &[OsString], operation: ProfileOperation) -> Result<Self, MachineError> {
+        let mut parsed = Self {
+            positionals: Vec::new(),
+            values: BTreeMap::new(),
+            flags: BTreeSet::new(),
+            trailing: Vec::new(),
+        };
+        let mut index = 0;
+        while index < arguments.len() {
+            let token = arguments[index].to_str().ok_or_else(|| {
+                MachineError::invalid_argument("argv", "profile arguments must be UTF-8")
+            })?;
+            if token == "--" {
+                if operation != ProfileOperation::Add {
+                    return Err(MachineError::invalid_argument(
+                        "argv",
+                        "only profile add accepts executable argv",
+                    ));
+                }
+                parsed.trailing = arguments[index + 1..]
+                    .iter()
+                    .map(|value| {
+                        value.to_str().map(str::to_owned).ok_or_else(|| {
+                            MachineError::invalid_argument("argv", "profile argv must be UTF-8")
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                break;
+            }
+            if token.contains('=') && token.starts_with("--") {
+                return Err(MachineError::invalid_argument(
+                    token,
+                    "equals-form options are not accepted",
+                ));
+            }
+            if operation.allows_flag(token) {
+                if !parsed.flags.insert(token.to_owned()) {
+                    return Err(MachineError::invalid_argument(
+                        token,
+                        "option may appear only once",
+                    ));
+                }
+                index += 1;
+                continue;
+            }
+            if token.starts_with("--") {
+                if !operation.allows_value(token) {
+                    return Err(MachineError::invalid_argument(token, "unknown option"));
+                }
+                let value = arguments
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| {
+                        MachineError::invalid_argument(token, "option value is missing")
+                    })?;
+                parsed
+                    .values
+                    .entry(token.to_owned())
+                    .or_default()
+                    .push(value.to_owned());
+                index += 2;
+                continue;
+            }
+            parsed.positionals.push(token.to_owned());
+            index += 1;
+        }
+        operation.validate_shape(&parsed)?;
+        Ok(parsed)
+    }
+    fn required_positional(&self, index: usize, label: &str) -> Result<String, MachineError> {
+        self.positionals
+            .get(index)
+            .cloned()
+            .ok_or_else(|| MachineError::invalid_argument(label, "required value is missing"))
+    }
+    fn required(&self, name: &str) -> Result<String, MachineError> {
+        self.values
+            .get(name)
+            .and_then(|values| values.last())
+            .cloned()
+            .ok_or_else(|| MachineError::invalid_argument(name, "required option is missing"))
+    }
+    fn path(&self, name: &str) -> Result<Option<PathBuf>, MachineError> {
+        Ok(self
+            .values
+            .get(name)
+            .and_then(|values| values.last())
+            .map(PathBuf::from))
+    }
+    fn flag(&self, name: &str) -> bool {
+        self.flags.contains(name)
+    }
+    fn environment(&self) -> Result<BTreeMap<String, String>, MachineError> {
+        let mut result = BTreeMap::new();
+        for entry in self.values.get("--env").into_iter().flatten() {
+            let (name, value) = entry.split_once('=').ok_or_else(|| {
+                MachineError::invalid_argument("--env", "environment entries use NAME=VALUE")
+            })?;
+            if name.is_empty()
+                || value.is_empty()
+                || result.insert(name.to_owned(), value.to_owned()).is_some()
+            {
+                return Err(MachineError::invalid_argument(
+                    "--env",
+                    "environment names must be unique and nonempty",
+                ));
+            }
+        }
+        for required in ["PATH", "LANG", "LC_ALL"] {
+            if !result.contains_key(required) {
+                return Err(MachineError::invalid_argument(
+                    "--env",
+                    format!("missing required {required}"),
+                ));
+            }
+        }
+        Ok(result)
+    }
+    fn require_operator(&self) -> Result<(), MachineError> {
+        let file_path = self.path("--operator-file")?;
+        let fd = self
+            .values
+            .get("--operator-fd")
+            .and_then(|values| values.last())
+            .map(|value| {
+                value.parse::<i32>().map_err(|_| {
+                    MachineError::invalid_argument(
+                        "--operator-fd",
+                        "fd must be a nonnegative integer",
+                    )
+                })
+            })
+            .transpose()?;
+        if file_path.is_some() == fd.is_some() {
+            return Err(MachineError::new(
+                "OPERATOR_CAPABILITY_REQUIRED",
+                "profile-wide operation requires exactly one operator capability source",
+                false,
+                json!({}),
+            ));
+        }
+        if let Some(fd) = fd {
+            if fd < 0 {
+                return Err(MachineError::invalid_argument(
+                    "--operator-fd",
+                    "fd must be a nonnegative integer",
+                ));
+            }
+            let source = File::open(format!("/dev/fd/{fd}")).map_err(|_| {
+                MachineError::new(
+                    "OPERATOR_CAPABILITY_REQUIRED",
+                    "operator capability fd is unavailable",
+                    false,
+                    json!({}),
+                )
+            })?;
+            let mut bytes = Vec::new();
+            source
+                .take(4097)
+                .read_to_end(&mut bytes)
+                .map_err(io_error)?;
+            if bytes.is_empty() || bytes.len() > 4096 {
+                return Err(MachineError::new(
+                    "OPERATOR_CAPABILITY_REQUIRED",
+                    "operator capability fd is empty or oversized",
+                    false,
+                    json!({}),
+                ));
+            }
+            return Ok(());
+        }
+        let path = file_path.ok_or_else(|| {
+            MachineError::new(
+                "OPERATOR_CAPABILITY_REQUIRED",
+                "profile-wide operation requires --operator-file",
+                false,
+                json!({}),
+            )
+        })?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| {
+            MachineError::new(
+                "OPERATOR_CAPABILITY_REQUIRED",
+                "operator capability is unavailable",
+                false,
+                json!({}),
+            )
+        })?;
+        if !metadata.file_type().is_file()
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.len() == 0
+            || metadata.len() > 4096
+        {
+            return Err(MachineError::new(
+                "OPERATOR_CAPABILITY_REQUIRED",
+                "operator capability file is unsafe",
+                false,
+                json!({}),
+            ));
+        }
+        Ok(())
+    }
+    fn reject_positionals_and_trailing(&self) -> Result<(), MachineError> {
+        if self.positionals.is_empty() && self.trailing.is_empty() {
+            Ok(())
+        } else {
+            Err(MachineError::invalid_argument(
+                "argv",
+                "unexpected positional argument",
+            ))
+        }
+    }
+}
+
+impl ProfileOperation {
+    fn allows_flag(self, name: &str) -> bool {
+        matches!(
+            (self, name),
+            (Self::Doctor, "--launch-probe" | "--leave-running")
+                | (
+                    Self::ServerStop | Self::ServerRestart | Self::ServerMigrate,
+                    "--interrupt"
+                )
+                | (Self::StateReset, "--require-server-absence")
+                | (Self::Events, "--follow")
+        )
+    }
+
+    fn allows_value(self, name: &str) -> bool {
+        if name == "--workspace" {
+            return true;
+        }
+        match self {
+            Self::Add => matches!(name, "--codex-home" | "--native-subagents" | "--env"),
+            Self::ServerStop | Self::ServerRestart => matches!(
+                name,
+                "--operator-file" | "--operator-fd" | "--confirm-server-key"
+            ),
+            Self::ServerMigrate => matches!(
+                name,
+                "--operator-file"
+                    | "--operator-fd"
+                    | "--confirm-old-server-key"
+                    | "--confirm-new-server-key"
+            ),
+            Self::MembershipTombstoneOrphan => matches!(
+                name,
+                "--operator-file"
+                    | "--operator-fd"
+                    | "--confirm-server-key"
+                    | "--confirm-workspace-id"
+                    | "--confirm-run-id"
+            ),
+            Self::StateReset => matches!(
+                name,
+                "--operator-file" | "--operator-fd" | "--confirm-server-key"
+            ),
+            Self::DiagnosticsList => matches!(
+                name,
+                "--after" | "--limit" | "--projection" | "--operator-file" | "--operator-fd"
+            ),
+            Self::Events => matches!(
+                name,
+                "--after" | "--projection" | "--operator-file" | "--operator-fd"
+            ),
+            Self::List
+            | Self::Show
+            | Self::Remove
+            | Self::Doctor
+            | Self::ServerStatus
+            | Self::ServerStart
+            | Self::MembershipVerify => false,
+        }
+    }
+
+    fn validate_shape(self, parsed: &Parsed) -> Result<(), MachineError> {
+        let expected_positionals = usize::from(self != Self::List);
+        if parsed.positionals.len() != expected_positionals {
+            return Err(MachineError::invalid_argument(
+                "argv",
+                format!("expected {expected_positionals} positional profile names"),
+            ));
+        }
+        if self == Self::Add {
+            if parsed.trailing.is_empty() {
+                return Err(MachineError::invalid_argument(
+                    "argv",
+                    "profile add requires a direct executable argv after --",
+                ));
+            }
+        } else if !parsed.trailing.is_empty() {
+            return Err(MachineError::invalid_argument(
+                "argv",
+                "unexpected executable argv",
+            ));
+        }
+        for (name, values) in &parsed.values {
+            if name != "--env" && values.len() != 1 {
+                return Err(MachineError::invalid_argument(
+                    name,
+                    "option may appear only once",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_policy_is_exact_tested_and_newer_unverified() {
+        assert_eq!(
+            version_verdict("0.149.0").unwrap(),
+            CompatibilityVerdict::Tested
+        );
+        assert_eq!(
+            version_verdict("0.150.0").unwrap(),
+            CompatibilityVerdict::Unverified
+        );
+        assert_eq!(
+            version_verdict("0.148.9").unwrap_err().code,
+            "COMPATIBILITY_REJECTED"
+        );
+    }
+
+    #[test]
+    fn parser_keeps_direct_argv_after_separator() {
+        let args = [
+            "demo",
+            "--codex-home",
+            "/tmp/codex",
+            "--native-subagents",
+            "enabled",
+            "--env",
+            "PATH=/bin",
+            "--env",
+            "LANG=C",
+            "--env",
+            "LC_ALL=C",
+            "--",
+            "/bin/codex",
+            "--strict-config",
+        ]
+        .map(OsString::from);
+        let parsed = Parsed::new(&args, ProfileOperation::Add).unwrap();
+        assert_eq!(parsed.positionals, ["demo"]);
+        assert_eq!(parsed.trailing, ["/bin/codex", "--strict-config"]);
+        assert_eq!(parsed.environment().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn membership_chain_rejects_rewritten_history() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-membership-test-{}", Uuid::now_v7()));
+        secure_dir(&root).unwrap();
+        let path = root.join("membership.jsonl");
+        append_membership(&path, "server_started", "workspace", None).unwrap();
+        append_membership(
+            &path,
+            "tombstone_orphan",
+            "workspace",
+            Some("run".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(replay_membership(&path).unwrap().len(), 2);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[20] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            replay_membership(&path).unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configuration_classification_is_closed_and_separates_runtime_observation() {
+        let root = std::env::temp_dir().join(format!("dolgorae-config-test-{}", Uuid::now_v7()));
+        secure_dir(&root).unwrap();
+        let profile = RuntimeProfile {
+            argv: vec!["/bin/codex".to_owned()],
+            codex_home: root.to_string_lossy().into_owned(),
+            environment: BTreeMap::new(),
+            native_subagents: NativeSubagents::Enabled,
+        };
+        let config = root.join("config.toml");
+        fs::write(&config, "approval_policy = \"never\"\nmodel = \"gpt-5\"\n").unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let snapshot = configuration_snapshot(&profile, &profile.codex_home).unwrap();
+        assert_eq!(snapshot.launch["model"], "gpt-5");
+        assert_eq!(snapshot.observation["approval_policy"], "never");
+        fs::write(&config, "unknown_future_field = true\n").unwrap();
+        assert_eq!(
+            configuration_snapshot(&profile, &profile.codex_home)
+                .unwrap_err()
+                .code,
+            "COMPATIBILITY_REJECTED"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

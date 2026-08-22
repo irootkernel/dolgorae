@@ -87,5 +87,6 @@ test-e2e:
 		export XDG_CACHE_HOME="$$test_root/cache"; \
 		$(PYTHON_BIN) tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"
+		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"
 	@echo "[test-e2e] completed"

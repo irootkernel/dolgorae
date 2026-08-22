@@ -27,6 +27,13 @@ pub struct FilesystemInfo {
     pub filesystem_type: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveProcessIdentity {
+    pub uid: u32,
+    pub process_group_id: u32,
+    pub fingerprint: String,
+}
+
 impl DarwinSystem {
     pub fn realpath(self, path: &Path) -> Result<PathBuf, std::io::Error> {
         let path = c_path(path)?;
@@ -95,6 +102,180 @@ impl DarwinSystem {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    pub fn lock_exclusive(self, file: &std::fs::File) -> Result<(), std::io::Error> {
+        // SAFETY: flock borrows the live descriptor and retains no pointer. The
+        // resulting lock remains tied to the caller-owned open file description.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn spawn_detached(self, command: &mut Command) -> Result<Child, std::io::Error> {
+        // SAFETY: the closure uses only async-signal-safe libc calls after fork
+        // and before exec, and retains no borrowed pointer after it returns.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+                if libc::sigemptyset(empty.as_mut_ptr()) == -1
+                    || libc::pthread_sigmask(
+                        libc::SIG_SETMASK,
+                        empty.as_ptr(),
+                        std::ptr::null_mut(),
+                    ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if reset_signal_dispositions() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    }
+
+    pub fn spawn_detached_with_log_fds(
+        self,
+        command: &mut Command,
+        stdout_read_fd: libc::c_int,
+        stderr_read_fd: libc::c_int,
+    ) -> Result<Child, std::io::Error> {
+        // SAFETY: the inherited descriptors are live until spawn returns. The
+        // child duplicates them onto the fixed private drainer descriptors and
+        // performs only async-signal-safe operations before exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() == -1
+                    || libc::dup2(stdout_read_fd, 3) == -1
+                    || libc::dup2(stderr_read_fd, 4) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+                if libc::sigemptyset(empty.as_mut_ptr()) == -1
+                    || libc::pthread_sigmask(
+                        libc::SIG_SETMASK,
+                        empty.as_ptr(),
+                        std::ptr::null_mut(),
+                    ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if reset_signal_dispositions() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    }
+
+    #[must_use]
+    pub fn process_exists(self, pid: u32) -> bool {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal zero performs an identity/existence check and does not
+        // deliver a signal or dereference pointers.
+        unsafe {
+            libc::kill(pid, 0) == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+    }
+
+    pub fn signal_process_group(
+        self,
+        pgid: u32,
+        signal: libc::c_int,
+    ) -> Result<(), std::io::Error> {
+        let pgid = libc::pid_t::try_from(pgid).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "process group is invalid")
+        })?;
+        // SAFETY: a negative verified process-group ID and a caller-selected
+        // signal are passed by value; no pointers or ownership cross the call.
+        if unsafe { libc::kill(-pgid, signal) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn live_process_identity(self, pid: u32) -> Result<LiveProcessIdentity, std::io::Error> {
+        let output = Command::new("/bin/ps")
+            .args([
+                "-p",
+                &pid.to_string(),
+                "-o",
+                "uid=",
+                "-o",
+                "pgid=",
+                "-o",
+                "lstart=",
+                "-o",
+                "command=",
+            ])
+            .env_clear()
+            .stdin(Stdio::null())
+            .output()?;
+        if !output.status.success() || output.stdout.len() > 16 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "process identity is unavailable",
+            ));
+        }
+        let fingerprint = String::from_utf8(output.stdout)
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "ps output is not UTF-8")
+            })?
+            .trim()
+            .to_owned();
+        let mut fields = fingerprint.split_whitespace();
+        let uid = fields
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "process uid is missing")
+            })?
+            .parse::<u32>()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let process_group_id = fields
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "process group is missing")
+            })?
+            .parse::<u32>()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if fingerprint.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "process fingerprint is empty",
+            ));
+        }
+        Ok(LiveProcessIdentity {
+            uid,
+            process_group_id,
+            fingerprint,
+        })
+    }
+
+    #[must_use]
+    pub fn reap_child_nonblocking(self, pid: u32) -> bool {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        let mut status = 0;
+        // SAFETY: waitpid receives a concrete PID and a pointer to one live
+        // integer. WNOHANG prevents this cleanup check from blocking.
+        unsafe { libc::waitpid(pid, std::ptr::addr_of_mut!(status), libc::WNOHANG) == pid }
     }
 
     pub fn lock_byte_timeout(
@@ -320,6 +501,27 @@ impl DarwinSystem {
             uid,
         })
     }
+}
+
+unsafe fn reset_signal_dispositions() -> libc::c_int {
+    // SAFETY: zero is a valid baseline for Darwin sigaction; the mask is then
+    // initialized by sigemptyset before the structure is passed to sigaction.
+    let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+    action.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: action owns one live signal mask and sigemptyset initializes it.
+    if unsafe { libc::sigemptyset(&raw mut action.sa_mask) } == -1 {
+        return -1;
+    }
+    for signal in 1..DARWIN_NSIG {
+        if signal != libc::SIGKILL && signal != libc::SIGSTOP {
+            // SAFETY: signal is in Darwin's valid range and action remains live
+            // for the duration of this async-signal-safe syscall.
+            if unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) } == -1 {
+                return -1;
+            }
+        }
+    }
+    0
 }
 
 fn c_path(path: &Path) -> Result<CString, std::io::Error> {

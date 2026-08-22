@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 
 use clap::{CommandFactory, Parser};
-use dolgorae::cli::{Cli, Command, RunCommand, RuntimeCommand, WorkspaceCommand, option_path};
+use dolgorae::cli::{
+    Cli, Command, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
+    ProfileServerCommand, ProfileStateCommand, RunCommand, RuntimeCommand, WorkspaceCommand,
+    option_path,
+};
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{CoreSemanticService, SemanticCommand, SemanticService};
 use dolgorae::workspace::WorkspaceMode;
@@ -13,6 +17,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
+    if args.len() == 4
+        && args[1] == dolgorae::profile::PROFILE_LOG_DRAINER_COMMAND
+        && args[2] == "--root"
+    {
+        return match dolgorae::profile::run_log_drainer(std::path::Path::new(&args[3])) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => ExitCode::from(error.exit_status()),
+        };
+    }
     let human = args.iter().any(|arg| arg == "--human");
     if is_help(&args) {
         return render_help(human);
@@ -23,7 +36,9 @@ fn main() -> ExitCode {
 
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
-            if let Err(reason) = dolgorae::cli::validate_argument_contract(&cli.command) {
+            if !matches!(&cli.command, Command::Profile { .. })
+                && let Err(reason) = dolgorae::cli::validate_argument_contract(&cli.command)
+            {
                 return render_failure(
                     cli.human,
                     cli.command.machine_name(),
@@ -104,6 +119,75 @@ fn execute(cli: Cli) -> ExitCode {
             return ExitCode::from(6);
         }
     }
+    if let Command::Profile { command } = &cli.command {
+        let (operation, arguments) = match command {
+            ProfileCommand::Add(args) => (dolgorae::profile::ProfileOperation::Add, &args.args),
+            ProfileCommand::List(args) => (dolgorae::profile::ProfileOperation::List, &args.args),
+            ProfileCommand::Show(args) => (dolgorae::profile::ProfileOperation::Show, &args.args),
+            ProfileCommand::Remove(args) => {
+                (dolgorae::profile::ProfileOperation::Remove, &args.args)
+            }
+            ProfileCommand::Doctor(args) => {
+                (dolgorae::profile::ProfileOperation::Doctor, &args.args)
+            }
+            ProfileCommand::Server { command } => match command {
+                ProfileServerCommand::Status(args) => (
+                    dolgorae::profile::ProfileOperation::ServerStatus,
+                    &args.args,
+                ),
+                ProfileServerCommand::Start(args) => {
+                    (dolgorae::profile::ProfileOperation::ServerStart, &args.args)
+                }
+                ProfileServerCommand::Stop(args) => {
+                    (dolgorae::profile::ProfileOperation::ServerStop, &args.args)
+                }
+                ProfileServerCommand::Restart(args) => (
+                    dolgorae::profile::ProfileOperation::ServerRestart,
+                    &args.args,
+                ),
+                ProfileServerCommand::Migrate(args) => (
+                    dolgorae::profile::ProfileOperation::ServerMigrate,
+                    &args.args,
+                ),
+            },
+            ProfileCommand::Membership { command } => match command {
+                ProfileMembershipCommand::Verify(args) => (
+                    dolgorae::profile::ProfileOperation::MembershipVerify,
+                    &args.args,
+                ),
+                ProfileMembershipCommand::TombstoneOrphan(args) => (
+                    dolgorae::profile::ProfileOperation::MembershipTombstoneOrphan,
+                    &args.args,
+                ),
+            },
+            ProfileCommand::State {
+                command: ProfileStateCommand::Reset(args),
+            } => (dolgorae::profile::ProfileOperation::StateReset, &args.args),
+            ProfileCommand::Diagnostics {
+                command: ProfileDiagnosticsCommand::List(args),
+            } => (
+                dolgorae::profile::ProfileOperation::DiagnosticsList,
+                &args.args,
+            ),
+            ProfileCommand::Events(args) => {
+                (dolgorae::profile::ProfileOperation::Events, &args.args)
+            }
+        };
+        return match dolgorae::profile::execute(operation, arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed profile result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
     let semantic_command = match &cli.command {
         Command::Worker(_) => unreachable!("hidden worker handled before semantic dispatch"),
         Command::Runtime {
@@ -144,6 +228,7 @@ fn execute(cli: Cli) -> ExitCode {
                 }
             }
         }
+        Command::Profile { .. } => unreachable!("profile handled before semantic dispatch"),
         _ => SemanticCommand::Future {
             dotted_name: command_name.to_owned(),
         },

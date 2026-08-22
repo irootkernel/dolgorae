@@ -123,14 +123,14 @@ pub struct PortablePolicy {
     pub mode: WorkspaceMode,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalProfileRegistry {
     pub schema_version: u32,
     pub profiles: BTreeMap<String, RuntimeProfile>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProfile {
     pub argv: Vec<String>,
@@ -139,7 +139,7 @@ pub struct RuntimeProfile {
     pub native_subagents: NativeSubagents,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeSubagents {
     Enabled,
@@ -1147,9 +1147,35 @@ pub fn parse_local_profiles(path: &Path) -> Result<LocalProfileRegistry, Machine
                 format!("profile {name:?} contains a reserved environment name"),
             ));
         }
+        validate_profile_path(path, name, &profile.environment["PATH"])?;
         validate_profile_argv(path, name, &profile.argv)?;
     }
     Ok(registry)
+}
+
+fn validate_profile_path(
+    registry_path: &Path,
+    profile_name: &str,
+    value: &str,
+) -> Result<(), MachineError> {
+    let mut seen = BTreeSet::new();
+    for component in value.split(':') {
+        let path = Path::new(component);
+        let existing_directory = fs::metadata(path).is_ok_and(|metadata| metadata.is_dir());
+        if component.is_empty()
+            || !path.is_absolute()
+            || !seen.insert(component)
+            || !existing_directory
+        {
+            return Err(MachineError::profile_config_invalid(
+                registry_path,
+                format!(
+                    "profile {profile_name:?} PATH must contain unique existing absolute directories"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_profile_argv(

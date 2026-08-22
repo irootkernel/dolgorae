@@ -180,6 +180,15 @@ impl RuntimeFeatures {
             workspace_event_stream: false,
         }
     }
+
+    #[must_use]
+    pub const fn task_005() -> Self {
+        let mut features = Self::task_001();
+        features.profile_server_migration = true;
+        features.profile_membership_repair = true;
+        features.profile_diagnostics = true;
+        features
+    }
 }
 
 #[must_use]
@@ -257,7 +266,7 @@ pub fn capabilities() -> RuntimeCapabilities {
             "storage_and_long_duration": "unverified",
             "resource_warning_live_dedicated": 6
         },
-        "features": RuntimeFeatures::task_001(),
+        "features": RuntimeFeatures::task_005(),
         "interactions": {
             "command_execution_approval": "unavailable",
             "file_change_approval": "unavailable",
@@ -277,7 +286,7 @@ pub fn capabilities() -> RuntimeCapabilities {
             "lifecycle_observation": "unverified",
             "disable_enforcement": "unavailable",
             "quiescence_tracking": "unverified",
-            "reason": "TASK-001 defines the capability contract; live profile verification belongs to TASK-005."
+            "reason": "TASK-005 validates the enabled-only launch policy, while complete native child observation remains unverified until a run exercises it."
         },
         "native_subagents_policy": "enabled",
         "profile": null
@@ -290,13 +299,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_001_advertises_no_future_runtime_behavior() {
+    fn task_005_advertises_only_completed_profile_behavior() {
         let capabilities = serde_json::to_value(capabilities()).unwrap();
         assert_eq!(capabilities["features"]["persistent_runs"], false);
         assert_eq!(
             capabilities["features"]["brokered_independent_subagent_runs"],
             false
         );
+        assert_eq!(capabilities["features"]["profile_server_migration"], true);
+        assert_eq!(capabilities["features"]["profile_membership_repair"], true);
         assert_eq!(capabilities["supported_transports"], json!(["machine_cli"]));
     }
 }

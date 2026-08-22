@@ -44,6 +44,8 @@ def main() -> int:
     ).stdout.split(b"\0")
     for encoded in sorted(item for item in tracked if item):
         path = ROOT / encoded.decode("utf-8")
+        if not path.exists():
+            continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicates)
             parsed += 1

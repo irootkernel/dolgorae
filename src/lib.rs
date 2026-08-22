@@ -9,6 +9,7 @@ pub mod fault;
 pub mod jcs;
 pub mod ledger;
 pub mod machine;
+pub mod profile;
 pub mod projection;
 pub mod protocol;
 pub mod providers;

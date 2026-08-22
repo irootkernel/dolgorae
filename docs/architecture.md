@@ -693,8 +693,9 @@ Native Subagent Policy is orthogonal to both use cases. Native children share
 the parent Run's thread tree, policy, and authority, and never become aggregate
 members, Independent Specialist Runs, peer Workers, or Dedicated Lane Servers.
 The selected Runtime Profile must explicitly acknowledge
-`native_subagents: enabled`; v1 does not claim disable enforcement for Codex
-0.147.0.
+`native_subagents: enabled`; v1 does not claim disable enforcement for the
+Codex 0.149.0 production pin. The original negative probe remains historical
+0.147.0 evidence.
 
 Instruction composition is split into a generation-immutable role and behavior
 contract and a Turn-scoped access context. The immutable contract does not
@@ -1653,7 +1654,7 @@ behavioral observation. Compatibility doctor resolves `$ref`, performs the
 normative structural comparison, then runs handshake, paginated model,
 codexHome, history, sandbox, early-ID, and server-request probes.
 
-The tested 0.147.0 manifest is `tested`. A newer compatible version is
+The tested 0.149.0 manifest is `tested`. A newer compatible version is
 `unverified` and that verdict is written to every run generation. Older or
 otherwise unlisted versions are rejected unless a future SOT revision adds
 them to the tested set.

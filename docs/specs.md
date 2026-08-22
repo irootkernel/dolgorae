@@ -330,7 +330,7 @@ and automatic updates are not supported release targets. Empirical release
 evidence is valid only for the recorded OS build and MUST be refreshed on a new
 macOS major version.
 
-Dolgorae depends on user-prepared Runtime Profiles. Codex App Server 0.147.0 is
+Dolgorae depends on user-prepared Runtime Profiles. Codex App Server 0.149.0 is
 the current compatibility baseline. Background-process safety is owned by each
 Sticky Dedicated logical lane across its successive physical generations and
 by the macOS process census; it MUST NOT depend on a future Codex terminal-
@@ -520,7 +520,7 @@ and cleanup, so it advertises lifecycle observation and quiescence tracking as
 native state still blocks pause, physical-generation replacement, profile stop,
 and shutdown. A disabled diagnostic result is recorded as `unverified`; it can
 never be published as a usable profile capability.
-For the 0.147.0 production profile, initialize MUST send
+For the 0.149.0 production profile, initialize MUST send
 `optOutNotificationMethods:[]`. It MUST NOT suppress `item/started`,
 `item/completed`, `thread/started`, turn lifecycle, or correlation methods.
 Observed lifecycle suppression downgrades `native_subagents` to `unverified`
@@ -1375,7 +1375,7 @@ normative:
 | `PURPOSE_REQUIRED` | 2 | `run start` | purpose is omitted or `UNSPECIFIED` for any Run |
 | `EXECUTION_LANE_REQUIRED` | 2 | `run start` | execution lane is omitted or `UNSPECIFIED`; no interactive default exists |
 | `CAPABILITY_UNSUPPORTED` | 4 | `run start`, projection and interaction commands | a required Dolgorae or profile feature is unavailable |
-| `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE` | 4 | profile add/update/doctor | the public profile requests disable enforcement that pinned Codex 0.147.0 did not provide |
+| `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE` | 4 | profile add/update/doctor | the public profile requests disable enforcement that the pinned policy does not provide; the negative proof was recorded against Codex 0.147.0 |
 | `ACCESS_TRANSITION_UNSUPPORTED` | 4 | write acquire/release and handoff | the tested profile cannot safely apply the requested policy to the existing thread; create a lineage-linked write continuation |
 | `BACKGROUND_EXECUTION_UNVERIFIED` | 4 | writer release/handoff/close, `workspace writer reset`, and recovery | the Dedicated lane-generation census or exact cleanup cannot prove the supported process scope empty |
 | `IDEMPOTENCY_CONFLICT` | 4 | `run start/fork/send/submit/respond/create-write-continuation` | an operation-scoped key was reused with different normalized input |
@@ -2262,7 +2262,7 @@ explicit context or artifact handoff.
 
 ## SPEC-009: Pending Requests and Approvals
 
-The checked [Codex required-subset manifest](protocol/codex-0.147.0-required-subset.json)
+The checked [Codex required-subset manifest](protocol/codex-0.149.0-required-subset.json)
 maps stable server requests as follows:
 
 - `item/commandExecution/requestApproval` and
@@ -2556,7 +2556,7 @@ Reasoning text, reasoning summaries, reasoning deltas, and internal planning
 streams MUST NOT be persisted in the ledger, projections, logs, diagnostics, or
 exports. The worker MUST independently filter every reasoning method before
 representation. Initialization-time suppression is not available on the pinned
-0.147.0 production profile, whose SPEC-003 launch contract requires
+0.149.0 production profile, whose SPEC-003 launch contract requires
 `optOutNotificationMethods:[]` because reasoning-only methods cannot be
 isolated from required native lifecycle evidence. Receipt-side filtering is
 therefore the sole normative mechanism for that profile; a future pin that
@@ -3153,7 +3153,7 @@ Dolgorae uses the stable app-server API surface plus the narrowly pinned
 `item/tool/requestUserInput` capability. A connection that requires tested
 user-input may advertise `experimentalApi`; all other experimental requests
 remain unsupported and are not implied by that carrier. Dolgorae validates
-0.147.0 as tested. For an
+0.149.0 as tested. For an
 unlisted newer version, Dolgorae may run the version as `unverified` only when:
 
 1. `codex app-server generate-json-schema` is available;
@@ -3546,7 +3546,7 @@ Assurance levels are ordered `best_effort_personal_alpha`,
 `verified_thread_scoped_control`, and `strong_process_containment`. Run creation
 MUST compare `required_assurance` with the profile snapshot before allocating a
 Run ID, lane, thread, or server. Failure is `ASSURANCE_LEVEL_UNAVAILABLE`.
-Requested and achieved levels are durable Run state. Codex 0.147.0 is capped at
+Requested and achieved levels are durable Run state. Codex 0.149.0 is capped at
 `best_effort_personal_alpha`: same-home, policy transition, multi-workspace,
 closed-generation history, and Dolgorae process-census cleanup tests passed.
 Background-terminal completeness failed. The prior native-subagent semantic

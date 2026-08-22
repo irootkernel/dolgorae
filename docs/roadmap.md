@@ -2,8 +2,9 @@
 
 Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `TASK-001`, `TASK-002`, `TASK-003-A`, `TASK-003-B`, and `TASK-003-C` are
-`COMPLETE`. `EPIC-002` is `ACTIVE`; `TASK-004` is `COMPLETE`, and `TASK-005` is
-the next implementation Task. `EPIC-003` is the first user-usable product slice.
+`COMPLETE`. `EPIC-002` and `TASK-006` are `ACTIVE`; `TASK-004` and `TASK-005`
+are `COMPLETE`.
+`EPIC-003` is the first user-usable product slice.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -234,7 +235,7 @@ survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unli
 
 ### TASK-005: Profile Registry, Singleton, and Compatibility Doctor
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement per-workspace Application Support `local.yaml` profile CRUD, direct executable, normalized
 global argv, absolute `CODEX_HOME`, and explicit environment-map validation;
@@ -251,14 +252,14 @@ The required-subset manifest is checked input, not a TASK-029 invention.
 Verification: fake executable matrices for missing commands, rejected wrapper argv,
 profile-name collision, home mismatch, incompatible same-home singleton,
 unsupported/older/newer versions, missing schema fields,
-additive fields, login failure, and successful 0.147.0 compatibility.
+additive fields, login failure, and successful 0.149.0 compatibility.
 Also cover `$ref` resolution, requiredness/type/enum changes, pagination,
 early-ID behavioral rejection, absent-thread errors, version-drift refusal and
 operator migration/rollback. Probe configuration mutations and classify each
 input as static, migratable, runtime-mutable, or ignored. Implement binary-level runtime capabilities,
 profile-specific interaction/capability snapshots, and pre-allocation rejection
 of missing required capabilities. Bare doctor remains offline; launch behavior
-is tested only by explicit `--launch-probe`. TASK-005 owns the selected 0.147.0
+is tested only by explicit `--launch-probe`. TASK-005 owns the selected 0.149.0
 native feature policy: reject raw global `multi_agent` arguments, inject exactly
 one profile-owned `--enable multi_agent` pair, treat absence as enabled, reject
 explicit public disable with `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE`, retain the
@@ -275,7 +276,7 @@ terminal API is optional hybrid evidence.
 
 ### TASK-006: Thread and Turn Lifecycle
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Implement private direct WebSocket-over-Unix connection ownership, HTTP Upgrade,
 masking, fragmentation, ping/pong, close, frame/message bounds,
@@ -1096,7 +1097,7 @@ evidence without secrets or unbounded logs.
 Status: `PLANNED`
 
 Run opt-in live smoke tests against prepared primary and secondary profiles
-using the checked 0.147.0 compatibility baseline (or a separately migrated
+using the checked 0.149.0 compatibility baseline (or a separately migrated
 compatible version). Profile
 names and local wrapper paths are runner inputs and are not normative fixtures.
 Cover profile-home isolation, singleton sharing within a profile, separation

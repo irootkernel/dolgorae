@@ -66,6 +66,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         ("machine", &["workspace"][..]),
+        ("profile", &["darwin", "jcs", "machine", "workspace"][..]),
         ("projection", &["audit", "domain", "jcs"][..]),
         ("protocol", &[][..]),
         ("providers", &[][..]),
