@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
+import stat
 import subprocess
 import sys
 
@@ -28,6 +30,53 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(instance, machine, f"output for {arguments}")
         if not completed.stdout.endswith("\n"):
             raise AssertionError(f"machine output lacks final LF for {arguments}")
+
+    home = pathlib.Path(os.environ["HOME"])
+    controller = home / "controller.json"
+    operator_one = home / "operator-1.json"
+    operator_two = home / "operator-2.json"
+    credential_cases = (
+        (
+            "controller",
+            "credential",
+            "create",
+            "--kind",
+            "automation",
+            "--instance-id",
+            "machine-e2e",
+            "--subject-id",
+            "pipeline",
+            "--output",
+            str(controller),
+        ),
+        (
+            "operator",
+            "credential",
+            "initialize",
+            "--output",
+            str(operator_one),
+        ),
+        (
+            "operator",
+            "credential",
+            "rotate",
+            "--operator-file",
+            str(operator_one),
+            "--output",
+            str(operator_two),
+        ),
+    )
+    for arguments in credential_cases:
+        completed = subprocess.run(
+            [str(binary), *arguments], check=True, capture_output=True, text=True
+        )
+        instance = json.loads(completed.stdout)
+        assert_valid(instance, machine, f"credential output for {arguments[:3]}")
+        if "capability" in completed.stdout:
+            raise AssertionError("credential command leaked capability material")
+    for path in (controller, operator_one, operator_two):
+        if stat.S_IMODE(path.stat().st_mode) != 0o600:
+            raise AssertionError(f"credential mode is not 0600: {path}")
 
     unknown = subprocess.run(
         [str(binary), "definitely-unknown"],

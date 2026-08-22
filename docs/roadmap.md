@@ -2,8 +2,8 @@
 
 Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `TASK-001`, `TASK-002`, `TASK-003-A`, `TASK-003-B`, and `TASK-003-C` are
-`COMPLETE`. `EPIC-002` and `TASK-007` are `ACTIVE`; `TASK-004`, `TASK-005`, and
-`TASK-006` are `COMPLETE`.
+`COMPLETE`. `EPIC-002` is `ACTIVE`; `TASK-004`, `TASK-005`, `TASK-006`, and
+`TASK-007` are `COMPLETE`.
 `EPIC-003` is the first user-usable product slice.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
@@ -298,7 +298,7 @@ user input, native descendants, and profile-global notifications.
 
 ### TASK-007: External Controller and Observer Boundary
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Implement strict controller credential creation and fd/file ingestion,
 domain-separated digest storage, constant-time mutation authorization before

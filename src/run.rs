@@ -272,6 +272,101 @@ impl<P: WorkspacePlatform> RunStore<P> {
         result
     }
 
+    pub fn load_manifest(&self, run_id: Uuid) -> Result<RunManifest, MachineError> {
+        verify_secure_directory(&self.state_root, self.platform.current_uid())?;
+        let runs = self.state_root.join("runs");
+        verify_secure_directory(&runs, self.platform.current_uid())?;
+        let root = runs.join(run_id.to_string());
+        verify_secure_directory(&root, self.platform.current_uid())?;
+        let path = root.join("manifest.json");
+        verify_secure_file(&path, self.platform.current_uid())?;
+        let bytes = fs::read(&path).map_err(|_| {
+            MachineError::new(
+                "RUN_NOT_FOUND",
+                "run is unavailable",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            )
+        })?;
+        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+            return Err(MachineError::new(
+                "RUN_STATE_INVARIANT_VIOLATION",
+                "run manifest exceeds the bounded representation",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            ));
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            MachineError::new(
+                "RUN_STATE_INVARIANT_VIOLATION",
+                "run manifest is not UTF-8",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            )
+        })?;
+        let canonical = canonicalize(&parse(text).map_err(|_| {
+            MachineError::new(
+                "RUN_STATE_INVARIANT_VIOLATION",
+                "run manifest is invalid",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            )
+        })?)
+        .map_err(|_| {
+            MachineError::new(
+                "RUN_STATE_INVARIANT_VIOLATION",
+                "run manifest is not canonicalizable",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            )
+        })?;
+        let manifest: RunManifest = serde_json::from_slice(&canonical).map_err(|_| {
+            MachineError::new(
+                "RUN_STATE_INVARIANT_VIOLATION",
+                "run manifest schema is invalid",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            )
+        })?;
+        validate_manifest(&manifest)?;
+        if manifest.run_id != run_id {
+            return Err(MachineError::new(
+                "RUN_STATE_INVARIANT_VIOLATION",
+                "run directory identity does not match its manifest",
+                false,
+                serde_json::json!({"run_id": run_id}),
+            ));
+        }
+        Ok(manifest)
+    }
+
+    pub fn load_controller_binding(&self, run_id: Uuid) -> Result<ControllerBinding, MachineError> {
+        let manifest = self.load_manifest(run_id)?;
+        let path = self
+            .state_root
+            .join("runs")
+            .join(run_id.to_string())
+            .join("controller.json");
+        if !path.exists() {
+            return Ok(manifest.controller);
+        }
+        verify_secure_file(&path, self.platform.current_uid())?;
+        let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        let canonical =
+            canonicalize(&parse(text).map_err(|error| run_path_error(&path, error.to_string()))?)
+                .map_err(|error| run_path_error(&path, error.to_string()))?;
+        let binding: ControllerBinding = serde_json::from_slice(&canonical)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        if binding.identity.generation < manifest.controller.identity.generation
+            || binding.capability_sha256.len() != 64
+        {
+            return Err(run_path_error(&path, "controller authority regressed"));
+        }
+        Ok(binding)
+    }
+
     fn populate_and_publish(
         &self,
         staging: &Path,
@@ -314,6 +409,15 @@ impl<P: WorkspacePlatform> RunStore<P> {
             0o600,
         )
         .map_err(|error| run_path_error(staging.join("manifest.json"), error.to_string()))?;
+        let controller_bytes = serde_json::to_vec(&manifest.controller)
+            .map_err(|error| run_path_error(staging.join("controller.json"), error.to_string()))?;
+        atomic_create(
+            &self.platform,
+            &staging.join("controller.json"),
+            &controller_bytes,
+            0o600,
+        )
+        .map_err(|error| run_path_error(staging.join("controller.json"), error.to_string()))?;
         atomic_create(&self.platform, &staging.join("audit.jsonl"), b"", 0o600)
             .map_err(|error| run_path_error(staging.join("audit.jsonl"), error.to_string()))?;
         sync_directory(staging).map_err(|error| run_path_error(staging, error.to_string()))?;
@@ -830,6 +934,7 @@ fn run_path_error(path: impl AsRef<Path>, reason: impl Into<String>) -> MachineE
 
 fn cleanup_staging(staging: &Path) {
     let _ = fs::remove_file(staging.join("manifest.json"));
+    let _ = fs::remove_file(staging.join("controller.json"));
     let _ = fs::remove_file(staging.join("audit.jsonl"));
     let _ = fs::remove_dir(staging.join("recovery"));
     let _ = fs::remove_dir(staging);

@@ -4,6 +4,7 @@ pub mod app_server;
 pub mod audit;
 pub mod cli;
 pub mod conformance;
+pub mod controller;
 pub mod domain;
 pub mod event;
 pub mod fault;

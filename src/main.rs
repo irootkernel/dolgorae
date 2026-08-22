@@ -2,9 +2,10 @@
 
 use clap::{CommandFactory, Parser};
 use dolgorae::cli::{
-    Cli, Command, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
-    ProfileServerCommand, ProfileStateCommand, RunCommand, RuntimeCommand, WorkspaceCommand,
-    option_path,
+    Cli, Command, ControllerCommand, ControllerCredentialCommand, OperatorCommand,
+    OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
+    ProfileServerCommand, ProfileStateCommand, RunCommand, RunControllerCommand, RuntimeCommand,
+    WorkspaceCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{CoreSemanticService, SemanticCommand, SemanticService};
@@ -118,6 +119,110 @@ fn execute(cli: Cli) -> ExitCode {
             let _ = args;
             return ExitCode::from(6);
         }
+    }
+    if let Command::Run(run) = &cli.command
+        && let RunCommand::Controller {
+            command: RunControllerCommand::Verify(args),
+        } = &run.command
+    {
+        let mut arguments = args.args.clone();
+        if let Some(path) = &run.controller_file {
+            arguments.push(OsString::from("--controller-file"));
+            arguments.push(path.as_os_str().to_owned());
+        }
+        if let Some(fd) = run.controller_fd {
+            arguments.push(OsString::from("--controller-fd"));
+            arguments.push(OsString::from(fd.to_string()));
+        }
+        return match dolgorae::controller::execute(
+            dolgorae::controller::CredentialOperation::RunVerify,
+            &arguments,
+        ) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed controller verification")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
+    if let Command::Run(run) = &cli.command
+        && let RunCommand::Controller {
+            command: RunControllerCommand::Reset(args),
+        } = &run.command
+    {
+        let mut arguments = args.args.clone();
+        if let Some(path) = &run.operator_file {
+            arguments.push(OsString::from("--operator-file"));
+            arguments.push(path.as_os_str().to_owned());
+        }
+        if let Some(fd) = run.operator_fd {
+            arguments.push(OsString::from("--operator-fd"));
+            arguments.push(OsString::from(fd.to_string()));
+        }
+        return match dolgorae::controller::execute(
+            dolgorae::controller::CredentialOperation::RunReset,
+            &arguments,
+        ) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed controller reset")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
+    let credential = match &cli.command {
+        Command::Controller {
+            command:
+                ControllerCommand::Credential {
+                    command: ControllerCredentialCommand::Create(args),
+                },
+        } => Some((
+            dolgorae::controller::CredentialOperation::ControllerCreate,
+            &args.args,
+        )),
+        Command::Operator {
+            command: OperatorCommand::Credential { command },
+        } => Some(match command {
+            OperatorCredentialCommand::Initialize(args) => (
+                dolgorae::controller::CredentialOperation::OperatorInitialize,
+                &args.args,
+            ),
+            OperatorCredentialCommand::Rotate(args) => (
+                dolgorae::controller::CredentialOperation::OperatorRotate,
+                &args.args,
+            ),
+        }),
+        _ => None,
+    };
+    if let Some((operation, arguments)) = credential {
+        return match dolgorae::controller::execute(operation, arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed credential result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
     }
     if let Command::Profile { command } = &cli.command {
         let (operation, arguments) = match command {

@@ -2847,87 +2847,26 @@ impl Parsed {
         Ok(result)
     }
     fn require_operator(&self) -> Result<(), MachineError> {
-        let file_path = self.path("--operator-file")?;
-        let fd = self
-            .values
-            .get("--operator-fd")
-            .and_then(|values| values.last())
-            .map(|value| {
-                value.parse::<i32>().map_err(|_| {
-                    MachineError::invalid_argument(
-                        "--operator-fd",
-                        "fd must be a nonnegative integer",
+        let mut arguments = Vec::new();
+        for flag in ["--operator-file", "--operator-fd"] {
+            if let Some(value) = self.values.get(flag).and_then(|values| values.last()) {
+                arguments.push(OsString::from(flag));
+                arguments.push(OsString::from(value));
+            }
+        }
+        let carrier =
+            crate::controller::carrier_from_options(&arguments, "--operator-file", "--operator-fd")
+                .map_err(|_| {
+                    MachineError::new(
+                        "OPERATOR_CAPABILITY_REQUIRED",
+                        "profile-wide operation requires a valid operator credential",
+                        false,
+                        json!({}),
                     )
-                })
-            })
-            .transpose()?;
-        if file_path.is_some() == fd.is_some() {
-            return Err(MachineError::new(
-                "OPERATOR_CAPABILITY_REQUIRED",
-                "profile-wide operation requires exactly one operator capability source",
-                false,
-                json!({}),
-            ));
-        }
-        if let Some(fd) = fd {
-            if fd < 0 {
-                return Err(MachineError::invalid_argument(
-                    "--operator-fd",
-                    "fd must be a nonnegative integer",
-                ));
-            }
-            let source = File::open(format!("/dev/fd/{fd}")).map_err(|_| {
-                MachineError::new(
-                    "OPERATOR_CAPABILITY_REQUIRED",
-                    "operator capability fd is unavailable",
-                    false,
-                    json!({}),
-                )
-            })?;
-            let mut bytes = Vec::new();
-            source
-                .take(4097)
-                .read_to_end(&mut bytes)
-                .map_err(io_error)?;
-            if bytes.is_empty() || bytes.len() > 4096 {
-                return Err(MachineError::new(
-                    "OPERATOR_CAPABILITY_REQUIRED",
-                    "operator capability fd is empty or oversized",
-                    false,
-                    json!({}),
-                ));
-            }
-            return Ok(());
-        }
-        let path = file_path.ok_or_else(|| {
-            MachineError::new(
-                "OPERATOR_CAPABILITY_REQUIRED",
-                "profile-wide operation requires --operator-file",
-                false,
-                json!({}),
-            )
-        })?;
-        let metadata = fs::symlink_metadata(&path).map_err(|_| {
-            MachineError::new(
-                "OPERATOR_CAPABILITY_REQUIRED",
-                "operator capability is unavailable",
-                false,
-                json!({}),
-            )
-        })?;
-        if !metadata.file_type().is_file()
-            || metadata.mode() & 0o777 != 0o600
-            || metadata.len() == 0
-            || metadata.len() > 4096
-        {
-            return Err(MachineError::new(
-                "OPERATOR_CAPABILITY_REQUIRED",
-                "operator capability file is unsafe",
-                false,
-                json!({}),
-            ));
-        }
-        Ok(())
+                })?;
+        crate::controller::OperatorStore::new(crate::controller::default_operator_root()?)
+            .authorize(&carrier)
+            .map(|_| ())
     }
     fn reject_positionals_and_trailing(&self) -> Result<(), MachineError> {
         if self.positionals.is_empty() && self.trailing.is_empty() {

@@ -189,6 +189,17 @@ impl RuntimeFeatures {
         features.profile_diagnostics = true;
         features
     }
+
+    #[must_use]
+    pub const fn task_007() -> Self {
+        let mut features = Self::task_005();
+        features.controller_binding = true;
+        features.worker_controller_revalidation = true;
+        features.operator_capability = true;
+        features.operator_controller_reset = true;
+        features.safe_client_projection = true;
+        features
+    }
 }
 
 #[must_use]
@@ -266,7 +277,7 @@ pub fn capabilities() -> RuntimeCapabilities {
             "storage_and_long_duration": "unverified",
             "resource_warning_live_dedicated": 6
         },
-        "features": RuntimeFeatures::task_005(),
+        "features": RuntimeFeatures::task_007(),
         "interactions": {
             "command_execution_approval": "unavailable",
             "file_change_approval": "unavailable",
@@ -299,7 +310,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_005_advertises_only_completed_profile_behavior() {
+    fn task_007_advertises_completed_authority_behavior_without_public_socket() {
         let capabilities = serde_json::to_value(capabilities()).unwrap();
         assert_eq!(capabilities["features"]["persistent_runs"], false);
         assert_eq!(
@@ -308,6 +319,15 @@ mod tests {
         );
         assert_eq!(capabilities["features"]["profile_server_migration"], true);
         assert_eq!(capabilities["features"]["profile_membership_repair"], true);
+        assert_eq!(capabilities["features"]["controller_binding"], true);
+        assert_eq!(
+            capabilities["features"]["worker_controller_revalidation"],
+            true
+        );
+        assert_eq!(capabilities["features"]["operator_capability"], true);
+        assert_eq!(capabilities["features"]["operator_controller_reset"], true);
+        assert_eq!(capabilities["features"]["safe_client_projection"], true);
+        assert_eq!(capabilities["features"]["public_local_socket"], false);
         assert_eq!(capabilities["supported_transports"], json!(["machine_cli"]));
     }
 }

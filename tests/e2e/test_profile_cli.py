@@ -237,8 +237,19 @@ def validate(binary: pathlib.Path) -> None:
             raise AssertionError("profile server log exceeded its rotation bound")
 
         operator = root / "operator"
-        operator.write_text("test-only-operator\n", encoding="utf-8")
-        operator.chmod(0o600)
+        initialized_operator = run(
+            binary,
+            home,
+            "operator",
+            "credential",
+            "initialize",
+            "--output",
+            str(operator),
+        )
+        if initialized_operator.returncode != 0:
+            raise AssertionError(
+                f"operator initialization failed: {initialized_operator.stdout}"
+            )
         started = run(binary, home, "profile", "server", "start", "default", "--workspace", str(workspace))
         started_data = envelope(started)["data"]
         if started.returncode != 0 or started_data["state"]["lifecycle"] != "ready":

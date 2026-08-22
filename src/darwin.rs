@@ -1,8 +1,8 @@
 use crate::providers::{MonotonicClock, ProcessIdentity, ProviderError};
 use std::ffi::{CStr, CString, OsString};
 use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,111 @@ pub struct LiveProcessIdentity {
 }
 
 impl DarwinSystem {
+    pub fn duplicate_fd_cloexec(self, fd: RawFd) -> Result<OwnedFd, std::io::Error> {
+        // SAFETY: fcntl borrows the caller's descriptor and returns a distinct
+        // descriptor on success. Ownership of that new descriptor is transferred
+        // exactly once to OwnedFd.
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a successful F_DUPFD_CLOEXEC result is a newly owned descriptor.
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    }
+
+    pub fn send_fd(self, socket: &UnixStream, fd: RawFd) -> Result<(), std::io::Error> {
+        let mut byte = [0_u8; 1];
+        let mut io = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let control_len = usize::try_from(unsafe {
+            // SAFETY: CMSG_SPACE is a pure size calculation for one descriptor.
+            libc::CMSG_SPACE(u32::try_from(std::mem::size_of::<RawFd>()).expect("fd size"))
+        })
+        .expect("control size");
+        let mut control = vec![0_u8; control_len];
+        let message = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut io,
+            msg_iovlen: 1,
+            msg_control: control.as_mut_ptr().cast(),
+            msg_controllen: u32::try_from(control.len()).expect("control size"),
+            msg_flags: 0,
+        };
+        // SAFETY: message points to live iovec/control storage. The first control
+        // header has enough CMSG_SPACE for exactly one RawFd.
+        unsafe {
+            let header = libc::CMSG_FIRSTHDR(&message);
+            if header.is_null() {
+                return Err(std::io::Error::other("SCM_RIGHTS header unavailable"));
+            }
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len =
+                libc::CMSG_LEN(u32::try_from(std::mem::size_of::<RawFd>()).expect("fd size"));
+            std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<RawFd>(), fd);
+            if libc::sendmsg(socket.as_raw_fd(), &message, 0) != 1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn receive_fd(self, socket: &UnixStream) -> Result<OwnedFd, std::io::Error> {
+        let mut byte = [0_u8; 1];
+        let mut io = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let control_len = usize::try_from(unsafe {
+            // SAFETY: CMSG_SPACE is a pure size calculation for one descriptor.
+            libc::CMSG_SPACE(u32::try_from(std::mem::size_of::<RawFd>()).expect("fd size"))
+        })
+        .expect("control size");
+        let mut control = vec![0_u8; control_len];
+        let mut message = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut io,
+            msg_iovlen: 1,
+            msg_control: control.as_mut_ptr().cast(),
+            msg_controllen: u32::try_from(control.len()).expect("control size"),
+            msg_flags: 0,
+        };
+        // SAFETY: recvmsg writes only into the live iovec/control buffers. A
+        // successful SCM_RIGHTS message transfers ownership of the received fd.
+        unsafe {
+            if libc::recvmsg(socket.as_raw_fd(), &mut message, 0) != 1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let header = libc::CMSG_FIRSTHDR(&message);
+            if header.is_null()
+                || (*header).cmsg_level != libc::SOL_SOCKET
+                || (*header).cmsg_type != libc::SCM_RIGHTS
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "SCM_RIGHTS descriptor is missing",
+                ));
+            }
+            let fd = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
+            if fd < 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "SCM_RIGHTS descriptor is invalid",
+                ));
+            }
+            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                let error = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(error);
+            }
+            Ok(OwnedFd::from_raw_fd(fd))
+        }
+    }
+
     pub fn realpath(self, path: &Path) -> Result<PathBuf, std::io::Error> {
         let path = c_path(path)?;
         // SAFETY: realpath is given a valid NUL-terminated input and a null
