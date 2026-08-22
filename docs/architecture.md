@@ -1079,6 +1079,16 @@ fields plus raw-wire length and SHA-256. It has the 120-second deadline but no
 arbitrary total size cap. An ambiguous oversize prefix fails compatibility and
 follows SPEC-006's active-turn quarantine rule.
 
+The TASK-006 implementation keeps this boundary split into two internal worker
+components. `app_server` owns the strict WebSocket and JSON-RPC transport,
+including duplicate-member rejection and server-request precedence; `turn`
+owns thread attachment, one-active-turn serialization, durable intent,
+interaction correlation, idempotent replay, and authoritative terminal
+readback. These components are production adapters used by the per-Run worker,
+but they do not themselves authorize an external mutation. Controller
+credential ingestion, same-uid observer projection, and public command wiring
+remain the TASK-007 boundary.
+
 ## Workspace Identity and Local Layout
 
 The canonical workspace ID is SPEC-002's full lowercase SHA-256 over the

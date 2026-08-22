@@ -473,6 +473,26 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         Ok(result)
     }
 
+    pub fn append_required_payload<T: serde::Serialize>(
+        &mut self,
+        kind: AuditKind,
+        payload: &T,
+        run_generation: u64,
+    ) -> Result<(), LedgerError> {
+        let serialized = serde_json::to_string(payload)
+            .map_err(|error| LedgerError::InvalidRecord(error.to_string()))?;
+        let record = AuditRecord::new(
+            self.next_sequence(),
+            self.clock.timestamp(),
+            self.run_id,
+            run_generation,
+            kind,
+            parse(&serialized).map_err(|error| LedgerError::InvalidRecord(error.to_string()))?,
+            self.previous_hash(),
+        )?;
+        self.append(record, AppendDurability::Required)
+    }
+
     pub fn append_client_event(
         &mut self,
         record: ClientEventRecord,

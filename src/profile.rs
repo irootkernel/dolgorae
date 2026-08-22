@@ -1,5 +1,6 @@
 //! Machine-local Runtime Profile registry and Codex App Server lifecycle.
 
+use crate::app_server::{JsonRpcConnection, TransportError};
 use crate::darwin::DarwinSystem;
 use crate::jcs::{PayloadRepresentation, canonicalize, parse, represent_payload};
 use crate::machine::MachineError;
@@ -2098,43 +2099,17 @@ fn wait_for_socket(path: &Path, pid: u32) -> Result<(), MachineError> {
 }
 
 fn probe_server(socket: &Path, expected_codex_home: &str) -> Result<ProbeResult, MachineError> {
-    let mut stream = UnixStream::connect(socket).map_err(transport)?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(transport)?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .map_err(transport)?;
-    let key = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        Uuid::now_v7().as_bytes(),
-    );
-    write!(
-        stream,
-        "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
-    )
-    .map_err(transport)?;
-    stream.flush().map_err(transport)?;
-    let response = read_http_upgrade(&mut stream)?;
-    let lower = response.to_ascii_lowercase();
-    if !response.starts_with("HTTP/1.1 101 ")
-        || !lower.contains("upgrade: websocket")
-        || !lower.contains("connection: upgrade")
-    {
-        return Err(transport("app-server rejected WebSocket upgrade"));
-    }
-    websocket_json(
-        &mut stream,
-        &json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "dolgorae", "title": "Dolgorae", "version": env!("CARGO_PKG_VERSION")},
-                "capabilities": {"experimentalApi": false, "optOutNotificationMethods": []}
-            }
+    let mut connection =
+        JsonRpcConnection::connect(socket, Duration::from_secs(30)).map_err(transport)?;
+    let initialized = connection
+        .request(
+            "initialize",
+            json!({
+            "clientInfo": {"name": "dolgorae", "title": "Dolgorae", "version": env!("CARGO_PKG_VERSION")},
+            "capabilities": {"experimentalApi": false, "optOutNotificationMethods": []}
         }),
-    )?;
-    let initialized = websocket_response(&mut stream, 1)?;
+        )
+        .map_err(transport)?;
     if initialized["codexHome"].as_str() != Some(expected_codex_home) {
         return Err(MachineError::new(
             "PROFILE_MISMATCH",
@@ -2143,12 +2118,12 @@ fn probe_server(socket: &Path, expected_codex_home: &str) -> Result<ProbeResult,
             json!({"expected_codex_home": expected_codex_home, "actual_codex_home": initialized["codexHome"]}),
         ));
     }
-    websocket_json(&mut stream, &json!({"method":"initialized","params":{}}))?;
-    websocket_json(
-        &mut stream,
-        &json!({"id":2,"method":"account/read","params":{"refreshToken":false}}),
-    )?;
-    let account = websocket_response(&mut stream, 2)?;
+    connection
+        .notify("initialized", json!({}))
+        .map_err(transport)?;
+    let account = connection
+        .request("account/read", json!({"refreshToken":false}))
+        .map_err(transport)?;
     if !account["requiresOpenaiAuth"].is_boolean() {
         return Err(compatibility("account/read lacks requiresOpenaiAuth"));
     }
@@ -2158,11 +2133,9 @@ fn probe_server(socket: &Path, expected_codex_home: &str) -> Result<ProbeResult,
     let mut default_count = 0_usize;
     let mut default_model = None;
     loop {
-        websocket_json(
-            &mut stream,
-            &json!({"id":request_id,"method":"model/list","params":{"cursor":cursor,"limit":100}}),
-        )?;
-        let page = websocket_response(&mut stream, request_id)?;
+        let page = connection
+            .request("model/list", json!({"cursor":cursor,"limit":100}))
+            .map_err(transport)?;
         let data = page["data"]
             .as_array()
             .ok_or_else(|| compatibility("model/list response lacks data"))?;
@@ -2198,17 +2171,19 @@ fn probe_server(socket: &Path, expected_codex_home: &str) -> Result<ProbeResult,
             "model/list must contain exactly one default model",
         ));
     }
-    let absent_id = request_id + 1;
-    websocket_json(
-        &mut stream,
-        &json!({
-            "id": absent_id,
-            "method": "thread/read",
-            "params": {"threadId": Uuid::now_v7(), "includeTurns": true}
-        }),
-    )?;
-    websocket_expected_error(&mut stream, absent_id, -32600)?;
-    websocket_close(&mut stream)?;
+    match connection.request(
+        "thread/read",
+        json!({"threadId": Uuid::now_v7(), "includeTurns": true}),
+    ) {
+        Err(TransportError::RemoteError { code: -32600, .. }) => {}
+        Err(error) => {
+            return Err(compatibility(format!(
+                "absent-thread probe failed: {error}"
+            )));
+        }
+        Ok(_) => return Err(compatibility("absent-thread probe unexpectedly succeeded")),
+    }
+    connection.close().map_err(transport)?;
     let mut capabilities = BTreeMap::new();
     for name in [
         "account_read",
@@ -2228,162 +2203,6 @@ fn probe_server(socket: &Path, expected_codex_home: &str) -> Result<ProbeResult,
         models: models.into_iter().collect(),
         capabilities,
     })
-}
-
-fn websocket_expected_error(
-    stream: &mut UnixStream,
-    id: u64,
-    expected_code: i64,
-) -> Result<(), MachineError> {
-    for _ in 0..4096 {
-        let message = websocket_message(stream)?;
-        if message.len() > 128 && !message[..128].windows(4).any(|bytes| bytes == b"\"id\"") {
-            return Err(compatibility(
-                "probe response did not expose its correlation ID within the early bound",
-            ));
-        }
-        let value: Value = serde_json::from_slice(&message)
-            .map_err(|_| transport("app-server emitted invalid JSON"))?;
-        if value["id"].as_u64() == Some(id) {
-            if value["error"]["code"].as_i64() != Some(expected_code) {
-                return Err(compatibility(
-                    "absent-thread probe returned an unexpected error",
-                ));
-            }
-            return Ok(());
-        }
-    }
-    Err(transport(
-        "app-server error response correlation bound exceeded",
-    ))
-}
-
-fn read_http_upgrade(stream: &mut UnixStream) -> Result<String, MachineError> {
-    let mut bytes = Vec::new();
-    let mut byte = [0_u8; 1];
-    while bytes.len() < 16 * 1024 {
-        stream.read_exact(&mut byte).map_err(transport)?;
-        bytes.push(byte[0]);
-        if bytes.ends_with(b"\r\n\r\n") {
-            return String::from_utf8(bytes)
-                .map_err(|_| transport("WebSocket upgrade response is not UTF-8"));
-        }
-    }
-    Err(transport("WebSocket upgrade response exceeds 16 KiB"))
-}
-
-fn websocket_json(stream: &mut UnixStream, value: &Value) -> Result<(), MachineError> {
-    let bytes = serde_json::to_vec(value).map_err(internal)?;
-    websocket_frame(stream, 0x1, &bytes)
-}
-
-fn websocket_close(stream: &mut UnixStream) -> Result<(), MachineError> {
-    websocket_frame(stream, 0x8, &1000_u16.to_be_bytes())
-}
-
-fn websocket_frame(
-    stream: &mut UnixStream,
-    opcode: u8,
-    payload: &[u8],
-) -> Result<(), MachineError> {
-    if payload.len() > 8 * 1024 * 1024 {
-        return Err(transport("WebSocket probe frame exceeds 8 MiB"));
-    }
-    let mut header = vec![0x80 | opcode];
-    match payload.len() {
-        length @ 0..=125 => header.push(0x80 | u8::try_from(length).expect("bounded")),
-        length @ 126..=65_535 => {
-            header.push(0x80 | 126);
-            header.extend(u16::try_from(length).expect("bounded").to_be_bytes());
-        }
-        length => {
-            header.push(0x80 | 127);
-            header.extend(u64::try_from(length).expect("bounded").to_be_bytes());
-        }
-    }
-    let digest = Sha256::digest(Uuid::now_v7().as_bytes());
-    let mask = &digest[..4];
-    header.extend(mask);
-    stream.write_all(&header).map_err(transport)?;
-    let masked = payload
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| byte ^ mask[index % 4])
-        .collect::<Vec<_>>();
-    stream.write_all(&masked).map_err(transport)?;
-    stream.flush().map_err(transport)
-}
-
-fn websocket_response(stream: &mut UnixStream, id: u64) -> Result<Value, MachineError> {
-    for _ in 0..4096 {
-        let message = websocket_message(stream)?;
-        let value: Value = serde_json::from_slice(&message)
-            .map_err(|_| transport("app-server emitted invalid JSON"))?;
-        if value["id"].as_u64() == Some(id) {
-            if let Some(error) = value.get("error") {
-                return Err(compatibility(format!(
-                    "app-server rejected probe request: {error}"
-                )));
-            }
-            return value
-                .get("result")
-                .cloned()
-                .ok_or_else(|| transport("app-server response lacks result"));
-        }
-    }
-    Err(transport("app-server response correlation bound exceeded"))
-}
-
-fn websocket_message(stream: &mut UnixStream) -> Result<Vec<u8>, MachineError> {
-    let mut message = Vec::new();
-    let mut expected_opcode = None;
-    loop {
-        let mut prefix = [0_u8; 2];
-        stream.read_exact(&mut prefix).map_err(transport)?;
-        let final_frame = prefix[0] & 0x80 != 0;
-        let opcode = prefix[0] & 0x0f;
-        if prefix[1] & 0x80 != 0 {
-            return Err(transport("server WebSocket frame is unexpectedly masked"));
-        }
-        let mut length = u64::from(prefix[1] & 0x7f);
-        if length == 126 {
-            let mut bytes = [0_u8; 2];
-            stream.read_exact(&mut bytes).map_err(transport)?;
-            length = u64::from(u16::from_be_bytes(bytes));
-        } else if length == 127 {
-            let mut bytes = [0_u8; 8];
-            stream.read_exact(&mut bytes).map_err(transport)?;
-            length = u64::from_be_bytes(bytes);
-        }
-        let length =
-            usize::try_from(length).map_err(|_| transport("WebSocket length is invalid"))?;
-        if length > 8 * 1024 * 1024 || message.len().saturating_add(length) > 8 * 1024 * 1024 {
-            return Err(transport("WebSocket message exceeds 8 MiB"));
-        }
-        let mut payload = vec![0_u8; length];
-        stream.read_exact(&mut payload).map_err(transport)?;
-        match opcode {
-            0x0 => {
-                if expected_opcode.is_none() {
-                    return Err(transport("unexpected continuation frame"));
-                }
-                message.extend(payload);
-            }
-            0x1 => {
-                if expected_opcode.replace(opcode).is_some() {
-                    return Err(transport("nested data frame"));
-                }
-                message.extend(payload);
-            }
-            0x8 => return Err(transport("app-server closed the probe connection")),
-            0x9 => websocket_frame(stream, 0xA, &payload)?,
-            0xA => {}
-            _ => return Err(transport("unsupported WebSocket probe opcode")),
-        }
-        if final_frame && matches!(opcode, 0x0 | 0x1) {
-            return Ok(message);
-        }
-    }
 }
 
 fn profile_root(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
