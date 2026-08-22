@@ -6,6 +6,7 @@ pub mod cli;
 pub mod conformance;
 pub mod controller;
 pub mod domain;
+pub mod engagement;
 pub mod event;
 pub mod fault;
 pub mod jcs;

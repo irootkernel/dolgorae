@@ -63,6 +63,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         ("darwin", &["providers"][..]),
         ("domain", &[][..]),
+        ("engagement", &["jcs", "machine"][..]),
         ("event", &["audit", "domain", "jcs", "workspace"][..]),
         ("fault", &[][..]),
         ("jcs", &[][..]),

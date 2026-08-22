@@ -363,7 +363,7 @@ path, or raw App Server frame appears in prompts, output, events, or logs.
 
 ### TASK-009: Durable External Review Engagement Core
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement the minimal External Specialist Engagement production path required
 by a one-shot review, using the existing checked External Specialist Facade and
