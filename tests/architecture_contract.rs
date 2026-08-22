@@ -76,6 +76,17 @@ fn source_module_dependencies_match_the_approved_graph() {
         ("runtime", &["protocol"][..]),
         ("semantic", &["machine", "runtime", "workspace"][..]),
         ("workspace", &["darwin", "jcs", "machine"][..]),
+        (
+            "worker",
+            &[
+                "conformance",
+                "darwin",
+                "event",
+                "fault",
+                "ledger",
+                "machine",
+            ][..],
+        ),
     ]);
 
     for path in rust_sources(&repository_root().join("src")) {

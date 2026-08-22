@@ -2,8 +2,8 @@
 
 Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `TASK-001`, `TASK-002`, `TASK-003-A`, `TASK-003-B`, and `TASK-003-C` are
-`COMPLETE`. No Epic or Task is currently active; `EPIC-002` is the next
-implementation Epic, and `EPIC-003` is the first user-usable product slice.
+`COMPLETE`. `EPIC-002` is `ACTIVE`; `TASK-004` is `COMPLETE`, and `TASK-005` is
+the next implementation Task. `EPIC-003` is the first user-usable product slice.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -207,14 +207,14 @@ without starting Codex, and all persisted formats are versioned.
 
 ## EPIC-002: Worker and Codex App-Server Integration
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Goal: Provide reconnectable per-run process ownership and a strict stable-subset
 adapter for profile-scoped Codex singleton accounts and threads.
 
 ### TASK-004: Per-Run Worker and Unix IPC
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement detached hidden worker re-execution, fixed short private socket paths,
 versioned runtime discovery records, persistent local locks, fd-3

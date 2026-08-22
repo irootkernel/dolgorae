@@ -3,8 +3,20 @@ use std::ffi::{CStr, CString, OsString};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::io::AsRawFd as _;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+const F_SETLKWTIMEOUT: libc::c_int = 10;
+const DARWIN_NSIG: libc::c_int = 32;
+
+#[repr(C)]
+struct FlockTimeout {
+    fl: libc::flock,
+    timeout: libc::timespec,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DarwinSystem;
@@ -85,6 +97,210 @@ impl DarwinSystem {
         Ok(())
     }
 
+    pub fn lock_byte_timeout(
+        self,
+        file: &std::fs::File,
+        offset: i64,
+        timeout: Duration,
+    ) -> Result<(), std::io::Error> {
+        let start = libc::off_t::try_from(offset).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock offset is invalid")
+        })?;
+        let seconds = libc::time_t::try_from(timeout.as_secs()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock timeout is invalid")
+        })?;
+        let nanoseconds = libc::c_long::from(timeout.subsec_nanos());
+        let mut request = FlockTimeout {
+            fl: libc::flock {
+                l_start: start,
+                l_len: 1,
+                l_pid: 0,
+                l_type: libc::F_WRLCK,
+                l_whence: libc::SEEK_SET as i16,
+            },
+            timeout: libc::timespec {
+                tv_sec: seconds,
+                tv_nsec: nanoseconds,
+            },
+        };
+        // SAFETY: fcntl receives a live borrowed descriptor and a pointer to a
+        // correctly laid-out Darwin flocktimeout that remains valid for the
+        // duration of the blocking call. Ownership of the descriptor is not
+        // transferred.
+        if unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                F_SETLKWTIMEOUT,
+                std::ptr::addr_of_mut!(request),
+            )
+        } == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn try_lock_byte(self, file: &std::fs::File, offset: i64) -> Result<(), std::io::Error> {
+        let start = libc::off_t::try_from(offset).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock offset is invalid")
+        })?;
+        let mut request = libc::flock {
+            l_start: start,
+            l_len: 1,
+            l_pid: 0,
+            l_type: libc::F_WRLCK,
+            l_whence: libc::SEEK_SET as i16,
+        };
+        // SAFETY: fcntl borrows the live descriptor and reads the initialized
+        // flock during this nonblocking call without retaining the pointer.
+        if unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                libc::F_SETLK,
+                std::ptr::addr_of_mut!(request),
+            )
+        } == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn unlock_byte(self, file: &std::fs::File, offset: i64) -> Result<(), std::io::Error> {
+        let start = libc::off_t::try_from(offset).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock offset is invalid")
+        })?;
+        let mut request = libc::flock {
+            l_start: start,
+            l_len: 1,
+            l_pid: 0,
+            l_type: libc::F_UNLCK,
+            l_whence: libc::SEEK_SET as i16,
+        };
+        // SAFETY: fcntl borrows the live descriptor and reads the initialized
+        // flock during this call without retaining the pointer.
+        if unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                libc::F_SETLK,
+                std::ptr::addr_of_mut!(request),
+            )
+        } == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Spawn a session-detached child whose only startup channel is fd 3.
+    /// Standard streams are disconnected before the fork, and inherited signal
+    /// state is normalized before re-exec.
+    pub fn spawn_detached_with_fd3(
+        self,
+        command: &mut Command,
+    ) -> Result<(Child, UnixStream), std::io::Error> {
+        let (parent, child_channel) = UnixStream::pair()?;
+        let child_fd = child_channel.as_raw_fd();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: the closure uses only async-signal-safe libc calls between
+        // fork and exec. The captured descriptor remains open until spawn
+        // returns and is duplicated to the fixed startup descriptor.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                if child_fd != 3 && libc::dup2(child_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(3, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+                if libc::sigemptyset(empty.as_mut_ptr()) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::pthread_sigmask(libc::SIG_SETMASK, empty.as_ptr(), std::ptr::null_mut())
+                    != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for signal in 1..DARWIN_NSIG {
+                    if signal != libc::SIGKILL && signal != libc::SIGSTOP {
+                        libc::signal(signal, libc::SIG_DFL);
+                    }
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn()?;
+        drop(child_channel);
+        Ok((child, parent))
+    }
+
+    pub fn install_worker_signal_policy(self) -> Result<(), std::io::Error> {
+        // SAFETY: signal disposition and mask changes affect only the current
+        // post-exec worker process. SIGINT/SIGHUP are intentionally ignored,
+        // and SIGTERM is synchronously consumed by the worker signal thread.
+        unsafe {
+            if libc::signal(libc::SIGINT, libc::SIG_IGN) == libc::SIG_ERR
+                || libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut termination = MaybeUninit::<libc::sigset_t>::uninit();
+            if libc::sigemptyset(termination.as_mut_ptr()) == -1
+                || libc::sigaddset(termination.as_mut_ptr(), libc::SIGTERM) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::pthread_sigmask(libc::SIG_BLOCK, termination.as_ptr(), std::ptr::null_mut())
+                != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn wait_for_worker_sigterm(self) -> Result<(), std::io::Error> {
+        // SAFETY: the set is fully initialized and contains only SIGTERM. The
+        // caller blocks that signal before creating worker threads, so sigwait
+        // is the sole synchronous consumer.
+        unsafe {
+            let mut termination = MaybeUninit::<libc::sigset_t>::uninit();
+            if libc::sigemptyset(termination.as_mut_ptr()) == -1
+                || libc::sigaddset(termination.as_mut_ptr(), libc::SIGTERM) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut observed = 0;
+            let result = libc::sigwait(termination.as_ptr(), &mut observed);
+            if result != 0 || observed != libc::SIGTERM {
+                return Err(if result == 0 {
+                    std::io::Error::other("sigwait returned an unexpected signal")
+                } else {
+                    std::io::Error::from_raw_os_error(result)
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn close_startup_fd3(self) -> Result<(), std::io::Error> {
+        // SAFETY: fd 3 is the fixed startup descriptor owned by the hidden
+        // worker. This function is called exactly once after the terminal
+        // startup handoff and deliberately invalidates that descriptor.
+        if unsafe { libc::close(3) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn current_process(self) -> Result<ProcessIdentity, ProviderError> {
         // SAFETY: these libc calls take no pointers, have no ownership effects, and
         // return process-local scalar identifiers. getpgid is checked for failure.
@@ -138,6 +354,7 @@ impl MonotonicClock for DarwinSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
 
     #[test]
     fn safe_identity_wrapper_returns_current_process() {
@@ -151,5 +368,19 @@ mod tests {
         let first = DarwinSystem.now();
         let second = DarwinSystem.now();
         assert!(second >= first);
+    }
+
+    #[test]
+    fn detached_spawn_preserves_only_the_fd3_startup_channel() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf ready >&3; printf leaked; printf diagnostic >&2",
+        ]);
+        let (mut child, mut startup) = DarwinSystem.spawn_detached_with_fd3(&mut command).unwrap();
+        let mut message = String::new();
+        startup.read_to_string(&mut message).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(message, "ready");
     }
 }

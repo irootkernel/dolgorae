@@ -82,7 +82,30 @@ fn render_version(human: bool) -> ExitCode {
 
 fn execute(cli: Cli) -> ExitCode {
     let command_name = cli.command.machine_name();
+    if let Command::Worker(args) = &cli.command {
+        #[cfg(target_os = "macos")]
+        {
+            return match dolgorae::worker::run_hidden_worker(&args.bootstrap) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    let machine = error.machine_error();
+                    let _ = dolgorae::worker::write_startup_handoff(
+                        &dolgorae::worker::StartupHandoff::Failed {
+                            code: machine.code.clone(),
+                        },
+                    );
+                    ExitCode::from(machine.exit_status())
+                }
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = args;
+            return ExitCode::from(6);
+        }
+    }
     let semantic_command = match &cli.command {
+        Command::Worker(_) => unreachable!("hidden worker handled before semantic dispatch"),
         Command::Runtime {
             command: RuntimeCommand::Capabilities,
         } => SemanticCommand::RuntimeCapabilities,

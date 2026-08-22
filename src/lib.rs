@@ -15,6 +15,7 @@ pub mod providers;
 pub mod run;
 pub mod runtime;
 pub mod semantic;
+pub mod worker;
 pub mod workspace;
 
 #[cfg(target_os = "macos")]

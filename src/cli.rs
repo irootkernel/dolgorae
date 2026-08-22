@@ -18,6 +18,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(name = "__worker", hide = true)]
+    Worker(WorkerArgs),
     Init(InitArgs),
     Serve(LeafArgs),
     Runtime {
@@ -55,6 +57,7 @@ impl Command {
     #[must_use]
     pub const fn machine_name(&self) -> &'static str {
         match self {
+            Self::Worker(_) => "__worker",
             Self::Init(_) => "init",
             Self::Serve(_) => "serve",
             Self::Runtime { command } => command.machine_name(),
@@ -71,7 +74,7 @@ impl Command {
     #[must_use]
     pub fn leaf_args(&self) -> Option<&LeafArgs> {
         match self {
-            Self::Init(_) | Self::Runtime { .. } => None,
+            Self::Worker(_) | Self::Init(_) | Self::Runtime { .. } => None,
             Self::Serve(args) => Some(args),
             Self::Engagement {
                 command: EngagementCommand::Call(args),
@@ -94,6 +97,12 @@ impl Command {
             Self::Run(args) => args.command.leaf_args(),
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct WorkerArgs {
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    pub bootstrap: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
