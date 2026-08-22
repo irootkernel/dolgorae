@@ -39,6 +39,15 @@ pub const MAX_IGNORED_FOREIGN_REQUESTS: usize = 64;
 /// keeps a foreign Thread from driving the journal's size.
 pub const MAX_FOREIGN_FIELD_CHARS: usize = 128;
 
+/// Interaction policy fixed for the lifetime of one Run worker session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSafetyPolicy {
+    #[default]
+    Standard,
+    ReviewerReadOnly,
+}
+
 /// Where an app-server transport failure happened.
 ///
 /// The checked error contract requires every `TRANSPORT_FAILURE` to name the
@@ -1149,6 +1158,7 @@ pub struct TurnCoordinator<S, J, A> {
     developer_instructions: String,
     sandbox: String,
     approval_policy: String,
+    safety_policy: SessionSafetyPolicy,
     run_generation: u64,
     server_key: String,
     server_epoch: u64,
@@ -1166,6 +1176,7 @@ pub struct CoordinatorConfig {
     pub developer_instructions: String,
     pub sandbox: String,
     pub approval_policy: String,
+    pub safety_policy: SessionSafetyPolicy,
     pub run_generation: u64,
     pub server_key: String,
     pub server_epoch: u64,
@@ -1231,6 +1242,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             developer_instructions: config.developer_instructions,
             sandbox: config.sandbox,
             approval_policy: config.approval_policy,
+            safety_policy: config.safety_policy,
             run_generation: config.run_generation,
             server_key: config.server_key,
             server_epoch: config.server_epoch,
@@ -1650,6 +1662,14 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if !supported {
             self.server
                 .respond_error(request_id, -32601, "method not supported")?;
+            return Ok(());
+        }
+        if self.safety_policy == SessionSafetyPolicy::ReviewerReadOnly {
+            self.server.respond_error(
+                request_id,
+                -32000,
+                "Reviewer read-only policy denies interactive authority",
+            )?;
             return Ok(());
         }
         let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
@@ -2190,13 +2210,19 @@ mod tests {
         server: FakeServer,
         attach: ThreadAttach,
     ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
-        coordinator_in(server, attach, Box::new(RecordingDiagnostics::default()))
+        coordinator_in(
+            server,
+            attach,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::Standard,
+        )
     }
 
     fn coordinator_in(
         mut server: FakeServer,
         attach: ThreadAttach,
         foreign_diagnostics: Box<dyn ForeignDiagnostics>,
+        safety_policy: SessionSafetyPolicy,
     ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
         server
             .replies
@@ -2217,6 +2243,7 @@ mod tests {
                 developer_instructions: "fixed".to_owned(),
                 sandbox: "read-only".to_owned(),
                 approval_policy: "untrusted".to_owned(),
+                safety_policy,
                 run_generation: 1,
                 server_key: "a".repeat(64),
                 server_epoch: 7,
@@ -2310,7 +2337,12 @@ mod tests {
         for request in requests {
             server.messages.push_back(request);
         }
-        let mut coordinator = coordinator_in(server, ThreadAttach::Start, Box::new(sink.clone()));
+        let mut coordinator = coordinator_in(
+            server,
+            ThreadAttach::Start,
+            Box::new(sink.clone()),
+            SessionSafetyPolicy::Standard,
+        );
         coordinator
             .start_turn(request("key", DeliveryMode::Submit))
             .unwrap();
@@ -2540,6 +2572,38 @@ mod tests {
                 .iter()
                 .all(|entry| !format!("{entry:?}").contains("secret"))
         );
+    }
+
+    #[test]
+    fn reviewer_policy_denies_interactions_without_waiting_or_retaining_payload() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        server.messages.push_back(serde_json::json!({
+            "id": 9,
+            "method": "item/fileChange/requestApproval",
+            "params": {"threadId":"thread-1","turnId":"turn-1","patch":"sentinel-secret-value"}
+        }));
+        let mut coordinator = coordinator_in(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::ReviewerReadOnly,
+        );
+        coordinator
+            .start_turn(request("key", DeliveryMode::Submit))
+            .unwrap();
+
+        assert!(coordinator.next_event().unwrap().is_none());
+        assert_eq!(coordinator.state(), &CoordinatorState::Running);
+        assert!(coordinator.pending_interactions().is_empty());
+        assert_eq!(coordinator.server.responses.len(), 1);
+        assert_eq!(coordinator.server.responses[0].0, 9);
+        assert!(!format!("{:?}", coordinator.journal().entries).contains("sentinel-secret-value"));
     }
 
     #[test]

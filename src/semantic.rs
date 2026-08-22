@@ -333,6 +333,7 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
         developer_instructions: instructions_text,
         sandbox: "read-only".to_owned(),
         approval_policy: "never".to_owned(),
+        safety_policy: crate::turn::SessionSafetyPolicy::Standard,
         artifact_root: directory.root.join("artifacts"),
         attach: SessionAttach::Start,
         transport_timeout_seconds: 900,

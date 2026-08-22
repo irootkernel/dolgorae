@@ -486,6 +486,7 @@ impl Run {
                     developer_instructions: "fixed".to_owned(),
                     sandbox: "read-only".to_owned(),
                     approval_policy: "never".to_owned(),
+                    safety_policy: dolgorae::turn::SessionSafetyPolicy::Standard,
                     artifact_root: root.join("artifacts"),
                     attach: SessionAttach::Start,
                     transport_timeout_seconds: 60,

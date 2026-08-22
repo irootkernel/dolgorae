@@ -18,6 +18,7 @@ pub mod providers;
 pub mod run;
 pub mod runtime;
 pub mod semantic;
+pub mod specialist;
 pub mod turn;
 pub mod worker;
 pub mod workspace;

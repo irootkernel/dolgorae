@@ -337,7 +337,7 @@ read-only review.
 
 ### TASK-008: Read-Only Specialist Runtime Baseline
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Build on the EPIC-002 read-only Run path and add the minimum production contract
 for an Independent Specialist Reviewer. Resolve one immutable Reviewer Agent

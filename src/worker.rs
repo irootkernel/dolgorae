@@ -18,9 +18,9 @@ use crate::machine::MachineError;
 use crate::turn::{
     AcceptedTurn, AppServer, CoordinatorConfig, CoordinatorState, DeliveryMode, DeliveryResult,
     ForeignDiagnostics, ForeignLane, IgnoredForeignRequest, ImageDetail, ImageSnapshot,
-    Interaction, ResponseArtifactStore, SharedLedgerJournal, StoredArtifact, TerminalTurn,
-    ThreadAttach, TransportStage, TurnCoordinator, TurnError, TurnFailureContext, TurnRequest,
-    recorded_terminal,
+    Interaction, ResponseArtifactStore, SessionSafetyPolicy, SharedLedgerJournal, StoredArtifact,
+    TerminalTurn, ThreadAttach, TransportStage, TurnCoordinator, TurnError, TurnFailureContext,
+    TurnRequest, recorded_terminal,
 };
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1275,6 +1275,8 @@ pub struct WorkerSessionBootstrap {
     pub developer_instructions: String,
     pub sandbox: String,
     pub approval_policy: String,
+    #[serde(default)]
+    pub safety_policy: SessionSafetyPolicy,
     pub artifact_root: PathBuf,
     pub attach: SessionAttach,
     pub transport_timeout_seconds: u64,
@@ -1308,6 +1310,11 @@ impl WorkerSessionBootstrap {
             || !self.artifact_root.is_absolute()
             || self.transport_timeout_seconds == 0
             || self.transport_timeout_seconds > 86_400
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        if self.safety_policy == SessionSafetyPolicy::ReviewerReadOnly
+            && (self.sandbox != "read-only" || self.approval_policy != "never")
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
@@ -2309,6 +2316,7 @@ impl WorkerSession {
                 developer_instructions: session.developer_instructions.clone(),
                 sandbox: session.sandbox.clone(),
                 approval_policy: session.approval_policy.clone(),
+                safety_policy: session.safety_policy,
                 run_generation,
                 server_key: session.server_key.clone(),
                 server_epoch: session.server_epoch,

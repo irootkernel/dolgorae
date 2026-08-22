@@ -137,6 +137,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         (
+            "specialist",
+            &["domain", "jcs", "machine", "run", "turn", "workspace"][..],
+        ),
+        (
             "turn",
             &[
                 "app_server",
