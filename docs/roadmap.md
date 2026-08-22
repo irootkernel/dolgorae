@@ -2,8 +2,8 @@
 
 Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `TASK-001`, `TASK-002`, `TASK-003-A`, `TASK-003-B`, and `TASK-003-C` are
-`COMPLETE`. `EPIC-002` is `ACTIVE`; `TASK-004`, `TASK-005`, `TASK-006`, and
-`TASK-007` are `COMPLETE`.
+`COMPLETE`. `EPIC-002`, `TASK-004`, `TASK-005`, `TASK-006`, and `TASK-007` are
+`COMPLETE`.
 `EPIC-003` is the first user-usable product slice.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
@@ -208,7 +208,7 @@ without starting Codex, and all persisted formats are versioned.
 
 ## EPIC-002: Worker and Codex App-Server Integration
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Provide reconnectable per-run process ownership and a strict stable-subset
 adapter for profile-scoped Codex singleton accounts and threads.
