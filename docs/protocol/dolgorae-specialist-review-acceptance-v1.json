@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "campaign_id": "TASK-013-2026-08-24",
+  "executed_on": "2026-08-24",
+  "host": {
+    "product": "codex-cli",
+    "version": "0.149.0",
+    "runtime_profile": "reviewer",
+    "carrier": "machine_cli",
+    "nontrivial_change_paths": [
+      "Makefile",
+      "tests/e2e/test_specialist_review_acceptance.py",
+      "tests/e2e/run_specialist_review_acceptance.py"
+    ]
+  },
+  "review_rounds": [
+    {
+      "round": 1,
+      "review_id": "01a02fc4-f7b6-71f3-a450-53a9ad2bc7d4",
+      "reviewer_run_id": "01a02fc4-f7b7-71a2-ae72-263fa05639ae",
+      "result_artifact_ref": "01a02fc6-3255-7e32-9d65-e02222001e72",
+      "finding_count": 3,
+      "machine_output_digest": "sha256:a01fb1f269023e403d589b9395ebe8285fb6769b682ea54ba9d6ec154c5fc779",
+      "workspace_fingerprint": "sha256:47aac7eda7263c068fde96fc601486cbe5b0eee233f7e4df650b61cef9d5d5c6",
+      "workspace_unchanged": true,
+      "outcome": "remediated"
+    },
+    {
+      "round": 2,
+      "review_id": "01a02fc9-263d-7861-b2ae-0e8caf6490f3",
+      "reviewer_run_id": "01a02fc9-263e-7463-8dc5-e06fae3261cf",
+      "result_artifact_ref": "01a02fca-9390-7060-b8c2-2b1deef1f4a1",
+      "finding_count": 2,
+      "machine_output_digest": "sha256:761c1f10d94e208d4478e6b4216accb1048c680f804fec1146afab6edb26fad1",
+      "workspace_fingerprint": "sha256:a56cd059f79e59724d330215d9669d061fd484512551bd4129df494d8ebcab88",
+      "workspace_unchanged": true,
+      "outcome": "remediated"
+    },
+    {
+      "round": 3,
+      "review_id": "01a02fcb-988b-7b62-8767-bb1309ca16a1",
+      "reviewer_run_id": "01a02fcb-988c-7771-a69a-8b58c616a0ba",
+      "result_artifact_ref": "01a02fcd-274c-7570-b6ee-f762976b6ac2",
+      "finding_count": 4,
+      "machine_output_digest": "sha256:a2554903b21f6ac8f937508fbbb9606ed1859b3d18cef618cebc8e5a1b4fa4fa",
+      "workspace_fingerprint": "sha256:1283f5c5611621d7a0748aec46ebce4b193006c14249cef26964e7cb9f342779",
+      "workspace_unchanged": true,
+      "outcome": "remediated"
+    },
+    {
+      "round": 4,
+      "review_id": "01a02fd1-ea31-7583-beff-6680a06ac746",
+      "reviewer_run_id": "01a02fd1-ea32-72b0-9b9d-5321d3db4e6c",
+      "result_artifact_ref": "01a02fd3-a76f-7f60-afb3-728f265accf3",
+      "finding_count": 4,
+      "machine_output_digest": "sha256:42c6a48e917ae671edf30e2dc28658dc61c0b01184c9ee46a8aa280e88a2176a",
+      "workspace_fingerprint": "sha256:0317310782d4568649e547496d1ccd2657566108ce361bb7b03ae3fe5e2bad9e",
+      "workspace_unchanged": true,
+      "outcome": "remediated"
+    }
+  ],
+  "accepted_findings": [
+    { "round": 1, "severity": "P1", "title": "Host-context canary check is vacuous", "resolution": "Inject the raw canary into the host adapter environment and scan bounded Dolgorae state plus observable output for absence." },
+    { "round": 1, "severity": "P1", "title": "Workspace fingerprint ignores ignored-file mutations", "resolution": "Include ignored-path inode, size, mode, mtime, and ctime metadata in both fingerprints and add a mutating fake regression." },
+    { "round": 1, "severity": "P2", "title": "Output size bound is enforced only after unbounded buffering", "resolution": "Replace capture_output with concurrent streaming reads that kill the child immediately beyond the combined 1 MiB limit." },
+    { "round": 2, "severity": "P1", "title": "Safe-failure acceptance accepts the wrong failure", "resolution": "Require the exact PROFILE_NOT_FOUND code and retryable false for the missing-profile phase." },
+    { "round": 2, "severity": "P2", "title": "Success acceptance does not validate the checked result schema", "resolution": "Validate every live result against the checked Draft 2020-12 Specialist Review schema and registry." },
+    { "round": 3, "severity": "P1", "title": "Hidden-context canary is passed directly to the Reviewer process", "resolution": "Treat the canary as host-adapter input and prove the resolved Reviewer manifest omits it while bounded output and durable state remain canary-free." },
+    { "round": 3, "severity": "P1", "title": "Recursion prevention is reported as passed without being tested", "resolution": "Inspect the exact Reviewer Run manifest and reject any dolgorae_review registration in its process-static MCP configuration." },
+    { "round": 3, "severity": "P1", "title": "Workspace mutation fingerprint excludes Git metadata", "resolution": "Include both absolute Git dir and common-dir file metadata in the pre/post fingerprint." },
+    { "round": 3, "severity": "P2", "title": "Safe-failure acceptance only tests a pre-allocation error", "resolution": "Add an opt-in live SIGINT phase and require REVIEW_CANCELLED with no residual nonterminal engagement." },
+    { "round": 4, "severity": "P1", "title": "Cancellation acceptance passes an unknown outcome", "resolution": "Accept only the observed REVIEW_CANCELLED terminal code; interrupted-unknown cannot satisfy cancellation acceptance." },
+    { "round": 4, "severity": "P1", "title": "Cleanup verification can miss a newly orphaned engagement", "resolution": "Snapshot engagement identities and require every newly allocated engagement to finish closed." },
+    { "round": 4, "severity": "P1", "title": "Hard timeout and output-limit termination can orphan descendant work", "resolution": "Send SIGINT, drain without retaining excess bytes, allow a bounded cleanup grace, and report an explicit unknown cleanup failure before any forced termination." },
+    { "round": 4, "severity": "P2", "title": "Acceptance schema permits internally contradictory evidence", "resolution": "Replace before/after pairs with one verified fingerprint plus workspace_unchanged:true and fix round order and finding counts in the schema." }
+  ],
+  "safe_failure": {
+    "error_code": "PROFILE_NOT_FOUND",
+    "retryable": false,
+    "workspace_fingerprint": "sha256:3e76d613d64428ad98d86a437e6d73c78027d1be30d48714a22aa1cbbcb6d993",
+    "workspace_unchanged": true,
+    "machine_output_digest": "sha256:4273746b97a5e512b6b5cd2b617547c132b92121a726d5b308669a439cd78048"
+  },
+  "cancellation": {
+    "error_code": "REVIEW_CANCELLED",
+    "retryable": false,
+    "workspace_fingerprint": "sha256:6462ae902a0e8eb628c1f2f098436a29f65ca99c8e0f3b8694b43154c2aac28e",
+    "workspace_unchanged": true,
+    "machine_output_digest": "sha256:e22bb2afc9399145165cbc0854b54c3c2f63c7921418b3984b744b5d206c6d7e",
+    "new_engagement_count": 1,
+    "new_engagement_terminal_states": ["closed"]
+  },
+  "isolation": {
+    "workspace_write_observed": false,
+    "workspace_fingerprint_stable": true,
+    "git_metadata_in_fingerprint": true,
+    "ignored_paths_in_fingerprint": true,
+    "separate_reviewer_run": true,
+    "separate_codex_thread": true,
+    "recursive_review_adapter_absent": true,
+    "host_context_canary_absent_from_output_and_state": true,
+    "credential_material_absent": true,
+    "private_endpoint_absent": true
+  },
+  "mcp": {
+    "disposition": "mcp_unavailable",
+    "tool_advertised": false,
+    "supported_carrier": "machine_cli",
+    "evidence": "docs/protocol/dolgorae-specialist-review-mcp-disposition-v1.json"
+  },
+  "evidence_policy": {
+    "max_combined_process_output_bytes": 1048576,
+    "raw_model_output_retained": false,
+    "only_digests_and_bounded_findings_retained": true
+  }
+}

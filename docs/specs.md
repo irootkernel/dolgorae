@@ -3043,6 +3043,13 @@ immutable result artifact, contain no hidden reasoning or raw protocol frame,
 report `workspace_write_observed: false`, and order findings by `P0`, `P1`,
 `P2`, then `P3` with stable input order within one severity. Reviewer failure,
 timeout, cancellation, invalid structured output, observed workspace mutation,
+and the SR1 live acceptance campaign are recorded without raw model output in
+the checked
+[`dolgorae-specialist-review-acceptance-v1.json`](protocol/dolgorae-specialist-review-acceptance-v1.json)
+artifact. The campaign evidence binds the pinned host and Machine CLI carrier,
+separate Reviewer Run and thread, resolved non-recursive profile, stable
+workspace including Git metadata and ignored paths, exact checked result
+schema, and terminal cancellation cleanup.
 or unknown Turn acceptance or outcome MUST produce a checked non-success
 result. Unknown work MUST NOT be replayed automatically.
 

@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-review-acceptance/v1",
+  "title": "Dolgorae Specialist Review live acceptance evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "campaign_id",
+    "executed_on",
+    "host",
+    "review_rounds",
+    "accepted_findings",
+    "safe_failure",
+    "cancellation",
+    "isolation",
+    "mcp",
+    "evidence_policy"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "campaign_id": { "const": "TASK-013-2026-08-24" },
+    "executed_on": { "const": "2026-08-24" },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product", "version", "runtime_profile", "carrier", "nontrivial_change_paths"],
+      "properties": {
+        "product": { "const": "codex-cli" },
+        "version": { "const": "0.149.0" },
+        "runtime_profile": { "const": "reviewer" },
+        "carrier": { "const": "machine_cli" },
+        "nontrivial_change_paths": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      }
+    },
+    "review_rounds": {
+      "type": "array",
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/review_round" }, { "properties": { "round": { "const": 1 }, "finding_count": { "const": 3 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/review_round" }, { "properties": { "round": { "const": 2 }, "finding_count": { "const": 2 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/review_round" }, { "properties": { "round": { "const": 3 }, "finding_count": { "const": 4 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/review_round" }, { "properties": { "round": { "const": 4 }, "finding_count": { "const": 4 } } }] }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "accepted_findings": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "items": { "$ref": "#/$defs/remediation" }
+    },
+    "safe_failure": {
+      "allOf": [
+        { "$ref": "#/$defs/non_success" },
+        { "properties": { "error_code": { "const": "PROFILE_NOT_FOUND" } } }
+      ]
+    },
+    "cancellation": {
+      "allOf": [
+        { "$ref": "#/$defs/non_success" },
+        {
+          "type": "object",
+          "required": ["new_engagement_count", "new_engagement_terminal_states"],
+          "properties": {
+            "error_code": { "const": "REVIEW_CANCELLED" },
+            "new_engagement_count": { "const": 1 },
+            "new_engagement_terminal_states": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "const": "closed" }
+            }
+          }
+        }
+      ]
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_write_observed",
+        "workspace_fingerprint_stable",
+        "git_metadata_in_fingerprint",
+        "ignored_paths_in_fingerprint",
+        "separate_reviewer_run",
+        "separate_codex_thread",
+        "recursive_review_adapter_absent",
+        "host_context_canary_absent_from_output_and_state",
+        "credential_material_absent",
+        "private_endpoint_absent"
+      ],
+      "properties": {
+        "workspace_write_observed": { "const": false },
+        "workspace_fingerprint_stable": { "const": true },
+        "git_metadata_in_fingerprint": { "const": true },
+        "ignored_paths_in_fingerprint": { "const": true },
+        "separate_reviewer_run": { "const": true },
+        "separate_codex_thread": { "const": true },
+        "recursive_review_adapter_absent": { "const": true },
+        "host_context_canary_absent_from_output_and_state": { "const": true },
+        "credential_material_absent": { "const": true },
+        "private_endpoint_absent": { "const": true }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "tool_advertised", "supported_carrier", "evidence"],
+      "properties": {
+        "disposition": { "const": "mcp_unavailable" },
+        "tool_advertised": { "const": false },
+        "supported_carrier": { "const": "machine_cli" },
+        "evidence": { "const": "docs/protocol/dolgorae-specialist-review-mcp-disposition-v1.json" }
+      }
+    },
+    "evidence_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_combined_process_output_bytes", "raw_model_output_retained", "only_digests_and_bounded_findings_retained"],
+      "properties": {
+        "max_combined_process_output_bytes": { "const": 1048576 },
+        "raw_model_output_retained": { "const": false },
+        "only_digests_and_bounded_findings_retained": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "review_round": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["round", "review_id", "reviewer_run_id", "result_artifact_ref", "finding_count", "machine_output_digest", "workspace_fingerprint", "workspace_unchanged", "outcome"],
+      "properties": {
+        "round": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "review_id": { "$ref": "#/$defs/uuid7" },
+        "reviewer_run_id": { "$ref": "#/$defs/uuid7" },
+        "result_artifact_ref": { "$ref": "#/$defs/uuid7" },
+        "finding_count": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "machine_output_digest": { "$ref": "#/$defs/digest" },
+        "workspace_fingerprint": { "$ref": "#/$defs/digest" },
+        "workspace_unchanged": { "const": true },
+        "outcome": { "const": "remediated" }
+      }
+    },
+    "remediation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["round", "severity", "title", "resolution"],
+      "properties": {
+        "round": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "resolution": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "non_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error_code", "retryable", "workspace_fingerprint", "workspace_unchanged", "machine_output_digest"],
+      "properties": {
+        "error_code": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "retryable": { "const": false },
+        "workspace_fingerprint": { "$ref": "#/$defs/digest" },
+        "workspace_unchanged": { "const": true },
+        "machine_output_digest": { "$ref": "#/$defs/digest" },
+        "new_engagement_count": { "type": "integer", "minimum": 1 },
+        "new_engagement_terminal_states": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

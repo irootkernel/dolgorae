@@ -489,7 +489,7 @@ canaries.
 
 ### TASK-013: Codex CLI Specialist Review Preview Acceptance
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Run an opt-in live acceptance campaign against the pinned Codex CLI and one
 prepared Reviewer Runtime Profile. The host Codex CLI performs a nontrivial

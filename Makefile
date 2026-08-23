@@ -15,7 +15,7 @@ INT_TESTS := \
 	--test workspace_contract
 
 .PHONY: test test-prepare test-unit test-int test-e2e \
-	format format-check lint vet architecture
+	test-live-specialist-review format format-check lint vet architecture
 
 test:
 	$(MAKE) test-prepare
@@ -90,5 +90,18 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"
+		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_specialist_review_acceptance.py
 	@echo "[test-e2e] completed"
+
+test-live-specialist-review:
+	@test "$${DOLGORAE_RUN_LIVE_SPECIALIST_REVIEW:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_SPECIALIST_REVIEW=1 is required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_specialist_review_acceptance.py \
+		--binary "$(DOLGORAE_BIN)" \
+		--workspace "$(CURDIR)" \
+		--profile "$${DOLGORAE_REVIEW_PROFILE:-reviewer}" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--phase "$${DOLGORAE_ACCEPTANCE_PHASE:-review}"

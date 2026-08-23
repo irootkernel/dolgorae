@@ -235,6 +235,14 @@ CLI remains the SR1 carrier. The Reviewer profile
 omits the adapter, and the semantic layer rejects nested
 first-class Specialist hiring, preventing recursive review invocation.
 
+The opt-in SR1 campaign retains only bounded findings, identifiers, and
+digests in the checked
+[`dolgorae-specialist-review-acceptance-v1.json`](protocol/dolgorae-specialist-review-acceptance-v1.json)
+artifact. Its schema rejects missing review rounds, unresolved findings,
+workspace-change claims, non-terminal cancellation cleanup, credential or
+private-endpoint disclosure, and any MCP advertisement under the selected
+`mcp_unavailable` disposition. Raw model output is not retained.
+
 ### Orchestration Broker
 
 The Orchestration Broker is an internal Dolgorae control-plane component used
