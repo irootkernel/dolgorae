@@ -443,8 +443,12 @@ fn reviewer_thread_is_registered(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(internal(error)),
     };
-    for entry in entries {
-        let root = entry.map_err(internal)?.path();
+    let mut roots = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    roots.sort();
+    for root in roots {
         let state: Value = match fs::read(root.join("state.json")) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(internal)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -456,14 +460,17 @@ fn reviewer_thread_is_registered(
         let manifest: Value =
             serde_json::from_slice(&fs::read(root.join("manifest.json")).map_err(internal)?)
                 .map_err(internal)?;
-        return Ok(manifest
+        let reviewer = manifest
             .pointer("/agent_configuration/role_reference")
             .and_then(Value::as_str)
             == Some(crate::specialist::REVIEWER_ROLE_REFERENCE)
             || manifest
                 .pointer("/aggregate_binding/role_reference")
                 .and_then(Value::as_str)
-                == Some(crate::specialist::REVIEWER_ROLE_REFERENCE));
+                == Some(crate::specialist::REVIEWER_ROLE_REFERENCE);
+        if reviewer {
+            return Ok(true);
+        }
     }
     Ok(false)
 }
@@ -1040,8 +1047,20 @@ mod tests {
     fn registered_reviewer_thread_is_rejected_structurally() {
         let root =
             std::env::temp_dir().join(format!("dolgorae-review-recursion-{}", new_uuid_v7()));
+        let ordinary = root.join("runs/aaa-ordinary");
         let run = root.join("runs/reviewer");
+        fs::create_dir_all(&ordinary).unwrap();
         fs::create_dir_all(&run).unwrap();
+        fs::write(
+            ordinary.join("state.json"),
+            br#"{"thread_id":"thread-reviewer"}"#,
+        )
+        .unwrap();
+        fs::write(
+            ordinary.join("manifest.json"),
+            br#"{"agent_configuration":{"role_reference":"primary"}}"#,
+        )
+        .unwrap();
         fs::write(
             run.join("state.json"),
             br#"{"thread_id":"thread-reviewer"}"#,

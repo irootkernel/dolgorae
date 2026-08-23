@@ -131,8 +131,10 @@ def workspace_fingerprint(workspace: Path) -> str:
             target = os.readlink(path).encode("utf-8", "surrogateescape")
             state.update(b"symlink\0" + len(target).to_bytes(8, "big") + target)
         elif path.is_file():
-            content = path.read_bytes()
-            state.update(b"file\0" + len(content).to_bytes(8, "big") + content)
+            state.update(b"file\0" + path.stat().st_size.to_bytes(8, "big"))
+            with path.open("rb") as source:
+                while chunk := source.read(65_536):
+                    state.update(chunk)
         else:
             state.update(b"other\0")
     for encoded in sorted(item for item in ignored.split(b"\0") if item):
