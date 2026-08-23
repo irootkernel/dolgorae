@@ -70,7 +70,7 @@
     { "round": 3, "severity": "P1", "title": "Workspace mutation fingerprint excludes Git metadata", "resolution": "Include both absolute Git dir and common-dir file metadata in the pre/post fingerprint." },
     { "round": 3, "severity": "P2", "title": "Safe-failure acceptance only tests a pre-allocation error", "resolution": "Add an opt-in live SIGINT phase and require REVIEW_CANCELLED with no residual nonterminal engagement." },
     { "round": 4, "severity": "P1", "title": "Cancellation acceptance passes an unknown outcome", "resolution": "Accept only the observed REVIEW_CANCELLED terminal code; interrupted-unknown cannot satisfy cancellation acceptance." },
-    { "round": 4, "severity": "P1", "title": "Cleanup verification can miss a newly orphaned engagement", "resolution": "Snapshot engagement identities and require every newly allocated engagement to finish closed." },
+    { "round": 4, "severity": "P1", "title": "Cleanup verification can miss a newly orphaned engagement", "resolution": "Snapshot engagement identities and require every newly allocated engagement to finish closed before task uncertainty or interrupted_unknown after an accepted-task cancellation race." },
     { "round": 4, "severity": "P1", "title": "Hard timeout and output-limit termination can orphan descendant work", "resolution": "Send SIGINT, drain without retaining excess bytes, allow a bounded cleanup grace, and report an explicit unknown cleanup failure before any forced termination." },
     { "round": 4, "severity": "P2", "title": "Acceptance schema permits internally contradictory evidence", "resolution": "Replace before/after pairs with one verified fingerprint plus workspace_unchanged:true and fix round order and finding counts in the schema." }
   ],
