@@ -430,7 +430,7 @@ state reuse.
 
 ### TASK-011: External MCP Per-Request Identity Probe
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-010`. Validate the pinned Codex CLI against the MCP
 2026-07-28 stateless request model before claiming reconnect-safe review

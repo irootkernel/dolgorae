@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "operation": "select_specialist_review_mcp_disposition",
+  "selected_at": "2026-08-23T17:06:20.086220Z",
+  "host": {
+    "name": "codex-cli",
+    "version": "0.149.0",
+    "binary_sha256": "f4a74117b8142cda581c95ff753abf4508b5636d89682c1ed77e4a9249af8963",
+    "mcp_request_model": "2026-07-28-stateless"
+  },
+  "required_carrier": {
+    "location": "tools/call params._meta",
+    "key": "xyz.rootkernel.dolgorae/externalRequestRef",
+    "authority": "host_controlled",
+    "value": "uuidv7_per_logical_invocation"
+  },
+  "observed_call": {
+    "tool_call_reached": true,
+    "capture_order": "meta_before_arguments",
+    "params_meta_present": true,
+    "required_key_observed": false,
+    "observed_meta_keys": [
+      "callId",
+      "progressToken",
+      "threadId",
+      "x-codex-turn-metadata"
+    ],
+    "arguments_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "raw_capture_sha256": "cbcf15bb6a9cd596e482e015ab5ab824ac0634717074ec5e514420f629910ba0"
+  },
+  "scenario_matrix": [
+    { "scenario": "initial_call", "status": "observed_missing_required_carrier" },
+    { "scenario": "same_reference_retry", "status": "not_executable_without_initial_reference" },
+    { "scenario": "client_reconnect", "status": "not_executable_without_initial_reference" },
+    { "scenario": "server_restart", "status": "not_executable_without_initial_reference" },
+    { "scenario": "concurrent_calls", "status": "not_executable_without_initial_reference" },
+    { "scenario": "response_loss_before_result_commit", "status": "not_executable_without_initial_reference" },
+    { "scenario": "response_loss_after_result_commit", "status": "not_executable_without_initial_reference" },
+    { "scenario": "connection_identity_ignored", "status": "ignored_by_contract" },
+    { "scenario": "process_identity_ignored", "status": "ignored_by_contract" }
+  ],
+  "ignored_identity_sources": {
+    "connection": true,
+    "stdio_process": true,
+    "json_rpc_request_id": true
+  },
+  "disposition": "mcp_unavailable",
+  "tool_advertised": false,
+  "supported_carrier": "machine_cli",
+  "reason": "Codex CLI 0.149.0 reached tools/call with params._meta but did not generate the required host-controlled vendor UUIDv7 key on the initial logical invocation. A reference that does not exist on the first call cannot be preserved across retry, reconnect, restart, concurrency, or response-loss paths, so MILESTONE-SR1 must expose only the Machine CLI carrier."
+}

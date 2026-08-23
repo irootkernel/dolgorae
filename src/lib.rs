@@ -12,6 +12,7 @@ pub mod fault;
 pub mod jcs;
 pub mod ledger;
 pub mod machine;
+pub mod mcp_review;
 pub mod profile;
 pub mod projection;
 pub mod protocol;

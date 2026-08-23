@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-review-mcp-disposition/v1",
+  "title": "Dolgorae Specialist Review MCP host disposition v1",
+  "description": "Checked version-pinned evidence selecting whether the optional external review MCP tool may be advertised for MILESTONE-SR1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "selected_at",
+    "host",
+    "required_carrier",
+    "observed_call",
+    "scenario_matrix",
+    "ignored_identity_sources",
+    "disposition",
+    "tool_advertised",
+    "supported_carrier",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "operation": { "const": "select_specialist_review_mcp_disposition" },
+    "selected_at": { "type": "string", "format": "date-time" },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "binary_sha256", "mcp_request_model"],
+      "properties": {
+        "name": { "const": "codex-cli" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "binary_sha256": { "$ref": "#/$defs/sha256" },
+        "mcp_request_model": { "const": "2026-07-28-stateless" }
+      }
+    },
+    "required_carrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["location", "key", "authority", "value"],
+      "properties": {
+        "location": { "const": "tools/call params._meta" },
+        "key": { "const": "xyz.rootkernel.dolgorae/externalRequestRef" },
+        "authority": { "const": "host_controlled" },
+        "value": { "const": "uuidv7_per_logical_invocation" }
+      }
+    },
+    "observed_call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_call_reached",
+        "capture_order",
+        "params_meta_present",
+        "required_key_observed",
+        "observed_meta_keys",
+        "arguments_sha256",
+        "raw_capture_sha256"
+      ],
+      "properties": {
+        "tool_call_reached": { "const": true },
+        "capture_order": { "const": "meta_before_arguments" },
+        "params_meta_present": { "type": "boolean" },
+        "required_key_observed": { "type": "boolean" },
+        "observed_meta_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "arguments_sha256": { "$ref": "#/$defs/sha256" },
+        "raw_capture_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "scenario_matrix": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scenario", "status"],
+        "properties": {
+          "scenario": {
+            "enum": [
+              "initial_call",
+              "same_reference_retry",
+              "client_reconnect",
+              "server_restart",
+              "concurrent_calls",
+              "response_loss_before_result_commit",
+              "response_loss_after_result_commit",
+              "connection_identity_ignored",
+              "process_identity_ignored"
+            ]
+          },
+          "status": {
+            "enum": [
+              "observed_missing_required_carrier",
+              "not_executable_without_initial_reference",
+              "ignored_by_contract"
+            ]
+          }
+        }
+      },
+      "x-uniqueBy": "scenario"
+    },
+    "ignored_identity_sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection", "stdio_process", "json_rpc_request_id"],
+      "properties": {
+        "connection": { "const": true },
+        "stdio_process": { "const": true },
+        "json_rpc_request_id": { "const": true }
+      }
+    },
+    "disposition": { "enum": ["replay_safe_meta", "mcp_unavailable"] },
+    "tool_advertised": { "type": "boolean" },
+    "supported_carrier": { "enum": ["mcp", "machine_cli"] },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 4096 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "disposition": { "const": "mcp_unavailable" } } },
+      "then": {
+        "properties": {
+          "tool_advertised": { "const": false },
+          "supported_carrier": { "const": "machine_cli" },
+          "observed_call": {
+            "properties": { "required_key_observed": { "const": false } }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "disposition": { "const": "replay_safe_meta" } } },
+      "then": {
+        "properties": {
+          "tool_advertised": { "const": true },
+          "supported_carrier": { "const": "mcp" },
+          "observed_call": {
+            "properties": { "required_key_observed": { "const": true } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "x-invariants": [
+    "replay_safe_meta requires the exact same host-controlled UUIDv7 on every required scenario",
+    "missing initial carrier evidence selects mcp_unavailable without attempting best-effort identity",
+    "connection, stdio process, and JSON-RPC request identity are never durable logical-request identity"
+  ]
+}
