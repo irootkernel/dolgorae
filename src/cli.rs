@@ -20,6 +20,8 @@ pub struct Cli {
 pub enum Command {
     #[command(name = "__worker", hide = true)]
     Worker(WorkerArgs),
+    #[command(name = "__specialist-review-mcp", hide = true)]
+    SpecialistReviewMcp(SpecialistReviewMcpArgs),
     Init(InitArgs),
     Serve(LeafArgs),
     Runtime {
@@ -58,6 +60,7 @@ impl Command {
     pub const fn machine_name(&self) -> &'static str {
         match self {
             Self::Worker(_) => "__worker",
+            Self::SpecialistReviewMcp(_) => "__specialist-review-mcp",
             Self::Init(_) => "init",
             Self::Serve(_) => "serve",
             Self::Runtime { command } => command.machine_name(),
@@ -74,7 +77,10 @@ impl Command {
     #[must_use]
     pub fn leaf_args(&self) -> Option<&LeafArgs> {
         match self {
-            Self::Worker(_) | Self::Init(_) | Self::Runtime { .. } => None,
+            Self::Worker(_)
+            | Self::SpecialistReviewMcp(_)
+            | Self::Init(_)
+            | Self::Runtime { .. } => None,
             Self::Serve(args) => Some(args),
             Self::Engagement {
                 command: EngagementCommand::Call(args),
@@ -103,6 +109,14 @@ impl Command {
 pub struct WorkerArgs {
     #[arg(long, value_name = "ABSOLUTE_PATH")]
     pub bootstrap: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct SpecialistReviewMcpArgs {
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    pub workspace: PathBuf,
+    #[arg(long, value_name = "RUNTIME_PROFILE")]
+    pub profile: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1328,6 +1342,34 @@ mod tests {
                 "{protected}"
             );
         }
+    }
+
+    #[test]
+    fn private_review_mcp_binds_workspace_and_profile_outside_tool_arguments() {
+        let cli = Cli::try_parse_from([
+            "dolgorae",
+            "__specialist-review-mcp",
+            "--workspace",
+            "/canonical/workspace",
+            "--profile",
+            "reviewer",
+        ])
+        .unwrap();
+        assert_eq!(cli.command.machine_name(), "__specialist-review-mcp");
+        assert!(validate_argument_contract(&cli.command).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "dolgorae",
+                "__specialist-review-mcp",
+                "--workspace",
+                "/canonical/workspace",
+                "--profile",
+                "reviewer",
+                "--request-ref",
+                "018f0c6a-7b01-7abc-8def-0123456789ab",
+            ])
+            .is_err()
+        );
     }
 
     /// specs.md: "`<duration>` is a positive base-10 integer followed

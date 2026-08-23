@@ -459,7 +459,7 @@ preserve metadata selects `mcp_unavailable`; and a checked disposition artifact.
 
 ### TASK-012: Narrow Codex CLI MCP Review Adapter
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-011`. Implement a private stdio MCP server entry point for
 external AI hosts and expose exactly one model-facing tool named

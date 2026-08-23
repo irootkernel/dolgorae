@@ -86,6 +86,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         ("machine", &["workspace"][..]),
         ("mcp_review", &[][..]),
         (
+            "mcp_review_server",
+            &["machine", "mcp_review", "semantic"][..],
+        ),
+        (
             "profile",
             &[
                 "app_server",

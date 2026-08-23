@@ -101,6 +101,15 @@ fn render_version(human: bool) -> ExitCode {
 
 fn execute(cli: Cli) -> ExitCode {
     let command_name = cli.command.machine_name();
+    if let Command::SpecialistReviewMcp(args) = &cli.command {
+        return match dolgorae::mcp_review_server::serve_stdio(&args.workspace, &args.profile) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("dolgorae MCP startup failed: {}", error.code);
+                ExitCode::from(error.exit_status())
+            }
+        };
+    }
     if let Command::Worker(args) = &cli.command {
         #[cfg(target_os = "macos")]
         {
@@ -318,6 +327,9 @@ fn execute(cli: Cli) -> ExitCode {
     }
     let semantic_command = match &cli.command {
         Command::Worker(_) => unreachable!("hidden worker handled before semantic dispatch"),
+        Command::SpecialistReviewMcp(_) => {
+            unreachable!("hidden MCP server handled before semantic dispatch")
+        }
         Command::Runtime {
             command: RuntimeCommand::Capabilities,
         } => SemanticCommand::RuntimeCapabilities,
