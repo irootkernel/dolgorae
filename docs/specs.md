@@ -3050,6 +3050,9 @@ artifact. The campaign evidence binds the pinned host and Machine CLI carrier,
 separate Reviewer Run and thread, resolved non-recursive profile, stable
 workspace including Git metadata and ignored paths, exact checked result
 schema, and terminal cancellation cleanup.
+Mutation detection is deliberately attribution-free and fail-closed: a
+concurrent process that changes a tracked, untracked, ignored, or Git-metadata
+path during a review causes the same safe non-success as a Reviewer mutation.
 or unknown Turn acceptance or outcome MUST produce a checked non-success
 result. Unknown work MUST NOT be replayed automatically.
 

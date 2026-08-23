@@ -12,6 +12,7 @@ use crate::workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read as _;
@@ -19,7 +20,7 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -36,7 +37,7 @@ pub const REVIEW_FOCUS: [&str; 7] = [
     "maintainability",
 ];
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static INTERRUPT_EPOCH: AtomicU64 = AtomicU64::new(0);
 static INTERRUPT_HANDLER: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -173,7 +174,7 @@ pub fn execute(
     request_ref: Uuid,
 ) -> Result<Value, MachineError> {
     install_interrupt_handler()?;
-    INTERRUPTED.store(false, Ordering::SeqCst);
+    let interrupt_epoch = INTERRUPT_EPOCH.load(Ordering::SeqCst);
     request.validate()?;
     if request_ref.get_version_num() != 7 {
         return Err(MachineError::invalid_argument(
@@ -208,6 +209,7 @@ pub fn execute(
             &prepared.plan,
             &key("hire"),
             |reservation, binding, plan| {
+                reviewer_run_id = Some(reservation.specialist_run_id);
                 let arguments = reviewer_start_arguments(
                     &canonical_workspace,
                     profile,
@@ -244,7 +246,7 @@ pub fn execute(
                 "Reviewer Run did not become ready",
             ));
         }
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if interrupted_since(interrupt_epoch) {
             return Err(review_error(
                 "REVIEW_CANCELLED",
                 "Specialist review was cancelled by the caller",
@@ -258,7 +260,7 @@ pub fn execute(
             let run_id = hired.specialist_run_id;
             thread::spawn(move || {
                 while !watcher_done.load(Ordering::SeqCst) {
-                    if INTERRUPTED.load(Ordering::SeqCst) {
+                    if interrupted_since(interrupt_epoch) {
                         let mut arguments = vec![OsString::from(run_id.to_string())];
                         arguments.extend(pairs(&[
                             ("--workspace", workspace.as_os_str()),
@@ -316,7 +318,7 @@ pub fn execute(
         watcher_done.store(true, Ordering::SeqCst);
         let _ = watcher.join();
         let task = task?;
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if interrupted_since(interrupt_epoch) {
             return Err(review_error(
                 "REVIEW_CANCELLED",
                 "Specialist review was cancelled by the caller",
@@ -398,13 +400,19 @@ pub fn execute(
 
 fn install_interrupt_handler() -> Result<(), MachineError> {
     let installed = INTERRUPT_HANDLER.get_or_init(|| {
-        ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
-            .map_err(|error| error.to_string())
+        ctrlc::set_handler(|| {
+            INTERRUPT_EPOCH.fetch_add(1, Ordering::SeqCst);
+        })
+        .map_err(|error| error.to_string())
     });
     installed
         .as_ref()
         .map_err(|reason| internal(format!("cannot install interrupt handler: {reason}")))
         .copied()
+}
+
+fn interrupted_since(epoch: u64) -> bool {
+    INTERRUPT_EPOCH.load(Ordering::SeqCst) != epoch
 }
 
 fn workspace_fingerprint(
@@ -455,8 +463,73 @@ fn workspace_fingerprint(
             let relative = PathBuf::from(OsString::from_vec(raw.to_vec()));
             hash_metadata_path(root, &relative, &mut digest)?;
         }
+        hash_git_metadata(root, &mut digest)?;
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn hash_git_metadata(root: &Path, digest: &mut Sha256) -> Result<(), MachineError> {
+    let mut directories = BTreeSet::new();
+    for argument in ["--git-dir", "--git-common-dir"] {
+        let mut output = git_paths(root, &["rev-parse", "--path-format=absolute", argument])?;
+        if output.last() == Some(&b'\n') {
+            output.pop();
+        }
+        if output.is_empty() || output.contains(&0) {
+            return Err(internal("git metadata path is empty or contains NUL"));
+        }
+        directories.insert(PathBuf::from(OsString::from_vec(output)));
+    }
+    for directory in directories {
+        digest.update(b"git-metadata\0");
+        hash_metadata_tree(&directory, &directory, digest)?;
+    }
+    Ok(())
+}
+
+fn hash_metadata_tree(
+    root: &Path,
+    directory: &Path,
+    digest: &mut Sha256,
+) -> Result<(), MachineError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| internal(error.to_string()))?;
+        let metadata = fs::symlink_metadata(&path).map_err(internal)?;
+        digest.update((relative.as_os_str().as_bytes().len() as u64).to_be_bytes());
+        digest.update(relative.as_os_str().as_bytes());
+        digest.update(metadata.mode().to_be_bytes());
+        digest.update(metadata.len().to_be_bytes());
+        digest.update(metadata.ino().to_be_bytes());
+        digest.update(metadata.mtime().to_be_bytes());
+        digest.update(metadata.mtime_nsec().to_be_bytes());
+        digest.update(metadata.ctime().to_be_bytes());
+        digest.update(metadata.ctime_nsec().to_be_bytes());
+        if metadata.file_type().is_symlink() {
+            digest.update(b"symlink\0");
+            digest.update(
+                fs::read_link(&path)
+                    .map_err(internal)?
+                    .as_os_str()
+                    .as_bytes(),
+            );
+        } else if metadata.is_dir() {
+            digest.update(b"directory\0");
+            hash_metadata_tree(root, &path, digest)?;
+        } else if metadata.is_file() {
+            digest.update(b"file\0");
+        } else {
+            digest.update(b"other\0");
+        }
+    }
+    Ok(())
 }
 
 fn git_paths(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, MachineError> {
@@ -771,5 +844,43 @@ mod tests {
         assert_ne!(before, after);
         fs::remove_file(path).unwrap();
         fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn git_metadata_digest_changes_when_repository_metadata_changes() {
+        let root = std::env::temp_dir().join(format!("dolgorae-review-git-{}", new_uuid_v7()));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let fingerprint = |root: &Path| {
+            let mut digest = Sha256::new();
+            hash_git_metadata(root, &mut digest).unwrap();
+            format!("{:x}", digest.finalize())
+        };
+        let before = fingerprint(&root);
+        fs::write(
+            root.join(".git/config"),
+            b"[core]\nrepositoryformatversion = 1\n",
+        )
+        .unwrap();
+        let after = fingerprint(&root);
+        assert_ne!(before, after);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupt_epoch_does_not_reset_when_another_review_starts() {
+        let before = INTERRUPT_EPOCH.load(Ordering::SeqCst);
+        assert!(!interrupted_since(before));
+        INTERRUPT_EPOCH.fetch_add(1, Ordering::SeqCst);
+        assert!(interrupted_since(before));
+        let later = INTERRUPT_EPOCH.load(Ordering::SeqCst);
+        assert!(!interrupted_since(later));
     }
 }

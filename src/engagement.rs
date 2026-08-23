@@ -376,7 +376,7 @@ impl EngagementStore {
         let outcome = publish(&reserved)?;
         let state = match outcome {
             RuntimeOutcome::Accepted => "ready",
-            RuntimeOutcome::Rejected => "recovery_required",
+            RuntimeOutcome::Rejected => "failed",
             RuntimeOutcome::Unknown => "recovery_required",
         };
         let final_result = HireReservation {
@@ -1497,17 +1497,33 @@ mod tests {
             drop(initial);
             let mut faulted = store_with_fault(&root, barrier);
             let published = std::sync::atomic::AtomicUsize::new(0);
+            let mut reserved_run_id = None;
             assert_eq!(
                 faulted
-                    .hire(opened.engagement_id, &"b".repeat(64), "hire", |_| {
-                        published.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        Ok(RuntimeOutcome::Accepted)
-                    })
+                    .hire(
+                        opened.engagement_id,
+                        &"b".repeat(64),
+                        "hire",
+                        |reservation| {
+                            reserved_run_id = Some(reservation.specialist_run_id);
+                            published.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Ok(RuntimeOutcome::Accepted)
+                        }
+                    )
                     .unwrap_err()
                     .code,
                 "INTERNAL_ERROR"
             );
             let calls_before_recovery = published.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                reserved_run_id.is_some(),
+                matches!(
+                    barrier,
+                    EngagementBarrier::BeforeHireOutcomeCommit
+                        | EngagementBarrier::AfterHireOutcomeCommit
+                ),
+                "the coordinator can retain the reserved Run exactly when publication ran"
+            );
             drop(faulted);
             let mut recovered = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
             let result = recovered
@@ -1530,6 +1546,32 @@ mod tests {
             );
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn rejected_hire_is_terminal_and_can_be_released_and_closed() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_engagement("workspace", &"a".repeat(64), "open")
+            .unwrap();
+        let rejected = store
+            .hire(opened.engagement_id, &"b".repeat(64), "hire", |_| {
+                Ok(RuntimeOutcome::Rejected)
+            })
+            .unwrap();
+        assert_eq!(rejected.state, "failed");
+        assert_eq!(
+            store
+                .release(opened.engagement_id, "release")
+                .unwrap()
+                .state,
+            "released"
+        );
+        assert_eq!(
+            store.close(opened.engagement_id, "close").unwrap().state,
+            "closed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
