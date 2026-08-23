@@ -3,8 +3,9 @@
 Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `TASK-001`, `TASK-002`, `TASK-003-A`, `TASK-003-B`, and `TASK-003-C` are
 `COMPLETE`. `EPIC-002`, `TASK-004`, `TASK-005`, `TASK-006`, and `TASK-007` are
-`COMPLETE`.
-`EPIC-003` is the first user-usable product slice.
+`COMPLETE`. `EPIC-003`, `TASK-008`, `TASK-009`, `TASK-010`, `TASK-011`,
+`TASK-012`, and `TASK-013` are `COMPLETE` and form the first user-usable
+product slice.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -323,7 +324,7 @@ and enforcing the external Controller and observer boundary.
 
 ## EPIC-003: External Read-Only Specialist Review Preview
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Goal: Deliver the first user-usable Dolgorae product slice as early as the
 independent Run core permits. An external Codex CLI remains the semantic control
