@@ -4662,6 +4662,46 @@ mod tests {
         }
     }
 
+    fn reviewer_bootstrap() -> WorkerSessionBootstrap {
+        WorkerSessionBootstrap {
+            app_server_socket: PathBuf::from("/tmp/app-server.sock"),
+            canonical_codex_home: "/tmp/codex-home".to_owned(),
+            server_key: "a".repeat(64),
+            server_epoch: 1,
+            fixed_model: "gpt-5".to_owned(),
+            default_effort: "high".to_owned(),
+            supported_efforts: vec!["high".to_owned()],
+            cwd: PathBuf::from("/tmp/workspace"),
+            developer_instructions: "review".to_owned(),
+            sandbox: "read-only".to_owned(),
+            approval_policy: "never".to_owned(),
+            safety_policy: SessionSafetyPolicy::ReviewerReadOnly,
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            attach: SessionAttach::Start,
+            transport_timeout_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn reviewer_bootstrap_requires_read_only_never_and_accepts_the_exact_pair() {
+        let valid = reviewer_bootstrap();
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut writable = valid.clone();
+        writable.sandbox = "workspace-write".to_owned();
+        assert_eq!(
+            writable.validate(),
+            Err(WorkerProtocolError::InvalidRuntimeRecord)
+        );
+
+        let mut prompting = valid;
+        prompting.approval_policy = "untrusted".to_owned();
+        assert_eq!(
+            prompting.validate(),
+            Err(WorkerProtocolError::InvalidRuntimeRecord)
+        );
+    }
+
     #[test]
     fn the_bind_budget_is_separate_from_the_larger_replay_budget() {
         assert!(

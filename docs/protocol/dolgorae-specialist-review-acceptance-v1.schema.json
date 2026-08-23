@@ -75,7 +75,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 1,
-              "items": { "const": "closed" }
+              "items": { "enum": ["closed", "interrupted_unknown"] }
             }
           }
         }

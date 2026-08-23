@@ -3061,6 +3061,9 @@ or unknown Turn acceptance or outcome MUST produce a checked non-success
 result. Unknown work MUST NOT be replayed automatically.
 An unknown hire publication is a terminally observable `recovery_required`
 quarantine for bounded waits, but it is not cancel-, release-, or replay-eligible.
+Likewise, a cancellation that races with an accepted Reviewer task may leave the
+engagement in terminal `interrupted_unknown` quarantine; the acceptance campaign
+distinguishes that state from the fully cleaned `closed` pre-task path.
 
 The first adapter profile supports one Reviewer, one active task, read-only
 access, and working-tree scope only. It does not queue a second task, retain a

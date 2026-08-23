@@ -459,7 +459,7 @@ def cancellation_evidence(
     if (
         before != after
         or not new_states
-        or any(state != "closed" for state in new_states)
+        or any(state not in {"closed", "interrupted_unknown"} for state in new_states)
         or error.get("retryable") is not False
         or not all(scan.values())
     ):
