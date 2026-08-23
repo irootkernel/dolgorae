@@ -1,17 +1,18 @@
 use dolgorae::audit::{AuditKind, AuditRecord, GENESIS_PREVIOUS_HASH};
 use dolgorae::domain::{
-    Access, Assurance, ControlMode, ControllerIdentity, ControllerKind, ExecutionLane, Purpose,
-    PurposeKind,
+    Access, AggregateKind, Assurance, ControlMode, ControllerIdentity, ControllerKind,
+    ExecutionLane, Purpose, PurposeKind,
 };
 use dolgorae::jcs::{
     PayloadRepresentation, RAW_PAYLOAD_LIMIT, canonicalize, parse, represent_payload,
 };
+use dolgorae::projection::RunStateProjection;
 use dolgorae::run::{
-    AgentConfigurationSnapshot, AppServerFacts, AuditPolicy, CapabilityState, CompatibilityVerdict,
-    ControllerBinding, DolgoraeBuild, ExecutableIdentity, InstructionSnapshot, ParentReference,
-    ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore, StartReservation,
-    StartReservationStore, controller_capability_digest, launch_contract_digest,
-    runtime_profile_snapshot_digest,
+    AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind, AppServerFacts, AuditPolicy,
+    CapabilityState, CompatibilityVerdict, ControllerBinding, DolgoraeBuild, ExecutableIdentity,
+    InstructionSnapshot, ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest,
+    RunStore, StartReservation, StartReservationStore, agent_configuration_digest,
+    controller_capability_digest, launch_contract_digest, runtime_profile_snapshot_digest,
 };
 use dolgorae::workspace::{GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode};
 use serde_json::Value;
@@ -202,6 +203,51 @@ fn run_publication_is_exclusive_canonical_and_permission_safe() {
             .to_string_lossy()
             .starts_with('.')
     }));
+}
+
+#[test]
+fn run_store_owns_external_reviewer_thread_lookup() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let mut manifest = sample_manifest();
+    manifest.control_mode = ControlMode::ManagedAgent;
+    manifest.controller.identity.kind = ControllerKind::Automation;
+    manifest.purpose = Purpose {
+        kind: PurposeKind::Review,
+        external_label: None,
+    };
+    manifest.agent_configuration.purpose = manifest.purpose.clone();
+    manifest.agent_configuration.role_reference = Some("independent-reviewer-v1".to_owned());
+    let aggregate_id = Uuid::now_v7();
+    manifest.parent_ref = Some(ParentReference {
+        namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
+        kind: "specialist".to_owned(),
+        id: aggregate_id.to_string(),
+    });
+    manifest.aggregate_binding = Some(AggregateBinding {
+        aggregate_kind: AggregateKind::ExternalSpecialistEngagement,
+        aggregate_id,
+        operation_id: Uuid::now_v7(),
+        member_kind: AggregateMemberKind::Specialist,
+        policy_sha256: None,
+        role_reference: manifest.agent_configuration.role_reference.clone(),
+        role_snapshot_sha256: Some("7".repeat(64)),
+        agent_configuration_sha256: Some(
+            agent_configuration_digest(&manifest.agent_configuration).unwrap(),
+        ),
+    });
+    let directory = store.publish(&manifest).unwrap();
+    let mut projection = RunStateProjection::starting(manifest.run_id);
+    projection.thread_id = Some("thread-reviewer".to_owned());
+    let state = directory.root.join("state.json");
+    fs::write(&state, serde_json::to_vec(&projection).unwrap()).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(store.reviewer_thread_registered("thread-reviewer").unwrap());
+    assert!(!store.reviewer_thread_registered("thread-parent").unwrap());
 }
 
 #[test]

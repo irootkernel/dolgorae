@@ -114,6 +114,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "engagement",
                 "machine",
+                "run",
                 "semantic",
                 "specialist",
                 "workspace",

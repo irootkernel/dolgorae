@@ -3037,8 +3037,10 @@ thread, immutable Reviewer Agent Configuration, canonical-workspace read-only
 access, and shell network disabled. Its Runtime Profile MUST NOT register the
 `dolgorae_review` adapter. The semantic service MUST also reject nested
 first-class Specialist creation from the externally hired Reviewer by matching
-the caller thread to the durable Reviewer Run binding; adapter aliases whose
-command resolves to the Dolgorae review entry point are rejected as well.
+the caller thread to the durable Reviewer Run binding through a typed Run-store
+query; the review coordinator MUST NOT parse the Run store's private files.
+Adapter aliases whose command resolves to the Dolgorae review entry point are
+rejected as well.
 
 A successful review MUST validate against the checked result shape, store one
 immutable result artifact, contain no hidden reasoning or raw protocol frame,

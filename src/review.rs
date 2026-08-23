@@ -4,11 +4,12 @@ use crate::controller::{CredentialCarrier, binding_from_carrier, create_controll
 use crate::domain::ControllerKind;
 use crate::engagement::{EngagementStore, RuntimeOutcome};
 use crate::machine::{MachineError, new_uuid_v7};
+use crate::run::RunStore;
 use crate::semantic::{
     ReviewerStartContext, RunVerb, control_reviewer_run, prepare_reviewer, start_reviewer_run,
 };
 use crate::specialist::{ReviewerOutput, validate_reviewer_output};
-use crate::workspace::WorkspaceService;
+use crate::workspace::{SystemWorkspacePlatform, WorkspaceService};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -437,42 +438,7 @@ fn reviewer_thread_is_registered(
     let Some(thread_id) = thread_id.to_str() else {
         return Ok(false);
     };
-    let runs = state_root.join("runs");
-    let entries = match fs::read_dir(&runs) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(internal(error)),
-    };
-    let mut roots = entries
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(internal)?;
-    roots.sort();
-    for root in roots {
-        let state: Value = match fs::read(root.join("state.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(internal)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(internal(error)),
-        };
-        if state.get("thread_id").and_then(Value::as_str) != Some(thread_id) {
-            continue;
-        }
-        let manifest: Value =
-            serde_json::from_slice(&fs::read(root.join("manifest.json")).map_err(internal)?)
-                .map_err(internal)?;
-        let reviewer = manifest
-            .pointer("/agent_configuration/role_reference")
-            .and_then(Value::as_str)
-            == Some(crate::specialist::REVIEWER_ROLE_REFERENCE)
-            || manifest
-                .pointer("/aggregate_binding/role_reference")
-                .and_then(Value::as_str)
-                == Some(crate::specialist::REVIEWER_ROLE_REFERENCE);
-        if reviewer {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    RunStore::new(SystemWorkspacePlatform, state_root).reviewer_thread_registered(thread_id)
 }
 
 fn workspace_fingerprint(
@@ -1040,46 +1006,6 @@ mod tests {
         let absent = digest(&root);
         fs::write(root.join("race.txt"), b"present").unwrap();
         assert_ne!(absent, digest(&root));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn registered_reviewer_thread_is_rejected_structurally() {
-        let root =
-            std::env::temp_dir().join(format!("dolgorae-review-recursion-{}", new_uuid_v7()));
-        let ordinary = root.join("runs/aaa-ordinary");
-        let run = root.join("runs/reviewer");
-        fs::create_dir_all(&ordinary).unwrap();
-        fs::create_dir_all(&run).unwrap();
-        fs::write(
-            ordinary.join("state.json"),
-            br#"{"thread_id":"thread-reviewer"}"#,
-        )
-        .unwrap();
-        fs::write(
-            ordinary.join("manifest.json"),
-            br#"{"agent_configuration":{"role_reference":"primary"}}"#,
-        )
-        .unwrap();
-        fs::write(
-            run.join("state.json"),
-            br#"{"thread_id":"thread-reviewer"}"#,
-        )
-        .unwrap();
-        fs::write(
-            run.join("manifest.json"),
-            format!(
-                "{{\"agent_configuration\":{{\"role_reference\":\"{}\"}}}}",
-                crate::specialist::REVIEWER_ROLE_REFERENCE
-            ),
-        )
-        .unwrap();
-        assert!(
-            reviewer_thread_is_registered(&root, std::ffi::OsStr::new("thread-reviewer")).unwrap()
-        );
-        assert!(
-            !reviewer_thread_is_registered(&root, std::ffi::OsStr::new("thread-parent")).unwrap()
-        );
         fs::remove_dir_all(root).unwrap();
     }
 

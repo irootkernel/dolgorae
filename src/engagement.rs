@@ -340,7 +340,7 @@ impl EngagementStore {
         {
             let faults = Arc::clone(&self.faults);
             let transaction = self.transaction()?;
-            require_state(&transaction, engagement_id, &["open"])?;
+            require_current(&transaction, engagement_id, &["open"])?;
             let active: i64 = transaction
                 .query_row(
                     "SELECT specialist_run_id IS NOT NULL FROM engagements WHERE engagement_id=?1",
@@ -480,7 +480,7 @@ impl EngagementStore {
         {
             let faults = Arc::clone(&self.faults);
             let transaction = self.transaction()?;
-            require_state(&transaction, engagement_id, &["ready"])?;
+            require_current(&transaction, engagement_id, &["ready"])?;
             let expected: String = transaction
                 .query_row(
                     "SELECT specialist_run_id FROM engagements WHERE engagement_id=?1",
@@ -750,25 +750,7 @@ impl EngagementStore {
     }
 
     pub fn snapshot(&self, engagement_id: Uuid) -> Result<EngagementSnapshot, MachineError> {
-        self.connection
-            .query_row(
-                "SELECT workspace_id,controller_sha256,state,specialist_run_id,task_id,result_sha256 FROM engagements WHERE engagement_id=?1",
-                [engagement_id.to_string()],
-                |row| {
-                    Ok(EngagementSnapshot {
-                        engagement_id,
-                        workspace_id: row.get(0)?,
-                        external_controller_ref_sha256: row.get(1)?,
-                        state: row.get(2)?,
-                        specialist_run_id: optional_uuid(row.get::<_, Option<String>>(3)?),
-                        task_id: optional_uuid(row.get::<_, Option<String>>(4)?),
-                        result_sha256: row.get(5)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(internal)?
-            .ok_or_else(not_found)
+        snapshot_in(&self.connection, engagement_id)
     }
 
     fn transaction(&mut self) -> Result<Transaction<'_>, MachineError> {
@@ -797,7 +779,7 @@ impl EngagementStore {
         }
         let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
-        require_state(&transaction, engagement_id, allowed)?;
+        require_current(&transaction, engagement_id, allowed)?;
         transaction
             .execute(
                 "UPDATE engagements SET state=?2,revision=revision+1 WHERE engagement_id=?1",
@@ -990,14 +972,6 @@ fn unix_time_ms() -> Result<i64, MachineError> {
     .map_err(internal)
 }
 
-fn require_state(
-    transaction: &Transaction<'_>,
-    id: Uuid,
-    allowed: &[&str],
-) -> Result<(), MachineError> {
-    require_current(transaction, id, allowed)
-}
-
 fn require_current(
     connection: &Connection,
     id: Uuid,
@@ -1038,7 +1012,9 @@ fn snapshot_in(
                 })
             },
         )
-        .map_err(internal)
+        .optional()
+        .map_err(internal)?
+        .ok_or_else(not_found)
 }
 
 fn digest_value(value: &Value) -> Result<String, MachineError> {

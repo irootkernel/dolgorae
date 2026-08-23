@@ -1,7 +1,7 @@
 use crate::audit::{GENESIS_PREVIOUS_HASH, HASH_SCHEME, is_microsecond_utc_timestamp};
 use crate::domain::{
     Access, AggregateKind, Assurance, ControlMode, ControllerIdentity, ControllerKind,
-    ExecutionLane, Purpose, RunLifecycle,
+    ExecutionLane, Purpose, PurposeKind, RunLifecycle,
 };
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
@@ -485,6 +485,48 @@ impl<P: WorkspacePlatform> RunStore<P> {
             ));
         }
         Ok(manifest)
+    }
+
+    /// Resolve whether a Codex thread belongs to a durable external Reviewer
+    /// Run without exposing the Run store's private directory layout.
+    pub fn reviewer_thread_registered(&self, thread_id: &str) -> Result<bool, MachineError> {
+        if thread_id.is_empty() || thread_id.len() > 256 || thread_id.chars().any(char::is_control)
+        {
+            return Ok(false);
+        }
+        verify_secure_directory(&self.state_root, self.platform.current_uid())?;
+        let runs = self.state_root.join("runs");
+        verify_secure_directory(&runs, self.platform.current_uid())?;
+        let mut run_ids = fs::read_dir(&runs)
+            .map_err(|error| run_path_error(&runs, error.to_string()))?
+            .filter_map(|entry| {
+                entry.ok().and_then(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| Uuid::parse_str(name).ok())
+                })
+            })
+            .collect::<Vec<_>>();
+        run_ids.sort();
+        for run_id in run_ids {
+            let projection = self.load_state_projection(run_id)?;
+            if projection.thread_id.as_deref() != Some(thread_id) {
+                continue;
+            }
+            let manifest = self.load_manifest(run_id)?;
+            let external_reviewer = manifest.control_mode == ControlMode::ManagedAgent
+                && manifest.purpose.kind == PurposeKind::Review
+                && manifest.execution_lane == ExecutionLane::SharedReadonly
+                && manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+                    binding.aggregate_kind == AggregateKind::ExternalSpecialistEngagement
+                        && binding.member_kind == AggregateMemberKind::Specialist
+                });
+            if external_reviewer {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Read the Run's durable state projection without taking the ledger.
