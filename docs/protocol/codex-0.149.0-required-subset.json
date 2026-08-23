@@ -59,10 +59,10 @@
       "classification_status": "verified_by_TASK-005"
     },
     "configuration_fields": {
-      "process_static": ["features", "model_context_window", "model_auto_compact_token_limit", "model_provider", "model_providers", "mcp_servers", "agents", "apps"],
-      "operator_migratable": ["model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity"],
+      "process_static": ["features", "model_context_window", "model_auto_compact_token_limit", "model_provider", "model_providers", "mcp_servers", "agents", "apps", "approvals_reviewer", "hooks", "marketplaces", "notify", "plugins", "shell_environment_policy", "skills"],
+      "operator_migratable": ["model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "personality", "plan_mode_reasoning_effort"],
       "runtime_mutable": ["approval_policy", "sandbox_mode", "sandbox_workspace_write", "web_search", "tools"],
-      "ignored": ["analytics", "check_for_update_on_startup", "disable_response_storage", "feedback", "file_opener", "hide_agent_reasoning", "history", "notice", "notices", "otel", "project_doc_fallback_filenames", "project_doc_max_bytes", "projects", "show_raw_agent_reasoning", "tui"]
+      "ignored": ["analytics", "check_for_update_on_startup", "desktop", "disable_response_storage", "feedback", "file_opener", "hide_agent_reasoning", "history", "notice", "notices", "otel", "project_doc_fallback_filenames", "project_doc_max_bytes", "projects", "show_raw_agent_reasoning", "tui"]
     },
     "feature_policy": {
       "multi_agent": {

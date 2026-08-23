@@ -4813,11 +4813,20 @@ mod tests {
             native_subagents: NativeSubagents::Enabled,
         };
         let config = root.join("config.toml");
-        fs::write(&config, "approval_policy = \"never\"\nmodel = \"gpt-5\"\n").unwrap();
+        fs::write(
+            &config,
+            "approval_policy = \"never\"\nmodel = \"gpt-5\"\napprovals_reviewer = \"user\"\n[desktop]\nfollowUpQueueMode = \"queue\"\n",
+        )
+        .unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let snapshot = configuration_snapshot("default", &profile, &profile.codex_home).unwrap();
         assert_eq!(snapshot.launch["model"], "gpt-5");
+        assert_eq!(snapshot.launch["approvals_reviewer"], "user");
         assert_eq!(snapshot.observation["approval_policy"], "never");
+        assert_eq!(
+            snapshot.observation["desktop"]["followUpQueueMode"],
+            "queue"
+        );
         fs::write(&config, "unknown_future_field = true\n").unwrap();
         assert_eq!(
             configuration_snapshot("default", &profile, &profile.codex_home)
