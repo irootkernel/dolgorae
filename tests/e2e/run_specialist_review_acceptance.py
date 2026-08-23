@@ -58,20 +58,8 @@ def run(
     interrupted = False
     try:
         while selector.get_map():
-            if process.poll() is not None:
-                for registered in list(selector.get_map().values()):
-                    chunk = registered.fileobj.read()
-                    selector.unregister(registered.fileobj)
-                    if bounded_failure is None:
-                        captured[registered.data].extend(chunk)
-                if (
-                    bounded_failure is None
-                    and sum(map(len, captured.values())) > MAX_OUTPUT_BYTES
-                ):
-                    bounded_failure = (
-                        "combined process output exceeds the 1 MiB acceptance bound"
-                    )
-                break
+            if process.poll() is not None and cleanup_deadline is None:
+                cleanup_deadline = time.monotonic() + 60
             if (
                 interrupt_after_seconds is not None
                 and not interrupted

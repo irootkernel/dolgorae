@@ -334,6 +334,27 @@ mod tests {
 
         let partial = exchange(b"{\"jsonrpc\":\"2.0\"}", 64);
         assert_eq!(partial[0]["error"]["message"], "partial MCP frame");
+
+        let mut multi_fill = vec![b'x'; 9_000];
+        multi_fill.extend_from_slice(
+            b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2026-07-28\"}}\n",
+        );
+        let responses = exchange(&multi_fill, 128);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(
+            responses[1]["result"]["protocolVersion"],
+            MCP_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn stdio_binding_rejects_relative_workspace_before_transport_access() {
+        assert_eq!(
+            serve_stdio(Path::new("relative"), "reviewer")
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
     }
 
     #[test]

@@ -272,7 +272,7 @@ fn reject_recursive_review_adapter(profile: &ProfileSnapshot) -> Result<(), Mach
         .and_then(Value::as_object)
         .is_some_and(|servers| {
             servers.iter().any(|(name, configuration)| {
-                name == "dolgorae_review" || configuration.to_string().contains("dolgorae_review")
+                name == "dolgorae_review" || recursive_review_command(configuration)
             })
         });
     if registered {
@@ -284,6 +284,30 @@ fn reject_recursive_review_adapter(profile: &ProfileSnapshot) -> Result<(), Mach
         ));
     }
     Ok(())
+}
+
+fn recursive_review_command(configuration: &Value) -> bool {
+    let Some(object) = configuration.as_object() else {
+        return false;
+    };
+    let command_is_dolgorae = object
+        .get("command")
+        .and_then(Value::as_str)
+        .and_then(|command| std::path::Path::new(command).file_name())
+        .and_then(std::ffi::OsStr::to_str)
+        == Some("dolgorae");
+    let arguments = object
+        .get("args")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    command_is_dolgorae
+        && (arguments
+            .windows(2)
+            .any(|pair| pair == ["specialist", "review"])
+            || arguments.contains(&"__specialist-review-mcp"))
 }
 
 fn validate_objective(objective: &str) -> Result<(), MachineError> {
@@ -410,13 +434,25 @@ mod tests {
 
     #[test]
     fn reviewer_profile_rejects_recursive_review_adapter() {
-        let mut profile = profile();
-        profile.process_static_configuration.insert(
+        let mut named = profile();
+        named.process_static_configuration.insert(
             "mcp_servers".to_owned(),
             serde_json::json!({"dolgorae_review":{"command":"dolgorae"}}),
         );
         assert_eq!(
-            ReviewerRuntimePlan::resolve(&profile, request())
+            ReviewerRuntimePlan::resolve(&named, request())
+                .unwrap_err()
+                .code,
+            "REVIEW_PROFILE_UNAVAILABLE"
+        );
+
+        let mut resolved = profile();
+        resolved.process_static_configuration.insert(
+            "mcp_servers".to_owned(),
+            serde_json::json!({"alias":{"command":"/usr/local/bin/dolgorae","args":["__specialist-review-mcp"]}}),
+        );
+        assert_eq!(
+            ReviewerRuntimePlan::resolve(&resolved, request())
                 .unwrap_err()
                 .code,
             "REVIEW_PROFILE_UNAVAILABLE"

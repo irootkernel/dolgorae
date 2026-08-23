@@ -106,9 +106,10 @@ struct EphemeralCarriers {
 
 impl EphemeralCarriers {
     fn create(state_root: &Path) -> Result<Self, MachineError> {
-        let root = state_root
-            .join("orchestration")
-            .join(format!(".specialist-review-{}", new_uuid_v7()));
+        let orchestration = state_root.join("orchestration");
+        fs::create_dir_all(&orchestration).map_err(internal)?;
+        fs::set_permissions(&orchestration, fs::Permissions::from_mode(0o700)).map_err(internal)?;
+        let root = orchestration.join(format!(".specialist-review-{}", new_uuid_v7()));
         fs::create_dir_all(&root).map_err(internal)?;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(internal)?;
         let aggregate = root.join("aggregate.json");
@@ -183,6 +184,7 @@ pub fn execute(
         ));
     }
     let prepared = prepare_reviewer(workspace, profile, &request.objective)?;
+    reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
     let before = workspace_fingerprint(&prepared.view, &canonical_workspace)?;
     let carriers = EphemeralCarriers::create(&prepared.state_root)?;
@@ -415,6 +417,57 @@ fn interrupted_since(epoch: u64) -> bool {
     INTERRUPT_EPOCH.load(Ordering::SeqCst) != epoch
 }
 
+fn reject_recursive_reviewer_context(state_root: &Path) -> Result<(), MachineError> {
+    let Some(thread_id) = std::env::var_os("CODEX_THREAD_ID") else {
+        return Ok(());
+    };
+    if reviewer_thread_is_registered(state_root, thread_id.as_os_str())? {
+        return Err(review_error(
+            "REVIEW_PROFILE_UNAVAILABLE",
+            "a Reviewer Run cannot start another Specialist Review",
+        ));
+    }
+    Ok(())
+}
+
+fn reviewer_thread_is_registered(
+    state_root: &Path,
+    thread_id: &std::ffi::OsStr,
+) -> Result<bool, MachineError> {
+    let Some(thread_id) = thread_id.to_str() else {
+        return Ok(false);
+    };
+    let runs = state_root.join("runs");
+    let entries = match fs::read_dir(&runs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(internal(error)),
+    };
+    for entry in entries {
+        let root = entry.map_err(internal)?.path();
+        let state: Value = match fs::read(root.join("state.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(internal)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(internal(error)),
+        };
+        if state.get("thread_id").and_then(Value::as_str) != Some(thread_id) {
+            continue;
+        }
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).map_err(internal)?)
+                .map_err(internal)?;
+        return Ok(manifest
+            .pointer("/agent_configuration/role_reference")
+            .and_then(Value::as_str)
+            == Some(crate::specialist::REVIEWER_ROLE_REFERENCE)
+            || manifest
+                .pointer("/aggregate_binding/role_reference")
+                .and_then(Value::as_str)
+                == Some(crate::specialist::REVIEWER_ROLE_REFERENCE));
+    }
+    Ok(false)
+}
+
 fn workspace_fingerprint(
     view: &crate::workspace::WorkspaceView,
     root: &Path,
@@ -425,47 +478,52 @@ fn workspace_fingerprint(
     if view.mode == crate::workspace::WorkspaceMode::NonGit {
         hash_tree(root, root, &mut digest)?;
     } else {
-        let output = git_paths(
-            root,
-            &[
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ],
-        )?;
-        for raw in output
-            .split(|byte| *byte == 0)
-            .filter(|raw| !raw.is_empty())
-        {
-            let relative = PathBuf::from(OsString::from_vec(raw.to_vec()));
-            hash_path(root, &relative, &mut digest)?;
-        }
-        // Ignored paths include build outputs that can be very large. Their
-        // inode metadata is content-sensitive for an unprivileged read-only
-        // Reviewer (a write necessarily changes ctime) and lets the adapter
-        // cover them without reading tens of gigabytes twice per review.
-        let ignored = git_paths(
-            root,
-            &[
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-            ],
-        )?;
-        for raw in ignored
-            .split(|byte| *byte == 0)
-            .filter(|raw| !raw.is_empty())
-        {
-            let relative = PathBuf::from(OsString::from_vec(raw.to_vec()));
-            hash_metadata_path(root, &relative, &mut digest)?;
-        }
-        hash_git_metadata(root, &mut digest)?;
+        hash_git_workspace(root, &mut digest)?;
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn hash_git_workspace(root: &Path, digest: &mut Sha256) -> Result<(), MachineError> {
+    let output = git_paths(
+        root,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )?;
+    for raw in output
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let relative = PathBuf::from(OsString::from_vec(raw.to_vec()));
+        hash_path(root, &relative, digest)?;
+    }
+    // Ignored paths include build outputs that can be very large. Their
+    // inode metadata is content-sensitive for an unprivileged read-only
+    // Reviewer (a write necessarily changes ctime) and lets the adapter
+    // cover them without reading tens of gigabytes twice per review.
+    let ignored = git_paths(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+    )?;
+    for raw in ignored
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let relative = PathBuf::from(OsString::from_vec(raw.to_vec()));
+        hash_metadata_path(root, &relative, digest)?;
+    }
+    hash_git_metadata(root, digest)?;
+    Ok(())
 }
 
 fn hash_git_metadata(root: &Path, digest: &mut Sha256) -> Result<(), MachineError> {
@@ -533,7 +591,9 @@ fn hash_metadata_tree(
 }
 
 fn git_paths(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, MachineError> {
-    let output = Command::new("git")
+    let output = Command::new("/usr/bin/git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["-c", "core.fsmonitor=false", "-c", "gc.auto=0"])
         .args([
             "-C",
             root.to_str()
@@ -572,7 +632,14 @@ fn hash_path(root: &Path, relative: &Path, digest: &mut Sha256) -> Result<(), Ma
     digest.update((relative.as_os_str().as_bytes().len() as u64).to_be_bytes());
     digest.update(relative.as_os_str().as_bytes());
     let path = root.join(relative);
-    let metadata = fs::symlink_metadata(&path).map_err(internal)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            digest.update(b"absent\0");
+            return Ok(());
+        }
+        Err(error) => return Err(internal(error)),
+    };
     if metadata.file_type().is_symlink() {
         digest.update(b"symlink\0");
         let target = fs::read_link(path).map_err(internal)?;
@@ -602,7 +669,14 @@ fn hash_metadata_path(
 ) -> Result<(), MachineError> {
     digest.update((relative.as_os_str().as_bytes().len() as u64).to_be_bytes());
     digest.update(relative.as_os_str().as_bytes());
-    let metadata = fs::symlink_metadata(root.join(relative)).map_err(internal)?;
+    let metadata = match fs::symlink_metadata(root.join(relative)) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            digest.update(b"absent\0");
+            return Ok(());
+        }
+        Err(error) => return Err(internal(error)),
+    };
     for value in [
         metadata.mode() as i64,
         metadata.len() as i64,
@@ -825,6 +899,21 @@ mod tests {
             .code,
             "REVIEW_OUTPUT_INVALID"
         );
+        assert_eq!(
+            checked_turn_output(&json!({"status":"accepted"}))
+                .unwrap_err()
+                .code,
+            "REVIEW_TIMEOUT"
+        );
+        assert_eq!(
+            checked_turn_output(&json!({
+                "status":"completed",
+                "final_response":{"kind":"inline"}
+            }))
+            .unwrap_err()
+            .code,
+            "REVIEW_OUTPUT_INVALID"
+        );
     }
 
     #[test]
@@ -871,6 +960,107 @@ mod tests {
         .unwrap();
         let after = fingerprint(&root);
         assert_ne!(before, after);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn production_git_fingerprint_covers_tracked_untracked_ignored_and_metadata() {
+        let root = std::env::temp_dir().join(format!("dolgorae-review-all-{}", new_uuid_v7()));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("/usr/bin/git")
+                .arg("init")
+                .arg(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(root.join(".gitignore"), b"ignored.txt\n").unwrap();
+        fs::write(root.join("tracked.txt"), b"tracked-one").unwrap();
+        assert!(
+            Command::new("/usr/bin/git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap(),
+                    "add",
+                    ".gitignore",
+                    "tracked.txt"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let fingerprint = |root: &Path| {
+            let mut digest = Sha256::new();
+            hash_git_workspace(root, &mut digest).unwrap();
+            format!("{:x}", digest.finalize())
+        };
+
+        let initial = fingerprint(&root);
+        fs::write(root.join("tracked.txt"), b"tracked-two").unwrap();
+        let tracked = fingerprint(&root);
+        assert_ne!(initial, tracked);
+
+        fs::write(root.join("untracked.txt"), b"untracked").unwrap();
+        let untracked = fingerprint(&root);
+        assert_ne!(tracked, untracked);
+
+        fs::write(root.join("ignored.txt"), b"ignored-one").unwrap();
+        let ignored = fingerprint(&root);
+        assert_ne!(untracked, ignored);
+        fs::write(root.join("ignored.txt"), b"ignored-two-longer").unwrap();
+        let ignored_changed = fingerprint(&root);
+        assert_ne!(ignored, ignored_changed);
+
+        fs::write(
+            root.join(".git/config"),
+            b"[core]\nrepositoryformatversion = 1\n",
+        )
+        .unwrap();
+        assert_ne!(ignored_changed, fingerprint(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disappearing_enumerated_path_has_a_stable_absent_marker() {
+        let root = std::env::temp_dir().join(format!("dolgorae-review-absent-{}", new_uuid_v7()));
+        fs::create_dir(&root).unwrap();
+        let digest = |root: &Path| {
+            let mut digest = Sha256::new();
+            hash_path(root, Path::new("race.txt"), &mut digest).unwrap();
+            format!("{:x}", digest.finalize())
+        };
+        let absent = digest(&root);
+        fs::write(root.join("race.txt"), b"present").unwrap();
+        assert_ne!(absent, digest(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registered_reviewer_thread_is_rejected_structurally() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-review-recursion-{}", new_uuid_v7()));
+        let run = root.join("runs/reviewer");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join("state.json"),
+            br#"{"thread_id":"thread-reviewer"}"#,
+        )
+        .unwrap();
+        fs::write(
+            run.join("manifest.json"),
+            format!(
+                "{{\"agent_configuration\":{{\"role_reference\":\"{}\"}}}}",
+                crate::specialist::REVIEWER_ROLE_REFERENCE
+            ),
+        )
+        .unwrap();
+        assert!(
+            reviewer_thread_is_registered(&root, std::ffi::OsStr::new("thread-reviewer")).unwrap()
+        );
+        assert!(
+            !reviewer_thread_is_registered(&root, std::ffi::OsStr::new("thread-parent")).unwrap()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

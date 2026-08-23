@@ -7,6 +7,7 @@ use crate::specialist::{ReviewerRuntimePlan, validate_reviewer_output};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -123,8 +124,11 @@ impl EngagementStore {
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(internal)?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(internal)?;
         }
         let connection = Connection::open(path).map_err(internal)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(internal)?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -680,6 +684,7 @@ impl EngagementStore {
                 "result_ready"
                     | "failed"
                     | "cancelled"
+                    | "recovery_required"
                     | "interrupted_unknown"
                     | "released"
                     | "closed"
@@ -1412,6 +1417,35 @@ mod tests {
     }
 
     #[test]
+    fn unknown_hire_is_observable_as_terminal_quarantine() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_engagement("workspace", &"a".repeat(64), "open")
+            .unwrap();
+        let quarantined = store
+            .hire(opened.engagement_id, &"b".repeat(64), "hire", |_| {
+                Ok(RuntimeOutcome::Unknown)
+            })
+            .unwrap();
+        assert_eq!(quarantined.state, "recovery_required");
+        assert_eq!(
+            store
+                .await_terminal(opened.engagement_id, Duration::from_secs(1))
+                .unwrap()
+                .state,
+            quarantined.state
+        );
+        assert_eq!(
+            store
+                .cancel(opened.engagement_id, "cancel")
+                .unwrap_err()
+                .code,
+            "STATE_CONFLICT"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn release_and_close_require_terminal_one_shot_result() {
         let (mut store, root) = store();
         let opened = store
@@ -1763,6 +1797,18 @@ mod tests {
     #[test]
     fn sqlite_durability_pragmas_and_event_chain_are_enforced() {
         let (mut store, root) = store();
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("orchestration.sqlite3"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let opened = store
             .open_engagement("workspace", &"a".repeat(64), "open")
             .unwrap();

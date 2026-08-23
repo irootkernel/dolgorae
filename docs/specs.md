@@ -3036,7 +3036,9 @@ The Reviewer MUST be an independent `managed_agent` Run with a separate Codex
 thread, immutable Reviewer Agent Configuration, canonical-workspace read-only
 access, and shell network disabled. Its Runtime Profile MUST NOT register the
 `dolgorae_review` adapter. The semantic service MUST also reject nested
-first-class Specialist creation from the externally hired Reviewer.
+first-class Specialist creation from the externally hired Reviewer by matching
+the caller thread to the durable Reviewer Run binding; adapter aliases whose
+command resolves to the Dolgorae review entry point are rejected as well.
 
 A successful review MUST validate against the checked result shape, store one
 immutable result artifact, contain no hidden reasoning or raw protocol frame,
@@ -3055,6 +3057,8 @@ concurrent process that changes a tracked, untracked, ignored, or Git-metadata
 path during a review causes the same safe non-success as a Reviewer mutation.
 or unknown Turn acceptance or outcome MUST produce a checked non-success
 result. Unknown work MUST NOT be replayed automatically.
+An unknown hire publication is a terminally observable `recovery_required`
+quarantine for bounded waits, but it is not cancel-, release-, or replay-eligible.
 
 The first adapter profile supports one Reviewer, one active task, read-only
 access, and working-tree scope only. It does not queue a second task, retain a
@@ -3070,6 +3074,9 @@ mode with foreign keys enabled and full synchronous durability. A hash-chained
 append-only event table is committed in the same transactions as aggregate,
 mailbox, activation, execution, and delivery state. JSONL and JSON snapshots are
 exports or replaceable diagnostics, never coequal authorities.
+The orchestration directory is owner-only (`0700`) and the SQLite authority is
+owner-readable and owner-writable only (`0600`) before any engagement state is
+published.
 
 The checked `dolgorae-orchestration-state-v1.schema.json` owns the exported
 materialized shape for aggregate bootstrap operations, both aggregates,

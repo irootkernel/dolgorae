@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -34,7 +35,10 @@ def main() -> int:
         (root / "home").mkdir()
         workspace = root / "workspace"
         workspace.mkdir()
-        os.system(f"git -C {workspace!s} init -q")
+        subprocess.run(
+            ["git", "-C", str(workspace), "init", "-q"],
+            check=True,
+        )
         (workspace / "change.txt").write_text("nontrivial working-tree change\n", encoding="utf-8")
         codex = root / "codex"
         executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.149.0\\n'\n")
