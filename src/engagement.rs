@@ -94,6 +94,13 @@ pub struct TaskReservation {
     pub state: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectedReview {
+    pub artifact_id: Uuid,
+    pub output: Value,
+}
+
 pub struct EngagementStore {
     connection: Connection,
     faults: Arc<dyn EngagementFaultInjector>,
@@ -592,6 +599,15 @@ impl EngagementStore {
     }
 
     pub fn collect(&mut self, engagement_id: Uuid) -> Result<Value, MachineError> {
+        self.collect_review(engagement_id)
+            .map(|collected| collected.output)
+    }
+
+    /// Deliver the immutable result together with its durable artifact identity.
+    /// The compatibility `collect` method above deliberately keeps the TASK-009
+    /// facade shape unchanged while the one-shot coordinator needs the reference
+    /// required by its checked public result.
+    pub fn collect_review(&mut self, engagement_id: Uuid) -> Result<CollectedReview, MachineError> {
         let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         let (state, task_id, artifact_id, result): (String, Option<String>, Option<String>, Option<String>) = transaction
@@ -642,7 +658,10 @@ impl EngagementStore {
             EngagementBarrier::BeforeDeliveryCommit,
             EngagementBarrier::AfterDeliveryCommit,
         )?;
-        serde_json::from_str(&result).map_err(internal)
+        Ok(CollectedReview {
+            artifact_id: artifact_id.parse().map_err(internal)?,
+            output: serde_json::from_str(&result).map_err(internal)?,
+        })
     }
 
     pub fn await_terminal(

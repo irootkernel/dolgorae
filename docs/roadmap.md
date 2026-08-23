@@ -323,7 +323,7 @@ and enforcing the external Controller and observer boundary.
 
 ## EPIC-003: External Read-Only Specialist Review Preview
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Goal: Deliver the first user-usable Dolgorae product slice as early as the
 independent Run core permits. An external Codex CLI remains the semantic control
@@ -392,7 +392,7 @@ cancellation; and fail-closed `interrupted_unknown` without task replay.
 
 ### TASK-010: One-Shot Specialist Review CLI and Checked Result Contract
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement the user-facing convenience operation:
 

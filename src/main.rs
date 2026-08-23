@@ -5,7 +5,7 @@ use dolgorae::cli::{
     Cli, Command, ControllerCommand, ControllerCredentialCommand, OperatorCommand,
     OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
     ProfileServerCommand, ProfileStateCommand, RunCommand, RunControllerCommand, RuntimeCommand,
-    WorkspaceCommand, option_path,
+    SpecialistCommand, WorkspaceCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{
@@ -288,6 +288,25 @@ fn execute(cli: Cli) -> ExitCode {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&data).expect("typed profile result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
+    if let Command::Specialist {
+        command: SpecialistCommand::Review(args),
+    } = &cli.command
+    {
+        return match dolgorae::review::execute_cli(&args.args) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed review result")
                     );
                 } else {
                     render_json(&SuccessEnvelope::new(command_name, data));

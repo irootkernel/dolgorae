@@ -16,12 +16,14 @@ use crate::ledger::{LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
 use crate::profile::{ProfileOperation, ServerState};
 use crate::run::{
-    AgentConfigurationSnapshot, AppServerFacts, AuditPolicy, CompatibilityVerdict, DolgoraeBuild,
-    ExecutableIdentity, InstructionSnapshot, ParentReference, ProfileCapabilitySnapshot,
-    ProfileSnapshot, RunManifest, RunStore, StartReservation, StartReservationStore,
-    launch_contract_digest, runtime_profile_snapshot_digest,
+    AgentConfigurationSnapshot, AggregateBinding, AppServerFacts, AuditPolicy,
+    CompatibilityVerdict, DolgoraeBuild, ExecutableIdentity, InstructionSnapshot, ParentReference,
+    ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore, StartReservation,
+    StartReservationStore, launch_contract_digest, runtime_profile_snapshot_digest,
 };
 use crate::runtime::{RuntimeCapabilities, capabilities};
+use crate::specialist::ReviewerRuntimePlan;
+use crate::specialist::ReviewerRuntimeRequest;
 use crate::turn::ImageDetail;
 use crate::worker::{
     ControlRequestV1, ControlResponseV1, SessionAttach, TurnControlImage, TurnControlRequest,
@@ -114,6 +116,55 @@ pub trait SemanticService: Send + Sync {
     fn execute(&self, command: &SemanticCommand) -> Result<SemanticResult, MachineError>;
 }
 
+pub(crate) struct PreparedReviewer {
+    pub view: WorkspaceView,
+    pub state_root: PathBuf,
+    pub plan: ReviewerRuntimePlan,
+    pub model: String,
+    pub effort: String,
+}
+
+pub(crate) fn prepare_reviewer(
+    workspace: Option<&Path>,
+    profile_name: &str,
+    objective: &str,
+) -> Result<PreparedReviewer, MachineError> {
+    let view = WorkspaceService::system()?.discover(workspace)?;
+    let state = profile_server_state(&view, profile_name)?;
+    let model = state.default_model.clone();
+    let efforts = advertised_efforts(&state, profile_name, &model)?;
+    let effort = default_effort(&efforts);
+    let profile = run_profile_snapshot(&state.snapshot)?;
+    let plan = ReviewerRuntimePlan::resolve(
+        &profile,
+        ReviewerRuntimeRequest {
+            runtime_profile: profile_name.to_owned(),
+            model: model.clone(),
+            effort: effort.clone(),
+            objective: objective.to_owned(),
+            required_capabilities: Vec::new(),
+        },
+    )?;
+    let state_root = workspace_state_root(&view)?;
+    Ok(PreparedReviewer {
+        view,
+        state_root,
+        plan,
+        model,
+        effort,
+    })
+}
+
+pub(crate) fn control_reviewer_run(
+    verb: RunVerb,
+    args: &[OsString],
+) -> Result<Value, MachineError> {
+    match run_control(verb, args)? {
+        SemanticResult::Run(value) => Ok(value),
+        _ => Err(internal("reviewer control returned a non-run result")),
+    }
+}
+
 #[derive(Default)]
 pub struct CoreSemanticService;
 
@@ -144,6 +195,26 @@ impl SemanticService for CoreSemanticService {
 /// Start a Run: pin the Runtime Profile, publish the run record, bootstrap the
 /// durable ledger, and hand the hidden worker the app-server session it will own.
 fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
+    run_start_with_context(args, None)
+}
+
+pub(crate) struct ReviewerStartContext<'a> {
+    pub reserved_run_id: Uuid,
+    pub aggregate_binding: &'a AggregateBinding,
+    pub plan: &'a ReviewerRuntimePlan,
+}
+
+pub(crate) fn start_reviewer_run(
+    args: &[OsString],
+    context: ReviewerStartContext<'_>,
+) -> Result<Value, MachineError> {
+    run_start_with_context(args, Some(&context))
+}
+
+fn run_start_with_context(
+    args: &[OsString],
+    reviewer: Option<&ReviewerStartContext<'_>>,
+) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(args, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
     let view = WorkspaceService::system()?.discover_for_run_start(workspace.as_deref())?;
@@ -225,7 +296,7 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
     // The normalization is decided here, before any Run identity exists, so a
     // retried allocation resolves to the same digest and therefore the same
     // Run rather than to a second one.
-    let normalized_identity_sha256 = start_normalized_digest(
+    let mut normalized_identity_sha256 = start_normalized_digest(
         &view,
         &profile,
         &binding,
@@ -239,6 +310,18 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
         &required_capabilities,
         &instructions_text,
     )?;
+    if let Some(context) = reviewer {
+        normalized_identity_sha256 = sha256_hex(
+            format!(
+                "reviewer-v1\0{normalized_identity_sha256}\0{}\0{}",
+                serde_json::to_string(context.aggregate_binding)
+                    .map_err(|error| internal(error.to_string()))?,
+                crate::run::agent_configuration_digest(&context.plan.agent_configuration)
+                    .map_err(internal)?
+            )
+            .as_bytes(),
+        );
+    }
     let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
     let reservation = match reservations.load(&idempotency_key)? {
         Some(held) => held,
@@ -247,10 +330,19 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
             operation: "start_run".to_owned(),
             idempotency_key: idempotency_key.clone(),
             normalized_identity_sha256: normalized_identity_sha256.clone(),
-            run_id: Uuid::now_v7(),
+            run_id: reviewer.map_or_else(Uuid::now_v7, |context| context.reserved_run_id),
         })?,
     };
     if reservation.normalized_identity_sha256 != normalized_identity_sha256 {
+        return Err(crate::run::idempotency_conflict(
+            reservation.run_id,
+            &reservation.normalized_identity_sha256,
+            &normalized_identity_sha256,
+        ));
+    }
+    if let Some(context) = reviewer
+        && reservation.run_id != context.reserved_run_id
+    {
         return Err(crate::run::idempotency_conflict(
             reservation.run_id,
             &reservation.normalized_identity_sha256,
@@ -274,7 +366,7 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
         );
     }
     let start_baseline = WorkspaceService::system()?.capture_run_baseline(&view)?;
-    let manifest = build_manifest(
+    let mut manifest = build_manifest(
         run_id,
         &view,
         &state,
@@ -291,6 +383,11 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
         required_capabilities,
         start_baseline,
     )?;
+    if let Some(context) = reviewer {
+        manifest.agent_configuration = context.plan.agent_configuration.clone();
+        manifest.aggregate_binding = Some(context.aggregate_binding.clone());
+        context.plan.validate_manifest(&manifest)?;
+    }
     let directory = store.publish(&manifest)?;
 
     let mut ledger = ConformantLedger::open_for_bootstrap(&directory.root, run_id)
@@ -333,7 +430,9 @@ fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
         developer_instructions: instructions_text,
         sandbox: "read-only".to_owned(),
         approval_policy: "never".to_owned(),
-        safety_policy: crate::turn::SessionSafetyPolicy::Standard,
+        safety_policy: reviewer.map_or(crate::turn::SessionSafetyPolicy::Standard, |context| {
+            context.plan.safety_policy
+        }),
         artifact_root: directory.root.join("artifacts"),
         attach: SessionAttach::Start,
         transport_timeout_seconds: 900,

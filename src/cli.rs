@@ -811,14 +811,9 @@ fn leaf_spec(command: &str) -> LeafSpec {
         "specialist.policy.show" | "specialist.policy.remove" => spec(W, &[], &[], 1, 1),
         "specialist.policy.validate" => spec(&["--workspace", "--file"], &[], &["--file"], 0, 0),
         "specialist.review" => spec(
-            &[
-                "--workspace",
-                "--request-fd",
-                "--controller-file",
-                "--controller-fd",
-            ],
+            &["--workspace", "--profile", "--scope", "--format"],
             &[],
-            &["--workspace", "--request-fd"],
+            &["--profile", "--scope", "--format"],
             0,
             0,
         ),
@@ -1131,7 +1126,7 @@ fn validate_leaf_tokens(command: &str, args: &[OsString], spec: &LeafSpec) -> Re
         }
     }
     if let Some(group) = match command {
-        "engagement.call" | "specialist.review" => Some(["--controller-file", "--controller-fd"]),
+        "engagement.call" => Some(["--controller-file", "--controller-fd"]),
         "run.create_write_continuation" => Some(["--new-controller-file", "--new-controller-fd"]),
         _ => None,
     } {
@@ -1292,6 +1287,47 @@ mod tests {
         let args = ["dolgorae", "run", "start", "--parent-id", "x"].map(OsString::from);
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(validate_argument_contract(&cli.command).is_err());
+    }
+
+    #[test]
+    fn specialist_review_exposes_only_the_public_fixed_carrier() {
+        let accepted = [
+            "dolgorae",
+            "specialist",
+            "review",
+            "--profile",
+            "reviewer",
+            "--scope",
+            "working-tree",
+            "--format",
+            "json",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(accepted).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_ok());
+        assert_eq!(cli.command.machine_name(), "specialist.review");
+
+        for protected in ["--request-fd", "--controller-file", "--controller-fd"] {
+            let rejected = [
+                "dolgorae",
+                "specialist",
+                "review",
+                "--profile",
+                "reviewer",
+                "--scope",
+                "working-tree",
+                "--format",
+                "json",
+                protected,
+                "3",
+            ]
+            .map(OsString::from);
+            let cli = Cli::try_parse_from(rejected).unwrap();
+            assert!(
+                validate_argument_contract(&cli.command).is_err(),
+                "{protected}"
+            );
+        }
     }
 
     /// specs.md: "`<duration>` is a positive base-10 integer followed

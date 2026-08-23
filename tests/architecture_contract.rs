@@ -98,6 +98,22 @@ fn source_module_dependencies_match_the_approved_graph() {
         ("projection", &["audit", "domain", "jcs"][..]),
         ("protocol", &[][..]),
         ("providers", &[][..]),
+        // The one-shot review coordinator is the product composition boundary:
+        // it binds trusted adapter state, the durable engagement, and the
+        // ordinary semantic Run service without moving product logic into main.
+        (
+            "review",
+            &[
+                "cli",
+                "controller",
+                "domain",
+                "engagement",
+                "machine",
+                "semantic",
+                "specialist",
+                "workspace",
+            ][..],
+        ),
         // `run` names `projection` because the Run record and the Run's
         // durable state projection are two halves of the same durable state: an
         // observer that may not take the ledger still has to read the
@@ -135,6 +151,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "projection",
                 "run",
                 "runtime",
+                "specialist",
                 "turn",
                 "worker",
                 "workspace",
