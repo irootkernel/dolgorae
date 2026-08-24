@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 
+import native_codex
 from schema_support import assert_valid, validator
 
 # Mirrors src/profile.rs's PROFILE_CAPABILITY_NAMES: the closed set of
@@ -245,15 +246,7 @@ def append_membership(
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
-    real_codex_name = shutil.which("codex")
-    if real_codex_name is None:
-        raise AssertionError("Codex 0.149.0 is required for the profile matrix")
-    real_codex = pathlib.Path(real_codex_name).resolve()
-    version = subprocess.run(
-        [str(real_codex), "--version"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-    if version != "codex-cli 0.149.0":
-        raise AssertionError(f"expected codex-cli 0.149.0, got {version!r}")
+    real_codex = native_codex.installed_codex()
 
     with tempfile.TemporaryDirectory(prefix="dolgorae-task005-") as temporary:
         root = pathlib.Path(temporary)

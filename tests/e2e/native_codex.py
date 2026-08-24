@@ -25,12 +25,14 @@ fingerprint before it believes a server is up.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
 
 PINNED_CODEX_VERSION = "0.149.0"
+PINNED_CODEX_ENV = "DOLGORAE_TEST_CODEX_BIN"
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 FAKE_APP_SERVER = REPOSITORY / "tools" / "fake_app_server"
@@ -113,22 +115,53 @@ def installed_codex() -> pathlib.Path:
     prerequisite is therefore hard, and absent it the case fails rather than
     quietly proving something weaker.
     """
-    resolved = shutil.which("codex")
-    if resolved is None:
+    override = os.environ.get(PINNED_CODEX_ENV)
+    resolved = override or shutil.which("codex")
+    if not resolved:
         raise AssertionError(
             f"Codex {PINNED_CODEX_VERSION} is required to generate the pinned "
             "app-server schema bundle; the live app-server is faked, the bundle "
-            "cannot be"
+            f"cannot be; set {PINNED_CODEX_ENV} to the exact executable"
         )
     codex = pathlib.Path(resolved).resolve()
-    reported = subprocess.run(
-        [str(codex), "--version"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-    if reported != f"codex-cli {PINNED_CODEX_VERSION}":
-        raise AssertionError(
-            f"expected codex-cli {PINNED_CODEX_VERSION} for schema generation, got {reported!r}"
+
+    def reported_version(candidate: pathlib.Path) -> str:
+        if not candidate.is_file():
+            return "missing"
+        completed = subprocess.run(
+            [str(candidate), "--version"], check=False, capture_output=True, text=True
         )
-    return codex
+        if completed.returncode != 0:
+            return f"exit {completed.returncode}"
+        return completed.stdout.strip()
+
+    expected = f"codex-cli {PINNED_CODEX_VERSION}"
+    reported = reported_version(codex)
+    if reported == expected:
+        return codex
+    if override:
+        raise AssertionError(
+            f"{PINNED_CODEX_ENV} must report {expected!r}, got {reported!r} from {codex}"
+        )
+
+    # Codex standalone installations keep versioned releases beside the
+    # `current` target. A host upgrade may advance PATH while the test's pinned
+    # schema generator remains installed, so resolve that sibling explicitly
+    # instead of asking users to downgrade their ordinary Codex CLI.
+    release_root = codex.parent.parent.parent
+    if release_root.name == "releases":
+        pinned = sorted(
+            release_root.glob(f"{PINNED_CODEX_VERSION}-*/bin/codex")
+        )
+        for candidate in pinned:
+            candidate = candidate.resolve()
+            if reported_version(candidate) == expected:
+                return candidate
+
+    raise AssertionError(
+        f"expected {expected} for schema generation, got {reported!r} from {codex}; "
+        f"install the pinned standalone release or set {PINNED_CODEX_ENV}"
+    )
 
 
 def scenario_path(name: str) -> pathlib.Path:
