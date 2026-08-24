@@ -602,7 +602,7 @@ fn doctor(parsed: &Parsed) -> Result<Value, MachineError> {
         let state_path = profile_state_path(&context, &snapshot);
         probed_state = read_state_if_running(&state_path)?;
         if probed_state.is_none() {
-            probed_state = Some(start_snapshot(
+            probed_state = Some(start_snapshot_for_probe(
                 &context,
                 &snapshot,
                 &mut OperatorHandoff::none(),
@@ -733,6 +733,8 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let old = parsed.required("--confirm-old-server-key")?;
     let new = parsed.required("--confirm-new-server-key")?;
+    require_canonical_server_key("--confirm-old-server-key", &old)?;
+    require_canonical_server_key("--confirm-new-server-key", &new)?;
     if new != snapshot.server_key {
         return Err(profile_mismatch(
             &name,
@@ -750,6 +752,37 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
         ));
     }
     let old_root = context.application_support_root.join("profiles").join(&old);
+    let new_root = profile_root(&context, &snapshot);
+    verify_private_directory(&old_root)?;
+    secure_dir(&new_root)?;
+    let home_root = home_root(&context, &snapshot.canonical_codex_home)?;
+    secure_dir(&home_root)?;
+    let migration_path = home_root.join("migration.json");
+
+    // Serialize fence creation with both automatic migration and every
+    // lifecycle reservation. The operator hold crosses into home.lock before
+    // it is released, preserving the global operator -> home -> server order.
+    let mut stop_operator = parsed.authorize_operator("profile.server.migrate")?;
+    let migration_locks =
+        acquire_migration_locks(&home_root, &old_root, &old, &new_root, &snapshot.server_key)?;
+    stop_operator.handoff(&migration_locks.home);
+    if let Some((migration_id, new_state)) =
+        reconcile_blocked_migration(&context, &snapshot, &old, &new, &home_root, &migration_path)?
+    {
+        drop(migration_locks);
+        return Ok(json!({
+            "profile": name,
+            "migrated": true,
+            "migration_id": migration_id,
+            "server_key": new,
+            "server_epoch": new_state.server_epoch,
+        }));
+    }
+    verify_migration_fence(&migration_path, None, &name, &snapshot.server_key)?;
+    let migration_id = Uuid::now_v7();
+
+    // Re-read every source proof under the migration locks. Observations made
+    // before this point cannot authorize terminating a later lifetime.
     let old_state = read_state_if_running(&old_root.join("state.json"))?
         .ok_or_else(|| profile_mismatch(&name, "old_server_running", json!(true), json!(false)))?;
     if old_state.server_key != old {
@@ -768,6 +801,8 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
             json!(old_state.snapshot.canonical_codex_home),
         ));
     }
+    let active = read_home_active(&home_root.join("active.json"))?;
+    verify_stop_home_active(&old_state.snapshot, &old_state, active.as_ref())?;
     let old_scope = MembershipScope {
         profile: name.clone(),
         server_key: old.clone(),
@@ -789,95 +824,25 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
             "migration with live members requires explicit --interrupt",
         ));
     }
-    let migration_id = Uuid::now_v7();
-    let home_root = home_root(&context, &snapshot.canonical_codex_home)?;
-    let migration_path = home_root.join("migration.json");
-    let mut migration = json!({
-        "schema_version": 1,
-        "migration_id": migration_id,
-        "old_server_key": old,
-        "new_server_key": new,
-        "old_epoch": old_state.server_epoch,
-        "new_epoch": null,
-        "old_version": old_state.snapshot.codex_version,
-        "new_version": snapshot.codex_version,
-        "old_executable_sha256": old_state.snapshot.executable_identity.sha256,
-        "new_executable_sha256": snapshot.executable_identity.sha256,
-        "old_schema_sha256": old_state.snapshot.schema_bundle_sha256,
-        "new_schema_sha256": snapshot.schema_bundle_sha256,
-        "old_manifest_sha256": old_state.snapshot.compatibility_manifest_sha256,
-        "new_manifest_sha256": snapshot.compatibility_manifest_sha256,
-        "phase": "prepared",
-    });
-    // PREPARE: the hold taken here covers the fsynced migration fence and
-    // stays live until the stop below reaches the home and server locks.
-    let mut stop_operator = parsed.authorize_operator("profile.server.migrate")?;
+    let mut migration =
+        migration_record(migration_id, &old_state, &snapshot, "operator_authorized");
     atomic_replace(
         &migration_path,
         &serde_json::to_vec_pretty(&migration).map_err(internal)?,
     )?;
-    if let Err(error) = stop_snapshot(
-        &context,
-        &old_state.snapshot,
-        parsed.flag("--interrupt"),
+    drop(migration_locks);
+    let new_state = execute_migration(
+        MigrationExecution {
+            migration_id,
+            context: &context,
+            new_snapshot: &snapshot,
+            old_state: &old_state,
+            migration_path: &migration_path,
+            migration: &mut migration,
+            interrupt: parsed.flag("--interrupt"),
+        },
         &mut stop_operator,
-    ) {
-        migration["phase"] = Value::String("rolled_back".to_owned());
-        migration["failure"] = Value::String(error.code.clone());
-        atomic_replace(
-            &migration_path,
-            &serde_json::to_vec_pretty(&migration).map_err(internal)?,
-        )?;
-        return Err(error);
-    }
-    migration["phase"] = Value::String("applying".to_owned());
-    atomic_replace(
-        &migration_path,
-        &serde_json::to_vec_pretty(&migration).map_err(internal)?,
-    )?;
-    // APPLY continues under a fresh authorization for the same reason the
-    // restart start does: the old generation must not be able to bring the
-    // new server up after a rotation.
-    let mut start_operator = parsed.authorize_operator("profile.server.migrate")?;
-    let new_state = match start_snapshot_for_migration(
-        &context,
-        &snapshot,
-        migration_id,
-        &mut start_operator,
-    ) {
-        Ok(state) => state,
-        Err(error) => {
-            // Restoring the server this migration itself stopped is the
-            // compensating half of an authorized operation already in
-            // flight, not a new effect, so it carries no hold: a rotation
-            // that lands here must not strand the profile stopped.
-            let restored = start_snapshot_for_migration(
-                &context,
-                &old_state.snapshot,
-                migration_id,
-                &mut OperatorHandoff::none(),
-            );
-            migration["phase"] = Value::String(
-                if restored.is_ok() {
-                    "rolled_back"
-                } else {
-                    "migration_blocked"
-                }
-                .to_owned(),
-            );
-            migration["failure"] = Value::String(error.code.clone());
-            atomic_replace(
-                &migration_path,
-                &serde_json::to_vec_pretty(&migration).map_err(internal)?,
-            )?;
-            return Err(error);
-        }
-    };
-    migration["new_epoch"] = Value::from(new_state.server_epoch);
-    migration["phase"] = Value::String("committed".to_owned());
-    atomic_replace(
-        &migration_path,
-        &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+        || parsed.authorize_operator("profile.server.migrate"),
     )?;
     Ok(json!({
         "profile": name,
@@ -886,6 +851,566 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
         "server_key": new,
         "server_epoch": new_state.server_epoch,
     }))
+}
+
+fn is_canonical_server_key(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn require_canonical_server_key(argument: &str, value: &str) -> Result<(), MachineError> {
+    if is_canonical_server_key(value) {
+        return Ok(());
+    }
+    Err(MachineError::invalid_argument(
+        argument,
+        "server key must be exactly 64 lowercase hexadecimal characters",
+    ))
+}
+
+fn require_canonical_persisted_server_key(value: &str) -> Result<(), MachineError> {
+    if is_canonical_server_key(value) {
+        Ok(())
+    } else {
+        Err(transport("migration server identity is invalid"))
+    }
+}
+
+struct MigrationLocks {
+    home: File,
+    first_server: Option<File>,
+    second_server: Option<File>,
+}
+
+impl Drop for MigrationLocks {
+    fn drop(&mut self) {
+        drop(self.second_server.take());
+        drop(self.first_server.take());
+        // `home` is dropped after this method returns.
+    }
+}
+
+fn acquire_migration_locks(
+    home_root: &Path,
+    old_root: &Path,
+    old_key: &str,
+    new_root: &Path,
+    new_key: &str,
+) -> Result<MigrationLocks, MachineError> {
+    let home = lock_file(&home_root.join("home.lock"))?;
+    let (first_root, second_root) = if old_key < new_key {
+        (old_root, new_root)
+    } else {
+        (new_root, old_root)
+    };
+    Ok(MigrationLocks {
+        home,
+        first_server: Some(lock_file(&first_root.join("server.lock"))?),
+        second_server: Some(lock_file(&second_root.join("server.lock"))?),
+    })
+}
+
+fn migration_record(
+    migration_id: Uuid,
+    old_state: &ServerState,
+    new_snapshot: &ProfileSnapshot,
+    authority: &str,
+) -> Value {
+    json!({
+        "schema_version": 1,
+        "migration_id": migration_id,
+        "authority": authority,
+        "old_server_key": old_state.server_key,
+        "new_server_key": new_snapshot.server_key,
+        "old_epoch": old_state.server_epoch,
+        "new_epoch": null,
+        "old_version": old_state.snapshot.codex_version,
+        "new_version": new_snapshot.codex_version,
+        "old_executable_sha256": old_state.snapshot.executable_identity.sha256,
+        "new_executable_sha256": new_snapshot.executable_identity.sha256,
+        "old_schema_sha256": old_state.snapshot.schema_bundle_sha256,
+        "new_schema_sha256": new_snapshot.schema_bundle_sha256,
+        "old_manifest_sha256": old_state.snapshot.compatibility_manifest_sha256,
+        "new_manifest_sha256": new_snapshot.compatibility_manifest_sha256,
+        "phase": "prepared",
+    })
+}
+
+struct MigrationExecution<'a> {
+    migration_id: Uuid,
+    context: &'a Context,
+    new_snapshot: &'a ProfileSnapshot,
+    old_state: &'a ServerState,
+    migration_path: &'a Path,
+    migration: &'a mut Value,
+    interrupt: bool,
+}
+
+fn execute_migration(
+    execution: MigrationExecution<'_>,
+    stop_operator: &mut OperatorHandoff,
+    authorize_start: impl FnOnce() -> Result<OperatorHandoff, MachineError>,
+) -> Result<ServerState, MachineError> {
+    let MigrationExecution {
+        migration_id,
+        context,
+        new_snapshot,
+        old_state,
+        migration_path,
+        migration,
+        interrupt,
+    } = execution;
+    if let Err(failure) = stop_snapshot_for_migration(
+        context,
+        &old_state.snapshot,
+        migration_id,
+        interrupt,
+        stop_operator,
+    ) {
+        let failure = *failure;
+        if failure.process_stopped {
+            return compensate_stopped_migration(
+                context,
+                old_state,
+                migration_id,
+                migration_path,
+                migration,
+                failure.reservation.as_ref(),
+                failure.error,
+            );
+        }
+        let error = failure.error;
+        migration["phase"] = Value::String("rolled_back".to_owned());
+        migration["failure"] = Value::String(error.code.clone());
+        persist_migration(migration_path, migration)?;
+        return Err(error);
+    }
+    migration["phase"] = Value::String("applying".to_owned());
+    if let Err(error) = persist_migration(migration_path, migration) {
+        return compensate_stopped_migration(
+            context,
+            old_state,
+            migration_id,
+            migration_path,
+            migration,
+            None,
+            error,
+        );
+    }
+    let mut start_operator = match authorize_start() {
+        Ok(operator) => operator,
+        Err(error) => {
+            return compensate_stopped_migration(
+                context,
+                old_state,
+                migration_id,
+                migration_path,
+                migration,
+                None,
+                error,
+            );
+        }
+    };
+    let new_state = match start_snapshot_for_migration(
+        context,
+        new_snapshot,
+        migration_id,
+        &mut start_operator,
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            return compensate_stopped_migration(
+                context,
+                old_state,
+                migration_id,
+                migration_path,
+                migration,
+                None,
+                error,
+            );
+        }
+    };
+    migration["new_epoch"] = Value::from(new_state.server_epoch);
+    migration["phase"] = Value::String("committed".to_owned());
+    if let Err(error) = persist_migration_attempts(migration_path, migration, 6) {
+        migration["phase"] = Value::String("migration_blocked".to_owned());
+        migration["failure"] = Value::String(error.code.clone());
+        persist_migration(migration_path, migration)?;
+        return Err(error);
+    }
+    Ok(new_state)
+}
+
+fn persist_migration(path: &Path, migration: &Value) -> Result<(), MachineError> {
+    persist_migration_attempts(path, migration, 3)
+}
+
+fn persist_migration_attempts(
+    path: &Path,
+    migration: &Value,
+    attempts: usize,
+) -> Result<(), MachineError> {
+    persist_migration_with(path, migration, attempts, atomic_replace)
+}
+
+fn persist_migration_with(
+    path: &Path,
+    migration: &Value,
+    attempts: usize,
+    mut write: impl FnMut(&Path, &[u8]) -> Result<(), MachineError>,
+) -> Result<(), MachineError> {
+    let bytes = serde_json::to_vec_pretty(migration).map_err(internal)?;
+    let mut last_error = None;
+    for _ in 0..attempts {
+        match write(path, &bytes) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("migration persistence attempt budget must be non-zero"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MigrationPhase {
+    Prepared,
+    Applying,
+    Blocked,
+    Committed,
+    RolledBack,
+}
+
+impl MigrationPhase {
+    fn parse(value: &str) -> Result<Self, MachineError> {
+        match value {
+            "prepared" => Ok(Self::Prepared),
+            "applying" => Ok(Self::Applying),
+            "migration_blocked" => Ok(Self::Blocked),
+            "committed" => Ok(Self::Committed),
+            "rolled_back" => Ok(Self::RolledBack),
+            _ => Err(transport("migration transaction phase is invalid")),
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Committed | Self::RolledBack)
+    }
+}
+
+#[derive(Debug)]
+struct ParsedMigrationRecord {
+    migration_id: Uuid,
+    phase: MigrationPhase,
+    old_server_key: String,
+    new_server_key: String,
+}
+
+fn read_migration_record(path: &Path) -> Result<(Value, ParsedMigrationRecord), MachineError> {
+    verify_private_regular_file(path, 0o600)?;
+    let value: Value = serde_json::from_slice(&fs::read(path).map_err(io_error)?)
+        .map_err(|_| transport("migration transaction is invalid"))?;
+    let migration_id = value["migration_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| transport("migration transaction identity is invalid"))?;
+    let phase = MigrationPhase::parse(
+        value["phase"]
+            .as_str()
+            .ok_or_else(|| transport("migration transaction phase is invalid"))?,
+    )?;
+    let old_server_key = value["old_server_key"]
+        .as_str()
+        .ok_or_else(|| transport("migration old server identity is invalid"))?
+        .to_owned();
+    let new_server_key = value["new_server_key"]
+        .as_str()
+        .ok_or_else(|| transport("migration new server identity is invalid"))?
+        .to_owned();
+    require_canonical_persisted_server_key(&old_server_key)?;
+    require_canonical_persisted_server_key(&new_server_key)?;
+    Ok((
+        value,
+        ParsedMigrationRecord {
+            migration_id,
+            phase,
+            old_server_key,
+            new_server_key,
+        },
+    ))
+}
+
+/// Operator-authorized recovery for an unresolved migration fence. The caller
+/// holds home.lock and both ordered server locks, so the ready generation
+/// proved here cannot change before the terminal phase is persisted.
+fn reconcile_blocked_migration(
+    context: &Context,
+    new_snapshot: &ProfileSnapshot,
+    confirmed_old_key: &str,
+    confirmed_new_key: &str,
+    home_root: &Path,
+    migration_path: &Path,
+) -> Result<Option<(Uuid, ServerState)>, MachineError> {
+    if !migration_path.exists() {
+        return Ok(None);
+    }
+    let (mut migration, parsed) = read_migration_record(migration_path)?;
+    if parsed.phase.is_terminal() {
+        return Ok(None);
+    }
+    if parsed.phase != MigrationPhase::Blocked {
+        return Ok(None);
+    }
+    if parsed.old_server_key != confirmed_old_key || parsed.new_server_key != confirmed_new_key {
+        return Ok(None);
+    }
+
+    let Some(active) = read_home_active(&home_root.join("active.json"))? else {
+        return Ok(None);
+    };
+    if active.lifecycle != "ready" || active.transition_token.is_some() {
+        return Ok(None);
+    }
+    if active.server_key == confirmed_new_key {
+        let state = read_state_if_running(
+            &context
+                .application_support_root
+                .join("profiles")
+                .join(confirmed_new_key)
+                .join("state.json"),
+        )?
+        .ok_or_else(|| {
+            profile_mismatch(
+                &new_snapshot.profile_name,
+                "migration_recovery_new_ready",
+                json!(true),
+                json!(false),
+            )
+        })?;
+        let state = attach_running(new_snapshot, &state, Some(&active))?;
+        migration["new_epoch"] = Value::from(state.server_epoch);
+        migration["phase"] = Value::String("committed".to_owned());
+        migration["failure"] = Value::Null;
+        persist_migration(migration_path, &migration)?;
+        return Ok(Some((parsed.migration_id, state)));
+    }
+    if active.server_key == confirmed_old_key {
+        let state = read_state_if_running(
+            &context
+                .application_support_root
+                .join("profiles")
+                .join(confirmed_old_key)
+                .join("state.json"),
+        )?
+        .ok_or_else(|| {
+            profile_mismatch(
+                &new_snapshot.profile_name,
+                "migration_recovery_old_ready",
+                json!(true),
+                json!(false),
+            )
+        })?;
+        attach_running(&state.snapshot, &state, Some(&active))?;
+        migration["phase"] = Value::String("rolled_back".to_owned());
+        migration["failure"] = Value::String("OPERATOR_RECONCILED".to_owned());
+        persist_migration(migration_path, &migration)?;
+    }
+    Ok(None)
+}
+
+/// Every error after the old lifetime has stopped takes the same compensating
+/// path. Restoration is migration-owned and therefore may cross the durable
+/// fence without fresh operator authority; the final phase records whether
+/// that restoration was actually proved.
+fn compensate_stopped_migration(
+    context: &Context,
+    old_state: &ServerState,
+    migration_id: Uuid,
+    migration_path: &Path,
+    migration: &mut Value,
+    stop_reservation: Option<&StopReservation>,
+    error: MachineError,
+) -> Result<ServerState, MachineError> {
+    if let Some(reservation) = stop_reservation
+        && settle_terminated_migration_stop(context, &old_state.snapshot, reservation).is_err()
+    {
+        migration["phase"] = Value::String("migration_blocked".to_owned());
+        migration["failure"] = Value::String(error.code.clone());
+        persist_migration(migration_path, migration)?;
+        return Err(error);
+    }
+    let restored = start_snapshot_for_migration(
+        context,
+        &old_state.snapshot,
+        migration_id,
+        &mut OperatorHandoff::none(),
+    );
+    migration["phase"] = Value::String(
+        if restored.is_ok() {
+            "rolled_back"
+        } else {
+            "migration_blocked"
+        }
+        .to_owned(),
+    );
+    migration["failure"] = Value::String(error.code.clone());
+    persist_migration(migration_path, migration)?;
+    Err(error)
+}
+
+/// Replaces a different live contract only when its complete durable
+/// membership proves that no Run can observe the stop. Ordinary Codex clients
+/// are outside this registry and are never enumerated or signalled here.
+fn automatic_quiescent_migration(
+    context: &Context,
+    new_snapshot: &ProfileSnapshot,
+    old_server_key: &str,
+) -> Result<ServerState, MachineError> {
+    require_canonical_persisted_server_key(old_server_key)?;
+    require_canonical_persisted_server_key(&new_snapshot.server_key)?;
+    let home = home_root(context, &new_snapshot.canonical_codex_home)?;
+    let active_path = home.join("active.json");
+    let migration_path = home.join("migration.json");
+    let old_root = context
+        .application_support_root
+        .join("profiles")
+        .join(old_server_key);
+    let new_root = profile_root(context, new_snapshot);
+    verify_private_directory(&old_root)?;
+    verify_private_directory(&new_root)?;
+
+    let migration_locks = acquire_migration_locks(
+        &home,
+        &old_root,
+        old_server_key,
+        &new_root,
+        &new_snapshot.server_key,
+    )?;
+    verify_migration_fence(
+        &migration_path,
+        None,
+        &new_snapshot.profile_name,
+        &new_snapshot.server_key,
+    )?;
+
+    let active = read_home_active(&active_path)?.ok_or_else(|| {
+        profile_mismatch(
+            &new_snapshot.profile_name,
+            "home_active_contract",
+            json!({"server_key": old_server_key, "lifecycle": "ready"}),
+            Value::Null,
+        )
+    })?;
+    if active.server_key == new_snapshot.server_key
+        && active.lifecycle == "ready"
+        && active.transition_token.is_none()
+    {
+        let new_state = read_state_if_running(&new_root.join("state.json"))?.ok_or_else(|| {
+            profile_mismatch(
+                &new_snapshot.profile_name,
+                "automatic_rollover_requested_server_running",
+                json!(true),
+                json!(false),
+            )
+        })?;
+        return attach_running(new_snapshot, &new_state, Some(&active));
+    }
+    if active.server_key != old_server_key
+        || active.lifecycle != "ready"
+        || active.transition_token.is_some()
+    {
+        return Err(profile_server_busy(
+            &new_snapshot.profile_name,
+            &active.server_key,
+            format!(
+                "the CODEX_HOME contract changed while preparing automatic rollover ({})",
+                active.lifecycle
+            ),
+        ));
+    }
+    let old_state = read_state_if_running(&old_root.join("state.json"))?.ok_or_else(|| {
+        profile_mismatch(
+            &new_snapshot.profile_name,
+            "old_server_running",
+            json!(true),
+            json!(false),
+        )
+    })?;
+    if old_state.server_key != old_server_key
+        || old_state.snapshot.canonical_codex_home != new_snapshot.canonical_codex_home
+        || active.server_epoch != old_state.server_epoch
+        || active.pid != Some(old_state.pid)
+    {
+        return Err(profile_mismatch(
+            &new_snapshot.profile_name,
+            "automatic_rollover_source",
+            json!({
+                "canonical_codex_home": new_snapshot.canonical_codex_home,
+                "server_key": old_server_key,
+                "server_epoch": active.server_epoch,
+                "pid": active.pid,
+            }),
+            json!({
+                "canonical_codex_home": old_state.snapshot.canonical_codex_home,
+                "server_key": old_state.server_key,
+                "server_epoch": old_state.server_epoch,
+                "pid": old_state.pid,
+            }),
+        ));
+    }
+    verify_recorded_socket(&old_state.snapshot.profile_name, &old_state)?;
+
+    let old_scope = MembershipScope {
+        profile: old_state.snapshot.profile_name.clone(),
+        server_key: old_server_key.to_owned(),
+    };
+    let old_records = replay_membership(&old_root.join("membership.jsonl"), &old_scope)?;
+    if old_records.last().map_or(0, |record| record.revision) != old_state.membership_revision {
+        return Err(old_scope.incomplete("membership journal and server state revisions differ"));
+    }
+    let old_index = derive_membership_index(&old_root, &old_records)?;
+    verify_membership_index(&old_root, &old_index, &old_scope)?;
+    let orphans = membership_orphans(context, &old_state.snapshot, &old_index)?;
+    if !orphans.is_empty() {
+        return Err(old_scope.incomplete(format!(
+            "automatic rollover source has {} orphan members",
+            orphans.len()
+        )));
+    }
+    let members = live_member_evidence(&old_index);
+    if !members.is_empty() {
+        return Err(old_scope.incomplete(format!(
+            "automatic rollover would interrupt {} live run member(s); use operator-authorized profile server migrate",
+            members.len()
+        )));
+    }
+
+    let migration_id = Uuid::now_v7();
+    let mut migration = migration_record(
+        migration_id,
+        &old_state,
+        new_snapshot,
+        "automatic_quiescent",
+    );
+    atomic_replace(
+        &migration_path,
+        &serde_json::to_vec_pretty(&migration).map_err(internal)?,
+    )?;
+    drop(migration_locks);
+
+    execute_migration(
+        MigrationExecution {
+            migration_id,
+            context,
+            new_snapshot,
+            old_state: &old_state,
+            migration_path: &migration_path,
+            migration: &mut migration,
+            interrupt: false,
+        },
+        &mut OperatorHandoff::none(),
+        || Ok(OperatorHandoff::none()),
+    )
 }
 
 fn membership_verify(parsed: &Parsed) -> Result<Value, MachineError> {
@@ -1908,7 +2433,27 @@ fn start_snapshot(
     snapshot: &ProfileSnapshot,
     operator: &mut OperatorHandoff,
 ) -> Result<ServerState, MachineError> {
-    start_snapshot_inner(context, snapshot, None, operator)
+    start_snapshot_inner(
+        context,
+        snapshot,
+        None,
+        QuiescentRolloverPolicy::Allow,
+        operator,
+    )
+}
+
+fn start_snapshot_for_probe(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    operator: &mut OperatorHandoff,
+) -> Result<ServerState, MachineError> {
+    start_snapshot_inner(
+        context,
+        snapshot,
+        None,
+        QuiescentRolloverPolicy::Deny,
+        operator,
+    )
 }
 
 fn start_snapshot_for_migration(
@@ -1917,7 +2462,19 @@ fn start_snapshot_for_migration(
     migration_id: Uuid,
     operator: &mut OperatorHandoff,
 ) -> Result<ServerState, MachineError> {
-    start_snapshot_inner(context, snapshot, Some(migration_id), operator)
+    start_snapshot_inner(
+        context,
+        snapshot,
+        Some(migration_id),
+        QuiescentRolloverPolicy::Deny,
+        operator,
+    )
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum QuiescentRolloverPolicy {
+    Allow,
+    Deny,
 }
 
 /// The Runtime Profile singleton start, split into the three phases ADR-016's
@@ -1941,6 +2498,7 @@ fn start_snapshot_inner(
     context: &Context,
     snapshot: &ProfileSnapshot,
     migration_id: Option<Uuid>,
+    rollover_policy: QuiescentRolloverPolicy,
     operator: &mut OperatorHandoff,
 ) -> Result<ServerState, MachineError> {
     if snapshot.compatibility_verdict == CompatibilityVerdict::Rejected {
@@ -1953,6 +2511,16 @@ fn start_snapshot_inner(
     let paths = LifecyclePaths::open(context, snapshot)?;
     let reservation = match prepare_start(&paths, snapshot, migration_id, operator)? {
         StartPrepared::Attached(state) => return Ok(*state),
+        StartPrepared::QuiescentRollover(old_server_key) => {
+            if rollover_policy == QuiescentRolloverPolicy::Deny {
+                return Err(profile_launch_conflict(
+                    &snapshot.profile_name,
+                    &old_server_key,
+                    "this start policy does not permit replacing a different active launch contract",
+                ));
+            }
+            return automatic_quiescent_migration(context, snapshot, &old_server_key);
+        }
         StartPrepared::Reserved(reservation) => reservation,
     };
     let applied = match apply_start(&paths, snapshot, &reservation) {
@@ -2014,6 +2582,9 @@ impl LifecyclePaths {
 enum StartPrepared {
     /// A verified live server already owns this contract; nothing to spawn.
     Attached(Box<ServerState>),
+    /// Another contract owns this account home. The caller must leave
+    /// PREPARE's locks before proving that lifetime quiescent and replacing it.
+    QuiescentRollover(String),
     /// This call owns the next lifetime and holds the reservation for it.
     Reserved(StartReservation),
 }
@@ -2063,14 +2634,20 @@ fn prepare_start(
     }
     if let Some(active) = active.as_ref() {
         if active.server_key != snapshot.server_key {
-            return Err(profile_launch_conflict(
-                &snapshot.profile_name,
-                &active.server_key,
-                format!(
-                    "another launch contract is active for this CODEX_HOME; requested {}",
-                    snapshot.server_key
-                ),
-            ));
+            if migration_id.is_some() {
+                return Err(profile_launch_conflict(
+                    &snapshot.profile_name,
+                    &active.server_key,
+                    format!(
+                        "another launch contract is active for this CODEX_HOME; requested {}",
+                        snapshot.server_key
+                    ),
+                ));
+            }
+            let old_server_key = active.server_key.clone();
+            drop(server_lock);
+            drop(home_lock);
+            return Ok(StartPrepared::QuiescentRollover(old_server_key));
         }
         // A `starting` or `stopping` record is another call's reservation in
         // its lock-free APPLY window. Spawning a second app-server onto the
@@ -2673,17 +3250,11 @@ fn verify_migration_fence(
     if !path.exists() {
         return Ok(());
     }
-    verify_private_regular_file(path, 0o600)?;
-    let value: Value = serde_json::from_slice(&fs::read(path).map_err(io_error)?)
-        .map_err(|_| transport("migration transaction is invalid"))?;
-    let phase = value["phase"].as_str().unwrap_or_default();
-    if !matches!(phase, "prepared" | "applying") {
+    let (value, parsed) = read_migration_record(path)?;
+    if parsed.phase.is_terminal() {
         return Ok(());
     }
-    let recorded = value["migration_id"]
-        .as_str()
-        .and_then(|value| Uuid::parse_str(value).ok());
-    if recorded == authorized {
+    if authorized == Some(parsed.migration_id) {
         return Ok(());
     }
     Err(profile_server_busy(
@@ -2713,8 +3284,72 @@ fn stop_snapshot(
     interrupt: bool,
     operator: &mut OperatorHandoff,
 ) -> Result<bool, MachineError> {
+    stop_snapshot_inner(context, snapshot, None, interrupt, operator)
+}
+
+fn stop_snapshot_for_migration(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    migration_id: Uuid,
+    interrupt: bool,
+    operator: &mut OperatorHandoff,
+) -> Result<bool, Box<MigrationStopFailure>> {
+    let paths = LifecyclePaths::open(context, snapshot)
+        .map_err(MigrationStopFailure::before_stop)
+        .map_err(Box::new)?;
+    let Some(reservation) = prepare_stop(&paths, snapshot, Some(migration_id), interrupt, operator)
+        .map_err(MigrationStopFailure::before_stop)
+        .map_err(Box::new)?
+    else {
+        return Ok(false);
+    };
+    if let Err(error) = apply_stop(&reservation.state) {
+        let process_stopped = !process_exists(reservation.state.pid);
+        if !process_stopped {
+            restore_stopping_reservation(&paths, snapshot, &reservation);
+        }
+        return Err(Box::new(MigrationStopFailure {
+            error,
+            reservation: Some(reservation),
+            process_stopped,
+        }));
+    }
+    commit_stop(&paths, snapshot, &reservation).map_err(|error| {
+        Box::new(MigrationStopFailure {
+            error,
+            reservation: Some(reservation),
+            process_stopped: true,
+        })
+    })?;
+    Ok(true)
+}
+
+struct MigrationStopFailure {
+    error: MachineError,
+    reservation: Option<StopReservation>,
+    process_stopped: bool,
+}
+
+impl MigrationStopFailure {
+    fn before_stop(error: MachineError) -> Self {
+        Self {
+            error,
+            reservation: None,
+            process_stopped: false,
+        }
+    }
+}
+
+fn stop_snapshot_inner(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    migration_id: Option<Uuid>,
+    interrupt: bool,
+    operator: &mut OperatorHandoff,
+) -> Result<bool, MachineError> {
     let paths = LifecyclePaths::open(context, snapshot)?;
-    let Some(reservation) = prepare_stop(&paths, snapshot, interrupt, operator)? else {
+    let Some(reservation) = prepare_stop(&paths, snapshot, migration_id, interrupt, operator)?
+    else {
         return Ok(false);
     };
     if let Err(error) = apply_stop(&reservation.state) {
@@ -2735,6 +3370,7 @@ struct StopReservation {
 fn prepare_stop(
     paths: &LifecyclePaths,
     snapshot: &ProfileSnapshot,
+    migration_id: Option<Uuid>,
     interrupt: bool,
     operator: &mut OperatorHandoff,
 ) -> Result<Option<StopReservation>, MachineError> {
@@ -2743,6 +3379,12 @@ fn prepare_stop(
     // authorized this stop can retire into the locks that replace it. Waiting
     // for the server to quiesce happens in APPLY, under no lock at all.
     operator.handoff(&home_lock);
+    verify_migration_fence(
+        &paths.home_root.join("migration.json"),
+        migration_id,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
     let Some(state) = read_state_if_running(&paths.state_path)? else {
         return Ok(None);
     };
@@ -2773,6 +3415,8 @@ fn prepare_stop(
         ));
     }
     verify_live_process_identity(&state)?;
+    let active = read_home_active(&paths.active_path)?;
+    verify_stop_home_active(snapshot, &state, active.as_ref())?;
     let scope = MembershipScope {
         profile: snapshot.profile_name.clone(),
         server_key: snapshot.server_key.clone(),
@@ -2823,6 +3467,42 @@ fn prepare_stop(
     drop(server_lock);
     drop(home_lock);
     Ok(Some(StopReservation { state, token }))
+}
+
+fn verify_stop_home_active(
+    snapshot: &ProfileSnapshot,
+    state: &ServerState,
+    active: Option<&HomeActive>,
+) -> Result<(), MachineError> {
+    let active = active.ok_or_else(|| {
+        profile_mismatch(
+            &snapshot.profile_name,
+            "home_active_contract",
+            json!({
+                "server_key": snapshot.server_key,
+                "server_epoch": state.server_epoch,
+                "lifecycle": "ready",
+                "pid": state.pid,
+            }),
+            Value::Null,
+        )
+    })?;
+    if active.server_key != snapshot.server_key
+        || active.server_epoch != state.server_epoch
+        || active.lifecycle != "ready"
+        || active.pid != Some(state.pid)
+        || active.transition_token.is_some()
+    {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &active.server_key,
+            format!(
+                "another lifecycle transition holds this CODEX_HOME in {}",
+                active.lifecycle
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The live members a stop would interrupt, as the evidence the interrupt
@@ -2926,6 +3606,66 @@ fn commit_stop(
             "epoch": reservation.state.server_epoch,
         }),
     )?;
+    drop(server_lock);
+    drop(home_lock);
+    Ok(())
+}
+
+/// Completes a migration-owned stop whose process termination succeeded but
+/// whose durable COMMIT returned an error. This cleanup is idempotent so a
+/// partial first COMMIT (socket or state already removed) can still reach the
+/// stopped boundary required before restoring the old snapshot.
+fn settle_terminated_migration_stop(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    reservation: &StopReservation,
+) -> Result<(), MachineError> {
+    if process_exists(reservation.state.pid) {
+        return Err(transport(
+            "migration stop settlement found the old process still running",
+        ));
+    }
+    stop_drainer(&reservation.state)?;
+    let paths = LifecyclePaths::open(context, snapshot)?;
+    let (home_lock, server_lock) = paths.lock()?;
+    if let Some(active) = read_home_active(&paths.active_path)?
+        && (active.server_key != snapshot.server_key
+            || active.server_epoch != reservation.state.server_epoch
+            || active.lifecycle != "stopping"
+            || active.transition_token != Some(reservation.token))
+    {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &active.server_key,
+            format!(
+                "another lifecycle transition replaced the migration stop in {}",
+                active.lifecycle
+            ),
+        ));
+    }
+    if let Some(current) = read_state(&paths.state_path)? {
+        if current.epoch_id != reservation.state.epoch_id {
+            return Err(profile_mismatch(
+                &snapshot.profile_name,
+                "server_epoch_identity",
+                json!(reservation.state.epoch_id),
+                json!(current.epoch_id),
+            ));
+        }
+        if fs::symlink_metadata(&reservation.state.socket_path).is_ok() {
+            verify_recorded_socket(&snapshot.profile_name, &reservation.state)?;
+            fs::remove_file(&reservation.state.socket_path).map_err(io_error)?;
+        }
+        fs::remove_file(&paths.state_path).map_err(io_error)?;
+    }
+    sync_parent(&paths.state_path)?;
+    if read_home_active(&paths.active_path)?.is_some() {
+        clear_home_active(
+            &snapshot.profile_name,
+            &paths.active_path,
+            &snapshot.server_key,
+        )?;
+    }
     drop(server_lock);
     drop(home_lock);
     Ok(())
@@ -3126,6 +3866,7 @@ fn process_identity_matches(pid: u32, uid: u32, pgid: u32, fingerprint: &str) ->
 /// absent — the "recorded lifetime absent" proof crash-recovery repair
 /// (`profile state reset`, migration-fence repair) requires before acting.
 fn server_lifetime_absent(context: &Context, server_key: &str) -> Result<bool, MachineError> {
+    require_canonical_persisted_server_key(server_key)?;
     let root = context
         .application_support_root
         .join("profiles")
@@ -3147,9 +3888,10 @@ fn server_lifetime_absent(context: &Context, server_key: &str) -> Result<bool, M
     Ok(true)
 }
 
-/// Operator repair for a migration fence left in `prepared`/`applying` phase
-/// by a crash: once both the old and new recorded lifetimes are proven
-/// absent, the fence is released so a fresh start or migration can proceed.
+/// Operator repair for an unresolved migration fence: once both the old and
+/// new recorded lifetimes are proven absent, the fence is released so a fresh
+/// start or migration can proceed. This includes `migration_blocked`, whose
+/// whole purpose is to require explicit reconciliation rather than selection.
 /// Best-effort: an unprovable or irrelevant fence is left untouched rather
 /// than failing the caller's otherwise-successful state reset.
 fn repair_stale_migration_fence(
@@ -3161,22 +3903,12 @@ fn repair_stale_migration_fence(
     if !migration_path.exists() {
         return Ok(false);
     }
-    verify_private_regular_file(&migration_path, 0o600)?;
-    let mut migration: Value =
-        serde_json::from_slice(&fs::read(&migration_path).map_err(io_error)?)
-            .map_err(|_| transport("migration transaction is invalid"))?;
-    let phase = migration["phase"].as_str().unwrap_or_default();
-    if !matches!(phase, "prepared" | "applying") {
+    let (mut migration, parsed) = read_migration_record(&migration_path)?;
+    if parsed.phase.is_terminal() || parsed.phase != MigrationPhase::Blocked {
         return Ok(false);
     }
-    let old_key = migration["old_server_key"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    let new_key = migration["new_server_key"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
+    let old_key = parsed.old_server_key;
+    let new_key = parsed.new_server_key;
     if old_key != server_key && new_key != server_key {
         return Ok(false);
     }
@@ -3646,10 +4378,10 @@ pub struct MembershipReceipt {
 /// for, exposed as a callable so the Run lifecycle can hold it without the
 /// profile module having to know how a Run starts.
 ///
-/// Takes `server.lock` and nothing above it. A member must never reach for
-/// `home.lock`: ADR-016's order runs `operator` → `home` → `server`, and a
-/// member that climbed it would close a cycle against the lifecycle
-/// operations that descend it.
+/// Takes `home.lock` and then `server.lock`, matching lifecycle order. A new
+/// registration is admitted only while this exact home contract is ready and
+/// no migration fence is active; that makes the empty-membership proof and
+/// stop reservation atomic against Run admission.
 pub fn register_run_member(
     workspace: Option<&Path>,
     state: &ServerState,
@@ -3749,6 +4481,9 @@ fn record_membership(
     }
     let context = context(workspace)?;
     let root = member_root(&context, state)?;
+    let home = home_root(&context, &state.snapshot.canonical_codex_home)?;
+    verify_private_directory(&home)?;
+    let _home_lock = lock_file(&home.join("home.lock"))?;
     let _server_lock = lock_file(&root.join("server.lock"))?;
     let state_path = root.join("state.json");
     // A membership record is only meaningful against the exact lifetime the
@@ -3768,6 +4503,16 @@ fn record_membership(
             json!({"server_key": state.server_key, "epoch_id": state.epoch_id}),
             json!({"server_key": current.server_key, "epoch_id": current.epoch_id}),
         ));
+    }
+    if kind == "run_registered" {
+        verify_migration_fence(
+            &home.join("migration.json"),
+            None,
+            &state.snapshot.profile_name,
+            &state.server_key,
+        )?;
+        let active = read_home_active(&home.join("active.json"))?;
+        verify_stop_home_active(&state.snapshot, &current, active.as_ref())?;
     }
     let scope = MembershipScope {
         profile: state.snapshot.profile_name.clone(),
@@ -4998,7 +5743,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_stale_migration_fence_is_a_no_op_without_a_fence() {
+    fn repair_stale_migration_fence_handles_absent_blocked_lifetimes() {
         let context = Context {
             workspace_id: "test".to_owned(),
             registry_path: std::env::temp_dir().join("unused.yaml"),
@@ -5013,6 +5758,7 @@ mod tests {
         atomic_replace(
             &migration_path,
             serde_json::to_vec_pretty(&json!({
+                "migration_id": Uuid::now_v7(),
                 "phase": "committed",
                 "old_server_key": "c".repeat(64),
                 "new_server_key": "d".repeat(64),
@@ -5023,6 +5769,38 @@ mod tests {
         .unwrap();
         assert!(!repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
         assert!(!repair_stale_migration_fence(&context, &home, &"e".repeat(64)).unwrap());
+
+        atomic_replace(
+            &migration_path,
+            serde_json::to_vec_pretty(&json!({
+                "migration_id": Uuid::now_v7(),
+                "phase": "applying",
+                "old_server_key": "c".repeat(64),
+                "new_server_key": "d".repeat(64),
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+        assert!(!repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
+        let in_flight: Value = serde_json::from_slice(&fs::read(&migration_path).unwrap()).unwrap();
+        assert_eq!(in_flight["phase"], "applying");
+
+        atomic_replace(
+            &migration_path,
+            serde_json::to_vec_pretty(&json!({
+                "migration_id": Uuid::now_v7(),
+                "phase": "migration_blocked",
+                "old_server_key": "c".repeat(64),
+                "new_server_key": "d".repeat(64),
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+        assert!(repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
+        let repaired: Value = serde_json::from_slice(&fs::read(&migration_path).unwrap()).unwrap();
+        assert_eq!(repaired["phase"], "rolled_back");
         fs::remove_dir_all(&context.application_support_root).unwrap();
     }
 
@@ -5408,6 +6186,347 @@ mod tests {
             compatibility_verdict: CompatibilityVerdict::Tested,
             server_key: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn migration_and_stop_reservations_are_mutually_exclusive_in_both_orders() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-stop-migration-order-{}", Uuid::now_v7()));
+        secure_dir(&root).unwrap();
+        let migration_path = root.join("migration.json");
+        let migration_id = Uuid::now_v7();
+        atomic_replace(
+            &migration_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "migration_id": migration_id,
+                "old_server_key": "a".repeat(64),
+                "new_server_key": "b".repeat(64),
+                "phase": "prepared",
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+
+        // Migration-first: an unrelated operator stop cannot pass the
+        // durable fence, while the stop owned by that migration can.
+        let unrelated =
+            verify_migration_fence(&migration_path, None, "default", &"a".repeat(64)).unwrap_err();
+        assert_eq!(unrelated.code, "PROFILE_SERVER_BUSY");
+        verify_migration_fence(
+            &migration_path,
+            Some(migration_id),
+            "default",
+            &"a".repeat(64),
+        )
+        .unwrap();
+
+        atomic_replace(
+            &migration_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "migration_id": "not-a-uuid",
+                "old_server_key": "a".repeat(64),
+                "new_server_key": "b".repeat(64),
+                "phase": "applying",
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+        let malformed =
+            verify_migration_fence(&migration_path, None, "default", &"a".repeat(64)).unwrap_err();
+        assert_eq!(malformed.code, "TRANSPORT_FAILURE");
+
+        atomic_replace(
+            &migration_path,
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "migration_id": migration_id,
+                "old_server_key": "a".repeat(64),
+                "new_server_key": "b".repeat(64),
+                "phase": "preprared",
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+        let malformed_phase =
+            verify_migration_fence(&migration_path, None, "default", &"a".repeat(64)).unwrap_err();
+        assert_eq!(malformed_phase.code, "TRANSPORT_FAILURE");
+
+        for phase in ["committed", "rolled_back"] {
+            for invalid_id in [Value::Null, Value::String("not-a-uuid".to_owned())] {
+                atomic_replace(
+                    &migration_path,
+                    serde_json::to_vec_pretty(&json!({
+                        "schema_version": 1,
+                        "migration_id": invalid_id,
+                        "old_server_key": "a".repeat(64),
+                        "new_server_key": "b".repeat(64),
+                        "phase": phase,
+                    }))
+                    .unwrap()
+                    .as_slice(),
+                )
+                .unwrap();
+                let invalid_terminal =
+                    verify_migration_fence(&migration_path, None, "default", &"a".repeat(64))
+                        .unwrap_err();
+                assert_eq!(invalid_terminal.code, "TRANSPORT_FAILURE");
+            }
+        }
+
+        // Stop-first: a migration-owned stop cannot replace the token of a
+        // stop already in its lock-free APPLY phase.
+        let snapshot = stopped_snapshot();
+        let state = stopped_state();
+        let stopping = HomeActive {
+            schema_version: 1,
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            server_key: snapshot.server_key.clone(),
+            server_epoch: state.server_epoch,
+            lifecycle: "stopping".to_owned(),
+            pid: Some(state.pid),
+            transition_token: Some(Uuid::now_v7()),
+        };
+        let occupied = verify_stop_home_active(&snapshot, &state, Some(&stopping)).unwrap_err();
+        assert_eq!(occupied.code, "PROFILE_SERVER_BUSY");
+
+        let ready = HomeActive {
+            lifecycle: "ready".to_owned(),
+            transition_token: None,
+            ..stopping
+        };
+        verify_stop_home_active(&snapshot, &state, Some(&ready)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_persistence_retries_are_bounded_and_report_exhaustion() {
+        let attempts = std::cell::Cell::new(0);
+        persist_migration_with(
+            Path::new("unused"),
+            &json!({"phase": "committed"}),
+            3,
+            |_, _| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 3 {
+                    Err(transport("injected migration write failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 3);
+
+        attempts.set(0);
+        let exhausted = persist_migration_with(
+            Path::new("unused"),
+            &json!({"phase": "migration_blocked"}),
+            3,
+            |_, _| {
+                attempts.set(attempts.get() + 1);
+                Err(transport("injected migration write failure"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(exhausted.code, "TRANSPORT_FAILURE");
+    }
+
+    #[test]
+    fn migration_confirmation_keys_are_canonical_before_path_construction() {
+        require_canonical_server_key("--confirm-old-server-key", &"a0".repeat(32)).unwrap();
+        for invalid in [
+            "../outside".to_owned(),
+            "/tmp/outside".to_owned(),
+            "A".repeat(64),
+            "g".repeat(64),
+            "a".repeat(63),
+            "a".repeat(65),
+        ] {
+            let error =
+                require_canonical_server_key("--confirm-old-server-key", &invalid).unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT", "accepted {invalid:?}");
+            assert_eq!(error.details["argument"], "--confirm-old-server-key");
+        }
+    }
+
+    #[test]
+    fn durable_migration_keys_are_canonical_before_path_construction() {
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-invalid-durable-migration-key-{}",
+            Uuid::now_v7()
+        ));
+        secure_dir(&root).unwrap();
+        let migration_path = root.join("migration.json");
+        atomic_replace(
+            &migration_path,
+            &serde_json::to_vec_pretty(&json!({
+                "migration_id": Uuid::now_v7(),
+                "phase": "committed",
+                "old_server_key": "../outside",
+                "new_server_key": "b".repeat(64),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = read_migration_record(&migration_path).unwrap_err();
+        assert_eq!(error.code, "TRANSPORT_FAILURE");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_rollover_attaches_to_the_requested_ready_generation() {
+        let support =
+            std::env::temp_dir().join(format!("dolgorae-duplicate-rollover-{}", Uuid::now_v7()));
+        let old_key = "a".repeat(64);
+        let new_key = "b".repeat(64);
+        let context = Context {
+            workspace_id: "test".to_owned(),
+            registry_path: support.join("unused.yaml"),
+            application_support_root: support.clone(),
+        };
+        let mut snapshot = stopped_snapshot();
+        snapshot.server_key = new_key.clone();
+        let home = home_root(&context, &snapshot.canonical_codex_home).unwrap();
+        let old_root = support.join("profiles").join(&old_key);
+        let new_root = support.join("profiles").join(&new_key);
+        secure_dir(&old_root).unwrap();
+        secure_dir(&new_root).unwrap();
+        let socket = PathBuf::from(format!("/tmp/ddr-{}.sock", Uuid::now_v7()));
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let socket_metadata = fs::symlink_metadata(&socket).unwrap();
+        let identity = DarwinSystem
+            .live_process_identity(std::process::id())
+            .unwrap();
+        let mut state = stopped_state();
+        state.server_key = new_key.clone();
+        state.snapshot = snapshot.clone();
+        state.pid = std::process::id();
+        state.pgid = identity.process_group_id;
+        state.uid = identity.uid;
+        state.process_fingerprint = identity.fingerprint;
+        state.socket_path = socket.to_str().unwrap().to_owned();
+        state.socket_device = socket_metadata.dev();
+        state.socket_inode = socket_metadata.ino();
+        atomic_replace(
+            &new_root.join("state.json"),
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        write_home_active(
+            &home.join("active.json"),
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                server_key: new_key,
+                server_epoch: state.server_epoch,
+                lifecycle: "ready".to_owned(),
+                pid: Some(state.pid),
+                transition_token: None,
+            },
+        )
+        .unwrap();
+
+        let attached = automatic_quiescent_migration(&context, &snapshot, &old_key).unwrap();
+        assert_eq!(attached, state);
+
+        drop(listener);
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn operator_reconciliation_commits_a_blocked_ready_replacement() {
+        let support = std::env::temp_dir().join(format!(
+            "dolgorae-blocked-migration-recovery-{}",
+            Uuid::now_v7()
+        ));
+        let new_key = "b".repeat(64);
+        let old_key = "a".repeat(64);
+        let new_root = support.join("profiles").join(&new_key);
+        let home = support.join("homes").join("home");
+        secure_dir(&new_root).unwrap();
+        secure_dir(&home).unwrap();
+        let socket = PathBuf::from(format!("/tmp/dmr-{}.sock", Uuid::now_v7()));
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let socket_metadata = fs::symlink_metadata(&socket).unwrap();
+        let identity = DarwinSystem
+            .live_process_identity(std::process::id())
+            .unwrap();
+
+        let mut snapshot = stopped_snapshot();
+        snapshot.server_key = new_key.clone();
+        let mut state = stopped_state();
+        state.server_key = new_key.clone();
+        state.snapshot = snapshot.clone();
+        state.pid = std::process::id();
+        state.pgid = identity.process_group_id;
+        state.uid = identity.uid;
+        state.process_fingerprint = identity.fingerprint;
+        state.socket_path = socket.to_str().unwrap().to_owned();
+        state.socket_device = socket_metadata.dev();
+        state.socket_inode = socket_metadata.ino();
+        atomic_replace(
+            &new_root.join("state.json"),
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        write_home_active(
+            &home.join("active.json"),
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                server_key: new_key.clone(),
+                server_epoch: state.server_epoch,
+                lifecycle: "ready".to_owned(),
+                pid: Some(state.pid),
+                transition_token: None,
+            },
+        )
+        .unwrap();
+        let migration_id = Uuid::now_v7();
+        let migration_path = home.join("migration.json");
+        atomic_replace(
+            &migration_path,
+            &serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "migration_id": migration_id,
+                "old_server_key": old_key,
+                "new_server_key": new_key,
+                "phase": "migration_blocked",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let context = Context {
+            workspace_id: "test".to_owned(),
+            registry_path: support.join("unused.yaml"),
+            application_support_root: support.clone(),
+        };
+
+        let recovered = reconcile_blocked_migration(
+            &context,
+            &snapshot,
+            &old_key,
+            &new_key,
+            &home,
+            &migration_path,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered.0, migration_id);
+        assert_eq!(recovered.1.server_key, new_key);
+        let migration: Value = serde_json::from_slice(&fs::read(&migration_path).unwrap()).unwrap();
+        assert_eq!(migration["phase"], "committed");
+
+        drop(listener);
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir_all(support).unwrap();
     }
 
     /// Attaching is how every Run reaches the singleton, so it asks the same

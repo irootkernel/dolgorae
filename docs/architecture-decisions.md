@@ -726,12 +726,17 @@ version/compatibility identity, normalized global arguments, symbolic
 `profile_state_directory_v1` cwd policy, explicit deterministic non-secret
 environment including PATH/LANG/LC_ALL, and normalized process-
 static configuration. Profile names with the same key are aliases.
-The same home with a different live launch contract fails with
-`PROFILE_LAUNCH_CONFLICT`; Dolgorae never silently joins or replaces it and
-never mixes contracts. Differing stopped definitions may coexist but only one
-contract may own the next verified lifetime. The active contract may run the
-shared reader singleton plus at most one Writer Capsule for the current durable
-writer generation; both use the identical contract and canonical home.
+The same home never runs two different shared launch contracts concurrently.
+Dolgorae never silently joins a mismatched contract. A generation-starting
+command may replace the incumbent without operator authority only when exact
+process/socket evidence and the complete membership journal prove zero live or
+orphan Run members; it uses the durable migration transaction and rollback
+rather than clearing the home record directly. Every other mismatch fails
+closed for explicit operator migration. Differing stopped definitions may
+coexist but only one contract may own the next verified lifetime. The active
+contract may run the shared reader singleton plus at most one Writer Capsule
+for the current durable writer generation; both use the identical contract and
+canonical home.
 
 Dolgorae launches only the direct Codex executable as `app-server --listen
 unix://...`; arbitrary wrapper and shell profiles are outside v1. It supplies a
@@ -790,11 +795,34 @@ commit so it never waits for members while holding `server.lock`. An interruptin
 members and never resumes them automatically. Because it crosses controller
 boundaries, it requires the separate local operator capability.
 
-Version/configuration drift that changes `server_key` is an operator-only home
-migration. Old/new server locks use binary key order, membership moves under one
-durable migration ID, and failure rolls back before new ready or remains
-explicitly blocked. A run-local `--accept-version-change` is rejected because a
-single controller cannot authorize effects on other singleton members.
+Version/configuration drift that changes `server_key` is a home migration.
+Zero-member automatic rollover acquires the home and old/new server locks,
+proves the complete quiescent source, and then uses the same durable migration
+ID and rollback path without interrupt authority. That ID fences its stop and
+start reservations; unrelated lifecycle operations cannot replace either
+transition token, and a pre-existing stop reservation bars migration. A
+migration with members is operator-only. Operator and automatic paths both
+validate and create the fence under the home and old/new server locks; a fence
+without a valid ID or canonical recorded keys, or any fence with an unknown
+phase, is never treated as authorization. `migration_blocked` remains fenced. Old/new server locks use binary key
+order. Every post-stop failure, including phase persistence and start
+reauthorization, uses the old-snapshot compensation path and either records
+rollback or remains explicitly blocked. Process termination is tracked
+separately from stop COMMIT, whose partial cleanup is settled idempotently.
+Final migration-record persistence is bounded-retry and otherwise becomes
+`migration_blocked`. The operator migrate path recovers that fence by proving
+the exact ready old or new generation under the same ordered locks and
+terminalizing the existing migration ID. Confirmation keys are validated as
+canonical lowercase-hex identities before any path construction. Diagnostic
+launch probes deny rollover. When neither recorded generation exists, operator
+state reset repairs `migration_blocked` through exact two-lifetime absence
+proof, but never rewrites `prepared` or `applying` during their lock-free
+process window. A duplicate rollover starter attaches if its re-proof finds
+the exact requested contract already ready. Membership admission uses home then server locking; registration requires
+exact ready home state and no migration fence, while release remains available
+during shutdown. A run-local
+`--accept-version-change` is rejected because a single controller cannot
+authorize effects on other singleton members.
 
 ### Consequences
 

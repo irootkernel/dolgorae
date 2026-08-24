@@ -772,11 +772,35 @@ and forces cross-epoch member reconciliation. Corrupt, missing, or unverifiable
 membership blocks the operation; an apparently empty partial index never
 authorizes termination.
 
-Server-key migration is an operator-only home transaction. Old and new server
-locks are acquired in ascending decoded-key order. A home-authoritative
-migration record prevents double membership, and failure before new ready
-retains old membership or lands in `migration_blocked` when rollback cannot be
-proved.
+Server-key migration is a home transaction. A generation-starting command may
+perform it without operator authority only after exact process/socket and
+complete membership evidence prove the source has zero live or orphan members;
+interrupting or otherwise non-quiescent migration remains operator-only. Old
+and new server locks are acquired in ascending decoded-key order. A
+home-authoritative migration record with a valid ID, phase, and canonical
+recorded server keys fences both stop and start reservations,
+prevents unrelated transition-token replacement and double membership, and
+is checked and created under the home and ordered old/new server locks for
+both migration authorities. An active record with an invalid transaction ID
+or a record with an unknown phase fails closed; `migration_blocked` stays
+active. Failure before new ready retains old membership or lands in
+`migration_blocked` when rollback cannot be proved; phase-write and start
+authorization failures after the old stop use that same compensation path.
+Migration stop distinguishes process termination from durable commit and can
+settle a partial commit idempotently. Final record persistence retries before
+fencing the ready replacement as `migration_blocked`. Operator migrate can
+reconcile that fence without manual process or JSON edits by proving the exact
+ready old/new generation and terminalizing the recorded transaction. Confirmed
+keys pass canonical identity validation before profile-path construction.
+Doctor launch probes use a no-rollover start policy. A blocked transaction with
+neither generation present is repairable only through operator state reset's
+two-lifetime absence proof; `prepared` and `applying` are never terminalized by
+that recovery while their migration may still be in flight. A concurrent
+duplicate rollover attaches when re-proof finds the requested generation
+already ready.
+Membership mutations take home then server locks. New registration checks the
+exact ready home record and migration fence under those locks, closing the
+quiescence-to-stop admission race; release remains valid for shutdown cleanup.
 
 The global order is operator, home, server keys in binary order, handoff,
 writer, run startup locks in UUID-byte order, then in-process run mutation

@@ -643,20 +643,57 @@ normalized process-static and explicitly accepted migratable fields enter the
 launch contract. Runtime-mutated trust and operational state are recorded as an
 initial observation but their enclosing file's raw digest MUST NOT enter
 `server_key`. The key remains fixed for the lifetime; a later process-static
-change requires operator migration rather than silently invalidating the live
-server. Pinned probes own the classification and hot-reload verdict for every
-field used by v1.
+change fixes that lifetime to its recorded snapshot. A generation-starting
+command MAY replace it automatically only after complete membership and exact
+process evidence prove that no Run remains attached; otherwise the change
+requires operator migration. Pinned probes own the classification and
+hot-reload verdict for every field used by v1.
 
 The singleton `server_key` is the domain-separated SHA-256 of that object, never
 the profile display name or incidental caller state. A compatible profile
-MUST reuse its live singleton across workspaces and runs. A different live
-launch contract for the same canonical home MUST fail with
-`PROFILE_LAUNCH_CONFLICT`; it MUST NOT start a second shared singleton or silently fall
-back to a reader-per-run server. Run-owned Dedicated Lane Server generations
-are the only additional App Server lifetimes. Stopped profile definitions with different contracts
-MAY coexist, but only the contract selected for the next singleton lifetime
-becomes active; another contract cannot start until the prior lifetime is
-verified stopped and its membership reconciled.
+MUST reuse its live singleton across workspaces and runs. A different contract
+for the same canonical home MUST NOT start a second shared singleton or silently
+fall back to a reader-per-run server. If the recorded Dolgorae singleton is
+`ready`, its membership journal and index are complete, it has no live or orphan
+Run member, and its exact process and socket identities verify, the starting
+command MUST retire it and atomically migrate the home to the requested contract
+without an operator credential. Any live member, incomplete evidence, lifecycle
+transition, or identity mismatch fails closed and leaves the incumbent running.
+The durable migration ID owns both its stop and start reservations: unrelated
+lifecycle commands MUST reject the active fence, and a migration MUST NOT
+replace a stop reservation that was already in progress when it acquired the
+home lock. Both operator and automatic migration MUST check and create that
+fence while holding the home and ordered old/new server locks. A missing or
+invalid ID, non-canonical recorded server key, or unknown/missing phase is
+corruption and MUST fail closed before profile-path access;
+`migration_blocked` remains an active fence until explicit repair.
+After the old lifetime stops, every subsequent failure—including persisting
+`applying` or refreshing operator authorization for the new start—MUST take the
+same compensating path: restore the old snapshot, then record `rolled_back`, or
+record `migration_blocked` if stop settlement or restoration cannot be proved.
+Stop reports termination separately from durable cleanup. Final `committed`
+persistence is retried; exhaustion records `migration_blocked` around the
+already-ready replacement instead of leaving an ambiguous `applying` record.
+An operator-authorized `profile server migrate` with the same confirmed old
+and new keys MUST reconcile an unresolved fence under those same locks: exact
+ready new evidence commits the recorded migration ID, while exact ready old
+evidence records rollback before a fresh migration attempt.
+Both confirmed server keys MUST be canonical 64-character lowercase hex before
+either value is used to construct a profile path or open a lock.
+`profile doctor --launch-probe` MUST NOT select automatic rollover: it may
+attach to or temporarily launch only the exact requested contract. Operator
+state reset MAY repair `migration_blocked` only after proving both recorded
+lifetimes absent. It MUST NOT terminalize `prepared` or `applying`, because
+those phases may belong to an in-flight migration's lock-free process window.
+If a duplicate generation-start reaches the migration re-proof after another
+caller has already published the exact requested ready contract, it MUST
+attach to that proven lifetime rather than report a spurious busy result.
+Run membership mutation follows home-then-server lock order. Registration
+requires the exact home contract to remain `ready` with no active migration
+fence; releases may still close an existing member during shutdown. Therefore
+no Run can enter after an automatic migration's empty-membership proof.
+Run-owned Dedicated Lane Server generations are the only additional App Server
+lifetimes. Stopped profile definitions with different contracts MAY coexist.
 Every singleton lifetime has a monotonically increasing `server_epoch`.
 
 Dolgorae, not the official Codex daemon lifecycle, starts the singleton as the
@@ -1129,13 +1166,14 @@ new run and retains source provenance without reading the source Codex thread.
 It is always read-only and acquires no writer authority.
 
 When a generation-starting command finds that the accepted launch contract
-would produce another server key, it returns `PROFILE_MIGRATION_REQUIRED` with
-old/new keys and the closed drift classification. A run controller cannot
-accept that profile-wide change. Only the operator-authorized `profile server
-migrate` command may append accepted generation contracts to every affected run
-after the full compatibility gate and membership transaction succeed. A change
-outside the migration allowlist returns `COMPATIBILITY_REJECTED` and requires a
-new run or profile definition.
+would produce another server key, it first attempts the exact quiescent
+rollover above. It records the same durable migration fence, stop/start absence
+proof, rollback state, and monotonically increasing epoch as an explicit
+migration. If any Run remains attached, a run controller cannot accept that
+profile-wide interruption; the operator-authorized `profile server migrate`
+command remains the only path that may interrupt members and append accepted
+generation contracts to affected runs. A change outside the migration allowlist
+returns `COMPATIBILITY_REJECTED` and requires a new run or profile definition.
 
 ## SPEC-006: Machine Output and Turn Control
 

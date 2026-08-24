@@ -636,14 +636,76 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         conflicting_add = run(binary, home, "profile", "add", "conflict", *conflicting_arguments)
         if conflicting_add.returncode != 0:
             raise AssertionError(f"same-home conflict profile add failed: {conflicting_add.stdout}")
+
+        # A diagnostic launch probe may start and stop only its own exact
+        # contract. It must never migrate an unrelated, already-running
+        # singleton and then tear the replacement down as probe cleanup.
+        old_state = envelope(
+            run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace))
+        )["data"]["state"]
+        conflicting_probe = run(
+            binary,
+            home,
+            "profile",
+            "doctor",
+            "conflict",
+            "--workspace",
+            str(workspace),
+            "--launch-probe",
+        )
+        if (
+            conflicting_probe.returncode != 4
+            or envelope(conflicting_probe)["error"]["code"] != "PROFILE_LAUNCH_CONFLICT"
+        ):
+            raise AssertionError(f"diagnostic probe crossed the active contract: {conflicting_probe.stdout}")
+        probe_preserved = envelope(
+            run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace))
+        )["data"]["state"]
+        if probe_preserved["pid"] != old_state["pid"]:
+            raise AssertionError("diagnostic launch probe replaced the existing singleton")
+
+        # A different launch contract cannot auto-roll a server that still
+        # owns a live Run. The failed attempt must leave the old process and
+        # active contract untouched.
+        append_membership(profile_root, "run_registered", workspace_id, "run-rollover-blocker")
         conflicting_start = run(
             binary, home, "profile", "server", "start", "conflict", "--workspace", str(workspace)
         )
         if (
             conflicting_start.returncode != 4
-            or envelope(conflicting_start)["error"]["code"] != "PROFILE_LAUNCH_CONFLICT"
+            or envelope(conflicting_start)["error"]["code"] != "PROFILE_MEMBERSHIP_INCOMPLETE"
         ):
-            raise AssertionError(f"same-home singleton conflict was not rejected: {conflicting_start.stdout}")
+            raise AssertionError(f"live same-home singleton was not preserved: {conflicting_start.stdout}")
+        preserved = envelope(
+            run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace))
+        )["data"]["state"]
+        if preserved["pid"] != old_state["pid"] or preserved["server_key"] != old_state["server_key"]:
+            raise AssertionError("failed automatic rollover changed the live source server")
+
+        # Once the source membership is empty, starting the new contract
+        # retires only the Dolgorae-managed singleton and publishes the new
+        # generation without an operator credential.
+        append_membership(profile_root, "run_closed", workspace_id, "run-rollover-blocker")
+        conflicting_start = run(
+            binary, home, "profile", "server", "start", "conflict", "--workspace", str(workspace)
+        )
+        conflicting_data = envelope(conflicting_start)["data"] if conflicting_start.returncode == 0 else {}
+        if conflicting_start.returncode != 0 or conflicting_data["state"]["lifecycle"] != "ready":
+            raise AssertionError(f"quiescent same-home rollover failed: {conflicting_start.stdout}")
+        if conflicting_data["state"]["server_key"] == old_state["server_key"]:
+            raise AssertionError("automatic rollover retained the old launch contract")
+        assert_valid(envelope(conflicting_start), machine, "quiescent-rollover Machine envelope")
+
+        # Returning to the original profile exercises a second automatic
+        # rollover and proves the committed migration fence is reusable.
+        returned = run(
+            binary, home, "profile", "server", "start", "default", "--workspace", str(workspace)
+        )
+        returned_data = envelope(returned)["data"] if returned.returncode == 0 else {}
+        if returned.returncode != 0 or returned_data["state"]["server_key"] != exact_data["server_key"]:
+            raise AssertionError(f"rollover back to the original contract failed: {returned.stdout}")
+        assert_valid(envelope(returned), machine, "quiescent-rollover-return Machine envelope")
+
         conflicting_remove = run(
             binary, home, "profile", "remove", "conflict", "--workspace", str(workspace)
         )
@@ -735,7 +797,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # between PREPARE and COMMIT would leave it, naming this profile's
         # own (now-stopped, so provably absent) server key as one side and a
         # never-started server key as the other. `profile state reset`
-        # proving both recorded lifetimes absent must repair it as a
+        # proving both recorded lifetimes absent must repair a blocked fence as a
         # best-effort side effect rather than leaving the CODEX_HOME fenced
         # forever with no operator recovery path.
         home_hash = hashlib.sha256(
@@ -753,7 +815,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     "migration_id": "00000000-0000-7000-8000-000000000000",
                     "old_server_key": exact_data["server_key"],
                     "new_server_key": never_started_server_key,
-                    "phase": "prepared",
+                    "phase": "migration_blocked",
                 }
             ),
             encoding="utf-8",

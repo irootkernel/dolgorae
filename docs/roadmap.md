@@ -251,12 +251,26 @@ server operations, full-key short-socket collision checks, and server lifecycle 
 The required-subset manifest is checked input, not a TASK-029 invention.
 
 Verification: fake executable matrices for missing commands, rejected wrapper argv,
-profile-name collision, home mismatch, incompatible same-home singleton,
+profile-name collision, home mismatch, incompatible active same-home singleton,
 unsupported/older/newer versions, missing schema fields,
 additive fields, login failure, and successful 0.149.0 compatibility.
 Also cover `$ref` resolution, requiredness/type/enum changes, pagination,
-early-ID behavioral rejection, absent-thread errors, version-drift refusal and
-operator migration/rollback. Probe configuration mutations and classify each
+early-ID behavioral rejection, absent-thread errors, version-drift quiescent
+automatic rollover, active-member refusal, and both migration-first and
+stop-first reservation races, malformed-fence rejection, plus operator
+migration/rollback. Malformed fence coverage includes both transaction ID and
+phase corruption; post-stop phase-write and start-authorization failures share
+the rollback path. Stop-commit partial cleanup and final commit-record write
+failure are separately covered lifecycle stages; operator reconciliation proves
+and commits a blocked ready replacement under the same migration locks. Invalid
+or traversal-shaped confirmation keys fail before filesystem access. Launch
+probes cannot select rollover, and blocked/absent generations are covered by
+operator state-reset repair without rewriting in-flight prepared/applying
+transactions. Durable migration keys are canonical before path access, and a
+duplicate rollover starter attaches to an already-ready requested generation.
+Membership registration is fenced atomically with the automatic migration
+quiescence proof.
+Probe configuration mutations and classify each
 input as static, migratable, runtime-mutable, or ignored. Implement binary-level runtime capabilities,
 profile-specific interaction/capability snapshots, and pre-allocation rejection
 of missing required capabilities. Bare doctor remains offline; launch behavior
@@ -267,8 +281,9 @@ explicit public disable with `NATIVE_SUBAGENT_DISABLE_UNAVAILABLE`, retain the
 disable launch only for diagnostic probes, advertise enabled-but-incomplete
 observation as `unverified`, and
 make active or unverified native state block every quiescence-dependent
-transition. A policy change requires a new server key and operator-authorized
-profile migration with no silent hot reload. Dedicated-lane campaigns prove
+transition. A policy change requires a new server key; a completely quiescent
+singleton rolls over through the durable migration transaction, while a live
+membership requires operator-authorized migration. Dedicated-lane campaigns prove
 identical-contract same-home shared/dedicated coexistence, globally unique server
 epochs, fixed logical-lane residency, same-lane resume only after exact prior-
 generation absence, and exact cleanup without unrelated signals. Cross-server
