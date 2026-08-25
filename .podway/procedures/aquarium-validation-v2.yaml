@@ -1,9 +1,9 @@
 schema: podway.procedure/v2
 id: aquarium-validation-v2
-version: "2"
+version: "5"
 name: Aquarium Validation
-purpose: Audit and remediate one completed epic until current evidence supports validation.
-description: A convergent Podway procedure for epic-wide direct audit, remediation, re-audit, review, and validation closeout.
+purpose: Audit one completed epic through bounded remediation, confirmation, and explicit finding disposition.
+description: A bounded Podway procedure for epic-wide audit, one automatic confirmation, user-directed follow-up, and validation closeout.
 goal_tracking: true
 node_definitions:
   baseline-record:
@@ -43,7 +43,7 @@ node_definitions:
   gap-decision:
     type: decision
     title: Evaluate audit gaps
-    objective: Route confirmed gaps to remediation and a clean audit to final review.
+    objective: Route the initial confirmed gaps to remediation and every post-remediation audit to final review before any user disposition.
     prompt: Does the fresh audit contain a confirmed gap?
     evidence_guidance:
       - Read the audit snapshot, matrix, checks, review, and confirmed gap count.
@@ -53,18 +53,18 @@ node_definitions:
         criteria: No confirmed gap remains and every required check has current evidence.
       - id: gaps-found
         label: Gaps found
-        criteria: At least one confirmed gap requires owned remediation.
+        criteria: At least one confirmed gap requires initial owned remediation or post-confirmation user direction.
     reason:
       required: true
       prompt: Explain the selection using the audit evidence.
   remediation-record:
     type: action
     title: Remediate confirmed gaps
-    intent: Record completed owned remediation goals, commits, verification, and reviews.
+    intent: Record one completed owned remediation pass, commits, verification, and source findings.
     items:
       - id: remediation-summary
         type: text
-        prompt: Record every remediation completed in this pass with its gap owner, correction, commit, checks, Mulgae evidence, and remaining external blockers.
+        prompt: Record every remediation completed in this pass with its gap owner, source finding, correction, commit, checks, and remaining external blockers.
         required: true
         min_length: 1
         max_length: 8000
@@ -72,7 +72,7 @@ node_definitions:
   final-review-record:
     type: action
     title: Record final validation evidence
-    intent: Record the latest clean audit and complete whole-epic Mulgae result.
+    intent: Record the latest audit and complete whole-epic Mulgae result, including every confirmation finding that requires user direction.
     items:
       - id: review-round
         type: integer
@@ -103,38 +103,118 @@ node_definitions:
         type: integer
         prompt: Record the number of unresolved valid findings.
         required: true
+      - id: critical-findings
+        type: integer
+        prompt: Record the number of locally verified Critical findings.
+        required: true
+      - id: high-findings
+        type: integer
+        prompt: Record the number of locally verified High findings.
+        required: true
+      - id: medium-findings
+        type: integer
+        prompt: Record the number of locally verified Medium findings.
+        required: true
+      - id: low-findings
+        type: integer
+        prompt: Record the number of locally verified Low findings.
+        required: true
+      - id: valid-finding-ids
+        type: text
+        prompt: Record the exact locally verified finding IDs by severity, or none.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
   final-review-decision:
     type: decision
     title: Evaluate final validation
-    objective: Route an incomplete or remediation-eligible review to rework, validate only clean evidence, and leave a confirmation-only review with valid findings undecided for user direction.
+    objective: Route the first review to one remediation, a clean review to closeout, incomplete evidence to a stop, and confirmation findings to user direction.
     prompt: Is the latest epic snapshot ready for validation closeout?
     evidence_guidance:
       - Read the final audit, required checks, review ordinal and mode, exact Mulgae run, and roadmap states.
-      - Select no option while a confirmation-only review retains a valid finding and the user has not authorized the next action.
+      - Use rework-required only for a remediation-eligible review; a confirmation-only finding requires user-direction.
     options:
       - id: validated
         label: Validation supported
         criteria: The fresh audit is clean, the root review is operationally complete with passing CI, and no unresolved valid finding remains.
       - id: rework-required
         label: Rework required
-        criteria: Evidence is stale or incomplete, CI failed, or a confirmed gap or remediation-eligible valid finding requires correction. Do not select this option for a confirmation-only hold without user authorization.
+        criteria: A remediation-eligible review has at least one locally verified valid finding and owns exactly one remediation plus confirmation review.
+      - id: user-direction
+        label: User direction required
+        criteria: A confirmation-only review has at least one locally verified valid finding and no later action has yet been authorized.
+      - id: incomplete
+        label: Validation incomplete
+        criteria: Review evidence, CI, coverage, publication, findings query, or another required prerequisite is incomplete or failed operationally.
     reason:
       required: true
       prompt: Explain the selection using the final validation evidence.
+  review-direction-decision:
+    type: decision
+    title: Choose the next finding disposition
+    objective: Record one explicit user choice without converting it into an unbounded remediation or review loop.
+    prompt: What did the user explicitly authorize for the current findings?
+    evidence_guidance:
+      - Read the latest audit, review mode, severity counts, exact finding IDs, and the user's current instruction.
+      - Leave this decision unset until the user explicitly selects the next action.
+    options:
+      - id: fix-and-review
+        label: Fix and review once
+        criteria: The user authorized exactly one remediation pass and one next-ordinal whole-epic confirmation review.
+      - id: accept-low
+        label: Accept Low findings
+        criteria: Critical, High, and Medium counts are zero and the user accepted every exact Low finding ID.
+      - id: micro-fix
+        label: Apply a micro correction
+        criteria: Only Low findings remain and the user selected an exact eligible micro correction with focused verification and no further review.
+      - id: accept-medium-risk
+        label: Accept Medium risk
+        criteria: Critical and High counts are zero and the user explicitly accepted every exact remaining Medium and Low finding ID.
+      - id: stop
+        label: Stop validation
+        criteria: The user directed validation to stop without another correction or review.
+    reason:
+      required: true
+      prompt: Record the exact user authority, finding IDs, and bounded next action.
+  micro-remediation-record:
+    type: action
+    title: Record a user-authorized micro correction
+    intent: Record one focused Low-only correction without claiming that the prior review covered its resulting bytes.
+    items:
+      - id: micro-remediation-summary
+        type: text
+        prompt: Record the selected finding IDs, exact correction, focused checks, commit, and the preceding review run that predates the correction.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
+  disposition-record:
+    type: action
+    title: Record validation disposition
+    intent: Preserve one explicit user or operational disposition before goal assessment.
+    items:
+      - id: disposition-summary
+        type: text
+        prompt: Record the disposition, exact authority or operational evidence, affected finding IDs, and residual risk.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
   goal-assessment:
     type: decision
     title: Assess the epic validation goal
     objective: Determine whether current evidence supports the validation goal.
     prompt: What is the outcome of the validation goal?
     evidence_guidance:
-      - Read the baseline, latest clean audit, remediation history, and final review evidence.
+      - Read the baseline, latest audit, remediation history, final review, and any explicit user disposition.
     options:
       - id: achieved
         label: Goal achieved
-        criteria: Fresh criterion assessments support the current validation goal.
+        criteria: This assessment was reached from validated, record-accepted-low, record-accepted-medium-risk, or micro-remediate; the review is operationally complete; no Critical or High finding remains; and every lower-severity finding has clean evidence, an explicit accepted-risk disposition, or a focused user-authorized micro-fix record.
       - id: not-achieved
         label: Goal not achieved
-        criteria: Fresh evidence does not support the current validation goal.
+        criteria: Fresh evidence does not support the current validation goal, including every path reached from record-stopped or record-incomplete; those dispositions can never select achieved.
       - id: superseded
         label: Goal superseded
         criteria: The current validation goal is no longer desired.
@@ -150,15 +230,23 @@ node_definitions:
   closeout-record:
     type: action
     title: Record validation closeout
-    intent: Record the final audited snapshot, roadmap record, commits, residue, and publication state.
+    intent: Record the final audited snapshot, any current-semantics repository change or explicit no-change result, residue, and publication state.
     items:
       - id: closeout-summary
         type: text
-        prompt: Record validation outcome and final lifecycle evidence.
+        prompt: Record validation outcome, any required lifecycle, accepted-risk, or actionable-handoff commit, or the verified reason no repository record is required.
         required: true
         min_length: 1
         max_length: 4000
         multiline: true
+      - id: promoted-evidence-references
+        type: list
+        prompt: Record each committed aquarium.promoted-evidence/v1 manifest as its repository-relative path followed by exactly one sha256-prefixed 64-hex manifest digest; leave absent when no package applies.
+        required: false
+        min_items: 0
+        max_items: 50
+        max_item_length: 1000
+        unique: true
 graph:
   entry: capture-baseline
   nodes:
@@ -185,21 +273,7 @@ graph:
       next: re-audit
     - id: re-audit
       use: audit-record
-      next: decide-re-audit
-    - id: decide-re-audit
-      use: gap-decision
-      evidence_from:
-        - node: remediate
-          required: true
-        - node: re-audit
-          required: true
-      routes:
-        clean:
-          to: final-review
-          effect: advance
-        gaps-found:
-          to: remediate
-          effect: rework
+      next: final-review
     - id: final-review
       use: final-review-record
       next: decide-final-review
@@ -215,6 +289,48 @@ graph:
         rework-required:
           to: audit
           effect: rework
+        user-direction:
+          to: await-user-direction
+          effect: advance
+        incomplete:
+          to: record-incomplete
+          effect: advance
+    - id: await-user-direction
+      use: review-direction-decision
+      evidence_from:
+        - node: final-review
+          required: true
+      routes:
+        fix-and-review:
+          to: audit
+          effect: rework
+        accept-low:
+          to: record-accepted-low
+          effect: advance
+        micro-fix:
+          to: micro-remediate
+          effect: advance
+        accept-medium-risk:
+          to: record-accepted-medium-risk
+          effect: advance
+        stop:
+          to: record-stopped
+          effect: advance
+    - id: micro-remediate
+      use: micro-remediation-record
+      next: assess-goal
+    - id: record-accepted-low
+      use: disposition-record
+      next: assess-goal
+    - id: record-accepted-medium-risk
+      use: disposition-record
+      next: assess-goal
+    - id: record-stopped
+      use: disposition-record
+      next: assess-goal
+    - id: record-incomplete
+      use: disposition-record
+      next: assess-goal
     - id: assess-goal
       use: goal-assessment
       evidence_from:
@@ -222,6 +338,18 @@ graph:
           required: true
         - node: final-review
           required: true
+        - node: await-user-direction
+          required: false
+        - node: micro-remediate
+          required: false
+        - node: record-accepted-low
+          required: false
+        - node: record-accepted-medium-risk
+          required: false
+        - node: record-stopped
+          required: false
+        - node: record-incomplete
+          required: false
       routes:
         achieved:
           to: closeout
@@ -241,3 +369,4 @@ manual_rework:
     - remediate
     - re-audit
     - final-review
+    - micro-remediate

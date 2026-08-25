@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-task-v2
-version: "2"
+version: "3"
 name: Aquarium Task
 purpose: Deliver one approved roadmap task through the complete Aquarium evidence workflow.
 description: A Podway record of task-handler planning, implementation, verification, refinement, documentation, review, approval, and closeout.
@@ -222,6 +222,14 @@ node_definitions:
         min_length: 1
         max_length: 3000
         multiline: true
+      - id: promoted-evidence-references
+        type: list
+        prompt: Record each committed aquarium.promoted-evidence/v1 manifest as its repository-relative path followed by exactly one sha256-prefixed 64-hex manifest digest; leave absent when no package applies.
+        required: false
+        min_items: 0
+        max_items: 50
+        max_item_length: 1000
+        unique: true
 graph:
   entry: record-plan
   nodes:

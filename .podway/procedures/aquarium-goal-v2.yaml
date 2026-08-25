@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-goal-v2
-version: "2"
+version: "4"
 name: Aquarium Goal
 purpose: Deliver one epic member, remediation, or closeout goal with current evidence.
 description: A flexible goal-centered Podway procedure for epic-handler work.
@@ -92,6 +92,20 @@ node_definitions:
         min_length: 1
         max_length: 7000
         multiline: true
+      - id: hardening-deferral-evidence-path
+        type: text
+        prompt: Record the staged repository-relative aquarium.promoted-evidence/v1 manifest path that durably preserves this deferral.
+        required: true
+        min_length: 1
+        max_length: 1024
+        multiline: true
+      - id: hardening-deferral-evidence-sha256
+        type: text
+        prompt: Record the exact promoted manifest digest as sha256 followed by a colon and 64 lowercase hexadecimal characters.
+        required: true
+        min_length: 71
+        max_length: 71
+        multiline: false
   evidence-decision:
     type: decision
     title: Evaluate goal evidence
@@ -105,7 +119,7 @@ node_definitions:
         criteria: Required checks and review are complete, CI passed, and no unresolved valid finding remains.
       - id: deferred-for-hardening
         label: Findings deferred to epic hardening
-        criteria: Required checks are current, this is an epic member task, its complete second review is recorded in hardening-deferral-eligible mode, and every remaining valid finding is durably linked to its authoritative Mulgae run and bounded Podway evidence for epic hardening.
+        criteria: Required checks are current, this is an epic member task, its complete second review is recorded in hardening-deferral-eligible mode, and every remaining valid finding is linked before this decision to a verified staged aquarium.promoted-evidence/v1 manifest and payload digests; Mulgae and Podway runtime identities remain non-authoritative local provenance only.
       - id: rework-required
         label: Rework required
         criteria: Evidence or CI failed, evidence is stale or incomplete, or a valid finding remains without the exact second-review member-task deferral above.
