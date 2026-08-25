@@ -15,11 +15,11 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-019",
-        "TASK-020",
-        "TASK-021",
-        "TASK-026",
-        "TASK-031"
+        "TASK-022",
+        "TASK-023",
+        "TASK-024",
+        "TASK-029",
+        "TASK-034"
       ],
       "catches": [
         "product boundary",
@@ -36,7 +36,7 @@
       "tasks": [
         "TASK-000-H",
         "TASK-002",
-        "TASK-014"
+        "TASK-017"
       ],
       "catches": [
         "workspace discovery",
@@ -78,7 +78,7 @@
         "TASK-000-H",
         "TASK-004",
         "TASK-007",
-        "TASK-017",
+        "TASK-020",
         "TASK-008",
         "TASK-013"
       ],
@@ -105,9 +105,6 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-014",
-        "TASK-015",
-        "TASK-016",
         "TASK-017",
         "TASK-018",
         "TASK-019",
@@ -119,7 +116,10 @@
         "TASK-025",
         "TASK-026",
         "TASK-027",
-        "TASK-028"
+        "TASK-028",
+        "TASK-029",
+        "TASK-030",
+        "TASK-031"
       ],
       "catches": [
         "public CLI and RPC adapters",
@@ -154,16 +154,16 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-019",
-        "TASK-020",
-        "TASK-021",
         "TASK-022",
         "TASK-023",
         "TASK-024",
         "TASK-025",
         "TASK-026",
+        "TASK-027",
         "TASK-028",
-        "TASK-029"
+        "TASK-029",
+        "TASK-031",
+        "TASK-032"
       ],
       "catches": [
         "machine and protobuf envelopes",
@@ -200,11 +200,11 @@
         "TASK-009",
         "TASK-010",
         "TASK-013",
-        "TASK-014",
         "TASK-017",
         "TASK-020",
-        "TASK-021",
-        "TASK-026"
+        "TASK-023",
+        "TASK-024",
+        "TASK-029"
       ],
       "catches": [
         "sandbox mapping",
@@ -229,14 +229,14 @@
         "TASK-009",
         "TASK-010",
         "TASK-013",
-        "TASK-016",
-        "TASK-018",
         "TASK-019",
-        "TASK-020",
         "TASK-021",
         "TASK-022",
         "TASK-023",
-        "TASK-024"
+        "TASK-024",
+        "TASK-025",
+        "TASK-026",
+        "TASK-027"
       ],
       "catches": [
         "lifecycle",
@@ -257,7 +257,7 @@
     },
     "SPEC-009": {
       "tasks": [
-        "TASK-015"
+        "TASK-018"
       ],
       "catches": [
         "normalized interactions",
@@ -278,15 +278,15 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-019",
-        "TASK-020",
-        "TASK-021",
         "TASK-022",
         "TASK-023",
         "TASK-024",
         "TASK-025",
+        "TASK-026",
         "TASK-027",
-        "TASK-028"
+        "TASK-028",
+        "TASK-030",
+        "TASK-031"
       ],
       "catches": [
         "JSON ingest",
@@ -323,12 +323,12 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-020",
-        "TASK-021",
-        "TASK-022",
         "TASK-023",
         "TASK-024",
-        "TASK-028"
+        "TASK-025",
+        "TASK-026",
+        "TASK-027",
+        "TASK-031"
       ],
       "catches": [
         "agent policy",
@@ -357,17 +357,17 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-019",
-        "TASK-020",
-        "TASK-021",
         "TASK-022",
         "TASK-023",
         "TASK-024",
         "TASK-025",
         "TASK-026",
+        "TASK-027",
         "TASK-028",
         "TASK-029",
-        "TASK-031"
+        "TASK-031",
+        "TASK-032",
+        "TASK-034"
       ],
       "catches": [
         "orchestration boundary",
@@ -430,17 +430,17 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-014",
-        "TASK-015",
-        "TASK-019",
-        "TASK-020",
-        "TASK-021",
+        "TASK-017",
+        "TASK-018",
+        "TASK-022",
         "TASK-023",
-        "TASK-025",
+        "TASK-024",
         "TASK-026",
+        "TASK-028",
         "TASK-029",
-        "TASK-030",
-        "TASK-031"
+        "TASK-032",
+        "TASK-033",
+        "TASK-034"
       ],
       "catches": [
         "coequal public adapters",
@@ -472,18 +472,18 @@
         "TASK-007",
         "TASK-008",
         "TASK-009",
-        "TASK-014",
-        "TASK-015",
         "TASK-017",
-        "TASK-019",
+        "TASK-018",
         "TASK-020",
-        "TASK-021",
         "TASK-022",
         "TASK-023",
         "TASK-024",
+        "TASK-025",
         "TASK-026",
         "TASK-027",
-        "TASK-031"
+        "TASK-029",
+        "TASK-030",
+        "TASK-034"
       ],
       "catches": [
         "control-mode compatibility",
@@ -515,16 +515,16 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
-        "TASK-019",
-        "TASK-020",
-        "TASK-021",
         "TASK-022",
         "TASK-023",
         "TASK-024",
+        "TASK-025",
         "TASK-026",
+        "TASK-027",
         "TASK-029",
-        "TASK-030",
-        "TASK-031"
+        "TASK-032",
+        "TASK-033",
+        "TASK-034"
       ],
       "catches": [
         "RPC gateway lifecycle and socket ownership",

@@ -14,6 +14,13 @@ This directory contains the public source of truth for Dolgorae.
 - [Protocol](protocol/) owns checked wire, persisted-state, and machine-output
   shapes.
 
+## Design studies
+
+- [Review target strategy analysis](review-strategy-analysis.md) records the
+  investigated review-tool baseline and accepted EPIC-004 implementation
+  decisions. It is not evidence that the planned runtime behavior is implemented
+  or available.
+
 If canonical documents disagree, resolve the contradiction before changing the
 implementation. For a behavior or architecture change, update the owning
 document first, then synchronize affected protocol artifacts, implementation,

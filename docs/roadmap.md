@@ -14,10 +14,13 @@ identity is never treated as retry continuity. This milestone does not wait for
 writer authority, the Dolgorae Primary control plane, Brokered Hierarchy, or
 Specialist-to-Specialist collaboration.
 
-After `MILESTONE-SR1`, the roadmap deliberately proceeds in five layers:
-external Specialist hardening, the minimum supervised Gul Run gateway, the
-transport-independent Dolgorae orchestration core and Brokered Hierarchy, live
-Primary control-plane integration, and finally the durable Collaboration Plane. `TASK-022` remains the live run-bound
+After `MILESTONE-SR1`, `EPIC-004` implements common immutable review targets,
+extends Specialist Review to dirty and historical Git state, and activates
+Dolgorae as Aquarium independent-review's Codex backend. The implementation
+roadmap then proceeds in five layers: external Specialist
+hardening, the minimum supervised Gul Run gateway, the transport-independent
+Dolgorae orchestration core and Brokered Hierarchy, live Primary control-plane
+integration, and finally the durable Collaboration Plane. `TASK-025` remains the live run-bound
 transport probe and occurs only after the Brokered Hierarchy core is complete.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
@@ -36,10 +39,11 @@ Document roles and the required synchronization procedure are defined by the
 | Milestone | Owning Epic | User-visible capability unlocked |
 | --- | --- | --- |
 | `MILESTONE-SR1` | `EPIC-003` | Codex CLI can request one independent read-only working-tree review through `dolgorae specialist review`. The `dolgorae_review` MCP tool is additionally available only when its per-request identity carrier passes `TASK-011` and `TASK-012`. |
-| `MILESTONE-ES1` | `EPIC-005` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
-| `MILESTONE-BH1` | `EPIC-007` | Gul can use Dolgorae as the live Primary control plane and operate a durable Brokered Hierarchy. |
-| `MILESTONE-BC1` | `EPIC-008` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
-| `MILESTONE-PA1` | `EPIC-010` | The complete Personal Alpha acceptance campaign passes. |
+| `MILESTONE-IR1` | `EPIC-004` | Aquarium independent-review uses Dolgorae, rather than an Orca-created Codex terminal, for immutable workspace, staged, dirty, HEAD, commit, and range review with a fresh Codex Reviewer. |
+| `MILESTONE-ES1` | `EPIC-006` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
+| `MILESTONE-BH1` | `EPIC-008` | Gul can use Dolgorae as the live Primary control plane and operate a durable Brokered Hierarchy. |
+| `MILESTONE-BC1` | `EPIC-009` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
+| `MILESTONE-PA1` | `EPIC-011` | The complete Personal Alpha acceptance campaign passes. |
 
 Milestones are cumulative. An earlier milestone remains usable while later
 Epics are implemented. A milestone does not waive its own Task completion gate
@@ -248,7 +252,7 @@ epochs, operator server-key migration, append-only membership repair,
 identity-complete shutdown, profile log drainer, profile diagnostic journal,
 symbolic launch-cwd policy, explicit PATH/LANG/LC_ALL, PREPARE/APPLY/COMMIT
 server operations, full-key short-socket collision checks, and server lifecycle commands.
-The required-subset manifest is checked input, not a TASK-029 invention.
+The required-subset manifest is checked input, not a TASK-032 invention.
 
 Verification: fake executable matrices for missing commands, rejected wrapper argv,
 profile-name collision, home mismatch, incompatible active same-home singleton,
@@ -397,7 +401,7 @@ Specialist-to-Specialist collaboration. A busy or terminal Reviewer fails with
 a typed result instead of preemption or implicit replacement. If Turn
 acceptance or outcome is not authoritative, record `interrupted_unknown` and do
 not replay automatically. Full cross-restart continuation, reusable members,
-multiple Specialists, and isolated-write operation belong to `EPIC-005`.
+multiple Specialists, and isolated-write operation belong to `EPIC-006`.
 
 Verification: crash before and after each SQLite commit, child Run reservation,
 Worker publication, thread creation, task acceptance, result artifact commit,
@@ -493,7 +497,7 @@ failure. Same-reference input drift returns `IDEMPOTENCY_CONFLICT`,
 Reviewer Run. In `mcp_unavailable` disposition, the
 server does not register the tool and the CLI carrier remains the supported SR1
 path. The adapter does not require a Dolgorae source Run or source Turn and does
-not depend on the later run-bound `TASK-022` probe.
+not depend on the later run-bound `TASK-025` probe.
 
 Verification: MCP initialize/list/call lifecycle for the selected disposition;
 concurrent client calls with independent one-shot engagements; exact replay only
@@ -540,14 +544,251 @@ preview and does not claim reusable Specialist pools, canonical workspace
 writes, Dolgorae Primary orchestration, Brokered Hierarchy, lateral
 collaboration, or Personal Alpha readiness.
 
-## EPIC-004: Access, Interaction, and Recovery Safety
+## EPIC-004: Immutable Review Targets and Aquarium Activation
+
+Status: `PLANNED`
+
+Goal: Implement reusable immutable review targets, extend Dolgorae Specialist
+Review to dirty and historical Git state, and replace the Orca-created Codex
+terminal in Aquarium independent-review with Dolgorae. Mulgae,
+independent-review, and orca-review share source-scope semantics without sharing
+one orchestration lifecycle. This Epic is not complete until the exact Aquarium
+installation has activated and verified the Dolgorae-backed path and Dolgorae
+has revalidated the resulting runtime Completed Confirm.
+
+### TASK-014: Immutable Review Target Foundation
+
+Status: `PLANNED`
+
+Implement the accepted `workspace`, `staged`, `dirty`, `head`, `commit`, and
+two-dot or three-dot `range` meanings from ADR-032 and
+[`review-strategy-analysis.md`](review-strategy-analysis.md). Task, Epic, and
+special-request identifiers provide authority and focus but MUST resolve to one
+source scope. Mulgae-only patch and stdin remain extensions.
+
+Add versioned `review-target.capture` and `review-target.settle` Machine
+operations, exposed by the corresponding `dolgorae review-target capture` and
+`dolgorae review-target settle` CLI commands. Capture returns an opaque capture
+reference, resolved source identities, safe manifest digest, whole-target
+digest, included and excluded dispositions, a backend-readable immutable root,
+and an owner-binding digest. Capture also binds one backend kind and immutable
+lifecycle identity and delivers a random settlement owner credential only
+through a caller-supplied protected `0600` output file or inherited descriptor
+bound outside model-visible input; no machine result or provider-visible content
+exposes the credential bytes or carrier path.
+
+Settlement is an idempotent compare-and-set operation requiring the capture
+reference, protected owner credential, expected capture revision, and a checked
+terminal receipt bound to the stored backend kind and lifecycle identity. It
+revalidates the receipt's authoritative terminal state, backend state revision,
+and stable evidence digest immediately before cleanup. Active, unknown, stale,
+foreign-owner, mismatched-lifecycle, missing-evidence, and concurrent losing
+requests preserve the capture. Exact accepted replay returns the original
+settlement; changed post-settlement input is a conflict.
+
+Capture MUST NOT modify the source worktree, index, refs, or Git metadata. It
+fails on capture-time drift, unresolved conflicts, escaping links, special
+files, snapshot mutation, invalid revisions, and recognized credentials,
+private keys, or tokens in tracked or untracked candidates. `workspace` and the
+after side of `dirty` materialize one final worktree-over-index byte sequence per
+path. `staged` materializes the captured index over captured `HEAD`, while
+`head`, `commit`, and `range` use only resolved Git objects; none of those four
+scopes may substitute current worktree bytes. Captures live outside the source
+repository under Dolgorae Application Support and disclose the same-user
+visibility limitation.
+
+Verification: checked request/result schemas; unit and black-box tests for all
+six scopes, root commits, both range forms, staged/unstaged/untracked/deleted/
+recreated/renamed paths, capture drift, conflicts, unsafe paths, tracked and
+untracked secrets, mutation detection, idempotent replay, foreign credentials,
+stale revisions, mismatched lifecycle receipts, forged or missing terminal
+evidence, simultaneous settlement races, cleanup, timeout, and unknown recovery;
+source and index before/after identity proof; `make test`; and an independent
+adversarial read-only review.
+
+### TASK-015: Scoped Specialist Review Runtime
+
+Status: `PLANNED`
+
+Depends on `TASK-014`. Add a versioned Specialist Review request whose target is
+`{kind, revision?}`. `workspace`, `staged`, `dirty`, and `head` reject a
+revision; `commit` requires one revision; `range` requires one exact `A..B` or
+`A...B` expression. The completed `specialist review --scope working-tree` v1
+request and result retain their existing spelling and meaning.
+
+The new path captures through TASK-014, starts one fresh managed Codex Reviewer
+through the External Specialist Engagement, exposes only the immutable target
+root as review context, validates the checked result and captured bytes, and
+settles the capture only after the engagement and Reviewer Run reach an
+authoritative outcome. The result binds the resolved Git identities, target and
+manifest digests, Reviewer identity, review verdict, engagement and Run state,
+settlement, capture-time source identity, capture-integrity proof, and the
+absence of workflow-issued source mutation. A later source change by another
+actor does not stale the captured target or result. Bounded-wait exhaustion
+observes authority once and preserves active or unknown state; cancellation
+requires explicit user authority.
+
+Verification: compatibility tests for v1; checked v2 CLI and Machine carriers;
+one fresh Reviewer for every scope; dirty and historical end-to-end campaigns;
+wrong-scope, source-drift, executable-drift, timeout, cancellation, unknown,
+result-tampering, and cleanup tests; exact executable version, file identity,
+capability result, and SHA-256 evidence; `make test`; opt-in live Codex CLI
+acceptance; and an independent adversarial read-only review.
+
+### TASK-016: Aquarium Activation and Runtime Completed Confirm
+
+Status: `PLANNED`
+
+Depends on `TASK-015`. Freeze one exact task-complete Dolgorae candidate, fill
+the placeholders in the handoff below, and move this Task to `BLOCKED` while an
+Aquarium owner executes it. The owner first validates the active Aquarium
+installation. If it already satisfies every requirement, no unnecessary change
+is required; otherwise the owner modifies and commits the active review
+contract, skills, supervision references, scripts, and tests under Aquarium's
+own authority. This repository does not prepare a migration document or make an
+Aquarium change on the owner's behalf.
+
+Copy the following request verbatim after replacing every angle-bracketed
+placeholder:
+
+```text
+Aquarium independent-review Dolgorae activation request
+
+Validated Dolgorae candidate:
+- repository commit: <DOLGORAE_COMMIT>
+- version: <DOLGORAE_VERSION>
+- executable path: <CANONICAL_EXECUTABLE_PATH>
+- executable file identity: <EXECUTABLE_FILE_IDENTITY>
+- executable SHA-256: <EXECUTABLE_SHA256>
+- capability/contract digest: <CAPABILITY_DIGEST>
+
+Required outcome:
+1. Aquarium independent-review must use this exact Dolgorae candidate to
+   capture the selected target and run one fresh Codex Reviewer.
+2. independent-review must create no Orca Run, Task, Dispatch, worker, or
+   terminal.
+3. orca-review must retain Orca provider and lifecycle supervision while using
+   the same immutable target meanings and captured bytes.
+4. workspace, staged, dirty, head, commit, and A..B/A...B range must have the
+   EPIC-004 meanings. Task, Epic, and special-request identifiers are authority
+   and focus, not source scopes.
+5. Mulgae remains operationally independent, but corresponding scope meanings
+   and resolved target identities must be semantically conformant.
+6. Review preparation must not modify the source worktree, index, refs, or Git
+   metadata. Dirty staged/unstaged/untracked/deleted/recreated state and Git
+   history targets must be supported.
+7. Missing or changed Dolgorae executable identity, source drift, unsafe files,
+   secret detection, incompatible capability, or incomplete settlement must
+   fail closed. Do not silently fall back to Orca for independent-review.
+8. Settlement must prove the capture owner, expected capture revision, bound
+   backend lifecycle, and authoritative terminal evidence. Active, unknown,
+   stale, foreign-owner, mismatched, or concurrent losing requests must retain
+   the capture and recovery evidence.
+
+Requested procedure:
+1. Inspect the exact active Aquarium review contract, independent-review,
+   orca-review, supervision references, target-inspection scripts, and tests.
+2. If the active implementation already satisfies every requirement, make no
+   unnecessary change and validate the exact current Aquarium commit.
+3. Otherwise, implement the minimum coherent active changes and commit them
+   under Aquarium's own authority and validation rules.
+4. Exercise all six scopes. Include staged plus unstaged changes, non-ignored
+   untracked files, staged deletion, deletion followed by recreation, rename,
+   root commit, ordinary commit, two-dot range, three-dot range, source drift,
+   secret rejection, timeout, unknown outcome, foreign-owner settlement, stale
+   revision, mismatched lifecycle, missing terminal evidence, concurrent
+   settlement, idempotent replay, and cleanup.
+5. Prove that independent-review uses Dolgorae without Orca objects and that
+   orca-review still uses the Orca lifecycle.
+6. Return the runtime Completed Confirm below. A documentation-only result,
+   uncommitted diff, mutable temporary path, or prose-only success statement is
+   insufficient.
+
+Required Completed Confirm:
+{
+  "status": "completed",
+  "completion_scope": "aquarium_runtime_activation",
+  "runtime_implementation": "verified",
+  "dolgorae": {
+    "commit": "<DOLGORAE_COMMIT>",
+    "version": "<DOLGORAE_VERSION>",
+    "canonical_executable_path": "<CANONICAL_EXECUTABLE_PATH>",
+    "executable_file_identity": "<EXECUTABLE_FILE_IDENTITY>",
+    "executable_sha256": "<EXECUTABLE_SHA256>",
+    "capability_digest": "<CAPABILITY_DIGEST>",
+    "launch_identity_evidence": "<STABLE_REFERENCE_PROVING_THE_INVOKED_OBJECT>"
+  },
+  "aquarium": {
+    "commit": "<EXACT_AQUARIUM_COMMIT>",
+    "installed_plugin_digest": "<INSTALLED_PLUGIN_DIGEST>"
+  },
+  "independent_review": {
+    "backend": "dolgorae",
+    "reviewer": "codex",
+    "orca_objects_created": false
+  },
+  "orca_review": {
+    "backend": "orca",
+    "immutable_target_contract": "verified"
+  },
+  "scope_matrix": {
+    "workspace": "passed",
+    "staged": "passed",
+    "dirty": "passed",
+    "head": "passed",
+    "commit": "passed",
+    "range_two_dot": "passed",
+    "range_three_dot": "passed"
+  },
+  "mulgae_semantic_conformance": "passed",
+  "capture_time_source_stable": true,
+  "source_mutation_observed": false,
+  "settlement_authorization_tests": "passed",
+  "failure_and_recovery_tests": "passed",
+  "validation_commands": ["<COMMAND_AND_RESULT>"],
+  "independent_review_evidence": "<STABLE_REFERENCE>",
+  "unresolved_blockers": []
+}
+
+If any requirement cannot be proven, return status "blocked" with the exact
+requirement, evidence, and smallest remaining action instead of issuing a
+Completed Confirm. Do not push or change another repository without separate
+authority.
+```
+
+After receiving `status: completed`, move this Task to `IN_REVIEW`. Re-read the
+exact Dolgorae and Aquarium commits, revalidate the executable and installed
+plugin digests, compare the canonical executable path and platform-specific file
+identity with the frozen candidate, inspect the launch identity evidence and
+every other stable reference, and rerun the bounded cross-repository
+compatibility checks. An Aquarium claim does not close this Task by itself.
+Missing evidence, an identity or digest mismatch, an uncommitted Aquarium
+change, a documentation-only confirmation, or any unresolved blocker returns
+the Task to `BLOCKED`.
+
+Verification: exact-candidate Dolgorae gates from TASK-015; Aquarium's complete
+repository validator and independent read-only review; all-scope runtime E2E;
+proof that independent-review creates no Orca objects; proof that orca-review
+retains Orca lifecycle ownership; capture-time source identity, post-run target
+and manifest digests, and workflow source-mutation evidence; failure, recovery,
+settlement, cleanup, activation, and rollback evidence; and independent Dolgorae
+revalidation of the Completed Confirm.
+
+Epic acceptance: every Task passes the ordinary completion gate; ADR-032,
+checked contracts, implementation, and tests agree; the runtime Completed
+Confirm binds exact committed and installed artifacts and survives Dolgorae
+revalidation; and the active Aquarium independent-review path uses Dolgorae to
+run a fresh Codex Reviewer without Orca objects. Completion unlocks
+`MILESTONE-IR1`. A design handoff alone unlocks nothing.
+
+## EPIC-005: Access, Interaction, and Recovery Safety
 
 Status: `PLANNED`
 
 Goal: Enforce Dolgorae's one-durable-writer-authority-per-worktree scope,
 Controller-authorized interaction, and conservative failure semantics.
 
-### TASK-014: Durable Writer Authority and Cross-Profile Handoff
+### TASK-017: Durable Writer Authority and Cross-Profile Handoff
 
 Status: `PLANNED`
 
@@ -604,7 +845,7 @@ Add deterministic interleavings for the normative lock matrix and every
 threadless first-write crash boundary; `acquire-write` on a threadless run is a
 state conflict. No task claims OS ownership of shared App Server descendants.
 
-### TASK-015: Pending Requests and Approvals
+### TASK-018: Pending Requests and Approvals
 
 Status: `PLANNED`
 
@@ -632,7 +873,7 @@ restart, exact response schemas, reader auto-decline, live-observed command/file
 request mappings, and method-not-found behavior for all recognized unsupported
 methods.
 
-### TASK-016: Pause, Close, and Lifecycle Shutdown
+### TASK-019: Pause, Close, and Lifecycle Shutdown
 
 Status: `PLANNED`
 
@@ -641,7 +882,7 @@ generation-level access instruction replacement, verified socket cleanup,
 start-failed bootstrap authority, terminal seals, and final-state restrictions.
 Worker cleanup covers its worker, connection, and an owned Dedicated Run Server's
 recorded command descendants; the shared singleton is excluded.
-This task owns live control-socket self-heal only after TASK-017 supplies the
+This task owns live control-socket self-heal only after TASK-020 supplies the
 four-verdict process-identity proof; TASK-004's primitive continues to fail
 closed rather than unlink an unverified live pathname.
 
@@ -651,7 +892,7 @@ binary skew, stale socket ownership, start failure before/after bound, seal cras
 points, acquire/release authority transitions, and no authority release before
 protocol-supported background absence; unverified execution remains blocked.
 
-### TASK-017: Process Identity and Group Recovery
+### TASK-020: Process Identity and Group Recovery
 
 Status: `PLANNED`
 
@@ -674,7 +915,7 @@ setsid/reparent detection; incomplete census; inode unlink/recreate; reboot
 proof; revalidated live worker control timeout returning `RUN_BUSY` with no
 signal; no unrelated signal under injected PID/PGID reuse.
 
-### TASK-018: History Reconciliation, Outcome Unknown, and Fork
+### TASK-021: History Reconciliation, Outcome Unknown, and Fork
 
 Status: `PLANNED`
 
@@ -695,7 +936,7 @@ pause and close, process identity, and outcome-unknown reconciliation are safe
 and independently reviewed. These safety mechanisms harden the already usable
 read-only Specialist Review Preview without delaying `MILESTONE-SR1`.
 
-## EPIC-005: External Specialist Engagement Hardening
+## EPIC-006: External Specialist Engagement Hardening
 
 Status: `PLANNED`
 
@@ -703,24 +944,24 @@ Goal: Generalize the one-shot read-only Specialist Review Preview into a durable
 reusable external Specialist service while the external AI remains the only
 semantic control plane.
 
-### TASK-019: Reusable External Specialist Engagements
+### TASK-022: Reusable External Specialist Engagements
 
 Status: `PLANNED`
 
-Depends on `TASK-018` and builds directly on `EPIC-003`. Remove the preview's
+Depends on `TASK-021` and builds directly on `EPIC-003`. Remove the preview's
 one-shot lifecycle restriction while preserving its trusted facade and
 aggregate model. Support multiple independently hired Specialists in one
 engagement, long-lived members, repeated sequential tasks per Specialist,
 explicit get, cancel, release, complete, and abort, safe host reconnect,
 completed-result redelivery, and exact aggregate-scoped idempotency across
-Dolgorae restarts. Reconcile every accepted task through the TASK-016 through
-TASK-018 lifecycle and outcome rules.
+Dolgorae restarts. Reconcile every accepted task through the TASK-019 through
+TASK-021 lifecycle and outcome rules.
 
 Retain one active Turn per Specialist and no implicit preemption. The external
 control plane explicitly waits, retries, hires another member, or releases the
 member. Add `isolated_write` only through a separate isolated workspace or
 worktree policy. Canonical workspace writes require the external host to
-quiesce its own writer and participate in TASK-014 writer authority. External
+quiesce its own writer and participate in TASK-017 writer authority. External
 Specialists still cannot use the Brokered Collaboration Plane or hire nested
 first-class Specialists.
 
@@ -736,18 +977,18 @@ Epic acceptance: completion unlocks `MILESTONE-ES1`. External AI hosts may keep,
 reuse, recover, and explicitly coordinate durable Specialist Engagements beyond
 the one-shot review preview.
 
-## EPIC-006: Dolgorae Orchestration Control Plane and Brokered Hierarchy Core
+## EPIC-007: Dolgorae Orchestration Control Plane and Brokered Hierarchy Core
 
 Status: `PLANNED`
 
 Goal: Add Dolgorae's own Primary orchestration authority and durable Brokered
 Hierarchy over the hardened independent Run and Specialist foundations.
 
-### TASK-020: Supervised Control-Plane Runtime and Minimum Gul Run Gateway
+### TASK-023: Supervised Control-Plane Runtime and Minimum Gul Run Gateway
 
 Status: `PLANNED`
 
-Depends on `TASK-019`. Implement the production host required before any
+Depends on `TASK-022`. Implement the production host required before any
 live Gul Orchestrated Session is claimed: foreground `dolgorae serve`, the
 single-instance gateway record and lock, private Unix-socket lifecycle,
 peer-UID validation, pinned tonic/prost generation, and one reconstructable
@@ -765,7 +1006,7 @@ implemented RPC into the same semantic service used by the Machine CLI. The
 runtime MUST advertise only actually implemented methods. Timeline, profile
 diagnostics, advanced Run operations, writer handoff, deletion,
 verification, and the full operator-facing conformance surface remain in
-`TASK-026`.
+`TASK-029`.
 
 This Task does not yet create a Dolgorae Primary or Brokered Hierarchy. It makes
 the real Gul transport and runtime ownership available to the following
@@ -783,13 +1024,13 @@ ControlPlaneRuntime without treating memory as durable authority.
 Task acceptance: Gul can launch `dolgorae serve`, negotiate public v1, create and
 operate ordinary low-level Runs through the minimum frozen Run path, and survive
 a controlled gateway restart. No Brokered Hierarchy milestone is claimed until
-TASK-021, TASK-022, and TASK-023 also complete.
+TASK-024, TASK-025, and TASK-026 also complete.
 
-### TASK-021: Durable Orchestration Session and Brokered Hierarchy Core
+### TASK-024: Durable Orchestration Session and Brokered Hierarchy Core
 
 Status: `PLANNED`
 
-Depends on `TASK-020`. Implement the first-class `Dolgorae-Orchestrated Session` aggregate over the
+Depends on `TASK-023`. Implement the first-class `Dolgorae-Orchestrated Session` aggregate over the
 independent Run core and the hardened Specialist execution path. Implement
 prepared Aggregate Bootstrap Operations coupled to a parentless Primary
 `StartRun` with checked Orchestration Launch Intent, the machine-local
@@ -826,9 +1067,9 @@ byte-identical public Protobuf source and descriptor.
 
 Epic acceptance: the complete Orchestration Session and Brokered Hierarchy state
 machine is implemented and proven through transport-independent fake adapters.
-No live Primary model tool is claimed until `EPIC-007` completes.
+No live Primary model tool is claimed until `EPIC-008` completes.
 
-## EPIC-007: Live Dolgorae Control Plane and Brokered Hierarchy
+## EPIC-008: Live Dolgorae Control Plane and Brokered Hierarchy
 
 Status: `PLANNED`
 
@@ -836,11 +1077,11 @@ Goal: Select and integrate the live run-bound Primary tool transport so Gul can
 use Dolgorae as the active semantic control plane with a durable Brokered
 Hierarchy.
 
-### TASK-022: Run-Bound Internal Tool Transport Probe
+### TASK-025: Run-Bound Internal Tool Transport Probe
 
 Status: `PLANNED`
 
-Depends on `TASK-020` and `TASK-021`. Validate and close the live transport boundary for the
+Depends on `TASK-023` and `TASK-024`. Validate and close the live transport boundary for the
 private Primary orchestration tool and the later Brokered Specialist
 Collaboration tool. Prove that the pinned Codex App Server can provide a private
 run-bound MCP bridge whose source Run, source Turn, tool-call identity,
@@ -857,9 +1098,9 @@ control-plane adapter and is not blocked or redesigned by this probe.
 
 The durable aggregate broker, Primary Orchestration Service, tool-dispatch
 interfaces, and fake handlers are implemented and unit-tested in
-`TASK-021`. This Task selects the supported live model-facing transport.
+`TASK-024`. This Task selects the supported live model-facing transport.
 Mailbox, Scheduler, Activation Manager, and collaboration outbox implementation
-remain in `TASK-024`.
+remain in `TASK-027`.
 
 Verification: live pinned transport probes for both run-bound tool surfaces,
 source Run and Turn correlation, concurrent calls, bounded wait timeout,
@@ -869,15 +1110,15 @@ source and descriptor remain byte-identical.
 
 Task acceptance: ADR-027, ADR-028, SPEC-012, architecture, both run-bound private
 tool schemas, fixtures, verification index, and implementation memos agree; the
-probe selects a supported bridge or explicitly blocks `TASK-023` and
-`TASK-024`; and an independent read-only review reports no unresolved
+probe selects a supported bridge or explicitly blocks `TASK-026` and
+`TASK-027`; and an independent read-only review reports no unresolved
 blocking finding.
 
-### TASK-023: Live Primary Orchestration Tool and Brokered Hierarchy Acceptance
+### TASK-026: Live Primary Orchestration Tool and Brokered Hierarchy Acceptance
 
 Status: `PLANNED`
 
-Depends on `TASK-020`, `TASK-022`, and `TASK-021`. Integrate only the checked Primary
+Depends on `TASK-023`, `TASK-025`, and `TASK-024`. Integrate only the checked Primary
 orchestration tool through the transport selected by the probe. Bind session,
 Primary Run, source Turn, tool-call ID, inherited root priority, Controller
 authority, and idempotency outside model arguments. Allow the Primary Agent to
@@ -886,7 +1127,7 @@ policy-admitted Specialists without receiving a child Controller credential or
 mutating another Run directly.
 
 Run one live integration with the actual supported Gul client against the
-TASK-020 local gRPC gateway. Create an Orchestrated Session in Standalone
+TASK-023 local gRPC gateway. Create an Orchestrated Session in Standalone
 Primary composition, transition it to Brokered Hierarchy by provisioning a
 Reviewer, execute and collect one bounded Specialist task, return at least one
 Primary or Specialist result above the inline bound through an artifact
@@ -895,7 +1136,7 @@ length and SHA-256, recover the hierarchy after a controlled Dolgorae restart,
 and return to a clean completed or active state. A mock, fake adapter, or merely Gul-shaped harness cannot satisfy this
 acceptance step. Specialist
 messages still route through Primary task operations in this Task; lateral
-Specialist collaboration is deferred to `EPIC-008`.
+Specialist collaboration is deferred to `EPIC-009`.
 
 Verification: actual Gul client private-boundary integration;
 user-approval-required and fully-delegated live paths; exact tool retry; source
@@ -907,23 +1148,23 @@ conflict; no credential exposure; no direct peer control; unchanged public Gul
 wire; and independent review of the live hierarchy path.
 
 Epic acceptance: completion unlocks `MILESTONE-BH1` only together with the
-minimum supervised Gul gateway completed in TASK-020. Gul can use the real
+minimum supervised Gul gateway completed in TASK-023. Gul can use the real
 local gRPC path to operate Dolgorae as the live Primary control plane, and
 Dolgorae can create, persist, recover, and operate a Brokered Hierarchy. Lateral Specialist collaboration is not yet part
 of this milestone.
 
-## EPIC-008: Brokered Specialist Collaboration
+## EPIC-009: Brokered Specialist Collaboration
 
 Status: `PLANNED`
 
 Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
 Brokered Hierarchy without making the Primary Agent a message relay.
 
-### TASK-024: Durable Mailbox, Virtual Actor, and Collaboration Plane
+### TASK-027: Durable Mailbox, Virtual Actor, and Collaboration Plane
 
 Status: `PLANNED`
 
-Depends on `TASK-020`, `TASK-022`, `TASK-023`, and `TASK-021`. Integrate the checked
+Depends on `TASK-023`, `TASK-025`, `TASK-026`, and `TASK-024`. Integrate the checked
 Specialist collaboration tool through the selected run-bound transport. Add the
 Collaboration Service, SQLite Collaboration Exchange and mailbox tables,
 transactional result outbox, dirty-set Mailbox Scheduler, Activation Manager,
@@ -956,14 +1197,14 @@ or aggregate ownership boundaries, or falsely claim known outcomes. Specialists
 in one Brokered Hierarchy may now collaborate laterally through durable bounded
 mailboxes without Primary message relay.
 
-## EPIC-009: Operator and Audit Interfaces
+## EPIC-010: Operator and Audit Interfaces
 
 Status: `PLANNED`
 
 Goal: Complete the Controller-facing operational surface and make every durable Run
 independently inspectable.
 
-### TASK-025: Status, Events, Results, and Change Observation
+### TASK-028: Status, Events, Results, and Change Observation
 
 Status: `PLANNED`
 
@@ -989,11 +1230,11 @@ truncation, Git/non-Git algorithms, and every command `data` variant. Test
 identity, observer/controller interaction and artifact denial matrices, profile
 redaction/authorization, and pre-ready failures that create no Run.
 
-### TASK-026: Complete Gul gRPC Surface and Extended Operational Conformance
+### TASK-029: Complete Gul gRPC Surface and Extended Operational Conformance
 
 Status: `PLANNED`
 
-Depends on `TASK-020`. Extend the already operational foreground
+Depends on `TASK-023`. Extend the already operational foreground
 `dolgorae serve` gateway from the 24-method BH1 set to all 34 methods in the
 frozen `dolgorae.public.v1` descriptor. Add the ten deferred RPCs covering
 profile diagnostics, Controller timeline, default-effort, fork,
@@ -1003,7 +1244,7 @@ safe projections. Complete bounded independent Run streams, exhaustive typed
 operator-safe conformance without adding Operator RPCs, TCP, client-streaming,
 bidirectional streaming, worker sockets, or App Server transports.
 
-The task MUST preserve the TASK-020 process, socket, peer-UID,
+The task MUST preserve the TASK-023 process, socket, peer-UID,
 ControlPlaneRuntime, and semantic-service ownership model. `GetCapabilities`
 continues to advertise only implemented methods until this Task completes, then
 advertises the complete public-v1 descriptor method set required by
@@ -1014,11 +1255,11 @@ unary and stream method; full method-kind/descriptor golden tests;
 32-envelope/4-MiB/5-second pressure boundaries; independent Run streams on one
 channel; continuation lineage; timeline redaction and image metadata; artifact
 regression coverage; advanced writer handoff; deletion and verification;
-and the exhaustive typed error map. Re-run the TASK-020 socket, restart,
+and the exhaustive typed error map. Re-run the TASK-023 socket, restart,
 carrier TOCTOU, allocation-loss, Interaction-loss, and secret-canary tests as
 regressions. All timing uses injectable clocks and no test binds TCP.
 
-### TASK-027: Verify, Export, and Confirmed Delete
+### TASK-030: Verify, Export, and Confirmed Delete
 
 Status: `PLANNED`
 
@@ -1033,7 +1274,7 @@ recovery artifacts, plaintext residual warning, deletion scope, and orphan
 Export cases capture one fsynced ledger-head watermark, copy only that complete
 prefix, and regenerate bundled projections from it.
 
-### TASK-028: Agent Governance and Process Cleanup
+### TASK-031: Agent Governance and Process Cleanup
 
 Status: `PLANNED`
 
@@ -1061,14 +1302,14 @@ escaped-process limitation reporting.
 Epic acceptance: every public command and audit workflow in `specs.md` is
 available against the deterministic fake environment.
 
-## EPIC-010: Conformance and Personal Alpha Release
+## EPIC-011: Conformance and Personal Alpha Release
 
 Status: `PLANNED`
 
 Goal: Establish release evidence for the supported Apple Silicon macOS and two
 real Codex targets.
 
-### TASK-029: Deterministic Protocol Conformance Suite
+### TASK-032: Deterministic Protocol Conformance Suite
 
 Status: `PLANNED`
 
@@ -1092,7 +1333,7 @@ credentials, timing-sensitive sleeps, or real Codex quota. Injectable time
 drives every timeout; named fault barriers cover every durability/effect edge;
 control v1 and all machine-output/error variants are included.
 
-### TASK-030: Crash, Concurrency, and Security E2E
+### TASK-033: Crash, Concurrency, and Security E2E
 
 Status: `PLANNED`
 
@@ -1114,7 +1355,7 @@ supplemental evidence. A pass requires every barrier case and iteration to
 succeed; random seeds alone are not scheduling proof. Retain bounded failure
 evidence without secrets or unbounded logs.
 
-### TASK-031: Two-Profile Live Smoke and Alpha Acceptance
+### TASK-034: Two-Profile Live Smoke and Alpha Acceptance
 
 Status: `PLANNED`
 
@@ -1133,7 +1374,7 @@ Run Server coexistence, globally unique epochs, fixed thread residency,
 dedicated-lane process census and exact cleanup, no unrelated signalling, policy
 transitions, profile diagnostic minimal/operational views, artifact
 integrity/range behavior, and the exact SPEC-007 writer turn carrier with
-`excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`. If any required dedicated-lane behavior fails, TASK-031 and
+`excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`. If any required dedicated-lane behavior fails, TASK-034 and
 release remain blocked; absence of a future native terminal API is not itself a
 blocker.
 The live campaign also runs one broker-owned Dedicated managed child, returns a
@@ -1151,8 +1392,8 @@ version is accepted for an existing profile only through the operator-authorized
 `profile server migrate` transaction; run-local resume/recover/reconcile
 commands cannot approve process-static drift.
 
-Epic acceptance: mark the personal alpha ready only after TASK-031 and the full
-Task completion gate are satisfied. TASK-031 alone owns the transition of the
+Epic acceptance: mark the personal alpha ready only after TASK-034 and the full
+Task completion gate are satisfied. TASK-034 alone owns the transition of the
 checked manifest's `production_runtime_eligible` field from false to true and
 must leave it false on any missing, failed, unverified, or stale production
 campaign. TASK-000-D owns only `architecture_contract_eligible`.

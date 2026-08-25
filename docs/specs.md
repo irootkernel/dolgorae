@@ -3109,6 +3109,92 @@ reusable member after the adapter closes the engagement, or enable lateral
 Specialist collaboration. Later durable External Specialist Engagement features
 extend the same aggregate and Run contracts rather than replacing this adapter.
 
+### Immutable Review Targets and Scoped Specialist Review
+
+EPIC-004 MUST add a versioned immutable review-target contract without changing
+the completed `working-tree` v1 request or result. The supported target kinds
+are `workspace`, `staged`, `dirty`, `head`, `commit`, and `range`:
+
+- `workspace` is every eligible non-ignored file in the captured current
+  workspace;
+- `staged` is the captured `HEAD` to captured-index transition;
+- `dirty` is the captured `HEAD` to the final combined staged, unstaged, and
+  non-ignored untracked state;
+- `head` is the tree of the commit resolved from `HEAD` at capture;
+- `commit` is the first-parent transition into one resolved commit, using the
+  empty tree for a root commit; and
+- `range` preserves the caller's exact `A..B` or `A...B` semantics and binds the
+  corresponding resolved base and head objects.
+
+Task, Epic, and special-request identifiers MUST supply authority and review
+focus rather than another source kind. They MUST resolve to exactly one target
+kind before capture. Patch and stdin remain Mulgae-only extensions.
+
+The Machine boundary MUST provide versioned `review-target.capture` and
+`review-target.settle` operations and a versioned Specialist Review target of
+`{kind, revision?}`. `workspace`, `staged`, `dirty`, and `head` MUST reject a
+revision. `commit` MUST require one revision, and `range` MUST require one exact
+two-dot or three-dot expression. Checked schemas introduced by TASK-014 and
+TASK-015 own the concrete request, result, and error shapes.
+
+Capture MUST NOT modify the source worktree, index, refs, or Git metadata.
+`workspace` and the after side of `dirty` MUST resolve one final byte sequence
+per path, with current worktree state winning over the index, worktree absence
+representing deletion, recreation restoring the worktree bytes, non-ignored
+untracked files included, and renames represented as deletion plus addition.
+`staged` MUST materialize only the captured index over the captured `HEAD`; a
+later worktree byte MUST NOT replace an index byte. `head`, `commit`, and
+`range` MUST materialize only their resolved Git objects and MUST NOT project
+current index or worktree bytes. Unresolved conflicts, invalid revisions,
+capture-time source drift, escaping links, special files, recognized
+credentials or secrets, and captured-byte or manifest mutation MUST fail closed
+without a partial provider-visible target.
+
+Captured bytes MUST live outside the source repository, be exposed read-only,
+and bind safe relative paths, content digests, resolved Git identities, included
+and excluded dispositions, and one whole-target digest. Capture creation MUST
+bind one backend kind and immutable backend lifecycle identity and MUST create a
+random settlement owner credential in a caller-supplied protected `0600` output
+file or inherited file descriptor bound outside model-visible input. Machine
+results MAY expose the owner-binding digest but MUST NOT expose the credential
+bytes or its carrier path.
+
+`review-target.settle` MUST require the capture reference, settlement owner
+credential, expected capture revision, and a checked terminal receipt bound to
+the same backend kind and lifecycle identity. The receipt MUST name an allowed
+authoritative terminal state, backend state revision, and stable evidence
+digest. The Coordinator MUST revalidate the credential, owner binding, expected
+revision, receipt binding, and terminal evidence immediately before cleanup.
+Active, unknown, stale-revision, foreign-owner, mismatched-lifecycle, missing
+evidence, and concurrently superseded requests MUST fail without deleting or
+changing recovery evidence. Replay of the same accepted settlement is
+idempotent; different input after settlement is a conflict. Default settlement
+MUST remove source bytes only after those checks pass. Timeout or unknown
+outcome MUST preserve the capture and recovery evidence. Same-user path
+visibility is a disclosed limitation, not a claim of operating-system
+containment.
+
+The scoped Specialist Review path MUST create one fresh managed Codex Reviewer,
+expose only the captured target as review context, bind its result to the target
+and manifest digests, verify that the captured bytes and manifest were not
+modified, and prove that the workflow issued no source mutation. Source
+identity MUST remain stable through capture publication. A later source change
+by another actor MUST NOT stale the immutable target or its result. Reviewer
+verdict MUST be reported separately from engagement, Run, and settlement state.
+Cancellation requires explicit user authority, and active or unknown work MUST
+NOT be replayed or cleaned up as if terminal.
+
+`MILESTONE-IR1` additionally requires the exact installed Aquarium
+independent-review path to use the exact validated Dolgorae executable for this
+capture and fresh Codex Reviewer flow without creating Orca objects. Aquarium
+orca-review retains Orca provider and lifecycle ownership while using the same
+target meanings and captured bytes. Mulgae remains operationally independent
+and MUST prove semantic and resolved-identity conformance rather than depend on
+Dolgorae storage. No design document or cross-repository claim is completion
+evidence: the runtime Completed Confirm defined by TASK-016 MUST bind exact
+committed and installed Dolgorae and Aquarium artifacts and survive Dolgorae
+revalidation.
+
 ### Durable Broker State and Operations
 
 The authoritative orchestration store is
@@ -3242,7 +3328,7 @@ The required-subset manifest has two independent eligibility fields.
 `architecture_contract_eligible` is owned by TASK-000-D and becomes true only
 after checked artifacts, reproducible pinned evidence, the self-contained
 package, and a no-P0/P1 independent architecture review agree.
-`production_runtime_eligible` is owned by TASK-031 and remains false until the
+`production_runtime_eligible` is owned by TASK-034 and remains false until the
 implemented two-profile runtime passes every production smoke, migration,
 cleanup, interaction, artifact, and review gate. Architecture closure never
 promotes production eligibility.
@@ -3701,7 +3787,7 @@ streaming, Controller interaction handling, basic writer status/acquire/release,
 Controller verification, and artifact metadata/bounded chunk retrieval.
 Timeline, profile diagnostics, advanced Run operations, writer handoff, delete,
 verification, and write continuation remain unavailable and unadvertised until
-`TASK-026`. A client
+`TASK-029`. A client
 MUST fail closed rather than call an unadvertised method. `MILESTONE-PA1`
 requires the complete descriptor method set.
 
@@ -4037,17 +4123,17 @@ and passes for the release candidate.
 
 | Runtime case ID | Owner | Required test | Test path |
 |---|---|---|---|
-| `slow_consumer_isolation` | `TASK-020` | `multi_run_pressure_e2e` | `tests/e2e/test_slow_consumer_isolation.py` |
-| `protected_interaction_lost_response` | `TASK-020` | `secret_canary_and_fault_barrier` | `tests/e2e/test_protected_interaction_lost_response.py` |
-| `gateway_restart` | `TASK-020` | `active_run_restart_e2e` | `tests/e2e/test_gateway_restart.py` |
-| `socket_ownership` | `TASK-020` | `macos_uds_attack_matrix` | `tests/e2e/test_socket_ownership.py` |
-| `private_boundary` | `TASK-023` | `real_gul_harness` | `tests/e2e/test_private_boundary.py` |
-| `run_configuration_restart` | `TASK-020` | `accepted_configuration_restart_e2e` | `tests/e2e/test_run_configuration_restart.py` |
-| `start_run_allocation_replay` | `TASK-020` | `allocation_loss_conflict_and_tombstone_e2e` | `tests/e2e/test_start_run_allocation_replay.py` |
-| `interaction_size_and_secret_barrier` | `TASK-020` | `preparse_bound_and_no_secret_replay_e2e` | `tests/e2e/test_interaction_size_and_secret_barrier.py` |
-| `event_revision_action_barrier` | `TASK-020` | `stale_aggregate_action_e2e` | `tests/e2e/test_event_revision_action_barrier.py` |
-| `lossless_non_utf8_path` | `TASK-029` | `opaque_path_cross_adapter_e2e` | `tests/e2e/test_lossless_non_utf8_path.py` |
-| `threadless_first_write_runtime` | `TASK-020` | `threadless_submit_writer_activation_e2e` | `tests/e2e/test_threadless_first_write_runtime.py` |
+| `slow_consumer_isolation` | `TASK-023` | `multi_run_pressure_e2e` | `tests/e2e/test_slow_consumer_isolation.py` |
+| `protected_interaction_lost_response` | `TASK-023` | `secret_canary_and_fault_barrier` | `tests/e2e/test_protected_interaction_lost_response.py` |
+| `gateway_restart` | `TASK-023` | `active_run_restart_e2e` | `tests/e2e/test_gateway_restart.py` |
+| `socket_ownership` | `TASK-023` | `macos_uds_attack_matrix` | `tests/e2e/test_socket_ownership.py` |
+| `private_boundary` | `TASK-026` | `real_gul_harness` | `tests/e2e/test_private_boundary.py` |
+| `run_configuration_restart` | `TASK-023` | `accepted_configuration_restart_e2e` | `tests/e2e/test_run_configuration_restart.py` |
+| `start_run_allocation_replay` | `TASK-023` | `allocation_loss_conflict_and_tombstone_e2e` | `tests/e2e/test_start_run_allocation_replay.py` |
+| `interaction_size_and_secret_barrier` | `TASK-023` | `preparse_bound_and_no_secret_replay_e2e` | `tests/e2e/test_interaction_size_and_secret_barrier.py` |
+| `event_revision_action_barrier` | `TASK-023` | `stale_aggregate_action_e2e` | `tests/e2e/test_event_revision_action_barrier.py` |
+| `lossless_non_utf8_path` | `TASK-032` | `opaque_path_cross_adapter_e2e` | `tests/e2e/test_lossless_non_utf8_path.py` |
+| `threadless_first_write_runtime` | `TASK-023` | `threadless_submit_writer_activation_e2e` | `tests/e2e/test_threadless_first_write_runtime.py` |
 
 ## External Protocol References
 

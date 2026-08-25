@@ -243,6 +243,58 @@ workspace-change claims, non-terminal cancellation cleanup, credential or
 private-endpoint disclosure, and any MCP advertisement under the selected
 `mcp_unavailable` disposition. Raw model output is not retained.
 
+### Immutable Review Target Coordinator
+
+The Immutable Review Target Coordinator introduced by EPIC-004 is a shared
+semantic subsystem beneath the scoped Specialist Review adapter and external
+consumers such as Aquarium. It owns target resolution, source eligibility,
+immutable materialization, manifest and whole-target identity, capture-time
+drift detection, post-execution validation, settlement, cleanup, and unknown
+outcome preservation. It does not own Reviewer selection, Aquarium policy,
+Orca provider supervision, or Mulgae adjudication and publication.
+
+The Coordinator reads Git objects, the index, and eligible worktree paths
+without mutating the source repository. Whole-tree targets use `current/`;
+transition targets use `before/` and `after/`. Captures live in an owner-only
+Dolgorae Application Support area, use read-only materialized files and
+directories, and carry a safe manifest with relative paths, byte sizes,
+SHA-256 digests, content classifications, inclusion dispositions, resolved Git
+objects, and the whole-target digest. The source repository path and private
+tool state are not Reviewer-visible target data.
+
+Capture and settlement are separate versioned Machine operations. A successful
+capture publishes an opaque reference only after every candidate has passed
+eligibility and secret checks and the source identity has been re-observed.
+The same transaction binds the capture to one backend kind and immutable
+lifecycle identity, stores only the digest of a random settlement owner
+credential, and delivers the credential through an owner-only file or inherited
+descriptor supplied by the trusted caller outside model-visible input. Neither
+the secret nor its carrier path enters provider-visible data or a machine
+result.
+
+Settlement is idempotent and backend-owned. Its compare-and-set transaction
+requires the opaque capture reference, protected owner credential, expected
+capture revision, and a checked terminal receipt whose backend kind, lifecycle
+identity, terminal state, state revision, and evidence digest match the stored
+owner. The Coordinator revalidates the referenced terminal evidence before it
+deletes source bytes. A stale revision, foreign credential, mismatched receipt,
+active or unknown state, missing evidence, or concurrent winning settlement
+leaves the capture unchanged. Exact replay returns the accepted settlement;
+different post-settlement input is a conflict. The scoped Specialist Review
+coordinator settles after authoritative Dolgorae engagement and Reviewer state;
+Aquarium's Orca-backed review settles only after authoritative Orca lifecycle
+state. The Coordinator never infers cancellation or settlement from elapsed
+time.
+
+The scoped Specialist Review Coordinator composes this subsystem with the
+existing External Specialist Facade. It validates the canonical executable's
+version, capability result, file identity, and SHA-256 immediately before
+source-bearing launch, creates one fresh Reviewer, passes only the immutable
+capture root, validates the checked review result and capture digest, and
+reports technical verdict independently of engagement, Run, and settlement
+state. The completed working-tree v1 path remains a compatible entry point; the
+new target contract is additive and versioned.
+
 ### Orchestration Broker
 
 The Orchestration Broker is an internal Dolgorae control-plane component used
@@ -382,9 +434,9 @@ authoritative global in-memory Run registry. Dirty sets, activation leases, and
 scheduler caches are reconstructable from SQLite.
 
 Gateway delivery is staged without changing the frozen Protobuf descriptor.
-`TASK-020` implements the 24-method path required by `MILESTONE-BH1`,
+`TASK-023` implements the 24-method path required by `MILESTONE-BH1`,
 including metadata-only artifact lookup and bounded artifact reads, and
-advertises only that method set through capabilities. `TASK-026` completes
+advertises only that method set through capabilities. `TASK-029` completes
 the remaining timeline, diagnostics, advanced Run, writer-handoff, delete,
 verification, and write-continuation methods and
 then advertises the complete descriptor method inventory. An unadvertised

@@ -1285,7 +1285,7 @@ const NATIVE_IMAGE_MAGICS: [[u8; 4]; 6] = [
 /// This is a check on the launch boundary, not a proof of provenance: a
 /// compiled program that merely re-execs something else is still a native
 /// image. Proving the running image is the recorded one is the spawn-image and
-/// process-census work TASK-017 owns; this closes the boundary the registry
+/// process-census work TASK-020 owns; this closes the boundary the registry
 /// itself is responsible for.
 fn validate_direct_executable(
     registry_path: &Path,

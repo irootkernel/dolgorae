@@ -5,7 +5,7 @@
   "production_runtime_eligible": false,
   "eligibility_owners": {
     "architecture_contract_eligible": "TASK-000-D",
-    "production_runtime_eligible": "TASK-031"
+    "production_runtime_eligible": "TASK-034"
   },
   "architecture_contract_requirements": {
     "runtime_baseline": "0.149.0",

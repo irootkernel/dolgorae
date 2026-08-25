@@ -1547,7 +1547,7 @@ fn diagnostics(parsed: &Parsed, events: bool) -> Result<Value, MachineError> {
     if parsed.flag("--follow") {
         return Err(MachineError::invalid_argument(
             "--follow",
-            "follow delivery is owned by TASK-025 status and change observation",
+            "follow delivery is owned by TASK-028 status and change observation",
         ));
     }
     let projection = parsed
@@ -3848,7 +3848,7 @@ fn process_exists(pid: u32) -> bool {
 /// Revalidates a recorded process's full identity (uid, process group, and
 /// executable fingerprint), not just PID existence, so a crashed process
 /// whose PID a later, unrelated process reused is never mistaken for the
-/// recorded one. Boot-UUID and full census-based revalidation are TASK-017.
+/// recorded one. Boot-UUID and full census-based revalidation are TASK-020.
 fn process_identity_matches(pid: u32, uid: u32, pgid: u32, fingerprint: &str) -> bool {
     if !process_exists(pid) {
         return false;

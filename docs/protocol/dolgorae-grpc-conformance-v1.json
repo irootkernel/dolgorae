@@ -249,57 +249,57 @@
   "runtime_pending": [
     {
       "id": "slow_consumer_isolation",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "multi_run_pressure_e2e"
     },
     {
       "id": "protected_interaction_lost_response",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "secret_canary_and_fault_barrier"
     },
     {
       "id": "gateway_restart",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "active_run_restart_e2e"
     },
     {
       "id": "socket_ownership",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "macos_uds_attack_matrix"
     },
     {
       "id": "private_boundary",
-      "owner": "TASK-023",
+      "owner": "TASK-026",
       "required_evidence": "real_gul_harness"
     },
     {
       "id": "run_configuration_restart",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "accepted_configuration_restart_e2e"
     },
     {
       "id": "start_run_allocation_replay",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "allocation_loss_conflict_and_tombstone_e2e"
     },
     {
       "id": "interaction_size_and_secret_barrier",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "preparse_bound_and_no_secret_replay_e2e"
     },
     {
       "id": "event_revision_action_barrier",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "stale_aggregate_action_e2e"
     },
     {
       "id": "lossless_non_utf8_path",
-      "owner": "TASK-029",
+      "owner": "TASK-032",
       "required_evidence": "opaque_path_cross_adapter_e2e"
     },
     {
       "id": "threadless_first_write_runtime",
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_evidence": "threadless_submit_writer_activation_e2e"
     }
   ],
@@ -1680,7 +1680,7 @@
   ],
   "delivery_stages": {
     "MILESTONE-BH1": {
-      "owner": "TASK-020",
+      "owner": "TASK-023",
       "required_methods": [
         "ArtifactService.GetArtifact",
         "ArtifactService.ReadArtifactChunk",
@@ -1733,7 +1733,7 @@
       "description": "Twenty-four-method frozen public-v1 path required for a live Gul Orchestrated Session and Brokered Hierarchy, including artifact metadata and bounded chunk retrieval."
     },
     "MILESTONE-PA1": {
-      "owner": "TASK-026",
+      "owner": "TASK-029",
       "required_methods": [
         "ArtifactService.GetArtifact",
         "ArtifactService.ReadArtifactChunk",

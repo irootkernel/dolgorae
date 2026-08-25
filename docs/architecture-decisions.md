@@ -1925,17 +1925,17 @@ work would unnecessarily delay the main control-plane milestone.
 Split the former gateway Task into two delivery stages without changing the
 checked Protobuf source or descriptor.
 
-`TASK-020`, before the durable Brokered Hierarchy core, implements the
+`TASK-023`, before the durable Brokered Hierarchy core, implements the
 foreground `dolgorae serve` process, private UDS and peer-UID boundary,
 singleton record and lock, reconstructable `ControlPlaneRuntime`, pinned gRPC
 code generation, and the checked minimum public-v1 method path needed by a live
 Gul Orchestrated Session. It routes each implemented method to the shared
 semantic service and advertises only those methods in capabilities.
 
-`TASK-026` later completes the remaining descriptor methods and extended
+`TASK-029` later completes the remaining descriptor methods and extended
 observation/operator-safe conformance. Generated stubs may exist before a method
 is implemented, but an unadvertised method is unavailable and must fail closed.
-`MILESTONE-BH1` requires `TASK-020`, the durable hierarchy core, and live
+`MILESTONE-BH1` requires `TASK-023`, the durable hierarchy core, and live
 Primary-tool integration. It therefore denotes actual Gul use, not a
 Gul-shaped fake harness.
 
@@ -1960,7 +1960,7 @@ Gul-shaped fake harness.
 
 - Downgrade BH1 to a Gul-shaped harness: rejected because the milestone is
   explicitly a user-usable Gul control plane.
-- Move all of EPIC-009 before the hierarchy core: rejected because the minimum
+- Move all of EPIC-010 before the hierarchy core: rejected because the minimum
   Run path is sufficient and the remaining operator surface does not determine
   hierarchy semantics.
 - Advertise every descriptor method and return placeholder success: rejected
@@ -2029,3 +2029,68 @@ durable request identity.
   trusted authority carrier.
 - Silently retry without a stable identifier: rejected because it can create a
   duplicate Specialist Run after response loss.
+
+## ADR-032: Separate Immutable Review Targets from Backend Supervision
+
+Status: Accepted
+
+### Context
+
+The completed Specialist Review preview accepts only one `working-tree` target
+and lets a fresh Codex Reviewer inspect the canonical workspace under the
+existing read-only policy. Aquarium's independent and Orca-backed reviews share
+staged, `HEAD`, commit, and range selection, but both use the original checkout,
+the staged target remains a live index, and dirty content cannot be selected.
+Mulgae already captures immutable workspace, staged, dirty, and Git-diff targets
+before provider execution.
+
+Replacing Aquarium's Codex terminal with Dolgorae while retaining those
+different source semantics would make the backend determine what was reviewed.
+Conversely, forcing all review tools into one execution lifecycle would erase
+useful differences between Dolgorae engagement supervision, Orca provider
+supervision, and Mulgae adjudication and publication.
+
+### Decision
+
+Adopt the six common source scopes and immutable-capture direction recorded in
+[`review-strategy-analysis.md`](review-strategy-analysis.md): `workspace`,
+`staged`, `dirty`, `head`, `commit`, and `range`. Task, Epic, and special-request
+identities supply authority and focus but never replace the selected source
+scope. Patch and stdin remain Mulgae-only extensions.
+
+Keep target semantics separate from backend supervision. EPIC-004 owns a
+versioned capture and settlement contract and a Specialist Review
+extension that does not reinterpret the completed `working-tree` v1 contract.
+Aquarium independent-review will use that Dolgorae path without an
+Orca terminal. Aquarium orca-review will use the same captured-target semantics
+while retaining Orca Run, Task, Dispatch, terminal, provider, acknowledgement,
+and recovery ownership. Mulgae will retain its native capture and run lifecycle
+and prove semantic conformance without code or storage coupling.
+
+Acceptance of this architecture is not runtime proof. Current product
+requirements, checked protocol, executable behavior, and active Aquarium skills
+remain unchanged until EPIC-004 implements, verifies, and activates them through
+its ordered Tasks and runtime Completed Confirm.
+
+### Consequences
+
+- Dirty and historical review will have one intended meaning across the three
+  strategies without requiring one common orchestration engine.
+- A reviewer result will bind to immutable bytes even if the source
+  repository changes after capture.
+- The source repository and index need not be modified to prepare a review.
+- Existing users retain the completed v1 Specialist Review and current Aquarium
+  behavior until EPIC-004's implementation and activation gate completes.
+- Runtime, compatibility, privacy, cleanup, and failure-path claims remain
+  unproven by this ADR and are mandatory EPIC-004 acceptance work.
+
+### Rejected alternatives
+
+- Change only independent-review target semantics: rejected because shared
+  result envelopes would describe materially different source scopes.
+- Replace Orca supervision in orca-review: rejected because target capture does
+  not own provider selection or Orca lifecycle guarantees.
+- Make Mulgae depend on Dolgorae capture internals: rejected because semantic
+  conformance does not justify cross-product storage and release coupling.
+- Rewrite the existing `working-tree` request in place: rejected because the
+  checked preview contract is already complete and must remain compatible.

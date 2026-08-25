@@ -297,7 +297,7 @@ impl VerifiedStaleSocket {
     /// mint this capability.  Merely observing an old pathname is insufficient.
     #[allow(
         dead_code,
-        reason = "TASK-017 process identity and group recovery mints this sealed capability"
+        reason = "TASK-020 process identity and group recovery mints this sealed capability"
     )]
     pub(crate) fn from_absent_generation(
         record: &WorkerRuntimeRecord,
@@ -3837,7 +3837,7 @@ pub struct StartedRun {
 /// The socket root is recreated with the rest of `/tmp/dolgorae-<uid>` and this
 /// marker lives beside the sockets it qualifies, so a record that names a boot
 /// this machine is no longer in is recognisably stale.  A first-class
-/// TASK-017 owns the first-class `kern.bootsessionuuid` Darwin provider; until
+/// TASK-020 owns the first-class `kern.bootsessionuuid` Darwin provider; until
 /// that recovery task lands, this private marker is the checked TASK-004
 /// worker-record identity.
 pub fn boot_session_uuid(uid: u32) -> Result<Uuid, WorkerProtocolError> {
