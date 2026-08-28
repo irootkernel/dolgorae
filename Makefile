@@ -15,7 +15,8 @@ INT_TESTS := \
 	--test workspace_contract
 
 .PHONY: test test-prepare test-unit test-int test-e2e \
-	test-live-specialist-review format format-check lint vet architecture
+	test-live-specialist-review test-live-scoped-specialist-review \
+	format format-check lint vet architecture
 
 test:
 	$(MAKE) test-prepare
@@ -89,6 +90,8 @@ test-e2e:
 		export XDG_CACHE_HOME="$$test_root/cache"; \
 		$(PYTHON_BIN) tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_review_target_cli.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_cli.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
@@ -106,3 +109,20 @@ test-live-specialist-review:
 		--profile "$${DOLGORAE_REVIEW_PROFILE:-reviewer}" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--phase "$${DOLGORAE_ACCEPTANCE_PHASE:-review}"
+
+test-live-scoped-specialist-review:
+	@test "$${DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_LIVE_WORKSPACE:-}" || { \
+		echo "DOLGORAE_LIVE_WORKSPACE is required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_scoped_specialist_review_acceptance.py \
+		--binary "$(DOLGORAE_BIN)" \
+		--workspace "$${DOLGORAE_LIVE_WORKSPACE}" \
+		--profile "$${DOLGORAE_REVIEW_PROFILE:-reviewer}" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--target-kind "$${DOLGORAE_REVIEW_TARGET_KIND:-workspace}" \
+		$${DOLGORAE_REVIEW_REVISION:+--revision "$${DOLGORAE_REVIEW_REVISION}"}

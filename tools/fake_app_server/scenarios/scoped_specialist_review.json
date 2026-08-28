@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "name": "scoped_specialist_review",
+  "description": "Seven fresh managed Reviewer threads return one checked empty verdict each.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "account/read",
+      "respond": {"result": {"requiresOpenaiAuth": false}}
+    },
+    {
+      "method": "model/list",
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "thread/read",
+      "respond": {"error": {"code": -32600, "message": "thread not found"}}
+    },
+    {"method": "thread/start", "occurrence": 1, "respond": {"result": {"thread": {"id": "thread-scope-1"}}}},
+    {"method": "thread/start", "occurrence": 2, "respond": {"result": {"thread": {"id": "thread-scope-2"}}}},
+    {"method": "thread/start", "occurrence": 3, "respond": {"result": {"thread": {"id": "thread-scope-3"}}}},
+    {"method": "thread/start", "occurrence": 4, "respond": {"result": {"thread": {"id": "thread-scope-4"}}}},
+    {"method": "thread/start", "occurrence": 5, "respond": {"result": {"thread": {"id": "thread-scope-5"}}}},
+    {"method": "thread/start", "occurrence": 6, "respond": {"result": {"thread": {"id": "thread-scope-6"}}}},
+    {"method": "thread/start", "occurrence": 7, "respond": {"result": {"thread": {"id": "thread-scope-7"}}}},
+    {
+      "method": "turn/start",
+      "respond": {"result": {"turn": {"id": "turn-${turn_index}"}}},
+      "emit": [
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "${thread_id}",
+            "turn": {
+              "id": "turn-${turn_index}",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "phase": "final_answer",
+                  "threadId": "${thread_id}",
+                  "turnId": "turn-${turn_index}",
+                  "status": "completed",
+                  "text": "{\"summary\":\"immutable target reviewed\",\"findings\":[]}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "thread/archive",
+      "respond": {"result": {"thread": {"id": "${thread_id}", "archived": true}}}
+    }
+  ]
+}

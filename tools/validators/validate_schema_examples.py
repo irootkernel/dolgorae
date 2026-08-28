@@ -30,6 +30,7 @@ def schema_name(example_name: str) -> str:
         "specialist-review-request.": "dolgorae-specialist-review-tool-v1.schema.json",
         "specialist-review-result.": "dolgorae-specialist-review-tool-v1.schema.json",
         "specialist-review-idempotency-conflict.": "dolgorae-specialist-review-tool-v1.schema.json",
+        "specialist-review-v2-": "dolgorae-specialist-review-tool-v2.schema.json",
     }
     if example_name in {
         "engagement-call-machine-success.valid.json",

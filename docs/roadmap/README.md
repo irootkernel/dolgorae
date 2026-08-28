@@ -611,7 +611,7 @@ adversarial read-only review.
 
 ### TASK-015: Scoped Specialist Review Runtime
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-014`. Add a versioned Specialist Review request whose target is
 `{kind, revision?}`. `workspace`, `staged`, `dirty`, and `head` reject a

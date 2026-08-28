@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EngagementBarrier {
@@ -127,7 +127,10 @@ impl EngagementStore {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(internal)?;
         }
-        let connection = Connection::open(path).map_err(internal)?;
+        let mut connection = Connection::open(path).map_err(internal)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(internal)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(internal)?;
         connection
             .execute_batch(
@@ -176,7 +179,7 @@ impl EngagementStore {
                  CREATE TABLE IF NOT EXISTS artifacts(
                    artifact_id TEXT PRIMARY KEY,
                    engagement_id TEXT NOT NULL UNIQUE,
-                   result_sha256 TEXT NOT NULL UNIQUE,
+                   result_sha256 TEXT NOT NULL,
                    canonical_json TEXT NOT NULL,
                    FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
                  ) STRICT;
@@ -213,7 +216,78 @@ impl EngagementStore {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        if observed != SCHEMA_VERSION.to_string() {
+        if observed == "1" {
+            connection
+                .execute_batch("PRAGMA foreign_keys=OFF;")
+                .map_err(internal)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(internal)?;
+            let locked_observed: String = transaction
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if locked_observed == "1" {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v1;
+                     ALTER TABLE artifacts RENAME TO artifacts_v1;
+                     CREATE TABLE artifacts(
+                       artifact_id TEXT PRIMARY KEY,
+                       engagement_id TEXT NOT NULL UNIQUE,
+                       result_sha256 TEXT NOT NULL,
+                       canonical_json TEXT NOT NULL,
+                       FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+                     ) STRICT;
+                     INSERT INTO artifacts(
+                       artifact_id, engagement_id, result_sha256, canonical_json
+                     ) SELECT
+                       artifact_id, engagement_id, result_sha256, canonical_json
+                     FROM artifacts_v1;
+                     CREATE TABLE delivery_receipts(
+                       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                       task_id TEXT NOT NULL UNIQUE,
+                       artifact_id TEXT NOT NULL,
+                       delivered_at_ms INTEGER NOT NULL,
+                       FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                       FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+                     ) STRICT;
+                     INSERT INTO delivery_receipts(
+                       sequence, task_id, artifact_id, delivered_at_ms
+                     ) SELECT
+                       sequence, task_id, artifact_id, delivered_at_ms
+                     FROM delivery_receipts_v1;
+                     DROP TABLE delivery_receipts_v1;
+                     DROP TABLE artifacts_v1;
+                     UPDATE metadata SET value='2' WHERE key='schema_version';",
+                    )
+                    .map_err(internal)?;
+                let violation: i64 = transaction
+                    .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(internal)?;
+                if violation != 0 {
+                    return Err(internal(
+                        "orchestration v1 migration violated a foreign key",
+                    ));
+                }
+            } else if locked_observed != SCHEMA_VERSION.to_string() {
+                return Err(MachineError::new(
+                    "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                    "orchestration schema is not supported",
+                    false,
+                    serde_json::json!({"observed":locked_observed}),
+                ));
+            }
+            transaction.commit().map_err(internal)?;
+            connection
+                .execute_batch("PRAGMA foreign_keys=ON;")
+                .map_err(internal)?;
+        } else if observed != SCHEMA_VERSION.to_string() {
             return Err(MachineError::new(
                 "ORCHESTRATION_SCHEMA_UNSUPPORTED",
                 "orchestration schema is not supported",
@@ -1213,6 +1287,267 @@ mod tests {
             reopened.snapshot(opened.engagement_id).unwrap().state,
             "result_ready"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn independent_engagements_may_publish_identical_checked_results() {
+        let (mut store, root) = store();
+        for number in 0..2 {
+            let opened = store
+                .open_engagement("workspace", &"a".repeat(64), &format!("open-{number}"))
+                .unwrap();
+            let hired = store
+                .hire(
+                    opened.engagement_id,
+                    &"b".repeat(64),
+                    &format!("hire-{number}"),
+                    |_| Ok(RuntimeOutcome::Accepted),
+                )
+                .unwrap();
+            store
+                .assign(
+                    opened.engagement_id,
+                    hired.specialist_run_id,
+                    &"c".repeat(64),
+                    &format!("task-{number}"),
+                    |_| {
+                        (
+                            RuntimeOutcome::Accepted,
+                            Some(serde_json::json!({"summary":"clean","findings":[]})),
+                        )
+                    },
+                )
+                .unwrap();
+        }
+        let artifacts: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(artifacts, 2);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v1_artifact_uniqueness_is_migrated_without_losing_rows() {
+        let (store, root) = store();
+        drop(store);
+        let database = root.join("orchestration.sqlite3");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                r#"PRAGMA foreign_keys=OFF;
+                 DROP TABLE delivery_receipts;
+                 DROP TABLE artifacts;
+                 CREATE TABLE artifacts(
+                   artifact_id TEXT PRIMARY KEY,
+                   engagement_id TEXT NOT NULL UNIQUE,
+                   result_sha256 TEXT NOT NULL UNIQUE,
+                   canonical_json TEXT NOT NULL,
+                   FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+                 ) STRICT;
+                 CREATE TABLE delivery_receipts(
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   task_id TEXT NOT NULL UNIQUE,
+                   artifact_id TEXT NOT NULL,
+                   delivered_at_ms INTEGER NOT NULL,
+                   FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                   FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+                 ) STRICT;
+                 INSERT INTO engagements(
+                   engagement_id, workspace_id, controller_sha256, state,
+                   specialist_run_id, task_id, result_sha256, result_json, revision
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000001', 'workspace',
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   'result_ready', '01900000-0000-7000-8000-000000000002',
+                   '01900000-0000-7000-8000-000000000003',
+                   'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                   '{"summary":"clean","findings":[]}', 4
+                 );
+                 INSERT INTO members(
+                   specialist_run_id, engagement_id, hire_operation_id,
+                   configuration_sha256, state
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000002',
+                   '01900000-0000-7000-8000-000000000001',
+                   '01900000-0000-7000-8000-000000000004',
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                   'ready'
+                 );
+                 INSERT INTO tasks(
+                   task_id, engagement_id, specialist_run_id, objective_sha256,
+                   state, result_sha256
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000003',
+                   '01900000-0000-7000-8000-000000000001',
+                   '01900000-0000-7000-8000-000000000002',
+                   'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                   'result_ready',
+                   'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+                 );
+                 INSERT INTO artifacts(
+                   artifact_id, engagement_id, result_sha256, canonical_json
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000005',
+                   '01900000-0000-7000-8000-000000000001',
+                   'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                   '{"findings":[],"summary":"clean"}'
+                 );
+                 INSERT INTO delivery_receipts(
+                   sequence, task_id, artifact_id, delivered_at_ms
+                 ) VALUES(
+                   7, '01900000-0000-7000-8000-000000000003',
+                   '01900000-0000-7000-8000-000000000005', 123456
+                 );
+                 UPDATE metadata SET value='1' WHERE key='schema_version';"#,
+            )
+            .unwrap();
+        drop(connection);
+        let migrated = EngagementStore::open(&database).unwrap();
+        let version: String = migrated
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+        let artifact: (String, String, String, String) = migrated
+            .connection
+            .query_row(
+                "SELECT artifact_id, engagement_id, result_sha256, canonical_json FROM artifacts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(artifact.0, "01900000-0000-7000-8000-000000000005");
+        assert_eq!(artifact.1, "01900000-0000-7000-8000-000000000001");
+        assert_eq!(artifact.2, "d".repeat(64));
+        assert_eq!(artifact.3, r#"{"findings":[],"summary":"clean"}"#);
+        let receipt: (i64, String, String, i64) = migrated
+            .connection
+            .query_row(
+                "SELECT sequence, task_id, artifact_id, delivered_at_ms FROM delivery_receipts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt.0, 7);
+        assert_eq!(receipt.1, "01900000-0000-7000-8000-000000000003");
+        assert_eq!(receipt.2, "01900000-0000-7000-8000-000000000005");
+        assert_eq!(receipt.3, 123456);
+        migrated
+            .connection
+            .execute_batch(
+                r#"INSERT INTO engagements(
+                   engagement_id, workspace_id, controller_sha256, state, revision
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000006', 'workspace',
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   'open', 1
+                 );
+                 INSERT INTO artifacts(
+                   artifact_id, engagement_id, result_sha256, canonical_json
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000007',
+                   '01900000-0000-7000-8000-000000000006',
+                   'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                   '{"findings":[],"summary":"clean"}'
+                 );"#,
+            )
+            .unwrap();
+        let violations: i64 = migrated
+            .connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        drop(migrated);
+        let reopened = EngagementStore::open(&database).unwrap();
+        let artifacts: i64 = reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(artifacts, 2);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_v1_migration_rolls_back_schema_and_rows() {
+        let (store, root) = store();
+        drop(store);
+        let database = root.join("orchestration.sqlite3");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE delivery_receipts;
+                 DROP TABLE artifacts;
+                 CREATE TABLE artifacts(
+                   artifact_id TEXT PRIMARY KEY,
+                   engagement_id TEXT NOT NULL UNIQUE,
+                   result_sha256 TEXT NOT NULL UNIQUE,
+                   canonical_json TEXT NOT NULL,
+                   FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+                 ) STRICT;
+                 CREATE TABLE delivery_receipts(
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   task_id TEXT NOT NULL UNIQUE,
+                   artifact_id TEXT NOT NULL,
+                   delivered_at_ms INTEGER NOT NULL,
+                   FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                   FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+                 ) STRICT;
+                 INSERT INTO artifacts(
+                   artifact_id, engagement_id, result_sha256, canonical_json
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000011',
+                   '01900000-0000-7000-8000-000000000012',
+                   'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                   '{}'
+                 );
+                 UPDATE metadata SET value='1' WHERE key='schema_version';",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = match EngagementStore::open(&database) {
+            Ok(_) => panic!("invalid v1 store unexpectedly migrated"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(
+            error.details["reason"],
+            "orchestration v1 migration violated a foreign key"
+        );
+
+        let connection = Connection::open(&database).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+        let artifacts: i64 = connection
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(artifacts, 1);
+        let migrated_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE '%_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_tables, 0);
+        drop(connection);
         std::fs::remove_dir_all(root).unwrap();
     }
 

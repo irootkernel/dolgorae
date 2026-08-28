@@ -1,0 +1,66 @@
+{
+  "schema": "dolgorae-specialist-review-result/v2",
+  "operation": "review_target_result",
+  "review_id": "018f0000-0000-7000-8000-000000000101",
+  "target": {
+    "request": {
+      "kind": "range",
+      "revision": "main...feature"
+    },
+    "capture_ref": "018f0000-0000-7000-8000-000000000102",
+    "capture_revision": 1,
+    "resolved_base": "1111111111111111111111111111111111111111",
+    "resolved_head": "2222222222222222222222222222222222222222",
+    "manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "whole_target_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capture_integrity": "verified"
+  },
+  "reviewer": {
+    "profile": "reviewer",
+    "run_id": "018f0000-0000-7000-8000-000000000103",
+    "state": "closed",
+    "model": "gpt-5.6",
+    "effort": "medium",
+    "executable": {
+      "version": "0.149.0",
+      "file_identity": {
+        "resolved_path": "/opt/codex/bin/codex",
+        "device": 1,
+        "inode": 2,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "capability_result": {
+        "compatibility_verdict": "tested",
+        "schema_bundle_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "launch_contract_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "result_artifact_ref": "018f0000-0000-7000-8000-000000000104"
+  },
+  "verdict": {
+    "summary": "No findings.",
+    "findings": []
+  },
+  "engagement": {
+    "id": "018f0000-0000-7000-8000-000000000101",
+    "state": "closed"
+  },
+  "settlement": {
+    "schema": "dolgorae-review-target-settlement-result/v1",
+    "capture_ref": "018f0000-0000-7000-8000-000000000102",
+    "capture_revision": 2,
+    "state": "settled",
+    "source_bytes_removed": true,
+    "replay": false,
+    "receipt_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "capture_time_source_identity": {
+    "workspace_id": "9999999999999999999999999999999999999999999999999999999999999999",
+    "resolved_base": "1111111111111111111111111111111111111111",
+    "resolved_head": "2222222222222222222222222222222222222222",
+    "manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "whole_target_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "workflow_issued_source_mutation": false
+}

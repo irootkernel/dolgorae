@@ -1,0 +1,14 @@
+{
+  "schema": "dolgorae-specialist-review-error-details/v2",
+  "target": {
+    "kind": "dirty"
+  },
+  "capture_ref": "018f0000-0000-7000-8000-000000000105",
+  "engagement_id": "018f0000-0000-7000-8000-000000000106",
+  "engagement_state": "interrupted_unknown",
+  "settlement_state": "preserved",
+  "required_action": "inspect_authority",
+  "cause_details": {
+    "required_action": "none"
+  }
+}

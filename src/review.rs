@@ -15,19 +15,21 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::Read as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::thread;
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const REVIEW_OBJECTIVE: &str = "Review the current working tree for concrete correctness, regression, concurrency, error-handling, security, test-coverage, and maintainability issues.";
+const DEFAULT_REVIEW_DEADLINE_SECONDS: u64 = 600;
+const MAX_REVIEW_REVISION_BYTES: usize = 1024;
 pub const REVIEW_FOCUS: [&str; 7] = [
     "correctness",
     "regressions",
@@ -52,6 +54,63 @@ pub struct ReviewRequest {
     pub deadline_seconds: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewTargetRequest {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+impl ReviewTargetRequest {
+    pub fn validate(&self) -> Result<(), MachineError> {
+        let known = ["workspace", "staged", "dirty", "head", "commit", "range"];
+        if !known.contains(&self.kind.as_str()) {
+            return Err(MachineError::invalid_argument(
+                "--target-kind",
+                "target kind must be workspace, staged, dirty, head, commit, or range",
+            ));
+        }
+        if self
+            .revision
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_REVIEW_REVISION_BYTES)
+        {
+            return Err(MachineError::invalid_argument(
+                "--revision",
+                "revision must be at most 1024 bytes",
+            ));
+        }
+        match (self.kind.as_str(), self.revision.as_deref()) {
+            ("workspace" | "staged" | "dirty" | "head", None) => Ok(()),
+            ("commit", Some(value)) if !value.is_empty() => Ok(()),
+            ("range", Some(value)) if exact_range(value) => Ok(()),
+            ("workspace" | "staged" | "dirty" | "head", Some(_)) => Err(
+                MachineError::invalid_argument("--revision", "this target kind rejects a revision"),
+            ),
+            ("commit" | "range", None) => Err(MachineError::invalid_argument(
+                "--revision",
+                "this target kind requires a revision",
+            )),
+            _ => Err(MachineError::invalid_argument(
+                "--revision",
+                "range requires one exact A..B or A...B expression",
+            )),
+        }
+    }
+}
+
+fn exact_range(value: &str) -> bool {
+    if value.contains("....") {
+        return false;
+    }
+    let separator = if value.contains("...") { "..." } else { ".." };
+    let Some((left, right)) = value.split_once(separator) else {
+        return false;
+    };
+    !left.is_empty() && !right.is_empty() && !left.contains("..") && !right.contains("..")
+}
+
 impl ReviewRequest {
     #[must_use]
     pub fn fixed() -> Self {
@@ -61,7 +120,7 @@ impl ReviewRequest {
             objective: REVIEW_OBJECTIVE.to_owned(),
             focus: REVIEW_FOCUS.iter().map(ToString::to_string).collect(),
             expected_output: "structured_findings_v1".to_owned(),
-            deadline_seconds: 600,
+            deadline_seconds: DEFAULT_REVIEW_DEADLINE_SECONDS,
         }
     }
 
@@ -103,6 +162,51 @@ struct EphemeralCarriers {
     root: PathBuf,
     aggregate: PathBuf,
     reviewer: PathBuf,
+    settlement_owner: PathBuf,
+    terminal_receipt: PathBuf,
+}
+
+struct InterruptWatcher {
+    done: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl InterruptWatcher {
+    fn start(interrupt_epoch: u64, workspace: PathBuf, controller: PathBuf, run_id: Uuid) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher_done = Arc::clone(&done);
+        let handle = thread::spawn(move || {
+            while !watcher_done.load(Ordering::SeqCst) {
+                if interrupted_since(interrupt_epoch) {
+                    let mut arguments = vec![OsString::from(run_id.to_string())];
+                    arguments.extend(pairs(&[
+                        ("--workspace", workspace.as_os_str()),
+                        ("--controller-file", controller.as_os_str()),
+                    ]));
+                    let _ = control_reviewer_run(RunVerb::Interrupt, &arguments);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        });
+        Self {
+            done,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for InterruptWatcher {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl EphemeralCarriers {
@@ -115,6 +219,8 @@ impl EphemeralCarriers {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(internal)?;
         let aggregate = root.join("aggregate.json");
         let reviewer = root.join("reviewer.json");
+        let settlement_owner = root.join("settlement-owner");
+        let terminal_receipt = root.join("terminal-receipt.json");
         create_controller_credential(
             &aggregate,
             ControllerKind::WorkflowOrchestrator,
@@ -133,6 +239,8 @@ impl EphemeralCarriers {
             root,
             aggregate,
             reviewer,
+            settlement_owner,
+            terminal_receipt,
         })
     }
 }
@@ -141,6 +249,8 @@ impl Drop for EphemeralCarriers {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.aggregate);
         let _ = fs::remove_file(&self.reviewer);
+        let _ = fs::remove_file(&self.settlement_owner);
+        let _ = fs::remove_file(&self.terminal_receipt);
         let _ = fs::remove_dir(&self.root);
     }
 }
@@ -149,24 +259,55 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(arguments, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
     let profile = required(arguments, "--profile")?;
-    if required(arguments, "--scope")? != "working-tree" {
-        return Err(MachineError::invalid_argument(
-            "--scope",
-            "the preview supports only working-tree",
-        ));
-    }
     if required(arguments, "--format")? != "json" {
         return Err(MachineError::invalid_argument(
             "--format",
             "the canonical specialist review format is json",
         ));
     }
-    execute(
-        workspace.as_deref(),
-        &profile,
-        &ReviewRequest::fixed(),
-        new_uuid_v7(),
-    )
+    match (
+        optional_value(arguments, "--scope")?,
+        optional_value(arguments, "--target-kind")?,
+    ) {
+        (Some(scope), None) if scope == "working-tree" => execute(
+            workspace.as_deref(),
+            &profile,
+            &ReviewRequest::fixed(),
+            new_uuid_v7(),
+        ),
+        (None, Some(kind)) => {
+            let target = ReviewTargetRequest {
+                kind,
+                revision: optional_value(arguments, "--revision")?,
+            };
+            let deadline_seconds = optional_value(arguments, "--deadline-seconds")?
+                .map(|value| {
+                    value.parse::<u64>().map_err(|_| {
+                        MachineError::invalid_argument(
+                            "--deadline-seconds",
+                            "deadline must be an integer",
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_REVIEW_DEADLINE_SECONDS);
+            execute_scoped(
+                workspace.as_deref(),
+                &profile,
+                &target,
+                deadline_seconds,
+                new_uuid_v7(),
+            )
+        }
+        (Some(_), Some(_)) => Err(MachineError::invalid_argument(
+            "argv",
+            "--scope and --target-kind are mutually exclusive",
+        )),
+        _ => Err(MachineError::invalid_argument(
+            "argv",
+            "use --scope working-tree for v1 or --target-kind for v2",
+        )),
+    }
 }
 
 pub fn execute(
@@ -229,6 +370,7 @@ pub fn execute(
                         reserved_run_id: reservation.specialist_run_id,
                         aggregate_binding: binding,
                         plan,
+                        review_cwd: None,
                     },
                 ) {
                     Ok(_) => RuntimeOutcome::Accepted,
@@ -289,7 +431,7 @@ pub fn execute(
                     &carriers.reviewer,
                     hired.specialist_run_id,
                     reservation.task_id,
-                    request.deadline_seconds,
+                    Duration::from_secs(request.deadline_seconds),
                     &prompt,
                 );
                 match control_reviewer_run(RunVerb::Send, &arguments) {
@@ -399,6 +541,436 @@ pub fn execute(
         }
     }
     result
+}
+
+pub fn execute_scoped(
+    workspace: Option<&Path>,
+    profile: &str,
+    target: &ReviewTargetRequest,
+    deadline_seconds: u64,
+    request_ref: Uuid,
+) -> Result<Value, MachineError> {
+    install_interrupt_handler()?;
+    let interrupt_epoch = INTERRUPT_EPOCH.load(Ordering::SeqCst);
+    target.validate()?;
+    if request_ref.get_version_num() != 7 {
+        return Err(MachineError::invalid_argument(
+            "external_request_ref",
+            "external request reference must be UUIDv7",
+        ));
+    }
+    if deadline_seconds == 0 || deadline_seconds > 3_600 {
+        return Err(MachineError::invalid_argument(
+            "--deadline-seconds",
+            "deadline must be between 1 and 3600 seconds",
+        ));
+    }
+    let mut request = ReviewRequest::fixed();
+    request.deadline_seconds = deadline_seconds;
+    let prepared = prepare_reviewer(workspace, profile, &request.objective)?;
+    reject_recursive_reviewer_context(&prepared.state_root)?;
+    let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
+    let carriers = EphemeralCarriers::create(&prepared.state_root)?;
+    let aggregate_carrier = CredentialCarrier::open_path(&carriers.aggregate)?;
+    let aggregate_binding = binding_from_carrier(&aggregate_carrier, 1)?;
+    drop(aggregate_carrier);
+    let database = prepared
+        .state_root
+        .join("orchestration")
+        .join("orchestration.sqlite3");
+    let mut store = EngagementStore::open(&database)?;
+    let key = |operation: &str| format!("scoped-specialist-review:{request_ref}:{operation}");
+    let opened = store.open_engagement(
+        &prepared.view.workspace_id,
+        &aggregate_binding.capability_sha256,
+        &key("open"),
+    )?;
+    let review_id = opened.engagement_id;
+    let capture = capture_review_target(
+        &canonical_workspace,
+        target,
+        review_id,
+        &carriers.settlement_owner,
+    );
+    let capture = match capture {
+        Ok(value) => value,
+        Err(error) => {
+            close_failed_engagement(
+                &mut store,
+                review_id,
+                &key,
+                None,
+                &canonical_workspace,
+                &carriers,
+            );
+            return Err(error);
+        }
+    };
+    let capture_ref = match uuid_field(&capture, "capture_ref") {
+        Ok(value) => value,
+        Err(error) => {
+            close_failed_engagement(
+                &mut store,
+                review_id,
+                &key,
+                None,
+                &canonical_workspace,
+                &carriers,
+            );
+            return Err(error);
+        }
+    };
+    let capture_root = prepared
+        .state_root
+        .join("review-targets")
+        .join(capture_ref.to_string())
+        .join("source");
+    let mut reviewer_run_id = None;
+    let result = (|| {
+        let capture_root = fs::canonicalize(&capture_root).map_err(internal)?;
+        let reported_capture_root =
+            fs::canonicalize(path_field(&capture, "immutable_root")?).map_err(internal)?;
+        if reported_capture_root != capture_root {
+            return Err(internal(
+                "capture result immutable_root diverges from the authoritative state root",
+            ));
+        }
+        let executable = verify_executable_identity(&prepared.profile_snapshot)?;
+        let lifecycle_started = Instant::now();
+        let mut hire_error = None;
+        let hired = store.hire_reviewer(
+            review_id,
+            &prepared.plan,
+            &key("hire"),
+            |reservation, binding, plan| {
+                reviewer_run_id = Some(reservation.specialist_run_id);
+                let arguments = reviewer_start_arguments(
+                    &canonical_workspace,
+                    profile,
+                    &carriers.reviewer,
+                    request_ref,
+                    review_id,
+                    &prepared.model,
+                    &prepared.effort,
+                    &plan.agent_configuration.normalized_instructions,
+                );
+                match start_reviewer_run(
+                    &arguments,
+                    ReviewerStartContext {
+                        reserved_run_id: reservation.specialist_run_id,
+                        aggregate_binding: binding,
+                        plan,
+                        review_cwd: Some(&capture_root),
+                    },
+                ) {
+                    Ok(_) => RuntimeOutcome::Accepted,
+                    Err(error) => {
+                        hire_error = Some(error);
+                        RuntimeOutcome::Rejected
+                    }
+                }
+            },
+        )?;
+        reviewer_run_id = Some(hired.specialist_run_id);
+        if hired.state != "ready" {
+            return Err(hire_error.unwrap_or_else(|| {
+                review_error("REVIEWER_START_FAILED", "Reviewer Run did not become ready")
+            }));
+        }
+        if interrupted_since(interrupt_epoch) {
+            return Err(review_error(
+                "REVIEW_CANCELLED",
+                "Specialist review was cancelled by the caller",
+            ));
+        }
+        let mut watcher = InterruptWatcher::start(
+            interrupt_epoch,
+            canonical_workspace.clone(),
+            carriers.reviewer.clone(),
+            hired.specialist_run_id,
+        );
+        let turn_timeout = Duration::from_secs(request.deadline_seconds)
+            .saturating_sub(lifecycle_started.elapsed())
+            .max(Duration::from_nanos(1));
+        let mut task_error = None;
+        let task = store.assign_review(
+            review_id,
+            hired.specialist_run_id,
+            &request.objective,
+            &key("assign"),
+            |reservation, _| {
+                let prompt = scoped_review_prompt(&request, target);
+                let arguments = reviewer_send_arguments(
+                    &canonical_workspace,
+                    &carriers.reviewer,
+                    hired.specialist_run_id,
+                    reservation.task_id,
+                    turn_timeout,
+                    &prompt,
+                );
+                match control_reviewer_run(RunVerb::Send, &arguments) {
+                    Ok(turn) => match checked_turn_output(&turn) {
+                        Ok(output) => (RuntimeOutcome::Accepted, Some(output)),
+                        Err(error) if error.code == "REVIEW_TIMEOUT" => {
+                            task_error = Some(error);
+                            (RuntimeOutcome::Unknown, None)
+                        }
+                        Err(error) => {
+                            task_error = Some(error);
+                            (RuntimeOutcome::Rejected, None)
+                        }
+                    },
+                    Err(error) if error.code == "TURN_INTERRUPTED" => {
+                        task_error = Some(review_error(
+                            "REVIEW_INTERRUPTED_UNKNOWN",
+                            "Reviewer Turn outcome is unknown and was not replayed",
+                        ));
+                        (RuntimeOutcome::Unknown, None)
+                    }
+                    Err(error) => {
+                        task_error = Some(error);
+                        (RuntimeOutcome::Rejected, None)
+                    }
+                }
+            },
+        );
+        let task = task?;
+        if interrupted_since(interrupt_epoch) {
+            return Err(review_error(
+                "REVIEW_CANCELLED",
+                "Specialist review was cancelled by the caller",
+            ));
+        }
+        let remaining = Duration::from_secs(request.deadline_seconds)
+            .saturating_sub(lifecycle_started.elapsed())
+            .max(Duration::from_nanos(1));
+        let terminal = store.await_terminal(review_id, remaining)?;
+        if terminal.state == "interrupted_unknown" {
+            return Err(task_error.unwrap_or_else(|| {
+                review_error(
+                    "REVIEW_INTERRUPTED_UNKNOWN",
+                    "Reviewer Turn outcome is unknown and was not replayed",
+                )
+            }));
+        }
+        if task.state != "result_ready" || terminal.state != "result_ready" {
+            return Err(task_error.unwrap_or_else(|| {
+                review_error(
+                    "REVIEW_TASK_FAILED",
+                    "Reviewer task did not produce a checked result",
+                )
+            }));
+        }
+        let collected = store.collect_review(review_id)?;
+        let output = validate_reviewer_output(collected.output)?;
+        let integrity =
+            crate::review_target::inspect_capture_in_state_root(&prepared.state_root, capture_ref)?;
+        let closed_run = close_reviewer(
+            &canonical_workspace,
+            &carriers.reviewer,
+            hired.specialist_run_id,
+        )?;
+        store.release(review_id, &key("release"))?;
+        let closed = store.close(review_id, &key("close"))?;
+        let executable_after = verify_executable_identity(&prepared.profile_snapshot)?;
+        if executable_after != executable {
+            return Err(review_error(
+                "REVIEW_EXECUTABLE_DRIFT",
+                "Reviewer executable changed during the review",
+            ));
+        }
+        let evidence_digest = digest_json(&json!({
+            "engagement":closed,
+            "reviewer":closed_run,
+            "artifact_id":collected.artifact_id,
+            "capture_ref":capture_ref,
+            "whole_target_digest":capture["whole_target_digest"]
+        }))?;
+        if interrupted_since(interrupt_epoch) {
+            return Err(review_error(
+                "REVIEW_CANCELLED",
+                "Specialist review was cancelled by the caller",
+            ));
+        }
+        watcher.stop();
+        if interrupted_since(interrupt_epoch) {
+            return Err(review_error(
+                "REVIEW_CANCELLED",
+                "Specialist review was cancelled by the caller",
+            ));
+        }
+        let settlement = settle_review_target(
+            &prepared.state_root,
+            capture_ref,
+            review_id,
+            "completed",
+            &evidence_digest,
+            &carriers,
+        )?;
+        Ok(scoped_review_result(
+            review_id,
+            hired.specialist_run_id,
+            collected.artifact_id,
+            profile,
+            target,
+            &capture,
+            &integrity,
+            &executable,
+            &prepared,
+            output,
+            settlement,
+        ))
+    })();
+    match result {
+        Ok(value) => Ok(value),
+        Err(mut error) => {
+            let cause_details = error.details.clone();
+            let state_before = store.snapshot(review_id).map(|value| value.state).ok();
+            close_failed_engagement(
+                &mut store,
+                review_id,
+                &key,
+                reviewer_run_id,
+                &canonical_workspace,
+                &carriers,
+            );
+            let preserve = matches!(
+                state_before.as_deref(),
+                Some("interrupted_unknown" | "recovery_required")
+            ) || error.code == "REVIEW_TARGET_MUTATED";
+            let settlement_state = if preserve {
+                "preserved"
+            } else if store
+                .snapshot(review_id)
+                .is_ok_and(|value| value.state == "closed")
+            {
+                let terminal_state = if error.code == "REVIEW_CANCELLED" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                let evidence = digest_json(&json!({
+                    "engagement_id":review_id,
+                    "state":"closed",
+                    "error_code":error.code
+                }))?;
+                match settle_review_target(
+                    &prepared.state_root,
+                    capture_ref,
+                    review_id,
+                    terminal_state,
+                    &evidence,
+                    &carriers,
+                ) {
+                    Ok(_) => "settled",
+                    Err(_) => "preserved",
+                }
+            } else {
+                "preserved"
+            };
+            error.details = json!({
+                "schema":"dolgorae-specialist-review-error-details/v2",
+                "target":target,
+                "capture_ref":capture_ref,
+                "engagement_id":review_id,
+                "engagement_state":state_before,
+                "settlement_state":settlement_state,
+                "required_action": if settlement_state == "preserved" {"inspect_authority"} else {"none"},
+                "cause_details":cause_details
+            });
+            Err(error)
+        }
+    }
+}
+
+fn capture_review_target(
+    workspace: &Path,
+    target: &ReviewTargetRequest,
+    review_id: Uuid,
+    owner_file: &Path,
+) -> Result<Value, MachineError> {
+    let mut arguments = pairs(&[
+        ("--workspace", workspace.as_os_str()),
+        ("--kind", target.kind.as_ref()),
+        ("--backend-kind", "dolgorae_specialist_review".as_ref()),
+        ("--backend-lifecycle-id", review_id.to_string().as_ref()),
+        ("--settlement-owner-file", owner_file.as_os_str()),
+    ]);
+    if let Some(revision) = &target.revision {
+        arguments.extend(pairs(&[("--revision", revision.as_ref())]));
+    }
+    crate::review_target::execute(crate::review_target::Operation::Capture, &arguments)
+}
+
+fn settle_review_target(
+    workspace_state_root: &Path,
+    capture_ref: Uuid,
+    review_id: Uuid,
+    terminal_state: &str,
+    evidence_digest: &str,
+    carriers: &EphemeralCarriers,
+) -> Result<Value, MachineError> {
+    let receipt = json!({
+        "schema":"dolgorae-review-target-terminal-receipt/v1",
+        "backend_kind":"dolgorae_specialist_review",
+        "backend_lifecycle_id":review_id,
+        "terminal_state":terminal_state,
+        "state_revision":1,
+        "evidence_digest":evidence_digest
+    });
+    let bytes = serde_json::to_vec(&receipt).map_err(internal)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&carriers.terminal_receipt)
+        .map_err(internal)?;
+    file.write_all(&bytes).map_err(internal)?;
+    file.sync_all().map_err(internal)?;
+    crate::review_target::settle_capture_in_state_root(
+        workspace_state_root,
+        capture_ref,
+        1,
+        &carriers.settlement_owner,
+        &carriers.terminal_receipt,
+    )
+}
+
+fn close_failed_engagement(
+    store: &mut EngagementStore,
+    review_id: Uuid,
+    key: &impl Fn(&str) -> String,
+    reviewer_run_id: Option<Uuid>,
+    workspace: &Path,
+    carriers: &EphemeralCarriers,
+) {
+    if let Some(run_id) = reviewer_run_id {
+        let _ = close_reviewer(workspace, &carriers.reviewer, run_id);
+    }
+    let state = store.snapshot(review_id).map(|value| value.state).ok();
+    if matches!(
+        state.as_deref(),
+        Some("open" | "provisioning" | "ready" | "executing" | "failed")
+    ) {
+        let _ = store.cancel(review_id, &key("cancel"));
+    }
+    if matches!(
+        store
+            .snapshot(review_id)
+            .map(|value| value.state)
+            .ok()
+            .as_deref(),
+        Some("cancelled" | "failed" | "result_ready")
+    ) {
+        let _ = store.release(review_id, &key("release"));
+    }
+    if store
+        .snapshot(review_id)
+        .is_ok_and(|value| value.state == "released")
+    {
+        let _ = store.close(review_id, &key("close"));
+    }
 }
 
 fn install_interrupt_handler() -> Result<(), MachineError> {
@@ -710,7 +1282,7 @@ fn reviewer_send_arguments(
     controller: &Path,
     run_id: Uuid,
     task_id: Uuid,
-    deadline_seconds: u64,
+    timeout: Duration,
     prompt: &str,
 ) -> Vec<OsString> {
     let mut values = vec![OsString::from(run_id.to_string())];
@@ -722,23 +1294,38 @@ fn reviewer_send_arguments(
             "--idempotency-key",
             format!("review-task:{task_id}").as_ref(),
         ),
-        ("--timeout", format!("{deadline_seconds}s").as_ref()),
+        (
+            "--timeout",
+            format!("{}ms", timeout.as_millis().max(1)).as_ref(),
+        ),
     ]));
     values
 }
 
-fn close_reviewer(workspace: &Path, controller: &Path, run_id: Uuid) -> Result<(), MachineError> {
+fn close_reviewer(
+    workspace: &Path,
+    controller: &Path,
+    run_id: Uuid,
+) -> Result<Value, MachineError> {
     let mut arguments = vec![OsString::from(run_id.to_string())];
     arguments.extend(pairs(&[
         ("--workspace", workspace.as_os_str()),
         ("--controller-file", controller.as_os_str()),
     ]));
-    control_reviewer_run(RunVerb::Close, &arguments).map(|_| ())
+    control_reviewer_run(RunVerb::Close, &arguments)
 }
 
 fn review_prompt(request: &ReviewRequest) -> String {
     format!(
         "Inspect the canonical working tree. Return only one JSON object with keys summary and findings. Each finding must contain severity (P0-P3), title, description, repository-relative path or null, line_start and line_end or null, recommendation, and confidence (high, medium, or low). Request: {}",
+        serde_json::to_string(request).expect("checked review request serializes")
+    )
+}
+
+fn scoped_review_prompt(request: &ReviewRequest, target: &ReviewTargetRequest) -> String {
+    format!(
+        "Inspect only the immutable review target rooted at the current directory. For transition targets, compare before/ with after/; for current targets inspect current/. Return only one JSON object with keys summary and findings. Each finding must contain exactly these keys: severity (P0-P3), title, description, path (a target-relative string or null), line_start and line_end (integers or null), recommendation, and confidence (high, medium, or low). Target: {}. Request: {}",
+        serde_json::to_string(target).expect("checked target request serializes"),
         serde_json::to_string(request).expect("checked review request serializes")
     )
 }
@@ -785,6 +1372,141 @@ fn review_result(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the checked v2 result binds each independent authority"
+)]
+fn scoped_review_result(
+    review_id: Uuid,
+    reviewer_run_id: Uuid,
+    artifact_id: Uuid,
+    profile: &str,
+    target: &ReviewTargetRequest,
+    capture: &Value,
+    integrity: &Value,
+    executable: &Value,
+    prepared: &crate::semantic::PreparedReviewer,
+    output: ReviewerOutput,
+    settlement: Value,
+) -> Value {
+    json!({
+        "schema":"dolgorae-specialist-review-result/v2",
+        "operation":"review_target_result",
+        "review_id":review_id,
+        "target":{
+            "request":target,
+            "capture_ref":capture["capture_ref"],
+            "capture_revision":capture["capture_revision"],
+            "resolved_base":capture["resolved_base"],
+            "resolved_head":capture["resolved_head"],
+            "manifest_digest":capture["manifest_digest"],
+            "whole_target_digest":capture["whole_target_digest"],
+            "capture_integrity":integrity["integrity"]
+        },
+        "reviewer":{
+            "profile":profile,
+            "run_id":reviewer_run_id,
+            "state":"closed",
+            "model":prepared.model,
+            "effort":prepared.effort,
+            "executable":executable,
+            "result_artifact_ref":artifact_id
+        },
+        "verdict":{
+            "summary":output.summary,
+            "findings":output.findings
+        },
+        "engagement":{
+            "id":review_id,
+            "state":"closed"
+        },
+        "settlement":settlement,
+        "capture_time_source_identity":{
+            "workspace_id":prepared.view.workspace_id,
+            "resolved_base":capture["resolved_base"],
+            "resolved_head":capture["resolved_head"],
+            "manifest_digest":capture["manifest_digest"],
+            "whole_target_digest":capture["whole_target_digest"]
+        },
+        "workflow_issued_source_mutation":false
+    })
+}
+
+fn verify_executable_identity(
+    snapshot: &crate::profile::ProfileSnapshot,
+) -> Result<Value, MachineError> {
+    let path = Path::new(&snapshot.executable_identity.resolved_path);
+    let canonical = fs::canonicalize(path).map_err(|_| {
+        review_error(
+            "REVIEW_EXECUTABLE_DRIFT",
+            "Reviewer executable is missing or no longer canonical",
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(|_| {
+        review_error(
+            "REVIEW_EXECUTABLE_DRIFT",
+            "Reviewer executable identity cannot be read",
+        )
+    })?;
+    let mut file = File::open(&canonical).map_err(|_| {
+        review_error(
+            "REVIEW_EXECUTABLE_DRIFT",
+            "Reviewer executable bytes cannot be read",
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(internal)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    let sha256 = format!("{:x}", digest.finalize());
+    if canonical != path
+        || metadata.dev() != snapshot.executable_identity.device
+        || metadata.ino() != snapshot.executable_identity.inode
+        || sha256 != snapshot.executable_identity.sha256
+    {
+        return Err(review_error(
+            "REVIEW_EXECUTABLE_DRIFT",
+            "Reviewer executable changed after profile validation",
+        ));
+    }
+    Ok(json!({
+        "version":snapshot.codex_version,
+        "file_identity":snapshot.executable_identity,
+        "sha256":sha256,
+        "capability_result":{
+            "compatibility_verdict":snapshot.compatibility_verdict,
+            "schema_bundle_sha256":snapshot.schema_bundle_sha256,
+            "launch_contract_sha256":snapshot.launch_contract_sha256
+        }
+    }))
+}
+
+fn digest_json(value: &Value) -> Result<String, MachineError> {
+    let bytes = serde_json::to_vec(value).map_err(internal)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn uuid_field(value: &Value, field: &str) -> Result<Uuid, MachineError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| internal(format!("capture result lacks {field}")))
+}
+
+fn path_field(value: &Value, field: &str) -> Result<PathBuf, MachineError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| internal(format!("capture result lacks {field}")))
+}
+
 fn required(arguments: &[OsString], flag: &str) -> Result<String, MachineError> {
     arguments
         .windows(2)
@@ -792,6 +1514,26 @@ fn required(arguments: &[OsString], flag: &str) -> Result<String, MachineError> 
         .and_then(|window| window[1].to_str())
         .map(ToOwned::to_owned)
         .ok_or_else(|| MachineError::invalid_argument(flag, "required UTF-8 option is missing"))
+}
+
+fn optional_value(arguments: &[OsString], flag: &str) -> Result<Option<String>, MachineError> {
+    let mut values = arguments
+        .windows(2)
+        .filter(|window| window[0] == flag)
+        .map(|window| {
+            window[1]
+                .to_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| MachineError::invalid_argument(flag, "option must be UTF-8"))
+        });
+    let value = values.next().transpose()?;
+    if values.next().is_some() {
+        return Err(MachineError::invalid_argument(
+            flag,
+            "option may be supplied only once",
+        ));
+    }
+    Ok(value)
 }
 
 fn pairs(values: &[(&str, &std::ffi::OsStr)]) -> Vec<OsString> {
@@ -833,6 +1575,103 @@ mod tests {
             "idempotency_key",
         ] {
             assert!(value.get(protected).is_none());
+        }
+    }
+
+    #[test]
+    fn scoped_target_contract_is_additive_and_exact() {
+        for kind in ["workspace", "staged", "dirty", "head"] {
+            ReviewTargetRequest {
+                kind: kind.to_owned(),
+                revision: None,
+            }
+            .validate()
+            .unwrap();
+        }
+        for (kind, revision) in [("commit", "HEAD~1"), ("range", "main...feature")] {
+            ReviewTargetRequest {
+                kind: kind.to_owned(),
+                revision: Some(revision.to_owned()),
+            }
+            .validate()
+            .unwrap();
+        }
+        ReviewTargetRequest {
+            kind: "commit".to_owned(),
+            revision: Some("a".repeat(MAX_REVIEW_REVISION_BYTES)),
+        }
+        .validate()
+        .unwrap();
+        let overlong = ReviewTargetRequest {
+            kind: "commit".to_owned(),
+            revision: Some("a".repeat(MAX_REVIEW_REVISION_BYTES + 1)),
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(overlong.code, "INVALID_ARGUMENT");
+        assert_eq!(overlong.details["argument"], "--revision");
+        for kind in ["commit", "range"] {
+            let missing = ReviewTargetRequest {
+                kind: kind.to_owned(),
+                revision: None,
+            }
+            .validate()
+            .unwrap_err();
+            assert_eq!(missing.details["argument"], "--revision");
+            assert_eq!(
+                missing.details["reason"],
+                "this target kind requires a revision"
+            );
+        }
+        let unknown = ReviewTargetRequest {
+            kind: "bogus".to_owned(),
+            revision: None,
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(unknown.details["argument"], "--target-kind");
+        assert_eq!(
+            ReviewTargetRequest {
+                kind: "dirty".to_owned(),
+                revision: Some("HEAD".to_owned()),
+            }
+            .validate()
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            ReviewTargetRequest {
+                kind: "range".to_owned(),
+                revision: Some("a....b".to_owned()),
+            }
+            .validate()
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
+        let prompt = scoped_review_prompt(
+            &ReviewRequest::fixed(),
+            &ReviewTargetRequest {
+                kind: "dirty".to_owned(),
+                revision: None,
+            },
+        );
+        assert!(prompt.contains("current directory"));
+        assert!(!prompt.contains("/Users/"));
+    }
+
+    #[test]
+    fn scoped_deadline_rejects_values_outside_the_schema_bounds() {
+        let target = ReviewTargetRequest {
+            kind: "workspace".to_owned(),
+            revision: None,
+        };
+        for deadline in [0, 3_601] {
+            let error =
+                execute_scoped(None, "unused", &target, deadline, Uuid::now_v7()).unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT");
+            assert_eq!(error.details["argument"], "--deadline-seconds");
         }
     }
 

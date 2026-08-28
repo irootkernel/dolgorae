@@ -587,6 +587,21 @@ pub fn validate_argument_contract(command: &Command) -> Result<(), String> {
     }
     let spec = leaf_spec(command.machine_name());
     validate_leaf_tokens(command.machine_name(), args, &spec)?;
+    if command.machine_name() == "specialist.review" {
+        let legacy = has(args, "--scope");
+        let scoped = has(args, "--target-kind");
+        if legacy == scoped {
+            return Err(
+                "exactly one of --scope working-tree or --target-kind is required".to_owned(),
+            );
+        }
+        if legacy && (has(args, "--revision") || has(args, "--deadline-seconds")) {
+            return Err(
+                "--revision and --deadline-seconds are available only with --target-kind"
+                    .to_owned(),
+            );
+        }
+    }
     if let Command::Run(run) = command
         && matches!(command.machine_name(), "run.artifact.export" | "run.export")
     {
@@ -853,9 +868,17 @@ fn leaf_spec(command: &str) -> LeafSpec {
         "specialist.policy.show" | "specialist.policy.remove" => spec(W, &[], &[], 1, 1),
         "specialist.policy.validate" => spec(&["--workspace", "--file"], &[], &["--file"], 0, 0),
         "specialist.review" => spec(
-            &["--workspace", "--profile", "--scope", "--format"],
+            &[
+                "--workspace",
+                "--profile",
+                "--scope",
+                "--target-kind",
+                "--revision",
+                "--deadline-seconds",
+                "--format",
+            ],
             &[],
-            &["--profile", "--scope", "--format"],
+            &["--profile", "--format"],
             0,
             0,
         ),
@@ -1246,6 +1269,7 @@ fn validate_option_value(command: &str, flag: &str, value: &str) -> Result<(), S
         "--length",
         "--expected-generation",
         "--expected-revision",
+        "--deadline-seconds",
     ]
     .contains(&flag)
     {
@@ -1271,6 +1295,11 @@ fn validate_option_value(command: &str, flag: &str, value: &str) -> Result<(), S
         "--kind" if command == "review-target.capture" => {
             Some(&["workspace", "staged", "dirty", "head", "commit", "range"])
         }
+        "--target-kind" if command == "specialist.review" => {
+            Some(&["workspace", "staged", "dirty", "head", "commit", "range"])
+        }
+        "--scope" if command == "specialist.review" => Some(&["working-tree"]),
+        "--format" if command == "specialist.review" => Some(&["json"]),
         "--kind" => Some(&[
             "human-cli",
             "interactive-client",
@@ -1433,6 +1462,62 @@ mod tests {
         let cli = Cli::try_parse_from(accepted).unwrap();
         assert!(validate_argument_contract(&cli.command).is_ok());
         assert_eq!(cli.command.machine_name(), "specialist.review");
+
+        let scoped = [
+            "dolgorae",
+            "specialist",
+            "review",
+            "--profile",
+            "reviewer",
+            "--target-kind",
+            "range",
+            "--revision",
+            "main...feature",
+            "--format",
+            "json",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(scoped).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_ok());
+
+        let mixed = [
+            "dolgorae",
+            "specialist",
+            "review",
+            "--profile",
+            "reviewer",
+            "--scope",
+            "working-tree",
+            "--target-kind",
+            "dirty",
+            "--format",
+            "json",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(mixed).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_err());
+
+        for (flag, value) in [("--revision", "HEAD"), ("--deadline-seconds", "30")] {
+            let legacy_with_v2 = [
+                "dolgorae",
+                "specialist",
+                "review",
+                "--profile",
+                "reviewer",
+                "--scope",
+                "working-tree",
+                flag,
+                value,
+                "--format",
+                "json",
+            ]
+            .map(OsString::from);
+            let cli = Cli::try_parse_from(legacy_with_v2).unwrap();
+            assert_eq!(
+                validate_argument_contract(&cli.command).unwrap_err(),
+                "--revision and --deadline-seconds are available only with --target-kind"
+            );
+        }
 
         for protected in ["--request-fd", "--controller-file", "--controller-fd"] {
             let rejected = [

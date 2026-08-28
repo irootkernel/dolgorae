@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-review-tool/v2",
+  "title": "Dolgorae immutable-target Specialist Review tool v2",
+  "description": "Additive checked request, success, and error-detail carriers for one fresh Reviewer over one immutable review target. The completed working-tree v1 contract remains separate and unchanged.",
+  "oneOf": [
+    { "$ref": "#/$defs/review_request" },
+    { "$ref": "#/$defs/review_result" },
+    { "$ref": "#/$defs/error_details" }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["workspace", "staged", "dirty", "head", "commit", "range"] },
+        "revision": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["workspace", "staged", "dirty", "head"] } } },
+          "then": { "not": { "required": ["revision"] } }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["commit", "range"] } } },
+          "then": { "required": ["revision"] }
+        }
+      ]
+    },
+    "review_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "target", "deadline_seconds"],
+      "properties": {
+        "operation": { "const": "review_target" },
+        "target": { "$ref": "#/$defs/target_request" },
+        "deadline_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      },
+      "x-adapterBoundFields": [
+        "canonical_workspace_id",
+        "runtime_profile_name",
+        "settlement_owner_credential",
+        "external_request_ref",
+        "aggregate_owner_controller_credential",
+        "specialist_run_controller_credential"
+      ]
+    },
+    "target_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request", "capture_ref", "capture_revision", "resolved_base", "resolved_head",
+        "manifest_digest", "whole_target_digest", "capture_integrity"
+      ],
+      "properties": {
+        "request": { "$ref": "#/$defs/target_request" },
+        "capture_ref": { "$ref": "#/$defs/uuid7" },
+        "capture_revision": { "const": 1 },
+        "resolved_base": { "type": ["string", "null"] },
+        "resolved_head": { "type": ["string", "null"] },
+        "manifest_digest": { "$ref": "#/$defs/sha256" },
+        "whole_target_digest": { "$ref": "#/$defs/sha256" },
+        "capture_integrity": { "const": "verified" }
+      }
+    },
+    "executable_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolved_path", "device", "inode", "sha256"],
+      "properties": {
+        "resolved_path": { "type": "string", "minLength": 1 },
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "file_identity", "sha256", "capability_result"],
+      "properties": {
+        "version": { "const": "0.149.0" },
+        "file_identity": { "$ref": "#/$defs/executable_identity" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "capability_result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["compatibility_verdict", "schema_bundle_sha256", "launch_contract_sha256"],
+          "properties": {
+            "compatibility_verdict": { "const": "tested" },
+            "schema_bundle_sha256": { "$ref": "#/$defs/sha256" },
+            "launch_contract_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "run_id", "state", "model", "effort", "executable", "result_artifact_ref"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "run_id": { "$ref": "#/$defs/uuid7" },
+        "state": { "const": "closed" },
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "minLength": 1 },
+        "executable": { "$ref": "#/$defs/executable" },
+        "result_artifact_ref": { "$ref": "#/$defs/uuid7" }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "findings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/finding" }
+        }
+      }
+    },
+    "engagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid7" },
+        "state": { "const": "closed" }
+      }
+    },
+    "source_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "resolved_base", "resolved_head", "manifest_digest", "whole_target_digest"],
+      "properties": {
+        "workspace_id": { "type": "string", "minLength": 1 },
+        "resolved_base": { "type": ["string", "null"] },
+        "resolved_head": { "type": ["string", "null"] },
+        "manifest_digest": { "$ref": "#/$defs/sha256" },
+        "whole_target_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "review_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "operation", "review_id", "target", "reviewer", "verdict", "engagement",
+        "settlement", "capture_time_source_identity", "workflow_issued_source_mutation"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-specialist-review-result/v2" },
+        "operation": { "const": "review_target_result" },
+        "review_id": { "$ref": "#/$defs/uuid7" },
+        "target": { "$ref": "#/$defs/target_result" },
+        "reviewer": { "$ref": "#/$defs/reviewer" },
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "engagement": { "$ref": "#/$defs/engagement" },
+        "settlement": { "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/settlement_result" },
+        "capture_time_source_identity": { "$ref": "#/$defs/source_identity" },
+        "workflow_issued_source_mutation": { "const": false }
+      }
+    },
+    "error_details": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "target", "capture_ref", "engagement_id", "engagement_state",
+        "settlement_state", "required_action"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-specialist-review-error-details/v2" },
+        "target": { "$ref": "#/$defs/target_request" },
+        "capture_ref": { "$ref": "#/$defs/uuid7" },
+        "engagement_id": { "$ref": "#/$defs/uuid7" },
+        "engagement_state": { "type": ["string", "null"] },
+        "settlement_state": { "enum": ["settled", "preserved"] },
+        "required_action": { "enum": ["none", "inspect_authority"] },
+        "cause_details": {}
+      }
+    }
+  }
+}

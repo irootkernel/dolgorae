@@ -122,6 +122,7 @@ pub(crate) struct PreparedReviewer {
     pub plan: ReviewerRuntimePlan,
     pub model: String,
     pub effort: String,
+    pub profile_snapshot: crate::profile::ProfileSnapshot,
 }
 
 pub(crate) fn prepare_reviewer(
@@ -134,7 +135,8 @@ pub(crate) fn prepare_reviewer(
     let model = state.default_model.clone();
     let efforts = advertised_efforts(&state, profile_name, &model)?;
     let effort = default_effort(&efforts);
-    let profile = run_profile_snapshot(&state.snapshot)?;
+    let profile_snapshot = state.snapshot.clone();
+    let profile = run_profile_snapshot(&profile_snapshot)?;
     let plan = ReviewerRuntimePlan::resolve(
         &profile,
         ReviewerRuntimeRequest {
@@ -152,6 +154,7 @@ pub(crate) fn prepare_reviewer(
         plan,
         model,
         effort,
+        profile_snapshot,
     })
 }
 
@@ -202,6 +205,7 @@ pub(crate) struct ReviewerStartContext<'a> {
     pub reserved_run_id: Uuid,
     pub aggregate_binding: &'a AggregateBinding,
     pub plan: &'a ReviewerRuntimePlan,
+    pub review_cwd: Option<&'a Path>,
 }
 
 pub(crate) fn start_reviewer_run(
@@ -423,10 +427,13 @@ fn run_start_with_context(
         fixed_model: model.clone(),
         default_effort: effort.clone(),
         supported_efforts: efforts,
-        cwd: view
-            .canonical_path
-            .to_path_buf()
-            .map_err(|_| internal("workspace path is not representable"))?,
+        cwd: match reviewer.and_then(|context| context.review_cwd) {
+            Some(path) => path.to_path_buf(),
+            None => view
+                .canonical_path
+                .to_path_buf()
+                .map_err(|_| internal("workspace path is not representable"))?,
+        },
         developer_instructions: instructions_text,
         sandbox: "read-only".to_owned(),
         approval_policy: "never".to_owned(),

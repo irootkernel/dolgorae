@@ -300,6 +300,14 @@ reports technical verdict independently of engagement, Run, and settlement
 state. The completed working-tree v1 path remains a compatible entry point; the
 new target contract is additive and versioned.
 
+The Coordinator keeps source-workspace authority and Runtime Profile ownership
+on the engagement while overriding only the managed Reviewer's launch working
+directory with the immutable capture root. It verifies the pinned executable
+identity immediately before that source-bearing launch. Engagement storage
+schema v2 removes the incorrect global uniqueness of a result-content digest;
+the v1-to-v2 migration rebuilds the artifact and delivery-receipt tables in one
+transaction so distinct engagements may retain identical checked verdicts.
+
 ### Orchestration Broker
 
 The Orchestration Broker is an internal Dolgorae control-plane component used

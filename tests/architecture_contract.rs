@@ -114,6 +114,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "engagement",
                 "machine",
+                "profile",
+                "review_target",
                 "run",
                 "semantic",
                 "specialist",

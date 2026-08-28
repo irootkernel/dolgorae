@@ -91,6 +91,46 @@ pub fn execute(operation: Operation, arguments: &[OsString]) -> Result<Value, Ma
     }
 }
 
+/// Revalidate one published capture without consulting mutable source state.
+///
+/// The scoped review coordinator uses this immediately before settlement so a
+/// Reviewer-visible byte or manifest replacement can never be accepted as the
+/// captured target. The returned object contains identity data only; it does
+/// not expose the settlement owner or its carrier.
+pub fn inspect_capture_in_state_root(
+    workspace_state_root: &Path,
+    capture_ref: Uuid,
+) -> Result<Value, MachineError> {
+    let capture_root = workspace_state_root
+        .join("review-targets")
+        .join(capture_ref.to_string());
+    let record: CaptureRecord = read_json(&capture_root.join("record.json"), 64 * 1024)?;
+    if record.capture_ref != capture_ref || record.settled {
+        return Err(target_error(
+            "REVIEW_TARGET_STATE_INVALID",
+            "capture is absent, mismatched, or already settled",
+        ));
+    }
+    let source = capture_root.join("source");
+    validate_capture_integrity(&capture_root, &source, &record)?;
+    let manifest_bytes = read_bounded(&capture_root.join("manifest.json"), 8 * 1024 * 1024)?;
+    let manifest: CaptureManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| target_error("REVIEW_TARGET_MUTATED", "capture manifest is invalid"))?;
+    Ok(json!({
+        "schema":"dolgorae-review-target-integrity-result/v1",
+        "capture_ref":record.capture_ref,
+        "capture_revision":record.revision,
+        "target_kind":manifest.target_kind,
+        "requested_revision":manifest.requested_revision,
+        "resolved_base":manifest.resolved_base,
+        "resolved_head":manifest.resolved_head,
+        "manifest_digest":record.manifest_digest,
+        "whole_target_digest":record.whole_target_digest,
+        "immutable_root":source,
+        "integrity":"verified"
+    }))
+}
+
 fn capture(arguments: &[OsString]) -> Result<Value, MachineError> {
     let workspace = option_path(arguments, "--workspace")?;
     let kind = parse_kind(&required(arguments, "--kind")?)?;
@@ -193,7 +233,45 @@ fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {
     let capture_root = state_root(&root)
         .join("review-targets")
         .join(capture_ref.to_string());
-    let _guard = SettlementGuard::acquire(&capture_root)?;
+    settle_at(
+        &capture_root,
+        capture_ref,
+        expected,
+        &owner_file,
+        &receipt_file,
+    )
+}
+
+pub fn settle_capture_in_state_root(
+    workspace_state_root: &Path,
+    capture_ref: Uuid,
+    expected_revision: u64,
+    owner_file: &Path,
+    receipt_file: &Path,
+) -> Result<Value, MachineError> {
+    require_absolute(workspace_state_root, "workspace_state_root")?;
+    require_absolute(owner_file, "settlement_owner_file")?;
+    require_absolute(receipt_file, "terminal_receipt_file")?;
+    let capture_root = workspace_state_root
+        .join("review-targets")
+        .join(capture_ref.to_string());
+    settle_at(
+        &capture_root,
+        capture_ref,
+        expected_revision,
+        owner_file,
+        receipt_file,
+    )
+}
+
+fn settle_at(
+    capture_root: &Path,
+    capture_ref: Uuid,
+    expected: u64,
+    owner_file: &Path,
+    receipt_file: &Path,
+) -> Result<Value, MachineError> {
+    let _guard = SettlementGuard::acquire(capture_root)?;
     let record_path = capture_root.join("record.json");
     let mut record: CaptureRecord = read_json(&record_path, 64 * 1024)?;
     if record.capture_ref != capture_ref {
@@ -202,14 +280,14 @@ fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {
             "capture revision does not match",
         ));
     }
-    let owner = read_private(&owner_file, 1024)?;
+    let owner = read_private(owner_file, 1024)?;
     if digest(&owner) != record.owner_digest {
         return Err(target_error(
             "REVIEW_TARGET_FOREIGN_OWNER",
             "settlement owner does not match",
         ));
     }
-    let receipt_bytes = read_private(&receipt_file, 64 * 1024)?;
+    let receipt_bytes = read_private(receipt_file, 64 * 1024)?;
     let receipt: TerminalReceipt = serde_json::from_slice(&receipt_bytes).map_err(|_| {
         invalid(
             "--terminal-receipt-file",
@@ -222,7 +300,7 @@ fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {
         if expected.checked_add(1) == Some(record.revision)
             && record.accepted_receipt_digest.as_deref() == Some(&receipt_digest)
         {
-            cleanup_settlement_source(&capture_root)?;
+            cleanup_settlement_source(capture_root)?;
             return Ok(settlement_result(&record, true));
         }
         return Err(target_error(
@@ -245,10 +323,10 @@ fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {
         ));
     }
     if source.exists() {
-        validate_capture_integrity(&capture_root, &source, &record)?;
+        validate_capture_integrity(capture_root, &source, &record)?;
         fs::rename(&source, &settling).map_err(io_error)?;
     } else if settling.exists() {
-        validate_capture_integrity(&capture_root, &settling, &record)?;
+        validate_capture_integrity(capture_root, &settling, &record)?;
     } else {
         return Err(target_error(
             "REVIEW_TARGET_STATE_INVALID",
@@ -259,7 +337,7 @@ fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {
     record.revision += 1;
     record.accepted_receipt_digest = Some(receipt_digest);
     write_record(&record_path, &record)?;
-    cleanup_settlement_source(&capture_root)?;
+    cleanup_settlement_source(capture_root)?;
     Ok(settlement_result(&record, false))
 }
 

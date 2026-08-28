@@ -3028,6 +3028,32 @@ dolgorae specialist review \
   --format json
 ```
 
+The additive immutable-target v2 Machine CLI carrier is:
+
+```text
+dolgorae specialist review \
+  --workspace <workspace> \
+  --profile <reviewer-runtime-profile> \
+  --target-kind <workspace|staged|dirty|head|commit|range> \
+  [--revision <commit-or-exact-range>] \
+  [--deadline-seconds <1..3600>] \
+  --format json
+```
+
+It uses
+[`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
+`--scope working-tree` remains the exact v1 carrier and rejects v2-only
+options. A commit or range revision is bounded to 1024 UTF-8 bytes. The v2
+deadline is one Reviewer lifecycle budget beginning after immutable capture;
+Turn execution and the following terminal wait share the remaining budget.
+The v2 result omits the immutable root and settlement credential
+carrier paths while binding the capture, source identity, Reviewer executable
+and capability evidence, engagement, verdict, integrity result, and settlement.
+The opt-in acceptance carrier is `make test-live-scoped-specialist-review`; it
+requires `DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW=1`, an explicitly supplied
+`DOLGORAE_LIVE_WORKSPACE`, a prepared Reviewer profile, and the exact Codex
+executable to verify.
+
 The optional external stdio MCP adapter exposes exactly one corresponding
 model-facing tool named `dolgorae_review`. Both entry points use the checked
 review payloads in
@@ -3184,6 +3210,12 @@ by another actor MUST NOT stale the immutable target or its result. Reviewer
 verdict MUST be reported separately from engagement, Run, and settlement state.
 Cancellation requires explicit user authority, and active or unknown work MUST
 NOT be replayed or cleaned up as if terminal.
+
+The private engagement authority schema is version 2. Opening a version 1 store
+MUST migrate the artifacts and delivery-receipt tables transactionally without
+losing rows. Result content digests are not globally unique: independent
+engagements MAY legitimately publish byte-identical checked verdicts, while
+artifact and engagement identities remain distinct.
 
 `MILESTONE-IR1` additionally requires the exact installed Aquarium
 independent-review path to use the exact validated Dolgorae executable for this

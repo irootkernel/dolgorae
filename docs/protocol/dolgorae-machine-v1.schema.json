@@ -2102,6 +2102,9 @@
           "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/review_result"
         },
         {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/review_result"
+        },
+        {
           "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/capture_result"
         },
         {
@@ -2346,7 +2349,10 @@
           "then": {
             "properties": {
               "data": {
-                "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/review_result"
+                "oneOf": [
+                  { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/review_result" },
+                  { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/review_result" }
+                ]
               }
             }
           }
