@@ -35,6 +35,8 @@
         "runtime.capabilities",
         "engagement.call",
         "specialist.review",
+        "review-target.capture",
+        "review-target.settle",
         "controller.credential.create",
         "operator.credential.initialize",
         "operator.credential.rotate",
@@ -184,7 +186,25 @@
         "EVENT_CURSOR_INVALID",
         "RPC_SERVER_ALREADY_RUNNING",
         "RPC_SOCKET_UNSAFE",
-        "SERVER_SHUTDOWN"
+        "SERVER_SHUTDOWN",
+        "REVIEW_TARGET_SOURCE_DRIFT",
+        "REVIEW_TARGET_STALE_REVISION",
+        "REVIEW_TARGET_FOREIGN_OWNER",
+        "REVIEW_TARGET_LIFECYCLE_MISMATCH",
+        "REVIEW_TARGET_TERMINAL_EVIDENCE_INVALID",
+        "REVIEW_TARGET_SETTLEMENT_CONFLICT",
+        "REVIEW_TARGET_STATE_INVALID",
+        "REVIEW_TARGET_SETTLEMENT_CONCURRENT",
+        "REVIEW_TARGET_MUTATED",
+        "REVIEW_TARGET_LIMIT_EXCEEDED",
+        "REVIEW_TARGET_UNSAFE_PATH",
+        "REVIEW_TARGET_UNSAFE_FILE",
+        "REVIEW_TARGET_CONFLICT",
+        "REVIEW_TARGET_REVISION_INVALID",
+        "REVIEW_TARGET_GIT_FAILED",
+        "REVIEW_TARGET_SECRET_DETECTED",
+        "REVIEW_TARGET_CARRIER_INVALID",
+        "REVIEW_TARGET_IO_FAILURE"
       ]
     },
     "path": {
@@ -2082,6 +2102,12 @@
           "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/review_result"
         },
         {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/capture_result"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/settlement_result"
+        },
+        {
           "$ref": "#/$defs/event_data"
         },
         {
@@ -2229,6 +2255,34 @@
             "properties": {
               "data": {
                 "$ref": "#/$defs/meta"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": { "const": "review-target.capture" }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/capture_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": { "const": "review-target.settle" }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/settlement_result"
               }
             }
           }

@@ -1,0 +1,16 @@
+{
+  "schema": "dolgorae-review-target-capture-result/v1",
+  "capture_ref": "018f0c6a-7b01-7abc-8def-0123456789ab",
+  "capture_revision": 1,
+  "target_kind": "dirty",
+  "resolved_base": "1111111111111111111111111111111111111111",
+  "resolved_head": "1111111111111111111111111111111111111111",
+  "manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "whole_target_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "included_file_count": 2,
+  "excluded": ["ignored_files", "git_metadata", "private_tool_state"],
+  "backend_kind": "dolgorae-specialist-review",
+  "backend_lifecycle_id": "engagement-018f0c6a",
+  "owner_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "immutable_root": "/Users/example/Library/Application Support/Dolgorae/workspaces/example/review-targets/018f0c6a-7b01-7abc-8def-0123456789ab/source"
+}

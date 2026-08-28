@@ -1,0 +1,9 @@
+{
+  "schema": "dolgorae-review-target-settlement-result/v1",
+  "capture_ref": "018f0c6a-7b01-7abc-8def-0123456789ab",
+  "capture_revision": 2,
+  "state": "settled",
+  "source_bytes_removed": true,
+  "replay": false,
+  "receipt_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}

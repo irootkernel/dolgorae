@@ -560,7 +560,7 @@ has revalidated the resulting runtime Completed Confirm.
 
 ### TASK-014: Immutable Review Target Foundation
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement the accepted `workspace`, `staged`, `dirty`, `head`, `commit`, and
 two-dot or three-dot `range` meanings from ADR-032 and

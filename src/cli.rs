@@ -52,6 +52,11 @@ pub enum Command {
         #[command(subcommand)]
         command: SpecialistCommand,
     },
+    #[command(name = "review-target")]
+    ReviewTarget {
+        #[command(subcommand)]
+        command: ReviewTargetCommand,
+    },
     Run(RunArgs),
 }
 
@@ -70,6 +75,7 @@ impl Command {
             Self::Workspace { command } => command.machine_name(),
             Self::Profile { command } => command.machine_name(),
             Self::Specialist { command } => command.machine_name(),
+            Self::ReviewTarget { command } => command.machine_name(),
             Self::Run(args) => args.command.machine_name(),
         }
     }
@@ -100,7 +106,29 @@ impl Command {
             Self::Workspace { command } => command.leaf_args(),
             Self::Profile { command } => command.leaf_args(),
             Self::Specialist { command } => command.leaf_args(),
+            Self::ReviewTarget { command } => Some(command.leaf_args()),
             Self::Run(args) => args.command.leaf_args(),
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReviewTargetCommand {
+    Capture(LeafArgs),
+    Settle(LeafArgs),
+}
+
+impl ReviewTargetCommand {
+    pub const fn machine_name(&self) -> &'static str {
+        match self {
+            Self::Capture(_) => "review-target.capture",
+            Self::Settle(_) => "review-target.settle",
+        }
+    }
+
+    pub const fn leaf_args(&self) -> &LeafArgs {
+        match self {
+            Self::Capture(args) | Self::Settle(args) => args,
         }
     }
 }
@@ -831,6 +859,43 @@ fn leaf_spec(command: &str) -> LeafSpec {
             0,
             0,
         ),
+        "review-target.capture" => spec(
+            &[
+                "--workspace",
+                "--kind",
+                "--revision",
+                "--backend-kind",
+                "--backend-lifecycle-id",
+                "--settlement-owner-file",
+            ],
+            &[],
+            &[
+                "--kind",
+                "--backend-kind",
+                "--backend-lifecycle-id",
+                "--settlement-owner-file",
+            ],
+            0,
+            0,
+        ),
+        "review-target.settle" => spec(
+            &[
+                "--workspace",
+                "--capture-ref",
+                "--expected-revision",
+                "--settlement-owner-file",
+                "--terminal-receipt-file",
+            ],
+            &[],
+            &[
+                "--capture-ref",
+                "--expected-revision",
+                "--settlement-owner-file",
+                "--terminal-receipt-file",
+            ],
+            0,
+            0,
+        ),
         // SPEC-005 grammar: `run [--controller-file <path> | --controller-fd
         // <fd>] start ...`.  `run start` MUST bind a Controller credential, so
         // the carrier the group accepts has to reach this leaf.
@@ -1124,7 +1189,7 @@ fn validate_leaf_tokens(command: &str, args: &[OsString], spec: &LeafSpec) -> Re
             return Err(format!("option {flag} cannot be repeated"));
         }
         for value in supplied {
-            validate_option_value(flag, value)?;
+            validate_option_value(command, flag, value)?;
         }
     }
     if !spec.positional.contains(&positionals) {
@@ -1166,7 +1231,7 @@ fn require_exactly_one(
     }
 }
 
-fn validate_option_value(flag: &str, value: &str) -> Result<(), String> {
+fn validate_option_value(command: &str, flag: &str, value: &str) -> Result<(), String> {
     if flag.ends_with("-fd") {
         let fd = value
             .parse::<i32>()
@@ -1175,7 +1240,15 @@ fn validate_option_value(flag: &str, value: &str) -> Result<(), String> {
             return Err(format!("{flag} requires a nonnegative file descriptor"));
         }
     }
-    if ["--limit", "--offset", "--length", "--expected-generation"].contains(&flag) {
+    if [
+        "--limit",
+        "--offset",
+        "--length",
+        "--expected-generation",
+        "--expected-revision",
+    ]
+    .contains(&flag)
+    {
         value
             .parse::<u64>()
             .map_err(|_| format!("{flag} requires an unsigned integer"))?;
@@ -1195,6 +1268,9 @@ fn validate_option_value(flag: &str, value: &str) -> Result<(), String> {
             "access-transition-unavailable",
             "access-transition-unverified",
         ]),
+        "--kind" if command == "review-target.capture" => {
+            Some(&["workspace", "staged", "dirty", "head", "commit", "range"])
+        }
         "--kind" => Some(&[
             "human-cli",
             "interactive-client",
@@ -1272,6 +1348,43 @@ mod tests {
     #[test]
     fn runtime_capabilities_parses() {
         assert!(Cli::try_parse_from(["dolgorae", "runtime", "capabilities"]).is_ok());
+    }
+    #[test]
+    fn review_target_commands_preserve_checked_scope_and_operation_identity() {
+        let capture = [
+            "dolgorae",
+            "review-target",
+            "capture",
+            "--kind",
+            "dirty",
+            "--backend-kind",
+            "review",
+            "--backend-lifecycle-id",
+            "lifecycle",
+            "--settlement-owner-file",
+            "/private/owner",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(capture).unwrap();
+        assert_eq!(cli.command.machine_name(), "review-target.capture");
+        assert!(validate_argument_contract(&cli.command).is_ok());
+
+        let invalid = [
+            "dolgorae",
+            "review-target",
+            "capture",
+            "--kind",
+            "patch",
+            "--backend-kind",
+            "review",
+            "--backend-lifecycle-id",
+            "lifecycle",
+            "--settlement-owner-file",
+            "/private/owner",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(invalid).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_err());
     }
     #[test]
     fn unknown_nested_command_is_rejected() {

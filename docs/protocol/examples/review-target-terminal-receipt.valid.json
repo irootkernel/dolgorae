@@ -1,0 +1,8 @@
+{
+  "schema": "dolgorae-review-target-terminal-receipt/v1",
+  "backend_kind": "dolgorae-specialist-review",
+  "backend_lifecycle_id": "engagement-018f0c6a",
+  "terminal_state": "completed",
+  "state_revision": 7,
+  "evidence_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}

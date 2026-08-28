@@ -120,6 +120,10 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
+        // The immutable target coordinator owns source capture and settlement
+        // while delegating canonical workspace discovery and Machine errors to
+        // their existing authorities.
+        ("review_target", &["cli", "machine", "workspace"][..]),
         // `run` names `projection` because the Run record and the Run's
         // durable state projection are two halves of the same durable state: an
         // observer that may not take the ledger still has to read the

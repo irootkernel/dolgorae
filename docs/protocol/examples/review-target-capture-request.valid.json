@@ -1,0 +1,9 @@
+{
+  "schema": "dolgorae-review-target-capture-request/v1",
+  "workspace": "/Users/example/project",
+  "kind": "range",
+  "revision": "main...feature",
+  "backend_kind": "dolgorae-specialist-review",
+  "backend_lifecycle_id": "engagement-018f0c6a",
+  "settlement_owner_file": "/Users/example/private/settlement-owner"
+}

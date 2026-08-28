@@ -265,6 +265,9 @@ tool state are not Reviewer-visible target data.
 Capture and settlement are separate versioned Machine operations. A successful
 capture publishes an opaque reference only after every candidate has passed
 eligibility and secret checks and the source identity has been re-observed.
+Their checked requests, manifest, terminal receipt, capture result, and
+settlement result are owned by
+[`dolgorae-review-target-v1.schema.json`](../protocol/dolgorae-review-target-v1.schema.json).
 The same transaction binds the capture to one backend kind and immutable
 lifecycle identity, stores only the digest of a random settlement owner
 credential, and delivers the credential through an owner-only file or inherited
@@ -284,7 +287,9 @@ different post-settlement input is a conflict. The scoped Specialist Review
 coordinator settles after authoritative Dolgorae engagement and Reviewer state;
 Aquarium's Orca-backed review settles only after authoritative Orca lifecycle
 state. The Coordinator never infers cancellation or settlement from elapsed
-time.
+time. A crash after source bytes move into the settlement staging tree but
+before the durable record advances is recovered by revalidating that same tree
+under the settlement lock before completing the compare-and-set.
 
 The scoped Specialist Review Coordinator composes this subsystem with the
 existing External Specialist Facade. It validates the canonical executable's

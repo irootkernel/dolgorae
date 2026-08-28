@@ -15,6 +15,7 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
+        "TASK-014",
         "TASK-022",
         "TASK-023",
         "TASK-024",
@@ -29,7 +30,8 @@
         "two user-facing use cases",
         "offline shell boundary",
         "first usable one-shot read-only Specialist Review product slice",
-        "external review CLI and MCP remain within External Specialist Engagement"
+        "external review CLI and MCP remain within External Specialist Engagement",
+        "immutable review targets remain a local same-user read-only product boundary"
       ]
     },
     "SPEC-002": {
@@ -105,6 +107,7 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
+        "TASK-014",
         "TASK-017",
         "TASK-018",
         "TASK-019",
@@ -139,7 +142,9 @@
         "external stdio MCP review adapter with adapter-bound authority",
         "checked specialist review request and result contract",
         "explicit host-controlled MCP external request reference",
-        "connection and process identity excluded from MCP idempotency"
+        "connection and process identity excluded from MCP idempotency",
+        "immutable review-target capture and settlement Machine CLI carriers",
+        "protected settlement owner and terminal receipt carriers"
       ]
     },
     "SPEC-006": {
@@ -154,6 +159,7 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
+        "TASK-014",
         "TASK-022",
         "TASK-023",
         "TASK-024",
@@ -167,6 +173,7 @@
       ],
       "catches": [
         "machine and protobuf envelopes",
+        "checked immutable review-target request, result, receipt, manifest, and error envelopes",
         "typed errors and timeouts",
         "exact projection membership",
         "append-time typed client-event normalization and 32-envelope or 4 MiB bounded sparse shared-cursor delivery",
@@ -278,6 +285,7 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
+        "TASK-014",
         "TASK-022",
         "TASK-023",
         "TASK-024",
@@ -342,7 +350,8 @@
         "writer-held blocking consultation denial",
         "read-only Reviewer role policy and recursive review denial",
         "adapter-bound review authority without model-supplied workspace or profile",
-        "MCP request reference supplied by trusted metadata rather than model arguments"
+        "MCP request reference supplied by trusted metadata rather than model arguments",
+        "review-target credentials, private tool state, and unsafe content excluded from captured evidence"
       ]
     },
     "SPEC-012": {
@@ -357,6 +366,7 @@
         "TASK-011",
         "TASK-012",
         "TASK-013",
+        "TASK-014",
         "TASK-022",
         "TASK-023",
         "TASK-024",
@@ -415,7 +425,9 @@
         "preview extends final engagement and Run contracts rather than a disposable path",
         "separate milestones for external hardening, live Brokered Hierarchy, and lateral collaboration",
         "external MCP replay safety selected by live per-request metadata probe",
-        "Machine CLI remains mandatory SR1 path when MCP continuity is unavailable"
+        "Machine CLI remains mandatory SR1 path when MCP continuity is unavailable",
+        "six-scope immutable review-target semantics and source non-mutation",
+        "owner-bound idempotent settlement, capture integrity, and unknown preservation"
       ]
     },
     "SPEC-013": {

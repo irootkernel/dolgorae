@@ -4,8 +4,8 @@ use clap::{CommandFactory, Parser};
 use dolgorae::cli::{
     Cli, Command, ControllerCommand, ControllerCredentialCommand, OperatorCommand,
     OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
-    ProfileServerCommand, ProfileStateCommand, RunCommand, RunControllerCommand, RuntimeCommand,
-    SpecialistCommand, WorkspaceCommand, option_path,
+    ProfileServerCommand, ProfileStateCommand, ReviewTargetCommand, RunCommand,
+    RunControllerCommand, RuntimeCommand, SpecialistCommand, WorkspaceCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{
@@ -325,10 +325,37 @@ fn execute(cli: Cli) -> ExitCode {
             Err(error) => render_failure(cli.human, command_name, error),
         };
     }
+    if let Command::ReviewTarget { command } = &cli.command {
+        let (operation, arguments) = match command {
+            ReviewTargetCommand::Capture(args) => {
+                (dolgorae::review_target::Operation::Capture, &args.args)
+            }
+            ReviewTargetCommand::Settle(args) => {
+                (dolgorae::review_target::Operation::Settle, &args.args)
+            }
+        };
+        return match dolgorae::review_target::execute(operation, arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed review target result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
     let semantic_command = match &cli.command {
         Command::Worker(_) => unreachable!("hidden worker handled before semantic dispatch"),
         Command::SpecialistReviewMcp(_) => {
             unreachable!("hidden MCP server handled before semantic dispatch")
+        }
+        Command::ReviewTarget { .. } => {
+            unreachable!("review target handled before semantic dispatch")
         }
         Command::Runtime {
             command: RuntimeCommand::Capabilities,

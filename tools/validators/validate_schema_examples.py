@@ -24,6 +24,7 @@ def schema_name(example_name: str) -> str:
         "ledger-state.": "dolgorae-ledger-state-v1.schema.json",
         "orchestration-state.": "dolgorae-orchestration-state-v1.schema.json",
         "orchestration-": "dolgorae-orchestration-tool-v1.schema.json",
+        "review-target-": "dolgorae-review-target-v1.schema.json",
         "specialist-policy.": "dolgorae-specialist-policy-v1.schema.json",
         "specialist-review-mcp-meta.": "dolgorae-specialist-review-mcp-meta-v1.schema.json",
         "specialist-review-request.": "dolgorae-specialist-review-tool-v1.schema.json",

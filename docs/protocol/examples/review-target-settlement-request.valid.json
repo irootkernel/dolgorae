@@ -1,0 +1,8 @@
+{
+  "schema": "dolgorae-review-target-settlement-request/v1",
+  "workspace": "/Users/example/project",
+  "capture_ref": "018f0c6a-7b01-7abc-8def-0123456789ab",
+  "expected_revision": 1,
+  "settlement_owner_file": "/Users/example/private/settlement-owner",
+  "terminal_receipt_file": "/Users/example/private/terminal-receipt.json"
+}
