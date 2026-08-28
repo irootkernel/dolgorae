@@ -3,8 +3,15 @@
 .claude/
 .codex/
 .codegraph/
-/.mulgae/
-/.gaori/
+/.mulgae/*
+!/.mulgae/config.yaml
+.gaori/*
+!.gaori/tester.yaml
+!.gaori/tester/
+.gaori/tester/*
+!.gaori/tester/rules/
+.gaori/tester/rules/*
+!.gaori/tester/rules/*.yaml
 /.venv/
 /.ruff_cache/
 __pycache__/

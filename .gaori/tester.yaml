@@ -1,0 +1,27 @@
+version: 2
+commands:
+  full:
+    command: ["make", "PYTHON_BIN=.venv/bin/python", "test"]
+    tags: [full, quality]
+    parser: generic
+    timeout_sec: 3600
+  format-check:
+    command: ["make", "format-check"]
+    tags: [format, rust, quality]
+    parser: generic
+    timeout_sec: 300
+  unit:
+    command: ["make", "test-unit"]
+    tags: [unit, rust]
+    parser: generic
+    timeout_sec: 1800
+  integration:
+    command: ["make", "test-int"]
+    tags: [integration, rust]
+    parser: generic
+    timeout_sec: 1800
+  e2e:
+    command: ["make", "PYTHON_BIN=.venv/bin/python", "test-e2e"]
+    tags: [e2e, rust, python]
+    parser: generic
+    timeout_sec: 1800

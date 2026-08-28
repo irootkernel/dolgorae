@@ -1,9 +1,9 @@
 schema: podway.procedure/v2
 id: aquarium-war-room-v2
-version: "1"
+version: "2"
 name: Aquarium War Room
 purpose: Diagnose one difficult bug and produce an approved task, epic, or incomplete-investigation record without implementing a fix.
-description: A Podway record of incident baseline, isolated reproduction, investigation, root-cause and scope decisions, exact-diff approval, documentation, and closeout.
+description: A Podway record of incident baseline or reproduction, investigation, semantic cause and scope decisions, guarded proposal quality, exact-diff approval, documentation, and closeout.
 goal_tracking: true
 node_definitions:
   baseline-record:
@@ -11,6 +11,28 @@ node_definitions:
     title: Capture incident baseline
     intent: Bind the investigation to symptoms, authority, safe scope, and the approved provider boundary.
     items:
+      - id: reproduction-state
+        type: choice
+        prompt: Record whether the defect was reproduced safely in the approved boundary.
+        required: true
+        choices:
+          - reproduced
+          - not-reproduced
+          - reproduction-not-required
+      - id: observed-behavior
+        type: text
+        prompt: Record the observed behavior, including the bounded reproduction result or the evidence available when reproduction was not safe or required.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+      - id: expected-behavior
+        type: text
+        prompt: Record the authority-backed expected behavior and the exact divergence under investigation.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
       - id: baseline-summary
         type: text
         prompt: Record canonical identity, symptoms, revisions, sources and digests, safe reproduction boundary, exclusions, and gaps.
@@ -56,7 +78,7 @@ node_definitions:
     objective: End diagnosis with exactly one bounded task, one epic, or an incomplete investigation.
     prompt: What artifact should this investigation produce?
     evidence_guidance:
-      - Read the established cause or blocker, affected contracts, dependencies, risks, and Design Gate impact.
+      - Read the established cause or blocker, affected contracts, dependencies, and risks.
     options:
       - id: task
         label: Bounded task
@@ -77,7 +99,7 @@ node_definitions:
     items:
       - id: proposal-summary
         type: text
-        prompt: Record target paths, draft digests, scope, evidence, acceptance checks, risks, and Design Gate impact.
+        prompt: Record target paths, draft digests, scope, evidence, acceptance checks, and risks.
         required: true
         min_length: 1
         max_length: 6000
@@ -87,6 +109,17 @@ node_definitions:
     title: Record diagnostic quality review
     intent: Record the Ouroboros quality pass and local adjudication for the selected diagnostic draft.
     items:
+      - id: quality-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-diagnostic-quality; Podway does not execute or attest the operation.
+        help: The declared operation is "Review the current Aquarium diagnostic proposal, investigation evidence, classification, and trust claims outside Podway in the recorded input basis." The matching digest identifies only this abstract slot contract and does not prove that any operation ran.
+        required: true
+        operation_id: aquarium-diagnostic-quality
+        operation_digest: sha256:c0ffd5f99c1298e6e184c69ab32ef83baa5db605e30ed201598f63770bc7cbbd
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
       - id: quality-summary
         type: text
         prompt: Record the reviewed draft identity and digest, Ouroboros QA operation, locally verified findings, adjudication, and repository status.
@@ -94,24 +127,117 @@ node_definitions:
         min_length: 1
         max_length: 6000
         multiline: true
-      - id: unresolved-valid-findings
+      - id: unresolved-investigation-findings
         type: integer
-        prompt: Record the number of unresolved locally valid findings.
+        prompt: Record the number of unresolved baseline, reproduction, or investigation findings.
         required: true
+        minimum: 0
+      - id: unresolved-proposal-findings
+        type: integer
+        prompt: Record the number of unresolved classification, proposal, or trust-claim findings.
+        required: true
+        minimum: 0
+      - id: investigation-findings
+        type: list
+        prompt: Record bounded unresolved baseline, reproduction, or investigation findings.
+        required: false
+        required_when:
+          - item: unresolved-investigation-findings
+            at_least: 1
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
+      - id: proposal-findings
+        type: list
+        prompt: Record bounded unresolved classification, proposal, or trust-claim findings.
+        required: false
+        required_when:
+          - item: unresolved-proposal-findings
+            at_least: 1
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
+      - id: quality-observations
+        type: list
+        prompt: Record failure or inconclusive quality-operation observations.
+        required: false
+        required_when:
+          - item: quality-result
+            field: outcome
+            not_equals: pass
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
   quality-decision:
     type: decision
     title: Evaluate diagnostic quality
-    objective: Require the selected task, epic, or incomplete-investigation draft to resolve every locally valid quality finding before approval.
+    objective: Route the quality result to the phase that owns each correction before approval.
     prompt: Is the selected diagnostic draft ready for exact-diff approval?
     evidence_guidance:
       - Read the selected draft, Ouroboros QA result, local adjudication, and unresolved-valid-findings count.
     options:
       - id: passed
         label: Quality passed
-        criteria: The current selected draft has zero unresolved locally valid findings.
-      - id: revise
-        label: Revision required
-        criteria: Evidence, classification, or draft content must change to resolve a locally valid finding.
+        criteria: The external quality result passed and no unresolved investigation or proposal finding remains.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: quality
+              item: unresolved-investigation-findings
+            equals: 0
+          - evidence:
+              node: quality
+              item: unresolved-proposal-findings
+            equals: 0
+      - id: investigation-changes
+        label: Investigation changes required
+        criteria: At least one baseline, reproduction, or investigation finding remains.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: quality
+              item: unresolved-investigation-findings
+            at_least: 1
+      - id: proposal-changes
+        label: Proposal changes required
+        criteria: No investigation finding remains and at least one classification, proposal, or trust-claim finding remains.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: quality
+              item: unresolved-investigation-findings
+            equals: 0
+          - evidence:
+              node: quality
+              item: unresolved-proposal-findings
+            at_least: 1
+      - id: incomplete
+        label: Quality review incomplete
+        criteria: The external quality result failed or is inconclusive.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            not_equals: pass
     reason:
       required: true
       prompt: Explain the quality decision from the current draft and adjudicated findings.
@@ -139,22 +265,10 @@ node_definitions:
     items:
       - id: documentation-summary
         type: text
-        prompt: Record applied paths and digests, validation, work-unit classification, and final Design Gate impact.
+        prompt: Record applied paths and digests, validation, and work-unit classification.
         required: true
         min_length: 1
         max_length: 5000
-        multiline: true
-  rejection-record:
-    type: action
-    title: Record unapproved diagnostic proposal
-    intent: Preserve the user's exact-diff rejection and the unapplied artifact boundary without mutating repository documents.
-    items:
-      - id: rejection-summary
-        type: text
-        prompt: Record the rejected draft identity and digest, user decision, unapplied paths, repository status, and any future explicit continuation.
-        required: true
-        min_length: 1
-        max_length: 4000
         multiline: true
   goal-assessment:
     type: decision
@@ -189,7 +303,7 @@ node_definitions:
     items:
       - id: closeout-summary
         type: text
-        prompt: Record classification, paths and digests, evidence gaps, gate state, repository residue, and next explicit workflow.
+        prompt: Record classification, paths and digests, evidence gaps, repository residue, and next explicit workflow.
         required: true
         min_length: 1
         max_length: 4000
@@ -202,12 +316,22 @@ graph:
       next: investigate
     - id: investigate
       use: investigation-record
+      evidence_from:
+        - node: capture-baseline
+          required: true
+          items:
+            - reproduction-state
+            - observed-behavior
+            - expected-behavior
+            - baseline-summary
       next: decide-cause
     - id: decide-cause
       use: cause-decision
       evidence_from:
         - node: investigate
           required: true
+          items:
+            - investigation-summary
       routes:
         established:
           to: classify-scope
@@ -223,6 +347,8 @@ graph:
       evidence_from:
         - node: investigate
           required: true
+          items:
+            - investigation-summary
         - node: decide-cause
           required: true
       routes:
@@ -249,62 +375,113 @@ graph:
       evidence_from:
         - node: draft-task
           required: false
+          items:
+            - proposal-summary
         - node: draft-epic
           required: false
+          items:
+            - proposal-summary
         - node: draft-incomplete
           required: false
+          items:
+            - proposal-summary
       next: decide-quality
     - id: decide-quality
       use: quality-decision
       evidence_from:
         - node: draft-task
           required: false
+          items:
+            - proposal-summary
         - node: draft-epic
           required: false
+          items:
+            - proposal-summary
         - node: draft-incomplete
           required: false
+          items:
+            - proposal-summary
         - node: quality
           required: true
+          items:
+            - quality-result
+            - quality-summary
+            - unresolved-investigation-findings
+            - unresolved-proposal-findings
+            - investigation-findings
+            - proposal-findings
+            - quality-observations
       routes:
         passed:
           to: approve-diff
           effect: advance
-        revise:
+        investigation-changes:
+          to: capture-baseline
+          effect: rework
+        proposal-changes:
           to: investigate
+          effect: rework
+        incomplete:
+          to: quality
           effect: rework
     - id: approve-diff
       use: approval-decision
       evidence_from:
         - node: draft-task
           required: false
+          items:
+            - proposal-summary
         - node: draft-epic
           required: false
+          items:
+            - proposal-summary
         - node: draft-incomplete
           required: false
+          items:
+            - proposal-summary
         - node: quality
           required: true
+          items:
+            - quality-result
+            - quality-summary
+            - unresolved-investigation-findings
+            - unresolved-proposal-findings
       routes:
         approved:
           to: document
           effect: advance
         changes-requested:
-          to: record-rejection
-          effect: advance
+          to: investigate
+          effect: rework
     - id: document
       use: documentation-record
-      next: assess-goal
-    - id: record-rejection
-      use: rejection-record
+      evidence_from:
+        - node: draft-task
+          required: false
+          items:
+            - proposal-summary
+        - node: draft-epic
+          required: false
+          items:
+            - proposal-summary
+        - node: draft-incomplete
+          required: false
+          items:
+            - proposal-summary
+        - node: approve-diff
+          required: true
       next: assess-goal
     - id: assess-goal
       use: goal-assessment
       evidence_from:
         - node: investigate
           required: true
+          items:
+            - investigation-summary
         - node: document
-          required: false
-        - node: record-rejection
-          required: false
+          required: true
+          items:
+            - documentation-summary
       routes:
         achieved:
           to: closeout
@@ -317,6 +494,9 @@ graph:
           effect: advance
     - id: closeout
       use: closeout-record
+      evidence_from:
+        - node: assess-goal
+          required: true
       terminal: true
 manual_rework:
   allowed_targets:

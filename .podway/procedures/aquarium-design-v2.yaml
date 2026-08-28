@@ -1,9 +1,9 @@
 schema: podway.procedure/v2
 id: aquarium-design-v2
-version: "1"
+version: "2"
 name: Aquarium Design
-purpose: Shape one approved project, epic, refactor, or Design Gate document set without implementing it.
-description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, quality review, exact-diff approval, document application, and closeout.
+purpose: Shape one approved project, feature epic, or refactor document set without implementing it.
+description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, challenge, guarded quality review, exact-diff approval, document application, and closeout.
 goal_tracking: true
 node_definitions:
   context-record:
@@ -33,20 +33,52 @@ node_definitions:
   draft-record:
     type: action
     title: Record the proposed design
-    intent: Bind quality review to one exact draft and Design Gate impact.
+    intent: Bind quality review to one exact draft and its unresolved constraints.
     items:
       - id: draft-summary
         type: text
-        prompt: Record target paths, draft digests, work-unit identity, Design Gate impact, and unresolved constraints.
+        prompt: Record target paths, draft digests, work-unit identity, and unresolved constraints.
         required: true
         min_length: 1
         max_length: 5000
+        multiline: true
+  challenge-record:
+    type: action
+    title: Challenge the proposed design
+    intent: Test the current draft against counterarguments, uncertainty, and missing evidence before quality review.
+    items:
+      - id: counterarguments
+        type: list
+        prompt: Record the material counterarguments or alternative designs considered.
+        required: true
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
+      - id: uncertainty
+        type: text
+        prompt: Record material uncertainty, evidence limitations, and what could change the design.
+        required: true
+        min_length: 1
+        max_length: 4000
         multiline: true
   quality-record:
     type: action
     title: Record Ouroboros quality evidence
     intent: Record the QA result and local adjudication for the current draft.
     items:
+      - id: quality-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-quality; Podway does not execute or attest the operation.
+        help: The declared operation is "Review the current Aquarium design draft, challenge, authority, and trust claims outside Podway in the recorded input basis." The matching digest identifies only this abstract slot contract and does not prove that any operation ran.
+        required: true
+        operation_id: aquarium-design-quality
+        operation_digest: sha256:3f51262cfcf3bb213105d52e1f2c41a79308d012001ad0832903e5ba72cefa89
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
       - id: quality-summary
         type: text
         prompt: Record QA operation IDs, findings, dispositions, and remaining evidence gaps.
@@ -54,24 +86,117 @@ node_definitions:
         min_length: 1
         max_length: 6000
         multiline: true
-      - id: unresolved-valid-findings
+      - id: unresolved-discovery-findings
         type: integer
-        prompt: Record unresolved valid finding count.
+        prompt: Record the number of unresolved authority, source, or discovery findings.
         required: true
+        minimum: 0
+      - id: unresolved-draft-findings
+        type: integer
+        prompt: Record the number of unresolved draft, challenge, or trust-claim findings.
+        required: true
+        minimum: 0
+      - id: discovery-findings
+        type: list
+        prompt: Record bounded unresolved authority, source, or discovery findings.
+        required: false
+        required_when:
+          - item: unresolved-discovery-findings
+            at_least: 1
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
+      - id: draft-findings
+        type: list
+        prompt: Record bounded unresolved draft, challenge, or trust-claim findings.
+        required: false
+        required_when:
+          - item: unresolved-draft-findings
+            at_least: 1
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
+      - id: quality-observations
+        type: list
+        prompt: Record failure or inconclusive quality-operation observations.
+        required: false
+        required_when:
+          - item: quality-result
+            field: outcome
+            not_equals: pass
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
   quality-decision:
     type: decision
     title: Evaluate design quality
-    objective: Only a complete, internally consistent draft may be proposed for application.
+    objective: Route each complete quality result to the phase that owns its correction.
     prompt: Is the current draft ready for exact-diff approval?
     evidence_guidance:
-      - Read the draft identity, Ouroboros QA evidence, local adjudication, and gate impact.
+      - Read the draft identity, Ouroboros QA evidence, local adjudication, and unresolved constraints.
     options:
       - id: passed
         label: Quality passed
-        criteria: QA is complete and no valid unresolved finding remains.
-      - id: revise
-        label: Revision required
-        criteria: A valid finding, unresolved design decision, or evidence gap requires a new draft.
+        criteria: The external quality result passed and no unresolved discovery or draft finding remains.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: quality
+              item: unresolved-discovery-findings
+            equals: 0
+          - evidence:
+              node: quality
+              item: unresolved-draft-findings
+            equals: 0
+      - id: discovery-changes
+        label: Discovery changes required
+        criteria: At least one authority, source, or discovery finding remains.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: quality
+              item: unresolved-discovery-findings
+            at_least: 1
+      - id: draft-changes
+        label: Draft changes required
+        criteria: No discovery finding remains and at least one draft, challenge, or trust-claim finding remains.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: quality
+              item: unresolved-discovery-findings
+            equals: 0
+          - evidence:
+              node: quality
+              item: unresolved-draft-findings
+            at_least: 1
+      - id: incomplete
+        label: Quality review incomplete
+        criteria: The external quality result failed or is inconclusive.
+        guards:
+          - evidence:
+              node: quality
+              item: quality-result
+            field: outcome
+            not_equals: pass
     reason:
       required: true
       prompt: Explain the decision from current evidence.
@@ -99,7 +224,7 @@ node_definitions:
     items:
       - id: application-summary
         type: text
-        prompt: Record applied paths and digests, validation commands and outcomes, and final Design Gate state.
+        prompt: Record applied paths and digests, validation commands and outcomes, and unresolved constraints.
         required: true
         min_length: 1
         max_length: 6000
@@ -110,14 +235,14 @@ node_definitions:
     objective: Determine whether the approved document outcome was achieved without implementation.
     prompt: What is the outcome of the current design goal?
     evidence_guidance:
-      - Read the approved diff, applied digests, validation, and Design Gate state.
+      - Read the approved diff, applied digests, validation, and unresolved constraints.
     options:
       - id: achieved
         label: Goal achieved
         criteria: The exact approved documents are applied and all required validation is current.
       - id: not-achieved
         label: Goal not achieved
-        criteria: Required documents, validation, or gate resolution remain incomplete.
+        criteria: Required documents, validation, or unresolved constraints remain incomplete.
       - id: superseded
         label: Goal superseded
         criteria: The desired design outcome has been replaced explicitly.
@@ -133,11 +258,11 @@ node_definitions:
   closeout-record:
     type: action
     title: Record design closeout
-    intent: Record final artifacts, gate state, residue, commit authority, and publication state.
+    intent: Record final artifacts, unresolved constraints, residue, commit authority, and publication state.
     items:
       - id: closeout-summary
         type: text
-        prompt: Record final paths and digests, gate IDs or pending status, repository residue, commit if required, and publication state.
+        prompt: Record final paths and digests, repository residue, commit if required, and publication state.
         required: true
         min_length: 1
         max_length: 4000
@@ -150,34 +275,90 @@ graph:
       next: discover
     - id: discover
       use: discovery-record
+      evidence_from:
+        - node: capture-context
+          required: true
+          items:
+            - context-summary
       next: draft
     - id: draft
       use: draft-record
+      evidence_from:
+        - node: discover
+          required: true
+          items:
+            - discovery-summary
+      next: challenge
+    - id: challenge
+      use: challenge-record
+      evidence_from:
+        - node: draft
+          required: true
+          items:
+            - draft-summary
       next: quality
     - id: quality
       use: quality-record
+      evidence_from:
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+        - node: challenge
+          required: true
+          items:
+            - counterarguments
+            - uncertainty
       next: decide-quality
     - id: decide-quality
       use: quality-decision
       evidence_from:
         - node: draft
           required: true
+          items:
+            - draft-summary
         - node: quality
           required: true
+          items:
+            - quality-result
+            - quality-summary
+            - unresolved-discovery-findings
+            - unresolved-draft-findings
+            - discovery-findings
+            - draft-findings
+            - quality-observations
       routes:
         passed:
           to: approve-diff
           effect: advance
-        revise:
+        discovery-changes:
+          to: discover
+          effect: rework
+        draft-changes:
           to: draft
+          effect: rework
+        incomplete:
+          to: quality
           effect: rework
     - id: approve-diff
       use: approval-decision
       evidence_from:
         - node: draft
           required: true
+          items:
+            - draft-summary
+        - node: challenge
+          required: true
+          items:
+            - counterarguments
+            - uncertainty
         - node: quality
           required: true
+          items:
+            - quality-result
+            - quality-summary
+            - unresolved-discovery-findings
+            - unresolved-draft-findings
       routes:
         approved:
           to: apply-documents
@@ -187,14 +368,25 @@ graph:
           effect: rework
     - id: apply-documents
       use: application-record
+      evidence_from:
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+        - node: approve-diff
+          required: true
       next: assess-goal
     - id: assess-goal
       use: goal-assessment
       evidence_from:
         - node: capture-context
           required: true
+          items:
+            - context-summary
         - node: apply-documents
           required: true
+          items:
+            - application-summary
       routes:
         achieved:
           to: closeout
@@ -207,6 +399,9 @@ graph:
           effect: advance
     - id: closeout
       use: closeout-record
+      evidence_from:
+        - node: assess-goal
+          required: true
       terminal: true
 manual_rework:
   allowed_targets:

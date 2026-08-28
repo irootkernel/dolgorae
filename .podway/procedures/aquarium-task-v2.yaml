@@ -1,9 +1,9 @@
 schema: podway.procedure/v2
 id: aquarium-task-v2
-version: "3"
+version: "5"
 name: Aquarium Task
 purpose: Deliver one approved roadmap task through the complete Aquarium evidence workflow.
-description: A Podway record of task-handler planning, implementation, verification, refinement, documentation, review, approval, and closeout.
+description: A Podway record of task-handler planning, implementation, refinement, verification, documentation, review, approval, and closeout.
 goal_tracking: true
 node_definitions:
   plan-record:
@@ -24,6 +24,18 @@ node_definitions:
         required: false
         allowed_media_types:
           - text/markdown
+  implementation-entry-record:
+    type: action
+    title: Prepare implementation entry
+    intent: Bind implementation either to the approved plan or to an operationally complete failed review CI decision.
+    items:
+      - id: implementation-entry-summary
+        type: text
+        prompt: Record the approved-plan basis on first entry or the exact failed review CI and rework basis on CI re-entry.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
   implementation-record:
     type: action
     title: Record implementation
@@ -48,20 +60,30 @@ node_definitions:
     title: Record verification
     intent: Record current requirement-mapped verification evidence.
     items:
-      - id: verification-summary
-        type: text
-        prompt: Record commands, actors, exit statuses, evidence references, and gaps.
+      - id: verification-result
+        type: check_result
+        prompt: Record the caller-supplied result for software-change-verification; Podway does not execute or attest the operation.
+        help: The declared operation is "Run the repository-authoritative verification required for the current software change in the recorded input basis." The matching digest identifies only this abstract slot contract and does not prove that any operation ran.
         required: true
-        min_length: 1
-        max_length: 6000
-        multiline: true
-      - id: verification-acceptable
-        type: choice
-        prompt: Record whether all required current verification is acceptable.
-        required: true
-        choices:
-          - acceptable
-          - unacceptable
+        operation_id: software-change-verification
+        operation_digest: sha256:b904aefd4dbd6b01337645fd34b1424efc9faf3d22c936de666305335076969e
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: verification-observations
+        type: list
+        prompt: Record failure or inconclusive observations, commands, actors, exit statuses, evidence references, and gaps.
+        required: false
+        required_when:
+          - item: verification-result
+            field: outcome
+            not_equals: pass
+        min_items: 1
+        max_items: 20
+        max_item_length: 1000
+        max_total_length: 20000
+        unique: true
   verification-decision:
     type: decision
     title: Evaluate verification
@@ -73,9 +95,21 @@ node_definitions:
       - id: passed
         label: Verification passed
         criteria: All required checks have current acceptable evidence.
+        guards:
+          - evidence:
+              node: verify
+              item: verification-result
+            field: outcome
+            equals: pass
       - id: failed
         label: Verification failed
         criteria: A required check failed, is stale, or lacks required evidence.
+        guards:
+          - evidence:
+              node: verify
+              item: verification-result
+            field: outcome
+            not_equals: pass
     reason:
       required: true
       prompt: Explain the decision using the recorded evidence.
@@ -112,6 +146,7 @@ node_definitions:
         type: integer
         prompt: Record the positive root-review ordinal for the current goal revision.
         required: true
+        minimum: 1
       - id: review-mode
         type: choice
         prompt: Record whether this round may trigger remediation or is confirmation-only.
@@ -133,10 +168,28 @@ node_definitions:
         min_length: 1
         max_length: 6000
         multiline: true
+      - id: ci-decision
+        type: choice
+        prompt: Record the exact Mulgae CI decision for this operationally complete review.
+        required: true
+        choices:
+          - pass
+          - fail
       - id: unresolved-valid-findings
         type: integer
         prompt: Record the number of unresolved valid findings.
         required: true
+        minimum: 0
+      - id: unresolved-implementation-findings
+        type: integer
+        prompt: Record the number of unresolved findings owned by implementation or refinement.
+        required: true
+        minimum: 0
+      - id: unresolved-documentation-findings
+        type: integer
+        prompt: Record the number of unresolved findings owned by documentation.
+        required: true
+        minimum: 0
   review-decision:
     type: decision
     title: Evaluate review
@@ -149,9 +202,67 @@ node_definitions:
       - id: approved
         label: Review approved
         criteria: The root review is operationally complete, CI passed, no valid unresolved finding remains, and the review pass changed no files.
-      - id: changes-requested
-        label: Changes requested
-        criteria: Review is incomplete, CI failed, or a remediation-eligible valid finding requires correction through the owning phase. Do not select this option for a confirmation-only hold without user authorization.
+        guards:
+          - evidence:
+              node: review
+              item: ci-decision
+            equals: pass
+          - evidence:
+              node: review
+              item: unresolved-valid-findings
+            equals: 0
+          - evidence:
+              node: review
+              item: unresolved-implementation-findings
+            equals: 0
+          - evidence:
+              node: review
+              item: unresolved-documentation-findings
+            equals: 0
+      - id: ci-failed
+        label: CI failed
+        criteria: The root review is operationally complete, but its CI decision failed and requires implementation rework regardless of finding counts.
+        guards:
+          - evidence:
+              node: review
+              item: ci-decision
+            equals: fail
+      - id: implementation-changes
+        label: Implementation changes requested
+        criteria: A remediation-eligible review whose CI passed has a valid implementation or refinement finding. Do not select this option for a confirmation-only hold without user authorization.
+        guards:
+          - evidence:
+              node: review
+              item: ci-decision
+            equals: pass
+          - evidence:
+              node: review
+              item: review-mode
+            equals: remediation-eligible
+          - evidence:
+              node: review
+              item: unresolved-implementation-findings
+            at_least: 1
+      - id: documentation-changes
+        label: Documentation changes requested
+        criteria: A remediation-eligible review has no implementation finding and at least one documentation finding.
+        guards:
+          - evidence:
+              node: review
+              item: ci-decision
+            equals: pass
+          - evidence:
+              node: review
+              item: review-mode
+            equals: remediation-eligible
+          - evidence:
+              node: review
+              item: unresolved-implementation-findings
+            equals: 0
+          - evidence:
+              node: review
+              item: unresolved-documentation-findings
+            at_least: 1
     reason:
       required: true
       prompt: Explain the decision using the recorded review evidence.
@@ -228,70 +339,139 @@ node_definitions:
         required: false
         min_items: 0
         max_items: 50
-        max_item_length: 1000
+        max_item_length: 1200
+        max_total_length: 1000000
         unique: true
 graph:
   entry: record-plan
   nodes:
     - id: record-plan
       use: plan-record
+      next: prepare-implementation
+    - id: prepare-implementation
+      use: implementation-entry-record
+      evidence_from:
+        - node: record-plan
+          required: true
+          items:
+            - plan-summary
       next: implement
     - id: implement
       use: implementation-record
+      next: refine
+    - id: refine
+      use: refinement-record
+      evidence_from:
+        - node: implement
+          required: true
+          items:
+            - implementation-summary
+            - source-revision
       next: verify
     - id: verify
       use: verification-record
+      evidence_from:
+        - node: refine
+          required: true
+          items:
+            - refinement-summary
       next: decide-verification
     - id: decide-verification
       use: verification-decision
       evidence_from:
-        - node: implement
-          required: true
         - node: verify
           required: true
+          items:
+            - verification-result
+            - verification-observations
       routes:
         passed:
-          to: refine
+          to: document
           effect: advance
         failed:
-          to: implement
+          to: refine
           effect: rework
-    - id: refine
-      use: refinement-record
-      next: document
     - id: document
       use: documentation-record
       next: review
     - id: review
       use: review-record
+      evidence_from:
+        - node: verify
+          required: true
+          items:
+            - verification-result
+        - node: document
+          required: true
+          items:
+            - documentation-summary
       next: decide-review
     - id: decide-review
       use: review-decision
       evidence_from:
         - node: review
           required: true
+          items:
+            - review-round
+            - review-mode
+            - review-run-id
+            - review-summary
+            - ci-decision
+            - unresolved-valid-findings
+            - unresolved-implementation-findings
+            - unresolved-documentation-findings
       routes:
         approved:
           to: assess-goal
           effect: advance
-        changes-requested:
-          to: refine
+        ci-failed:
+          to: prepare-implementation
+          effect: rework
+        implementation-changes:
+          to: implement
+          effect: rework
+        documentation-changes:
+          to: document
           effect: rework
     - id: assess-goal
       use: goal-assessment
       evidence_from:
         - node: record-plan
           required: true
+          items:
+            - plan-summary
+        - node: prepare-implementation
+          required: true
+          items:
+            - implementation-entry-summary
         - node: implement
           required: true
+          items:
+            - implementation-summary
+            - source-revision
         - node: verify
           required: true
+          items:
+            - verification-result
         - node: refine
           required: true
+          items:
+            - refinement-summary
         - node: document
           required: true
+          items:
+            - documentation-summary
         - node: review
           required: true
+          items:
+            - review-round
+            - review-mode
+            - review-run-id
+            - review-summary
+            - ci-decision
+            - unresolved-valid-findings
+            - unresolved-implementation-findings
+            - unresolved-documentation-findings
       routes:
         achieved:
           to: record-outcome
@@ -312,6 +492,8 @@ graph:
           required: true
         - node: record-outcome
           required: true
+          items:
+            - outcome-summary
       routes:
         approved:
           to: closeout

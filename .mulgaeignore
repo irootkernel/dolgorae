@@ -1,0 +1,24 @@
+# Credentials and local secrets
+.env
+.env.*
+*.pem
+*.key
+/credentials/
+
+# Agent and workflow control state
+/AGENTS.md
+/CLAUDE.md
+/.codex/
+/.gaori/
+/.mulgae/
+/.podway/runtime/
+
+# Generated and duplicated output
+/target/
+/.venv/
+/.ruff_cache/
+__pycache__/
+*.py[cod]
+*.zip
+/docs.zip
+/prompt.md
