@@ -548,6 +548,8 @@ collaboration, or Personal Alpha readiness.
 
 Status: `PLANNED`
 
+Detailed SOT: [EPIC-004 dossier](../todo/TODO-EPIC-004-immutable-review-targets-and-aquarium-activation.md)
+
 Goal: Implement reusable immutable review targets, extend Dolgorae Specialist
 Review to dirty and historical Git state, and replace the Orca-created Codex
 terminal in Aquarium independent-review with Dolgorae. Mulgae,

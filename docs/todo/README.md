@@ -9,7 +9,7 @@ None.
 
 ## Adopted active-Epic dossiers
 
-None. The canonical roadmap currently has no active Epic.
+- [`EPIC-004: Immutable Review Targets and Aquarium Activation`](TODO-EPIC-004-immutable-review-targets-and-aquarium-activation.md)
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the
