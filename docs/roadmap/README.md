@@ -640,7 +640,7 @@ acceptance; and an independent adversarial read-only review.
 
 ### TASK-016: Aquarium Activation and Runtime Completed Confirm
 
-Status: `PLANNED`
+Status: `BLOCKED`
 
 Depends on `TASK-015`. Freeze one exact task-complete Dolgorae candidate, fill
 the placeholders in the handoff below, and move this Task to `BLOCKED` while an
@@ -651,19 +651,23 @@ contract, skills, supervision references, scripts, and tests under Aquarium's
 own authority. This repository does not prepare a migration document or make an
 Aquarium change on the owner's behalf.
 
-Copy the following request verbatim after replacing every angle-bracketed
-placeholder:
+Copy the following request verbatim. The frozen Dolgorae fields are final; the
+Aquarium owner must replace every `REQUIRED:` marker with exact evidence before
+returning the Completed Confirm:
 
 ```text
 Aquarium independent-review Dolgorae activation request
 
 Validated Dolgorae candidate:
-- repository commit: <DOLGORAE_COMMIT>
-- version: <DOLGORAE_VERSION>
-- executable path: <CANONICAL_EXECUTABLE_PATH>
-- executable file identity: <EXECUTABLE_FILE_IDENTITY>
-- executable SHA-256: <EXECUTABLE_SHA256>
-- capability/contract digest: <CAPABILITY_DIGEST>
+- repository commit: 7685c58d42c654ea20f1ee5bfba02bc28abc441f
+- version: 0.1.0
+- executable path: /Users/draccoon/Workspace/RootKernel/dolgorae/dolgorae/target/release/dolgorae
+- executable file identity: darwin device=16777232 inode=635709269
+- executable SHA-256: sha256:f4c940fcf00ff0bb6aaeb27b3b5a1b9fbfdd5115fde0a88246a3432d91a425f9
+- capability/contract digest: sha256:0c7f8bb7e6b6f86fd98eb5aec9cda1e6859fbc1da2f06b1c0e4a21ad2e5ff307
+
+The capability/contract digest is SHA-256 over the compact JSON `data` object
+from `runtime capabilities` with object keys sorted lexicographically.
 
 Required outcome:
 1. Aquarium independent-review must use this exact Dolgorae candidate to
@@ -713,17 +717,17 @@ Required Completed Confirm:
   "completion_scope": "aquarium_runtime_activation",
   "runtime_implementation": "verified",
   "dolgorae": {
-    "commit": "<DOLGORAE_COMMIT>",
-    "version": "<DOLGORAE_VERSION>",
-    "canonical_executable_path": "<CANONICAL_EXECUTABLE_PATH>",
-    "executable_file_identity": "<EXECUTABLE_FILE_IDENTITY>",
-    "executable_sha256": "<EXECUTABLE_SHA256>",
-    "capability_digest": "<CAPABILITY_DIGEST>",
-    "launch_identity_evidence": "<STABLE_REFERENCE_PROVING_THE_INVOKED_OBJECT>"
+    "commit": "7685c58d42c654ea20f1ee5bfba02bc28abc441f",
+    "version": "0.1.0",
+    "canonical_executable_path": "/Users/draccoon/Workspace/RootKernel/dolgorae/dolgorae/target/release/dolgorae",
+    "executable_file_identity": "darwin device=16777232 inode=635709269",
+    "executable_sha256": "sha256:f4c940fcf00ff0bb6aaeb27b3b5a1b9fbfdd5115fde0a88246a3432d91a425f9",
+    "capability_digest": "sha256:0c7f8bb7e6b6f86fd98eb5aec9cda1e6859fbc1da2f06b1c0e4a21ad2e5ff307",
+    "launch_identity_evidence": "REQUIRED: stable reference proving the invoked object"
   },
   "aquarium": {
-    "commit": "<EXACT_AQUARIUM_COMMIT>",
-    "installed_plugin_digest": "<INSTALLED_PLUGIN_DIGEST>"
+    "commit": "REQUIRED: exact Aquarium commit",
+    "installed_plugin_digest": "REQUIRED: installed plugin digest"
   },
   "independent_review": {
     "backend": "dolgorae",
@@ -748,8 +752,8 @@ Required Completed Confirm:
   "source_mutation_observed": false,
   "settlement_authorization_tests": "passed",
   "failure_and_recovery_tests": "passed",
-  "validation_commands": ["<COMMAND_AND_RESULT>"],
-  "independent_review_evidence": "<STABLE_REFERENCE>",
+  "validation_commands": ["REQUIRED: exact command and result"],
+  "independent_review_evidence": "REQUIRED: stable independent-review evidence reference",
   "unresolved_blockers": []
 }
 
