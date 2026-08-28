@@ -9,7 +9,7 @@ accepted decision, not an append-only historical chain. If a decision changes,
 edit its ADR in place and update every affected SOT document in the same change;
 Git history preserves the prior text. Contradictory active ADRs are invalid.
 Document roles and the required synchronization procedure are defined by the
-[documentation authority map](README.md).
+[documentation authority map](../README.md).
 
 ## ADR-001: Ship One Binary With Two Public Adapters and No Installed Daemon
 
@@ -677,7 +677,8 @@ shares the production parser can certify the same mistake twice.
 Use `serde_json::RawValue` only behind an in-repository duplicate-detecting
 visitor that preserves numeric source lexemes through adaptation; never parse
 untrusted protocol input directly into `serde_json::Value` or typed structs.
-The safe dependency/mechanism table in architecture.md is normative, and every
+The safe dependency/mechanism table in `docs/architecture/README.md` is
+normative, and every
 new runtime dependency requires an ADR amendment. The shared fake app-server is
 an independent Python WebSocket-over-Unix-socket subprocess owned by TASK-004 and driven by
 manifest-validated declarative scenarios.

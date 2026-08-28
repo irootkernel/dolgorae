@@ -879,7 +879,7 @@ fn leaf_spec(command: &str) -> LeafSpec {
         | "run.reconcile"
         | "run.verify"
         | "run.controller.verify" => spec(C, &[], &[], 1, 1),
-        // specs.md: "Pause and close reject running or waiting runs unless
+        // docs/specs/README.md: "Pause and close reject running or waiting runs unless
         // `--interrupt` is present."  The switch has to exist before it can be
         // required.
         "run.close" => spec(C, &["--interrupt"], &[], 1, 1),
@@ -1238,7 +1238,7 @@ fn validate_option_value(flag: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// specs.md fixes the whole `<duration>` grammar: "a positive base-10 integer
+/// docs/specs/README.md fixes the whole `<duration>` grammar: "a positive base-10 integer
 /// followed immediately by `ms`, `s`, `m`, or `h`.  Fractions, compound
 /// durations, zero, negative values, and values greater than 24 hours are
 /// rejected with `INVALID_ARGUMENT`."
@@ -1372,7 +1372,7 @@ mod tests {
         );
     }
 
-    /// specs.md: "`<duration>` is a positive base-10 integer followed
+    /// docs/specs/README.md: "`<duration>` is a positive base-10 integer followed
     /// immediately by `ms`, `s`, `m`, or `h`.  Fractions, compound durations,
     /// zero, negative values, and values greater than 24 hours are rejected."
     #[test]

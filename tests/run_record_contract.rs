@@ -319,7 +319,7 @@ fn manifest_rejects_mutable_or_inconsistent_identity() {
     );
 }
 
-/// specs.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
+/// docs/specs/README.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
 /// limited to 128, 64, and 256 UTF-8 bytes, and reject NUL/control
 /// characters", and a `direct_interactive` Primary Run "MUST NOT carry a
 /// parent reference".  The record layer is the last place that can refuse one,
@@ -563,7 +563,7 @@ impl Drop for TestTree {
     }
 }
 
-/// specs.md: "Run allocation reserves its key before publishing a Run ...
+/// docs/specs/README.md: "Run allocation reserves its key before publishing a Run ...
 /// Response loss is reconciled by retrying the identical allocation key, which
 /// returns the original Run; changed normalized input is
 /// `IDEMPOTENCY_CONFLICT` and can never allocate another Run under that key."

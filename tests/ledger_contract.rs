@@ -1767,7 +1767,7 @@ fn an_observer_pages_the_durable_ledger_through_the_head_it_captured() {
 }
 
 /// The Run's last terminal Turn is durable evidence, not a worker's memory:
-/// specs.md sends a Master to `run status.data.last_terminal` for the
+/// docs/specs/README.md sends a Master to `run status.data.last_terminal` for the
 /// response, usage, and cursor behind an intentionally minimal exit-7
 /// envelope, and a stopped or restarted worker has none of that in process.
 #[test]

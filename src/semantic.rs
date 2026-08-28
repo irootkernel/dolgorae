@@ -292,7 +292,7 @@ fn run_start_with_context(
 
     let state_root = workspace_state_root(&view)?;
     let profile = run_profile_snapshot(&state.snapshot)?;
-    // specs.md: "Run allocation reserves its key before publishing a Run."
+    // docs/specs/README.md: "Run allocation reserves its key before publishing a Run."
     // The normalization is decided here, before any Run identity exists, so a
     // retried allocation resolves to the same digest and therefore the same
     // Run rather than to a second one.
@@ -353,7 +353,7 @@ fn run_start_with_context(
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     // The identical retry returns the original Run.  Reaching a published Run
     // through its own reservation is exactly the response-loss reconciliation
-    // specs.md describes, so nothing is allocated, published, or started again
+    // docs/specs/README.md describes, so nothing is allocated, published, or started again
     // — and because nothing here reached that Run's worker, the verdict is
     // derived from what durable state proves rather than asserted as `Match`.
     if store.load_manifest(run_id).is_ok() {
@@ -502,7 +502,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         RunVerb::Close => Prepared::Close {
             interrupt: switch(args, "--interrupt"),
         },
-        // specs.md: "Writer acquisition is lazy and explicit. `run
+        // docs/specs/README.md: "Writer acquisition is lazy and explicit. `run
         // send|submit --write` MUST activate" it — and a `shared_readonly`
         // Run that requested write is `SHARED_RUN_WRITE_FORBIDDEN`, whose
         // required action is a dedicated write continuation.  The lane comes
@@ -742,7 +742,7 @@ fn run_events(
     let page = match first {
         Ok(response) => response,
         // The durable ledger is the authority, and an observer may read it
-        // without a worker: specs.md has projection-only `events` open the
+        // without a worker: docs/specs/README.md has projection-only `events` open the
         // fsynced ledger rather than start, attach, or contend for one.
         Err(error) if worker_unreachable(error) => {
             return observed_events(state_root, run_id, after, projection);
@@ -1111,7 +1111,7 @@ fn terminal_turn_value(sources: &RunSources, terminal: &crate::turn::TerminalTur
 
 /// The Turn a `status` reply reports as the Run's last terminal.
 ///
-/// specs.md sends a Master here for the response, usage, and cursor behind the
+/// docs/specs/README.md sends a Master here for the response, usage, and cursor behind the
 /// intentionally minimal exit-7 envelope.  The worker carries the terminal its
 /// own drain observed, so this restates observed evidence and publishes
 /// nothing when there is none.
@@ -1470,7 +1470,7 @@ fn turn_request(args: &[OsString]) -> Result<TurnControlRequest, MachineError> {
         let (detail, path) = value.split_once('=').ok_or_else(|| {
             MachineError::invalid_argument("--image", "expected <auto|low|high>=<path>")
         })?;
-        // specs.md stores "the canonical path, detail, byte length, and
+        // docs/specs/README.md stores "the canonical path, detail, byte length, and
         // streaming SHA-256" and puts the tuple in idempotency normalization,
         // so the detail token the caller wrote travels with its path.
         let detail = match detail {
@@ -1497,7 +1497,7 @@ fn turn_request(args: &[OsString]) -> Result<TurnControlRequest, MachineError> {
     })
 }
 
-/// The Turn's text, from the one source specs.md allows.
+/// The Turn's text, from the one source docs/specs/README.md allows.
 ///
 /// "`send` and `submit` accept exactly one text source: `--message` or stdin.
 /// Empty text is rejected.  If `--message` is absent, stdin is required and
@@ -1541,7 +1541,7 @@ fn nonempty_message(argument: &str, message: String) -> Result<String, MachineEr
     Ok(message)
 }
 
-/// The interaction response body, from the one source specs.md allows.
+/// The interaction response body, from the one source docs/specs/README.md allows.
 ///
 /// "`respond` accepts a JSON body only from exactly one protected inherited
 /// `--response-fd` or non-TTY stdin; an interaction response body is never
@@ -1774,7 +1774,7 @@ fn advertised_effort_names(profile: &str, item: &Value) -> Result<Vec<String>, M
 
 /// The effort an omitted `--effort` selects at Run creation.
 ///
-/// specs.md: "Omitted `--effort` at run creation selects the first advertised
+/// docs/specs/README.md: "Omitted `--effort` at run creation selects the first advertised
 /// effort for the resolved model and records it as the run default."  Which
 /// effort that is belongs to the app-server's advertised order, not to a
 /// preference of ours.
@@ -1784,7 +1784,7 @@ fn default_effort(efforts: &[String]) -> String {
 
 /// The digest an allocation key is bound to.
 ///
-/// specs.md fixes the members: "canonical workspace identity, resolved profile
+/// docs/specs/README.md fixes the members: "canonical workspace identity, resolved profile
 /// snapshot, Controller ID/generation, control mode, execution lane,
 /// purpose/parent, model/effort, assurance, required capabilities, and
 /// instruction byte length and SHA-256.  Their carrier paths and secret bytes
@@ -2242,7 +2242,7 @@ fn optional(args: &[OsString], flag: &str) -> Option<String> {
 
 /// The Run's public parent metadata, or nothing.
 ///
-/// specs.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
+/// docs/specs/README.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
 /// limited to 128, 64, and 256 UTF-8 bytes, and reject NUL/control
 /// characters", and "a `direct_interactive` Primary Run MUST NOT carry a
 /// parent reference".  Both are decided before the allocation key is reserved:
@@ -2292,7 +2292,7 @@ fn bounded_option(
         .transpose()
 }
 
-/// specs.md bounds public Run metadata in UTF-8 bytes and rejects NUL and
+/// docs/specs/README.md bounds public Run metadata in UTF-8 bytes and rejects NUL and
 /// control characters.  A value a Run manifest could never hold is a fact
 /// about the caller's argv, so it is refused here rather than reaching the
 /// record layer and surfacing as a state-invariant violation.
@@ -2320,7 +2320,7 @@ fn bounded_metadata(flag: &str, value: String, maximum: usize) -> Result<String,
 
 /// One opaque allocation key, bounded before anything durable is written.
 ///
-/// specs.md: "`--idempotency-key` is an opaque, nonempty UTF-8 string scoped
+/// docs/specs/README.md: "`--idempotency-key` is an opaque, nonempty UTF-8 string scoped
 /// to the run."  Opaque is why only emptiness and the bound are checked: the
 /// bytes are never interpreted, only stored and compared.  The bound is the
 /// 256 UTF-8 bytes the checked schema already allows a Run's longest public
@@ -2416,7 +2416,7 @@ fn compatibility_rejected(
 
 /// A control response body is bounded by the interaction payload contract.
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-/// A Turn's text is one bounded payload, not a stream: specs.md bounds "raw
+/// A Turn's text is one bounded payload, not a stream: docs/specs/README.md bounds "raw
 /// app-server payloads selected for ledger representation to 2 MiB", and the
 /// message the caller pipes in is exactly such a payload.
 const MAX_MESSAGE_BYTES: u64 = 2 * 1024 * 1024;
@@ -2658,7 +2658,7 @@ mod tests {
         }
     }
 
-    /// specs.md has model resolution "exhaust every `model/list.nextCursor`",
+    /// docs/specs/README.md has model resolution "exhaust every `model/list.nextCursor`",
     /// and SPEC-006 makes `supportedReasoningEfforts[].reasoningEffort` the
     /// advertised order an omitted `--effort` selects from.
     #[test]
@@ -2726,7 +2726,7 @@ mod tests {
         assert_eq!(error.details["expected"], json!(MAX_MODEL_LIST_PAGES));
     }
 
-    /// specs.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
+    /// docs/specs/README.md: "`parent_ref.namespace`, `kind`, and `id` are all-or-none,
     /// limited to 128, 64, and 256 UTF-8 bytes, and reject NUL/control
     /// characters", and "a `direct_interactive` Primary Run MUST NOT carry a
     /// parent reference".
@@ -2810,7 +2810,7 @@ mod tests {
         }
     }
 
-    /// specs.md: "`--idempotency-key` is an opaque, nonempty UTF-8 string
+    /// docs/specs/README.md: "`--idempotency-key` is an opaque, nonempty UTF-8 string
     /// scoped to the run."  Opaque is why only emptiness and the bound are
     /// checked, and the check happens before anything durable is written.
     #[test]

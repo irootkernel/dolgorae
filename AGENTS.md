@@ -67,11 +67,11 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 ### Repository Index and Authorities
 
 - Dolgorae is a local durable control layer for persistent Codex runs. The Rust implementation leaves conversation storage with Codex while owning stable run identity, controller authorization, workspace writer coordination, recovery, and auditability.
-- `docs/specs.md` owns externally observable behavior and semantic requirements.
-- `docs/architecture.md` owns component boundaries, state ownership, process topology, and technical invariants.
-- `docs/architecture-decisions.md` records accepted decisions, rationale, and rejected alternatives.
+- `docs/specs/README.md` owns externally observable behavior and semantic requirements.
+- `docs/architecture/README.md` owns component boundaries, state ownership, process topology, and technical invariants.
+- `docs/architecture-decision-records/README.md` records accepted decisions, rationale, and rejected alternatives.
 - `docs/protocol/` owns checked wire, persisted-state, and machine-output shapes.
-- `docs/roadmap.md` is the sole delivery-order and delivery-status authority.
+- `docs/roadmap/README.md` is the sole delivery-order and delivery-status authority.
 - If canonical documents disagree, resolve the contradiction before changing implementation. For behavior or architecture changes, update the owning document first, then synchronize affected protocol artifacts, implementation, tests, and roadmap entries.
 - The supported toolchain is Rust 1.97.1, Buf 1.66.1, and Python 3 with the validation dependencies in `tools/validation/requirements.txt`.
 - The complete repository gate is `make PYTHON_BIN=.venv/bin/python test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.

@@ -3,12 +3,13 @@
 Status: Normative target specification for the first supported release.
 
 This document owns Dolgorae's externally observable behavior. Technical structure
-is owned by [architecture.md](architecture.md), decision rationale by
-[architecture-decisions.md](architecture-decisions.md), and delivery state by
-[roadmap.md](roadmap.md). A contradiction between SOT documents is an invalid
+is owned by [architecture](../architecture/README.md), decision rationale by
+[architecture decision records](../architecture-decision-records/README.md), and
+delivery state by the [roadmap](../roadmap/README.md). A contradiction between
+SOT documents is an invalid
 state and must be reconciled before an implementation task becomes active.
 Document roles and the required synchronization procedure are defined by the
-[documentation authority map](README.md).
+[documentation authority map](../README.md).
 
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.
@@ -228,7 +229,7 @@ is invalid.
 
 An External Specialist Engagement is opened explicitly through
 `open_external_engagement` on the External Specialist Facade defined by
-[`dolgorae-external-specialist-facade-v1.schema.json`](protocol/dolgorae-external-specialist-facade-v1.schema.json).
+[`dolgorae-external-specialist-facade-v1.schema.json`](../protocol/dolgorae-external-specialist-facade-v1.schema.json).
 The open request supplies immutable external provenance and one aggregate-scoped
 idempotency key. The adapter binds the canonical workspace and exactly one
 protected aggregate-owner Controller credential outside model-visible payloads.
@@ -558,7 +559,7 @@ The machine-local Specialist Policy Registry lives at:
 
 Each entry is a create-exclusive `<policy-name>.json` file that validates
 against
-[`dolgorae-specialist-policy-v1.schema.json`](protocol/dolgorae-specialist-policy-v1.schema.json)
+[`dolgorae-specialist-policy-v1.schema.json`](../protocol/dolgorae-specialist-policy-v1.schema.json)
 and its executable semantic validator. The content `policy_name` MUST match the
 filename exactly. Files are current-uid-owned mode 0600, no-symlink regular
 files, at most 1 MiB, and installed through a descriptor-relative temporary
@@ -1226,21 +1227,21 @@ verification retains readers for every released bundle version. A newer binary
 opening an unsupported on-disk run, audit, or hash version fails closed and
 requires the matching binary; v1 defines no in-place migration.
 
-The checked [machine-output schema](protocol/dolgorae-machine-v1.schema.json),
-[error contract](protocol/dolgorae-error-contract-v1.json),
-[client-event-record schema](protocol/dolgorae-event-record-v1.schema.json),
-[event-delivery schema](protocol/dolgorae-event-delivery-v1.schema.json),
-[interaction schema](protocol/dolgorae-interaction-v1.schema.json),
-[capability schema](protocol/dolgorae-capabilities-v1.schema.json), and
-[controller-credential schema](protocol/dolgorae-controller-credential-v1.schema.json),
-[operator-credential schema](protocol/dolgorae-operator-credential-v1.schema.json),
-[artifact schema](protocol/dolgorae-artifact-v1.schema.json),
-[Controller timeline schema](protocol/dolgorae-timeline-v1.schema.json),
-[RPC mutation policy](protocol/dolgorae-rpc-mutation-policy-v1.json),
-[gRPC client policy](protocol/dolgorae-grpc-client-policy-v1.json),
-[gRPC error map](protocol/dolgorae-grpc-error-mapping-v1.json),
-[Protobuf source](protocol/dolgorae/public/v1/dolgorae.proto), and
-[descriptor manifest](protocol/dolgorae-public-v1.descriptor.json)
+The checked [machine-output schema](../protocol/dolgorae-machine-v1.schema.json),
+[error contract](../protocol/dolgorae-error-contract-v1.json),
+[client-event-record schema](../protocol/dolgorae-event-record-v1.schema.json),
+[event-delivery schema](../protocol/dolgorae-event-delivery-v1.schema.json),
+[interaction schema](../protocol/dolgorae-interaction-v1.schema.json),
+[capability schema](../protocol/dolgorae-capabilities-v1.schema.json), and
+[controller-credential schema](../protocol/dolgorae-controller-credential-v1.schema.json),
+[operator-credential schema](../protocol/dolgorae-operator-credential-v1.schema.json),
+[artifact schema](../protocol/dolgorae-artifact-v1.schema.json),
+[Controller timeline schema](../protocol/dolgorae-timeline-v1.schema.json),
+[RPC mutation policy](../protocol/dolgorae-rpc-mutation-policy-v1.json),
+[gRPC client policy](../protocol/dolgorae-grpc-client-policy-v1.json),
+[gRPC error map](../protocol/dolgorae-grpc-error-mapping-v1.json),
+[Protobuf source](../protocol/dolgorae/public/v1/dolgorae.proto), and
+[descriptor manifest](../protocol/dolgorae-public-v1.descriptor.json)
 are normative.
 `command` is a closed dotted
 subcommand enum and `invocation_id` is a UUIDv7. `data` is a command-tagged
@@ -2300,7 +2301,7 @@ explicit context or artifact handoff.
 
 ## SPEC-009: Pending Requests and Approvals
 
-The checked [Codex required-subset manifest](protocol/codex-0.149.0-required-subset.json)
+The checked [Codex required-subset manifest](../protocol/codex-0.149.0-required-subset.json)
 maps stable server requests as follows:
 
 - `item/commandExecution/requestApproval` and
@@ -2465,7 +2466,7 @@ worker or Codex process. Its first three records MUST be, in order,
 `workspace_initialized`, `idempotency_reserved`, and exactly one of
 `run_created` or `write_continuation_created`. The first record binds the
 workspace ID; the second validates against
-[`dolgorae-idempotency-intent-v1.schema.json`](protocol/dolgorae-idempotency-intent-v1.schema.json)
+[`dolgorae-idempotency-intent-v1.schema.json`](../protocol/dolgorae-idempotency-intent-v1.schema.json)
 and binds the normalized operation identity and allocated Run ID; the third
 publishes the initial Run state. No later record may repeat
 `workspace_initialized` or either allocation kind. A later operation may append
@@ -2973,7 +2974,7 @@ continuation Turn solely because a result arrived.
 An External Specialist Engagement exists when another AI is already the Primary
 Agent and semantic control plane. It is opened and operated through the checked
 private CLI or MCP payload contract
-[`dolgorae-external-specialist-facade-v1.schema.json`](protocol/dolgorae-external-specialist-facade-v1.schema.json).
+[`dolgorae-external-specialist-facade-v1.schema.json`](../protocol/dolgorae-external-specialist-facade-v1.schema.json).
 Opening is an explicit, empty aggregate operation. The adapter binds the
 canonical workspace and an aggregate-owner Controller credential outside the
 payload. Dolgorae stores an immutable Aggregate Controller Binding containing
@@ -3030,7 +3031,7 @@ dolgorae specialist review \
 The optional external stdio MCP adapter exposes exactly one corresponding
 model-facing tool named `dolgorae_review`. Both entry points use the checked
 review payloads in
-[`dolgorae-specialist-review-tool-v1.schema.json`](protocol/dolgorae-specialist-review-tool-v1.schema.json).
+[`dolgorae-specialist-review-tool-v1.schema.json`](../protocol/dolgorae-specialist-review-tool-v1.schema.json).
 The CLI wraps a successful review result in the ordinary checked machine
 envelope with command tag `specialist.review`; an enabled MCP adapter returns
 the checked review result or checked review error directly. Both compile to the
@@ -3048,7 +3049,7 @@ generate one UUIDv7 per logical call and repeat it unchanged in
 `tools/call params._meta` under the checked vendor key
 `xyz.rootkernel.dolgorae/externalRequestRef`. The metadata fragment is validated
 against
-[`dolgorae-specialist-review-mcp-meta-v1.schema.json`](protocol/dolgorae-specialist-review-mcp-meta-v1.schema.json).
+[`dolgorae-specialist-review-mcp-meta-v1.schema.json`](../protocol/dolgorae-specialist-review-mcp-meta-v1.schema.json).
 The model cannot supply or override this value through tool arguments. Same
 reference and same normalized request return the original review identity;
 same reference with different input returns `IDEMPOTENCY_CONFLICT`.
@@ -3087,7 +3088,7 @@ report `workspace_write_observed: false`, and order findings by `P0`, `P1`,
 timeout, cancellation, invalid structured output, observed workspace mutation,
 and the SR1 live acceptance campaign are recorded without raw model output in
 the checked
-[`dolgorae-specialist-review-acceptance-v1.json`](protocol/dolgorae-specialist-review-acceptance-v1.json)
+[`dolgorae-specialist-review-acceptance-v1.json`](../protocol/dolgorae-specialist-review-acceptance-v1.json)
 artifact. The campaign evidence binds the pinned host and Machine CLI carrier,
 separate Reviewer Run and thread, resolved non-recursive profile, stable
 workspace including Git metadata and ignored paths, exact checked result

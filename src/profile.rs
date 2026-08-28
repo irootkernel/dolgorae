@@ -4684,7 +4684,7 @@ impl DiagnosticProjection {
 /// journal.
 ///
 /// This is the authority a foreign-thread observation is recorded in:
-/// specs.md closes the v1 Run audit-kind enum and states that a foreign-thread
+/// docs/specs/README.md closes the v1 Run audit-kind enum and states that a foreign-thread
 /// diagnostic "is never a Run event and uses the separate profile diagnostic
 /// schema", so a Run ledger record is not an option for it.
 pub fn append_profile_diagnostic(

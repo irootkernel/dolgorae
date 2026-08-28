@@ -5,11 +5,11 @@ Status: Normative target architecture for the first supported release.
 This document owns technical structure and invariants. It describes the system
 Dolgorae is required to implement; it does not claim that the currently empty
 repository already implements it. Product behavior is owned by
-[specs.md](specs.md), rationale by
-[architecture-decisions.md](architecture-decisions.md), and implementation
-progress by [roadmap.md](roadmap.md).
+[the specification](../specs/README.md), rationale by the
+[architecture decision records](../architecture-decision-records/README.md),
+and implementation progress by the [roadmap](../roadmap/README.md).
 Document roles and the required synchronization procedure are defined by the
-[documentation authority map](README.md).
+[documentation authority map](../README.md).
 
 ## System Context
 
@@ -168,7 +168,7 @@ effects.
 
 The External Specialist Facade is a private CLI or MCP adapter over the shared
 semantic service. Its checked payload contract is
-[`dolgorae-external-specialist-facade-v1.schema.json`](protocol/dolgorae-external-specialist-facade-v1.schema.json).
+[`dolgorae-external-specialist-facade-v1.schema.json`](../protocol/dolgorae-external-specialist-facade-v1.schema.json).
 It supports explicit engagement open and safe get, Specialist hire, task
 assignment, bounded await, result collection, cancellation, release, and
 engagement close. It does not add a planner, task graph, or autonomous scheduling
@@ -194,7 +194,7 @@ The One-Shot Specialist Review Coordinator is a convenience adapter over the
 External Specialist Facade. It is shared by the `dolgorae specialist review`
 Machine CLI command and the external stdio MCP tool `dolgorae_review`. Its
 checked model-visible shape is
-[`dolgorae-specialist-review-tool-v1.schema.json`](protocol/dolgorae-specialist-review-tool-v1.schema.json).
+[`dolgorae-specialist-review-tool-v1.schema.json`](../protocol/dolgorae-specialist-review-tool-v1.schema.json).
 
 The Coordinator binds the canonical workspace, Reviewer Runtime Profile,
 aggregate-owner and per-Run Controller credentials, external provenance,
@@ -237,7 +237,7 @@ first-class Specialist hiring, preventing recursive review invocation.
 
 The opt-in SR1 campaign retains only bounded findings, identifiers, and
 digests in the checked
-[`dolgorae-specialist-review-acceptance-v1.json`](protocol/dolgorae-specialist-review-acceptance-v1.json)
+[`dolgorae-specialist-review-acceptance-v1.json`](../protocol/dolgorae-specialist-review-acceptance-v1.json)
 artifact. Its schema rejects missing review rounds, unresolved findings,
 workspace-change claims, non-terminal cancellation cleanup, credential or
 private-endpoint disclosure, and any MCP advertisement under the selected
@@ -326,7 +326,7 @@ capability or a private Worker address.
 
 The Primary Orchestration Service is a transport-independent broker adapter. Its
 checked model-facing payload contract is
-[`dolgorae-orchestration-tool-v1.schema.json`](protocol/dolgorae-orchestration-tool-v1.schema.json).
+[`dolgorae-orchestration-tool-v1.schema.json`](../protocol/dolgorae-orchestration-tool-v1.schema.json).
 It implements Specialist request and operation wait, safe listing, bounded task
 assignment, task wait and result collection, and graceful release. The live
 run-bound MCP adapter is replaceable and is selected only after the transport
@@ -337,7 +337,7 @@ priority, Controller authority, and idempotency outside model arguments. The
 model cannot provide or override those fields. `request_specialist` resolves a
 role only from the session's immutable, schema-validated Specialist Policy
 snapshot in
-[`dolgorae-specialist-policy-v1.schema.json`](protocol/dolgorae-specialist-policy-v1.schema.json).
+[`dolgorae-specialist-policy-v1.schema.json`](../protocol/dolgorae-specialist-policy-v1.schema.json).
 The model cannot choose Runtime Profile, model, credential, priority, or access
 outside that policy.
 
@@ -950,7 +950,7 @@ delivery. It uses SQLite WAL, foreign keys, `synchronous=FULL`, a bounded busy
 timeout, and one workspace mutation owner. A hash-chained append-only
 `orchestration_event` table commits with state changes. `orchestration/state.json`
 and JSONL exports are replaceable materializations validated against
-[`dolgorae-orchestration-state-v1.schema.json`](protocol/dolgorae-orchestration-state-v1.schema.json)
+[`dolgorae-orchestration-state-v1.schema.json`](../protocol/dolgorae-orchestration-state-v1.schema.json)
 with cross-object invariants enforced by the Rust orchestration implementation.
 
 The state owner creates an External Specialist Engagement entirely inside one

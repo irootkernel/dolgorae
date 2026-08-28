@@ -82,7 +82,7 @@ pub const CONTROL_CALL_TIMEOUT: Duration = Duration::from_secs(900);
 pub const MAX_TURN_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long shutdown waits for the terminal history of the Turn it interrupted.
 ///
-/// specs.md fixes it: an identity-verified `shutdown`, and worker `SIGTERM`,
+/// docs/specs/README.md fixes it: an identity-verified `shutdown`, and worker `SIGTERM`,
 /// "waits up to five seconds for a terminal event ... and records
 /// `outcome_unknown` on expiry".
 pub const SHUTDOWN_TERMINAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -433,7 +433,7 @@ impl StartupLockFile {
     /// Take the Run's startup/mutation range (slot 0) for an operation that
     /// serializes *against* worker startup rather than performing one.
     ///
-    /// No owner record is written. specs.md: "All-zero, stale,
+    /// No owner record is written. docs/specs/README.md: "All-zero, stale,
     /// checksum-invalid, or unknown-layout slots never establish identity and
     /// do not block a kernel-lock winner; a locked range with no valid
     /// matching record is `Unverifiable`" — and `Unverifiable` returns
@@ -638,7 +638,7 @@ pub enum ControlRequestV1 {
     /// Read the Run's control state together with the terminal its drain
     /// observed.  Open to any same-uid observer.
     ///
-    /// specs.md sends a Master to `run status.data.last_terminal` for the
+    /// docs/specs/README.md sends a Master to `run status.data.last_terminal` for the
     /// response, usage, and cursor behind an intentionally minimal exit-7
     /// envelope, and SPEC-007 freezes `status` byte-identically across builds.
     /// Those two cannot both ride one request: the frozen answer may not grow
@@ -721,7 +721,7 @@ pub enum ControlRequestV1 {
         caller: Option<ExecutingBuild>,
     },
     /// End the Run.  `interrupt` is the caller's explicit authorization to
-    /// interrupt live work: specs.md refuses a running or waiting Run without
+    /// interrupt live work: docs/specs/README.md refuses a running or waiting Run without
     /// it rather than interrupting implicitly.
     Close {
         expected: WorkerIdentity,
@@ -1177,7 +1177,7 @@ impl WorkerControlServer {
 
     /// SIGTERM during an active Turn.
     ///
-    /// specs.md: the worker "sends `turn/interrupt`, waits up to five seconds
+    /// docs/specs/README.md: the worker "sends `turn/interrupt`, waits up to five seconds
     /// for a terminal event, fsyncs terminal evidence when observed, and
     /// records `outcome_unknown` on expiry before generation cleanup".  That
     /// is the same drain-ordered sequence an identity-verified `shutdown`
@@ -2244,7 +2244,7 @@ pub struct TurnControlRequest {
 
 /// One `--image` value as the caller wrote it.
 ///
-/// The detail token travels with the path because specs.md stores "the
+/// The detail token travels with the path because docs/specs/README.md stores "the
 /// canonical path, detail, byte length, and streaming SHA-256" and makes the
 /// tuple part of idempotency normalization: dropping the token here would
 /// silently downgrade every image to `auto` and make two different requests
@@ -2455,7 +2455,7 @@ impl WorkerSession {
         // published snapshot.  `perform(Accept)` may be inside `turn/start`
         // while the snapshot still says idle; queueing behind it makes the
         // interrupt decision authoritative and ordered against that accept.
-        // Its own budget is separate from the terminal wait: specs.md starts
+        // Its own budget is separate from the terminal wait: docs/specs/README.md starts
         // the five seconds at "sends `turn/interrupt`", not before.
         let outcome = Arc::new(MutationOutcome::default());
         if self
@@ -2517,7 +2517,7 @@ impl WorkerSession {
             return true;
         }
         // The Turn's outcome is now unobservable, and the ledger has to say so
-        // before this generation goes away.  specs.md makes that a
+        // before this generation goes away.  docs/specs/README.md makes that a
         // requirement, not an attempt: a refused dispatch, an unanswered one,
         // or a failed journal write all mean the record was never made, and a
         // shutdown that reports an unconfirmed terminal while leaving nothing
@@ -2834,7 +2834,7 @@ fn perform(
             // A closed Run refusing a new Turn is a lifecycle fact about the
             // Run, not a complaint about the caller's arguments: the identical
             // request was legal a moment ago and no rewording of it will ever
-            // be accepted again.  specs.md gives that its own registered code
+            // be accepted again.  docs/specs/README.md gives that its own registered code
             // and exit class, so the caller can tell "fix your input" from
             // "this Run is over".
             if progress.is_closed() {
@@ -2879,7 +2879,7 @@ fn perform(
             let thread_id = coordinator.thread_id().map(str::to_owned);
             let live = coordinator.active_turn_id().is_some()
                 || !coordinator.pending_interactions().is_empty();
-            // specs.md: "Pause and close reject running or waiting runs unless
+            // docs/specs/README.md: "Pause and close reject running or waiting runs unless
             // `--interrupt` is present."  Interrupting a Turn is an effect on
             // the app-server, so it happens only when the caller asked for it
             // by name.
@@ -3252,7 +3252,7 @@ fn transport_details(stage: &str) -> serde_json::Value {
 
 /// The Dolgorae build a process is running, as an ordinary request compares it.
 ///
-/// It travels on every non-frozen control request: specs.md has the CLI-worker
+/// It travels on every non-frozen control request: docs/specs/README.md has the CLI-worker
 /// handshake carry the Dolgorae semantic version and binary SHA-256 and
 /// refuse a mismatch, and a caller-side check alone cannot do that — an older
 /// CLI that never learned to check simply would not perform it.  The worker
@@ -3713,7 +3713,7 @@ pub fn runtime_root(state_root: &Path) -> PathBuf {
 /// The worker owns this composition because it is the only place that knows
 /// both the Run's coordinator and, from its own session bootstrap, which
 /// Runtime Profile the Run is pinned to.  The routing metadata is operational:
-/// specs.md puts "foreign-thread routing metadata" in the projection that
+/// docs/specs/README.md puts "foreign-thread routing metadata" in the projection that
 /// requires the operator capability, so the record is marked accordingly and
 /// carries no request payload.
 struct ProfileForeignDiagnostics {
@@ -4452,7 +4452,7 @@ fn serve_events(
         Ok(state) => state.ledger_head.sequence,
         Err(error) => return ledger_read_failed(&error.to_string()),
     };
-    // specs.md: a cursor "beyond the authoritative Run ledger head" is
+    // docs/specs/README.md: a cursor "beyond the authoritative Run ledger head" is
     // `EVENT_CURSOR_INVALID`, not a malformed argument.  The head is the
     // worker's own, so the refusal names both cursors the caller needs.
     if after > head {

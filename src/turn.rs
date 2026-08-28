@@ -493,7 +493,7 @@ pub enum JournalEntry {
     },
     /// One Turn reached a terminal state.
     ///
-    /// specs.md sends a Master to `run status.data.last_terminal` for the
+    /// docs/specs/README.md sends a Master to `run status.data.last_terminal` for the
     /// response, usage, and cursor behind an intentionally minimal exit-7
     /// envelope, and a worker's control state is process memory that a
     /// restart or a shutdown erases.  The durable record therefore carries the
@@ -864,7 +864,7 @@ pub struct ForeignLane<'a> {
 /// Where a foreign-thread observation is durably recorded.
 ///
 /// SPEC-004: "A foreign-thread object cannot mutate run state; it records
-/// bounded profile diagnostic metadata."  specs.md closes the v1 Run
+/// bounded profile diagnostic metadata."  docs/specs/README.md closes the v1 Run
 /// audit-kind enum and states that a foreign-thread diagnostic "is never a Run
 /// event and uses the separate profile diagnostic schema" — so the destination
 /// is the Runtime Profile's journal, and the Run's coordinator is handed a
@@ -1522,7 +1522,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// Record that an operation which had already written to the app-server
     /// lost its answer, and restate the fault as the uncertainty it is.
     ///
-    /// specs.md: "`TRANSPORT_FAILURE` is retryable only when the operation
+    /// docs/specs/README.md: "`TRANSPORT_FAILURE` is retryable only when the operation
     /// made no external write ... Any uncertain acceptance emits `false`."
     /// Past an external write the caller cannot safely reissue the identical
     /// invocation, and the Run has just quarantined itself durably, so the
@@ -1709,7 +1709,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     ///
     /// * The observation is durable before it is remembered in memory. A
     ///   worker that crashes still leaves the evidence that its connection was
-    ///   handed another Thread's decision. specs.md closes the v1 Run
+    ///   handed another Thread's decision. docs/specs/README.md closes the v1 Run
     ///   audit-kind enum and states that a foreign-thread diagnostic "is never
     ///   a Run event and uses the separate profile diagnostic schema", so the
     ///   record goes to the Runtime Profile's diagnostic journal and never to
@@ -1800,7 +1800,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// `turn/interrupt` is an external write like any other, so losing its
     /// answer leaves the Turn's outcome uncertain rather than merely unsent:
     /// the app-server may have interrupted it, may have let it run on, and
-    /// this Run can no longer tell.  specs.md forbids reporting that as a
+    /// this Run can no longer tell.  docs/specs/README.md forbids reporting that as a
     /// retryable transport hiccup, so the loss quarantines the Run durably and
     /// is restated as `outcome_unknown`.  A refusal the app-server correlated
     /// to the interrupt is definitive and does neither.
@@ -2851,7 +2851,7 @@ mod tests {
             "response lost",
         )));
         let mut coordinator = coordinator(server);
-        // specs.md: "`TRANSPORT_FAILURE` is retryable only when the operation
+        // docs/specs/README.md: "`TRANSPORT_FAILURE` is retryable only when the operation
         // made no external write ... Any uncertain acceptance emits `false`."
         // `turn/start` was already on the wire, so the fault reported is the
         // same `outcome_unknown` the ledger has just recorded, not a retryable

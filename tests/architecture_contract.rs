@@ -189,7 +189,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         //
         // It names `profile` because a foreign-thread observation "is never a
         // Run event and uses the separate profile diagnostic schema"
-        // (specs.md), and the worker is the only place that knows both the
+        // (docs/specs/README.md), and the worker is the only place that knows both the
         // Run's coordinator and, from its own session bootstrap, which Runtime
         // Profile the Run is pinned to. `turn` stays free of it: the
         // coordinator is handed a writer rather than deriving one.

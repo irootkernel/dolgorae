@@ -2,8 +2,9 @@
 
 Status: Accepted EPIC-004 implementation baseline. This document records the
 investigated 2026-08-25 baseline and the decisions EPIC-004 must implement. It
-does not advertise a runtime capability or a completed review. Current product behavior remains governed by
-[`specs.md`](specs.md) and the checked protocol artifacts.
+does not advertise a runtime capability or a completed review. Current product
+behavior remains governed by the [specification](../specs/README.md) and the
+checked protocol artifacts.
 
 ## Goal
 
@@ -166,6 +167,7 @@ EPIC-004 implementation and activation must keep the following decisions closed:
    formats remain compatible; and the exact installed Aquarium copy is moved
    atomically between the old and new contracts without mixed workers.
 8. TASK-016 freezes one exact Dolgorae candidate and sends the copyable handoff
-   in canonical `docs/roadmap.md` to the Aquarium owner. EPIC-004 remains blocked
+   in canonical `docs/roadmap/README.md` to the Aquarium owner. EPIC-004 remains
+   blocked
    until Aquarium returns runtime proof for an exact committed and installed
    candidate and Dolgorae independently revalidates that Completed Confirm.

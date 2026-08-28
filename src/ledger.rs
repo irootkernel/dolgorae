@@ -1315,7 +1315,7 @@ fn deliveries_after(
 
 /// Read one page of durable events without owning the Run's ledger.
 ///
-/// specs.md: projection-only `status`, `events`, and `verify` "read the
+/// docs/specs/README.md: projection-only `status`, `events`, and `verify` "read the
 /// fsynced ledger/runtime projection directly and do not start, attach,
 /// recover, or contend on the per-run startup lock". So this opens
 /// `audit.jsonl` read-only, takes no advisory lock, repairs nothing, and stops
@@ -1344,7 +1344,7 @@ impl ObservedLedger {
     /// The payload of the last durable `turn_terminal` record, if this Run
     /// has one.
     ///
-    /// specs.md has a Master read `run status.data.last_terminal` for the
+    /// docs/specs/README.md has a Master read `run status.data.last_terminal` for the
     /// response, usage, and cursor behind an exit-7 envelope. The ledger is
     /// where that fact is durable, so an observer with no live worker
     /// reconstructs the terminal Turn from the record rather than from a

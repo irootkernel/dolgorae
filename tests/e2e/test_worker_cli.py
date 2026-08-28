@@ -935,7 +935,7 @@ def validate_foreign_thread(binary: pathlib.Path) -> None:
 def validate_shutdown_interrupt(binary: pathlib.Path) -> None:
     """SIGTERM during an active Turn must interrupt it and prove the outcome.
 
-    specs.md: "If worker `SIGTERM` arrives during an active turn, it sends
+    docs/specs/README.md: "If worker `SIGTERM` arrives during an active turn, it sends
     `turn/interrupt`, waits up to five seconds for a terminal event, fsyncs
     terminal evidence when observed, and records `outcome_unknown` on expiry
     before generation cleanup."  A worker that instead reported itself idle
@@ -1328,7 +1328,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
             if turn["workspace_changes"]["attribution"] != "unverified":  # type: ignore[index]
                 raise AssertionError(f"a read-only turn claimed measured changes: {turn!r}")
 
-            # specs.md: "`send` and `submit` accept exactly one text source:
+            # docs/specs/README.md: "`send` and `submit` accept exactly one text source:
             # `--message` or stdin ... If `--message` is absent, stdin is
             # required and MUST NOT be a TTY."  This turn names no message at
             # all, so starting one at all proves the piped bytes were read, and
@@ -1385,7 +1385,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
             if resumed["run_id"] != run_id:
                 raise AssertionError(f"run respond did not answer with the Run: {resumed!r}")
 
-            # specs.md: "`respond` accepts a JSON body only from exactly one
+            # docs/specs/README.md: "`respond` accepts a JSON body only from exactly one
             # protected inherited `--response-fd` or non-TTY stdin".  The body
             # below travels on a pipe with no descriptor named at all, so
             # reaching the Run's interaction table proves stdin was read.
@@ -1510,7 +1510,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
             if error["details"] != {"run_id": run_id, "operation": "run.send"}:  # type: ignore[index]
                 raise AssertionError(f"the refusal omitted its checked details: {error!r}")
 
-            # specs.md: "Empty text is rejected."  From either source, and as a
+            # docs/specs/README.md: "Empty text is rejected."  From either source, and as a
             # refusal about the argument rather than about the Run.
             for argv, body in (
                 ([*controlled, "send", run_id, *owned, "--message", "",
@@ -1523,7 +1523,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
                 if error["code"] != "INVALID_ARGUMENT":  # type: ignore[index]
                     raise AssertionError(f"empty turn text was accepted: {empty!r}")
 
-            # specs.md: "`SHARED_RUN_WRITE_FORBIDDEN` ... a `shared_readonly`
+            # docs/specs/README.md: "`SHARED_RUN_WRITE_FORBIDDEN` ... a `shared_readonly`
             # run requested write; a lineage-linked write continuation is
             # required."  Exit class 4, with the lane and the required action
             # the error contract fixes.
@@ -1574,7 +1574,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
             if error["code"] != "INVALID_ARGUMENT":  # type: ignore[index]
                 raise AssertionError(f"submit accepted a caller timeout: {timed_submit!r}")
 
-            # specs.md: "`<duration>` is a positive base-10 integer followed
+            # docs/specs/README.md: "`<duration>` is a positive base-10 integer followed
             # immediately by `ms`, `s`, `m`, or `h`.  Fractions, compound
             # durations, zero, negative values, and values greater than 24
             # hours are rejected with `INVALID_ARGUMENT`."
@@ -1662,7 +1662,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
                     raise AssertionError(f"the cursor refusal named no head: {error!r}")
             del head
 
-            # specs.md: projection-only `status` and `events` read the fsynced
+            # docs/specs/README.md: projection-only `status` and `events` read the fsynced
             # projection directly and MUST NOT fail because the identity
             # verdict is unverifiable.  The Run's worker is stopped here, so
             # every fact below comes from durable state alone.

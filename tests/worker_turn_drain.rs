@@ -1201,7 +1201,7 @@ fn shutdown_interrupts_the_active_turn_and_confirms_the_terminal_it_observed() {
 /// H1, the other half: a Turn whose terminal never arrives is `outcome_unknown`
 /// on disk and an unconfirmed shutdown to the caller.
 ///
-/// specs.md: shutdown "records `outcome_unknown` on expiry before generation
+/// docs/specs/README.md: shutdown "records `outcome_unknown` on expiry before generation
 /// cleanup".  The old fabrication — flipping the published state to `idle` and
 /// answering `terminal_confirmed:true` — left the caller believing a Turn had
 /// ended that was still running, with nothing durable to recover from.
@@ -1336,7 +1336,7 @@ fn close_refuses_a_live_run_until_the_caller_asks_for_the_interrupt() {
 
 /// H3: `status` carries the terminal the drain observed.
 ///
-/// specs.md sends a Master here for the response, usage, and cursor behind the
+/// docs/specs/README.md sends a Master here for the response, usage, and cursor behind the
 /// intentionally minimal exit-7 envelope, so `last_terminal` cannot be a
 /// permanent null.
 #[test]
@@ -1374,7 +1374,7 @@ fn status_carries_the_last_terminal_the_drain_observed() {
 
 /// L2 and L3: what a reader Turn actually puts on the wire.
 ///
-/// specs.md pins the reader's turn policy as
+/// docs/specs/README.md pins the reader's turn policy as
 /// `sandboxPolicy:{"type":"readOnly","networkAccess":false}`, stores each
 /// image's caller-supplied detail token, and has a terminal report the Turn's
 /// own reasoning effort rather than the Run's default.
@@ -1622,7 +1622,7 @@ fn shutdown_does_not_queue_abandon_behind_an_interrupt_that_never_started() {
     );
 }
 
-/// specs.md: shutdown "records `outcome_unknown` on expiry before generation
+/// docs/specs/README.md: shutdown "records `outcome_unknown` on expiry before generation
 /// cleanup" — a requirement, not an attempt.
 ///
 /// The record is not written behind the caller's back after the reply.  By the
@@ -1700,7 +1700,7 @@ fn a_drain_that_stops_under_a_live_turn_records_the_outcome_it_lost() {
     );
 }
 
-/// specs.md: `TRANSPORT_FAILURE` "is retryable only when the operation made no
+/// docs/specs/README.md: `TRANSPORT_FAILURE` "is retryable only when the operation made no
 /// external write.  Any uncertain acceptance emits `false`."
 ///
 /// A transport that dies under an accepted Turn made every write there is: the
@@ -1798,7 +1798,7 @@ fn a_definitive_app_server_refusal_does_not_quarantine_the_run() {
 ///
 /// Losing its answer leaves the Turn's outcome uncertain rather than merely
 /// unsent: the app-server may have interrupted it, may have let it run on, and
-/// this Run can no longer tell.  specs.md forbids reporting that as a
+/// this Run can no longer tell.  docs/specs/README.md forbids reporting that as a
 /// retryable transport hiccup, so the loss quarantines the Run durably and is
 /// restated as the uncertainty it is.
 #[test]
@@ -1837,7 +1837,7 @@ fn an_interrupt_whose_answer_is_lost_is_outcome_unknown_and_never_retryable() {
     );
 }
 
-/// specs.md gives a closed Run its own registered lifecycle refusal.
+/// docs/specs/README.md gives a closed Run its own registered lifecycle refusal.
 ///
 /// The identical request was legal a moment ago and no rewording of it will
 /// ever be accepted again, so calling it an invalid argument sends the caller

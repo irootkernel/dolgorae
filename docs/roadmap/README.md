@@ -29,10 +29,10 @@ replay, projection, and observer-publication work. EPIC-001 completed after its
 Epic-level acceptance checks passed.
 
 This document owns execution order and delivery status. Product requirements
-remain authoritative in [specs.md](specs.md); this roadmap must not redefine
-them.
+remain authoritative in the [specification](../specs/README.md); this roadmap
+must not redefine them.
 Document roles and the required synchronization procedure are defined by the
-[documentation authority map](README.md).
+[documentation authority map](../README.md).
 
 ## Product Milestones
 
@@ -562,7 +562,8 @@ Status: `PLANNED`
 
 Implement the accepted `workspace`, `staged`, `dirty`, `head`, `commit`, and
 two-dot or three-dot `range` meanings from ADR-032 and
-[`review-strategy-analysis.md`](review-strategy-analysis.md). Task, Epic, and
+[review-target strategy analysis](../architecture-decision-records/review-strategy-analysis.md).
+Task, Epic, and
 special-request identifiers provide authority and focus but MUST resolve to one
 source scope. Mulgae-only patch and stdin remain extensions.
 
@@ -1299,7 +1300,8 @@ without Controller disclosure,
 detached-worker signal/stdout behavior, five-second graceful/forced cleanup, and
 escaped-process limitation reporting.
 
-Epic acceptance: every public command and audit workflow in `specs.md` is
+Epic acceptance: every public command and audit workflow in
+`docs/specs/README.md` is
 available against the deterministic fake environment.
 
 ## EPIC-011: Conformance and Personal Alpha Release

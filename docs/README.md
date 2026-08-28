@@ -1,35 +1,67 @@
 # Dolgorae Documentation
 
-This directory contains the public source of truth for Dolgorae.
+Profile: `single-scope`. Dolgorae has one delivery scope and one canonical
+roadmap. The root [README](../README.md) is the user-facing product entrypoint;
+this directory is for maintainers and contributors who change product
+contracts, implementation, validation, or local operations.
 
-## Canonical documents
+## Authority map
 
-- [Product specification](specs.md) owns externally observable behavior and
-  semantic requirements.
-- [Architecture](architecture.md) owns component boundaries, state ownership,
-  process topology, and technical invariants.
-- [Architecture decisions](architecture-decisions.md) records accepted choices,
-  rationale, and rejected alternatives.
-- [Roadmap](roadmap.md) owns delivery order and status.
-- [Protocol](protocol/) owns checked wire, persisted-state, and machine-output
-  shapes.
+| Role | Canonical owner |
+| --- | --- |
+| Product specifications | [specs/README.md](specs/README.md) |
+| Architecture | [architecture/README.md](architecture/README.md) |
+| Architecture decision records | [architecture-decision-records/README.md](architecture-decision-records/README.md) |
+| Implementation tips | [implementation-tips/README.md](implementation-tips/README.md) |
+| Operations | [ops/README.md](ops/README.md) |
+| Roadmap | [roadmap/README.md](roadmap/README.md) |
+| TODO candidates and active dossiers | [todo/README.md](todo/README.md) |
+| Deferred feedback | [deferred-feedback/README.md](deferred-feedback/README.md) |
 
-## Design studies
+The checked [protocol](protocol/) artifacts derive wire, persisted-state, and
+machine-output contracts from the product specification. The
+[review-target strategy analysis](architecture-decision-records/review-strategy-analysis.md)
+is a supporting accepted design study, not runtime or completion evidence. The
+root [contribution guide](../CONTRIBUTING.md) is an entrypoint to implementation
+guidance, and the public [changelog](../CHANGELOG.md) owns release history.
 
-- [Review target strategy analysis](review-strategy-analysis.md) records the
-  investigated review-tool baseline and accepted EPIC-004 implementation
-  decisions. It is not evidence that the planned runtime behavior is implemented
-  or available.
+## Precedence and synchronization
 
-If canonical documents disagree, resolve the contradiction before changing the
-implementation. For a behavior or architecture change, update the owning
-document first, then synchronize affected protocol artifacts, implementation,
-tests, and roadmap entries.
+Each role owner is authoritative only for its stated domain. Specifications own
+observable behavior, architecture owns structure and invariants, decision
+records own accepted rationale, and the roadmap alone owns delivery identity,
+order, lifecycle vocabulary, and status. Protocol artifacts, implementation,
+tests, and summaries are derived where they overlap those authorities.
 
-## Validation ownership
+If canonical documents disagree, stop and resolve the contradiction in the
+owning documents before changing implementation. Update affected protocol
+artifacts, implementation, tests, and roadmap references only after the owners
+agree.
 
-Rust unit and integration tests own product semantics. Python is intentionally
-limited to small JSON/schema and Markdown checks plus black-box tests of the
-compiled Rust executable. Run the complete repository gate with `make test`;
-its ordered prepare, unit, integration, and E2E layers are documented in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+## Roadmap identity and dossier lifecycle
+
+The canonical roadmap namespace is `docs/roadmap/README.md`. This path migration
+does not change established Epic or Task identifiers, ordering, or uppercase
+lifecycle vocabulary; the roadmap's identity rules remain authoritative.
+Cross-scope qualification is unnecessary while Dolgorae has one delivery scope.
+
+Future epic-sized ideas live in the TODO owner without roadmap status. When an
+idea is adopted as an active Epic with tasks, its temporary dossier is listed
+as adopted TODO work and linked from the roadmap with `Detailed SOT`. Epic
+closeout promotes durable outcomes to their owners, removes the dossier, and
+replaces that link with `Canonical Outcomes`. Historical completed work without
+these lifecycle fields remains unchanged.
+
+## Language and validation
+
+Canonical repository documentation is written in English. Run the non-writing
+Markdown check with:
+
+```sh
+.venv/bin/python tools/validators/validate_markdown.py
+```
+
+Rust tests own product semantics. Python remains limited to small independent
+repository checks and black-box executable tests. The complete gate and its
+formatting side effect are documented in the
+[implementation tips](implementation-tips/README.md).

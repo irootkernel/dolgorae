@@ -231,7 +231,7 @@ pub struct RunDirectory {
 
 /// One workspace-scoped allocation key and the Run it is bound to.
 ///
-/// specs.md: "Run allocation reserves its key before publishing a Run ...
+/// docs/specs/README.md: "Run allocation reserves its key before publishing a Run ...
 /// Response loss is reconciled by retrying the identical allocation key, which
 /// returns the original Run; changed normalized input is
 /// `IDEMPOTENCY_CONFLICT` and can never allocate another Run under that key."

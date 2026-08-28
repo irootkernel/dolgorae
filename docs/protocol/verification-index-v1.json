@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source": "docs/specs.md",
+  "source": "docs/specs/README.md",
   "requirement_id": "REQ-<SPEC>-<first-12-lowercase-hex-of-sha256(normalized-normative-paragraph-utf8)>",
   "normalization": "collapse ASCII whitespace and retain exact punctuation and RFC-2119 words",
   "sections": {
