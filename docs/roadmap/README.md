@@ -1411,9 +1411,11 @@ campaign. TASK-000-D owns only `architecture_contract_eligible`.
 
 ## EPIC-012: Development Aquarium Producer
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
-Detailed SOT: [EPIC-012 dossier](../todo/TODO-EPIC-012-dev-aquarium-producer.md)
+Canonical Outcomes: [producer Make targets](../../Makefile),
+[producer implementation](../../tools/dev_aquarium/producer.py), and
+[black-box contract tests](../../tests/e2e/test_dev_aquarium_producer.py)
 
 Goal: Enroll Dolgorae as an exact executable producer for Aquarium's isolated
 development channel so downstream review activation consumes one immutable,
@@ -1421,7 +1423,7 @@ checksummed, leased generation instead of a mutable repository build path.
 
 ### TASK-035: Produce an Exact Dolgorae Development Generation
 
-Status: `IN_REVIEW`
+Status: `COMPLETE`
 
 Depends on `TASK-015`. Add the standard `aquarium-dev-describe` and
 `aquarium-dev-build` Make targets. The descriptor identifies project
