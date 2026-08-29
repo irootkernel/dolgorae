@@ -546,9 +546,14 @@ collaboration, or Personal Alpha readiness.
 
 ## EPIC-004: Immutable Review Targets and Aquarium Activation
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
-Detailed SOT: [EPIC-004 dossier](../todo/TODO-EPIC-004-immutable-review-targets-and-aquarium-activation.md)
+Canonical Outcomes: [specification](../specs/README.md#immutable-review-targets-and-scoped-specialist-review),
+[architecture](../architecture/README.md#immutable-review-target-coordinator),
+[ADR-032](../architecture-decision-records/README.md#adr-032-separate-immutable-review-targets-from-backend-supervision),
+[checked review-target protocol](../protocol/dolgorae-review-target-v1.schema.json),
+[implementation](../../src/review_target.rs), and
+[black-box contract tests](../../tests/e2e/test_review_target_cli.py)
 
 Goal: Implement reusable immutable review targets, extend Dolgorae Specialist
 Review to dirty and historical Git state, and replace the Orca-created Codex
@@ -640,18 +645,13 @@ acceptance; and an independent adversarial read-only review.
 
 ### TASK-016: Aquarium Activation and Runtime Completed Confirm
 
-Status: `BLOCKED`
+Status: `COMPLETE`
 
-Depends on `TASK-015` and `TASK-035` and remains externally blocked on Aquarium
-`TASK-024` completing enrollment and runtime confirmation. Consume one exact
-enrolled Dolgorae development generation, fill the placeholders in the handoff
-below, and keep this Task `BLOCKED` while an
-Aquarium owner executes it. The owner first validates the active Aquarium
-installation. If it already satisfies every requirement, no unnecessary change
-is required; otherwise the owner modifies and commits the active review
-contract, skills, supervision references, scripts, and tests under Aquarium's
-own authority. This repository does not prepare a migration document or make an
-Aquarium change on the owner's behalf.
+Depends on `TASK-015`, `TASK-035`, and Aquarium `TASK-024`. The Aquarium owner
+consumed one exact enrolled Dolgorae development generation, completed the
+runtime activation under Aquarium's authority, and returned a Completed Confirm
+that survived Dolgorae's independent revalidation. The handoff contract below
+records the evidence shape required at that external authority boundary.
 
 Copy the following request verbatim. Aquarium owns the exact generation fields
 created from the completed TASK-035 producer and must replace every `REQUIRED:`
@@ -766,15 +766,14 @@ Completed Confirm. Do not push or change another repository without separate
 authority.
 ```
 
-After receiving `status: completed`, move this Task to `IN_REVIEW`. Re-read the
-exact Dolgorae and Aquarium commits, revalidate the executable and installed
-plugin digests, compare the canonical executable path, development version, and
-artifact digest with the enrolled generation, inspect the lease evidence and
-every other stable reference, and rerun the bounded cross-repository
-compatibility checks. An Aquarium claim does not close this Task by itself.
-Missing evidence, an identity or digest mismatch, an uncommitted Aquarium
-change, a documentation-only confirmation, or any unresolved blocker returns
-the Task to `BLOCKED`.
+Acceptance required re-reading the exact Dolgorae and Aquarium commits,
+revalidating the executable and installed plugin digests, comparing the
+canonical executable path, development version, and artifact digest with the
+enrolled generation, inspecting the lease evidence and every other stable
+reference, and rerunning the bounded cross-repository compatibility checks. An
+Aquarium claim alone was insufficient: missing evidence, an identity or digest
+mismatch, an uncommitted Aquarium change, a documentation-only confirmation, or
+any unresolved blocker would have kept the Task `BLOCKED`.
 
 Verification: exact-generation Dolgorae gates from TASK-035; Aquarium's complete
 repository validator and independent read-only review; all-scope runtime E2E;
