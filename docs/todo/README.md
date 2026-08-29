@@ -10,6 +10,7 @@ None.
 ## Adopted active-Epic dossiers
 
 - [`EPIC-004: Immutable Review Targets and Aquarium Activation`](TODO-EPIC-004-immutable-review-targets-and-aquarium-activation.md)
+- [`EPIC-012: Development Aquarium Producer`](TODO-EPIC-012-dev-aquarium-producer.md)
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the

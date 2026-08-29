@@ -642,8 +642,10 @@ acceptance; and an independent adversarial read-only review.
 
 Status: `BLOCKED`
 
-Depends on `TASK-015`. Freeze one exact task-complete Dolgorae candidate, fill
-the placeholders in the handoff below, and move this Task to `BLOCKED` while an
+Depends on `TASK-015` and `TASK-035` and remains externally blocked on Aquarium
+`TASK-024` completing enrollment and runtime confirmation. Consume one exact
+enrolled Dolgorae development generation, fill the placeholders in the handoff
+below, and keep this Task `BLOCKED` while an
 Aquarium owner executes it. The owner first validates the active Aquarium
 installation. If it already satisfies every requirement, no unnecessary change
 is required; otherwise the owner modifies and commits the active review
@@ -651,26 +653,27 @@ contract, skills, supervision references, scripts, and tests under Aquarium's
 own authority. This repository does not prepare a migration document or make an
 Aquarium change on the owner's behalf.
 
-Copy the following request verbatim. The frozen Dolgorae fields are final; the
-Aquarium owner must replace every `REQUIRED:` marker with exact evidence before
-returning the Completed Confirm:
+Copy the following request verbatim. Aquarium owns the exact generation fields
+created from the completed TASK-035 producer and must replace every `REQUIRED:`
+marker with exact evidence before returning the Completed Confirm:
 
 ```text
 Aquarium independent-review Dolgorae activation request
 
-Validated Dolgorae candidate:
-- repository commit: 7685c58d42c654ea20f1ee5bfba02bc28abc441f
-- version: 0.1.0
-- executable path: /Users/draccoon/Workspace/RootKernel/dolgorae/dolgorae/target/release/dolgorae
-- executable file identity: darwin device=16777232 inode=635709269
-- executable SHA-256: sha256:f4c940fcf00ff0bb6aaeb27b3b5a1b9fbfdd5115fde0a88246a3432d91a425f9
-- capability/contract digest: sha256:0c7f8bb7e6b6f86fd98eb5aec9cda1e6859fbc1da2f06b1c0e4a21ad2e5ff307
+Validated Dolgorae generation:
+- project ID: dolgorae
+- repository commit: REQUIRED: exact clean local-main producer commit
+- development version: REQUIRED: v0.1.0-dev.<commit-prefix>
+- canonical executable path: REQUIRED: exact immutable generation path
+- executable SHA-256: REQUIRED: exact enrolled artifact digest
+- capability/contract digest: REQUIRED: exact runtime capability digest
+- generation lease evidence: REQUIRED: stable reference proving the invoked generation stayed leased
 
 The capability/contract digest is SHA-256 over the compact JSON `data` object
 from `runtime capabilities` with object keys sorted lexicographically.
 
 Required outcome:
-1. Aquarium independent-review must use this exact Dolgorae candidate to
+1. Aquarium independent-review must use this exact Dolgorae generation to
    capture the selected target and run one fresh Codex Reviewer.
 2. independent-review must create no Orca Run, Task, Dispatch, worker, or
    terminal.
@@ -717,13 +720,13 @@ Required Completed Confirm:
   "completion_scope": "aquarium_runtime_activation",
   "runtime_implementation": "verified",
   "dolgorae": {
-    "commit": "7685c58d42c654ea20f1ee5bfba02bc28abc441f",
-    "version": "0.1.0",
-    "canonical_executable_path": "/Users/draccoon/Workspace/RootKernel/dolgorae/dolgorae/target/release/dolgorae",
-    "executable_file_identity": "darwin device=16777232 inode=635709269",
-    "executable_sha256": "sha256:f4c940fcf00ff0bb6aaeb27b3b5a1b9fbfdd5115fde0a88246a3432d91a425f9",
-    "capability_digest": "sha256:0c7f8bb7e6b6f86fd98eb5aec9cda1e6859fbc1da2f06b1c0e4a21ad2e5ff307",
-    "launch_identity_evidence": "REQUIRED: stable reference proving the invoked object"
+    "project_id": "dolgorae",
+    "commit": "REQUIRED: exact producer commit",
+    "development_version": "REQUIRED: exact development version",
+    "canonical_executable_path": "REQUIRED: exact immutable generation path",
+    "executable_sha256": "REQUIRED: exact enrolled artifact digest",
+    "capability_digest": "REQUIRED: exact runtime capability digest",
+    "generation_lease_evidence": "REQUIRED: stable launch lease reference"
   },
   "aquarium": {
     "commit": "REQUIRED: exact Aquarium commit",
@@ -765,15 +768,15 @@ authority.
 
 After receiving `status: completed`, move this Task to `IN_REVIEW`. Re-read the
 exact Dolgorae and Aquarium commits, revalidate the executable and installed
-plugin digests, compare the canonical executable path and platform-specific file
-identity with the frozen candidate, inspect the launch identity evidence and
+plugin digests, compare the canonical executable path, development version, and
+artifact digest with the enrolled generation, inspect the lease evidence and
 every other stable reference, and rerun the bounded cross-repository
 compatibility checks. An Aquarium claim does not close this Task by itself.
 Missing evidence, an identity or digest mismatch, an uncommitted Aquarium
 change, a documentation-only confirmation, or any unresolved blocker returns
 the Task to `BLOCKED`.
 
-Verification: exact-candidate Dolgorae gates from TASK-015; Aquarium's complete
+Verification: exact-generation Dolgorae gates from TASK-035; Aquarium's complete
 repository validator and independent read-only review; all-scope runtime E2E;
 proof that independent-review creates no Orca objects; proof that orca-review
 retains Orca lifecycle ownership; capture-time source identity, post-run target
@@ -1405,3 +1408,56 @@ Task completion gate are satisfied. TASK-034 alone owns the transition of the
 checked manifest's `production_runtime_eligible` field from false to true and
 must leave it false on any missing, failed, unverified, or stale production
 campaign. TASK-000-D owns only `architecture_contract_eligible`.
+
+## EPIC-012: Development Aquarium Producer
+
+Status: `PLANNED`
+
+Detailed SOT: [EPIC-012 dossier](../todo/TODO-EPIC-012-dev-aquarium-producer.md)
+
+Goal: Enroll Dolgorae as an exact executable producer for Aquarium's isolated
+development channel so downstream review activation consumes one immutable,
+checksummed, leased generation instead of a mutable repository build path.
+
+### TASK-035: Produce an Exact Dolgorae Development Generation
+
+Status: `PLANNED`
+
+Depends on `TASK-015`. Add the standard `aquarium-dev-describe` and
+`aquarium-dev-build` Make targets. The descriptor identifies project
+`dolgorae`, next version `v0.1.0`, artifact kind `executable`, and artifact path
+`bin/dolgorae`. TASK-035 depends only on TASK-015, never on TASK-016 or Aquarium
+TASK-024. The builder accepts one absolute, caller-created empty
+`AQUARIUM_DEV_OUTPUT`, requires a clean local `main`, confines every Cargo and
+producer output to that staging root, and writes exactly the executable plus
+`manifest.json`.
+
+The descriptor and manifest use the exact closed field sets and newline-delimited
+JSON encoding of `aquarium-dev-producer-description/v1` and
+`aquarium-dev-artifact-manifest/v1`. The manifest binds the exact source commit,
+`v0.1.0-dev.<12-hex-prefix>` version, artifact kind and path, and
+`sha256:<lowercase-hex>`. It must reject missing, relative, non-directory,
+non-empty, symlinked, or physically repository-contained output roots and must
+not write into the repository or the stable user environment. A bounded locked
+release build exports and verifies the exact HEAD tree into staging, builds only
+that immutable snapshot with staging-local Cargo state, supervises the entire
+build process group, handles repeated interruption, removes partial output, and
+publishes the manifest atomically last. `v0.1.0-dev.<sha12>` is a local channel
+generation identifier derived from the canonical Cargo package version; it is
+not a stable release or a claim that SemVer precedence follows the existing
+0.1.0 candidate.
+
+Verification: focused black-box tests cover descriptor bytes, every output-root
+rejection, dirty or non-main repository rejection, isolated release build,
+manifest identity and checksum, exact output inventory, and repository
+non-mutation; the generated executable's runtime capability digest equals the
+completed TASK-015 contract digest; the complete repository gate and one
+pre-existing Mulgae read-only review pass without consuming TASK-024 or the new
+generation; one task-scoped commit exists without push. Completion hands the exact
+clean commit to Aquarium TASK-024 for enrollment and publication. It does not
+itself install, activate, or release Dolgorae.
+
+Epic acceptance: TASK-035 passes its ordinary completion gate, the producer
+contract is promoted to its durable owner, and the temporary dossier is removed
+in the approved closeout commit. The Epic completes without push, installation,
+or Aquarium mutation.
