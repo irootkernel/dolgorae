@@ -1421,7 +1421,7 @@ checksummed, leased generation instead of a mutable repository build path.
 
 ### TASK-035: Produce an Exact Dolgorae Development Generation
 
-Status: `PLANNED`
+Status: `IN_REVIEW`
 
 Depends on `TASK-015`. Add the standard `aquarium-dev-describe` and
 `aquarium-dev-build` Make targets. The descriptor identifies project
@@ -1437,7 +1437,7 @@ JSON encoding of `aquarium-dev-producer-description/v1` and
 `aquarium-dev-artifact-manifest/v1`. The manifest binds the exact source commit,
 `v0.1.0-dev.<12-hex-prefix>` version, artifact kind and path, and
 `sha256:<lowercase-hex>`. It must reject missing, relative, non-directory,
-non-empty, symlinked, or physically repository-contained output roots and must
+non-empty, symlink-root, or physically repository-contained output roots and must
 not write into the repository or the stable user environment. A bounded locked
 release build exports and verifies the exact HEAD tree into staging, builds only
 that immutable snapshot with staging-local Cargo state, supervises the entire

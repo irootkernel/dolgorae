@@ -35,9 +35,10 @@ contract admitted by Aquarium TASK-024.
 
 `make aquarium-dev-build AQUARIUM_DEV_OUTPUT=<absolute-empty-directory>`:
 
-- physically canonicalizes the repository and output root, rejects symlinked
-  roots or any symlink path component, and accepts only an existing absolute
-  empty directory outside this repository;
+- physically canonicalizes the repository and output root, rejects a symlink as
+  the supplied root itself, and accepts only an existing absolute empty
+  canonical directory outside this repository; platform alias ancestors such
+  as macOS `/var` are resolved before the retained root descriptor is opened;
 - requires a clean local `main` and derives identity from its exact `HEAD`;
 - exports the exact HEAD tree into a producer-owned staging subtree, verifies
   its tree identity against HEAD, and never compiles mutable checkout bytes;

@@ -16,7 +16,17 @@ INT_TESTS := \
 
 .PHONY: test test-prepare test-unit test-int test-e2e \
 	test-live-specialist-review test-live-scoped-specialist-review \
-	format format-check lint vet architecture
+	format format-check lint vet architecture \
+	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
+
+aquarium-dev-describe:
+	@$(PYTHON_BIN) tools/dev_aquarium/producer.py describe
+
+aquarium-dev-build:
+	@$(PYTHON_BIN) tools/dev_aquarium/producer.py build
+
+test-aquarium-dev-producer:
+	@$(PYTHON_BIN) tests/e2e/test_dev_aquarium_producer.py
 
 test:
 	$(MAKE) test-prepare
@@ -47,6 +57,7 @@ test-prepare:
 	$(PYTHON_BIN) tools/validators/validate_json_schemas.py
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
 	$(PYTHON_BIN) tools/validators/validate_markdown.py
+	$(MAKE) test-aquarium-dev-producer
 	git --no-pager diff --check
 	@echo "[test-prepare] completed"
 

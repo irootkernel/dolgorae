@@ -306,8 +306,9 @@ fn collect_python_files(directory: &Path, output: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn python_is_limited_to_validators_fixtures_and_black_box_e2e() {
+fn python_is_limited_to_dev_tools_validators_fixtures_and_black_box_e2e() {
     let root = repository_root();
+    let dev_aquarium_root = root.join("tools/dev_aquarium");
     let validator_root = root.join("tools/validators");
     // ADR-014 places exactly one Python fixture outside the validators: the
     // shared fake app-server, whose independence from the Rust ingest path is
@@ -318,10 +319,11 @@ fn python_is_limited_to_validators_fixtures_and_black_box_e2e() {
     collect_python_files(&root, &mut files);
     for path in files {
         assert!(
-            path.starts_with(&validator_root)
+            path.starts_with(&dev_aquarium_root)
+                || path.starts_with(&validator_root)
                 || path.starts_with(&fake_app_server_root)
                 || path.starts_with(&e2e_root),
-            "Python is limited to tools/validators, tools/fake_app_server, and tests/e2e: {}",
+            "Python is limited to tools/dev_aquarium, tools/validators, tools/fake_app_server, and tests/e2e: {}",
             path.display()
         );
         if path.starts_with(&e2e_root) || path.starts_with(&fake_app_server_root) {
