@@ -11,6 +11,20 @@ The implementation is written in Rust. The product contract is defined by the
 checked [protocol](docs/protocol/) artifacts. The
 [roadmap](docs/roadmap/README.md) is the sole delivery-status authority.
 
+## Release maturity
+
+The release train begins with `v0.1.0`, an Integration Preview covering the
+cumulative product scope through `EPIC-004`. Later `v0.1.x` previews advance at
+the `MILESTONE-ES1`, `MILESTONE-BH1`, and `MILESTONE-BC1` boundaries. They do
+not claim the complete target specification, Personal Alpha readiness, or
+customer support.
+
+`v0.2.0` is the planned first customer-supported release. It remains a Personal
+Alpha and requires every currently planned product Epic from `EPIC-005` through
+`EPIC-011`, including the complete `MILESTONE-PA1` acceptance campaign. See the
+[release train](docs/roadmap/README.md#release-train) for the exact version and
+milestone boundaries.
+
 ## Build and use from source
 
 Build Dolgorae with the supported Rust 1.97.1 toolchain, then inspect the

@@ -1,11 +1,12 @@
 # Dolgorae Architecture
 
-Status: Normative target architecture for the first supported release.
+Status: Normative target architecture for the `v0.2.0` Personal Alpha, the
+first customer-supported release.
 
 This document owns technical structure and invariants. It describes the system
-Dolgorae is required to implement; it does not claim that the currently empty
-repository already implements it. Product behavior is owned by
-[the specification](../specs/README.md), rationale by the
+Dolgorae is required to implement for that release; it does not claim that an
+earlier milestone preview already implements the complete target. Product
+behavior is owned by [the specification](../specs/README.md), rationale by the
 [architecture decision records](../architecture-decision-records/README.md),
 and implementation progress by the [roadmap](../roadmap/README.md).
 Document roles and the required synchronization procedure are defined by the

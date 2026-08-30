@@ -5,7 +5,10 @@ Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `COMPLETE`. `EPIC-002`, `TASK-004`, `TASK-005`, `TASK-006`, and `TASK-007` are
 `COMPLETE`. `EPIC-003`, `TASK-008`, `TASK-009`, `TASK-010`, `TASK-011`,
 `TASK-012`, and `TASK-013` are `COMPLETE` and form the first user-usable
-product slice.
+product slice. `EPIC-004`, `TASK-014`, `TASK-015`, and `TASK-016` are
+`COMPLETE` and establish the `v0.1.0` Integration Preview product boundary.
+`EPIC-012` and `TASK-035` are also `COMPLETE`; they provide development-channel
+production infrastructure but do not add a user-facing product milestone.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -16,12 +19,13 @@ Specialist-to-Specialist collaboration.
 
 After `MILESTONE-SR1`, `EPIC-004` implements common immutable review targets,
 extends Specialist Review to dirty and historical Git state, and activates
-Dolgorae as Aquarium independent-review's Codex backend. The implementation
-roadmap then proceeds in five layers: external Specialist
-hardening, the minimum supervised Gul Run gateway, the transport-independent
-Dolgorae orchestration core and Brokered Hierarchy, live Primary control-plane
-integration, and finally the durable Collaboration Plane. `TASK-025` remains the live run-bound
-transport probe and occurs only after the Brokered Hierarchy core is complete.
+Dolgorae as Aquarium independent-review's Codex backend. After the `v0.1.0`
+Integration Preview, the implementation roadmap proceeds through access and
+recovery safety, external Specialist hardening, the supervised Gul Run gateway
+and Brokered Hierarchy core, live Primary control-plane integration, the durable
+Collaboration Plane, operator and audit interfaces, and final conformance and
+Personal Alpha acceptance. `TASK-025` remains the live run-bound transport probe
+and occurs only after the Brokered Hierarchy core is complete.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -48,6 +52,23 @@ Document roles and the required synchronization procedure are defined by the
 Milestones are cumulative. An earlier milestone remains usable while later
 Epics are implemented. A milestone does not waive its own Task completion gate
 or any safety limitation stated in its owning Epic.
+
+## Release Train
+
+| Version | Classification | Required completion boundary | Cumulative product milestones |
+| --- | --- | --- | --- |
+| `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
+| `v0.1.1` | Milestone Preview | `EPIC-006` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
+| `v0.1.2` | Milestone Preview | `EPIC-008` complete, including the preceding `EPIC-007` control-plane core | Through `MILESTONE-BH1` |
+| `v0.1.3` | Milestone Preview | `EPIC-009` complete | Through `MILESTONE-BC1` |
+| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
+
+The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
+readiness, the complete target specification, or customer support. A completion
+boundary makes a version eligible for release; it does not itself create a
+release, change the changelog, authorize a tag or publication, or prove an
+installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
+unless this table is explicitly revised.
 
 ## Status Model
 
@@ -1312,12 +1333,13 @@ Epic acceptance: every public command and audit workflow in
 `docs/specs/README.md` is
 available against the deterministic fake environment.
 
-## EPIC-011: Conformance and Personal Alpha Release
+## EPIC-011: Conformance and v0.2.0 Personal Alpha Release
 
 Status: `PLANNED`
 
-Goal: Establish release evidence for the supported Apple Silicon macOS and two
-real Codex targets.
+Goal: Establish `v0.2.0` release evidence for the supported Apple Silicon macOS
+and two real Codex targets, completing the first customer-supported Personal
+Alpha release.
 
 ### TASK-032: Deterministic Protocol Conformance Suite
 
@@ -1402,11 +1424,13 @@ version is accepted for an existing profile only through the operator-authorized
 `profile server migrate` transaction; run-local resume/recover/reconcile
 commands cannot approve process-static drift.
 
-Epic acceptance: mark the personal alpha ready only after TASK-034 and the full
-Task completion gate are satisfied. TASK-034 alone owns the transition of the
-checked manifest's `production_runtime_eligible` field from false to true and
-must leave it false on any missing, failed, unverified, or stale production
-campaign. TASK-000-D owns only `architecture_contract_eligible`.
+Epic acceptance: mark the `v0.2.0` Personal Alpha ready only after TASK-034 and
+the full Task completion gate are satisfied. This is the first release eligible
+for customer support; earlier `v0.1.x` milestone previews do not inherit that
+claim. TASK-034 alone owns the transition of the checked manifest's
+`production_runtime_eligible` field from false to true and must leave it false
+on any missing, failed, unverified, or stale production campaign. TASK-000-D
+owns only `architecture_contract_eligible`.
 
 ## EPIC-012: Development Aquarium Producer
 

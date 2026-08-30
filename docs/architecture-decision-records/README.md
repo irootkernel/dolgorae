@@ -1,8 +1,9 @@
 # Dolgorae Architecture Decisions
 
-Status: Decision record for the first supported release. Each ADR carries its
-own Accepted, Under Review, or Superseded status; this heading does not promote
-an Under Review ADR to Accepted.
+Status: Decision record for the `v0.2.0` Personal Alpha, the first
+customer-supported release. Each ADR carries its own Accepted, Under Review, or
+Superseded status; this heading does not promote an Under Review ADR to
+Accepted.
 
 This document owns decision rationale. Each ADR describes the currently
 accepted decision, not an append-only historical chain. If a decision changes,

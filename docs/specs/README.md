@@ -1,6 +1,7 @@
 # Dolgorae Product Specification
 
-Status: Normative target specification for the first supported release.
+Status: Normative target specification for the `v0.2.0` Personal Alpha, the
+first customer-supported release.
 
 This document owns Dolgorae's externally observable behavior. Technical structure
 is owned by [architecture](../architecture/README.md), decision rationale by
@@ -10,6 +11,10 @@ SOT documents is an invalid
 state and must be reconciled before an implementation task becomes active.
 Document roles and the required synchronization procedure are defined by the
 [documentation authority map](../README.md).
+
+The cumulative `v0.1.x` milestone previews implement only the product boundary
+assigned to each version by the roadmap. They do not claim this complete target
+specification, Personal Alpha readiness, or customer support.
 
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.
@@ -322,14 +327,14 @@ Codex App Server singleton per canonical Runtime Profile launch-authority
 contract and one or more Run-owned Dedicated Lane Server generations. Those
 Codex processes are not Dolgorae daemons.
 
-The first supported release is a personal alpha for Apple Silicon macOS 26.0
-or later (`aarch64-apple-darwin`) on local APFS. The canonical workspace and
-Dolgorae's configured mutable state and lock root MUST report `MNT_LOCAL` and
-`f_fstypename == "apfs"`; there is no v1 override. Intel macOS, Linux,
-Windows, network filesystems, non-APFS local filesystems, public installers,
-and automatic updates are not supported release targets. Empirical release
-evidence is valid only for the recorded OS build and MUST be refreshed on a new
-macOS major version.
+The `v0.2.0` first customer-supported release is a Personal Alpha for Apple
+Silicon macOS 26.0 or later (`aarch64-apple-darwin`) on local APFS. The
+canonical workspace and Dolgorae's configured mutable state and lock root MUST
+report `MNT_LOCAL` and `f_fstypename == "apfs"`; there is no v1 override. Intel
+macOS, Linux, Windows, network filesystems, non-APFS local filesystems, public
+installers, and automatic updates are not supported release targets. Empirical
+release evidence is valid only for the recorded OS build and MUST be refreshed
+on a new macOS major version.
 
 Dolgorae depends on user-prepared Runtime Profiles. Codex App Server 0.149.0 is
 the current compatibility baseline. Background-process safety is owned by each
