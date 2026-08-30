@@ -16,7 +16,13 @@ from schema_support import assert_valid, validator
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
-    cases = (("--help",), ("--version",), ("runtime", "capabilities"))
+    cases = (
+        ("--help",),
+        ("help",),
+        ("help", "runtime"),
+        ("--version",),
+        ("runtime", "capabilities"),
+    )
     for arguments in cases:
         completed = subprocess.run(
             [str(binary), *arguments],
@@ -50,6 +56,11 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     "safe_client_projection must stay false until a real "
                     "safe-observer projection caller exists"
                 )
+        elif arguments[0] in {"--help", "help"}:
+            if instance["command"] != "help":
+                raise AssertionError(f"help used the wrong command: {arguments}")
+            if not instance["data"]["text"].startswith("Usage: dolgorae"):
+                raise AssertionError(f"help omitted usage text: {arguments}")
 
     home = pathlib.Path(os.environ["HOME"])
     controller = home / "controller.json"
@@ -130,6 +141,15 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         pass
     else:
         raise AssertionError("--human --version unexpectedly emitted JSON")
+
+    human_help = subprocess.run(
+        [str(binary), "--human", "help", "runtime"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if human_help.stderr or not human_help.stdout.startswith("Usage: dolgorae runtime"):
+        raise AssertionError(f"human help boundary failed: {human_help!r}")
 
 
 def main() -> int:

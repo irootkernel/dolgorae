@@ -51,6 +51,9 @@ fn main() -> ExitCode {
             }
             execute(cli)
         }
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => {
+            render_generated_help(human, error.to_string())
+        }
         Err(error) => render_failure(
             human,
             "unknown",
@@ -85,6 +88,15 @@ fn render_help(human: bool) -> ExitCode {
         ));
         ExitCode::SUCCESS
     }
+}
+
+fn render_generated_help(human: bool, text: String) -> ExitCode {
+    if human {
+        print!("{text}");
+    } else {
+        render_json(&SuccessEnvelope::new("help", json!({"text": text})));
+    }
+    ExitCode::SUCCESS
 }
 
 fn render_version(human: bool) -> ExitCode {
