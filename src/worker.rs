@@ -3748,9 +3748,9 @@ impl ForeignDiagnostics for ProfileForeignDiagnostics {
 ///
 /// The worker never re-derives which profile a Run belongs to: the server key
 /// comes from the session bootstrap it was launched with, and the Application
-/// Support root is the parent of the workspace state root it was pinned to.
-/// A Run whose state root is not the expected two levels below Application
-/// Support has an unusable durable layout, which is a bootstrap fault rather
+/// Dolgorae home is the parent of the workspace state root it was pinned to.
+/// A Run whose state root is not the expected two levels below Dolgorae home
+/// has an unusable durable layout, which is a bootstrap fault rather
 /// than something to guess around.
 fn profile_diagnostics_root(
     state_root: &Path,
@@ -3759,14 +3759,14 @@ fn profile_diagnostics_root(
     if decode_sha256(server_key).is_none() {
         return Err(WorkerProtocolError::InvalidRuntimeRecord);
     }
-    let application_support = state_root
+    let dolgorae_home = state_root
         .parent()
         .and_then(Path::parent)
         .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
-    if !application_support.is_absolute() {
+    if !dolgorae_home.is_absolute() {
         return Err(WorkerProtocolError::InvalidRuntimeRecord);
     }
-    Ok(application_support.join("profiles").join(server_key))
+    Ok(dolgorae_home.join("profiles").join(server_key))
 }
 
 #[must_use]
@@ -5346,16 +5346,16 @@ mod tests {
 
     #[test]
     fn foreign_thread_observations_land_in_this_runs_profile_diagnostic_journal() {
-        let application_support =
+        let dolgorae_home =
             std::env::temp_dir().join(format!("dolgorae-foreign-sink-{}", Uuid::now_v7()));
-        let state_root = application_support.join("workspaces").join("11".repeat(32));
+        let state_root = dolgorae_home.join("workspaces").join("11".repeat(32));
         fs::create_dir_all(&state_root).unwrap();
         let server_key = "a".repeat(64);
 
         let profile_root = profile_diagnostics_root(&state_root, &server_key).unwrap();
         assert_eq!(
             profile_root,
-            application_support.join("profiles").join(&server_key),
+            dolgorae_home.join("profiles").join(&server_key),
             "a Run's diagnostics belong to the Runtime Profile it is pinned to"
         );
         assert!(
@@ -5416,7 +5416,7 @@ mod tests {
                 & 0o777,
             0o600
         );
-        fs::remove_dir_all(&application_support).unwrap();
+        fs::remove_dir_all(&dolgorae_home).unwrap();
     }
 
     #[cfg(target_os = "macos")]

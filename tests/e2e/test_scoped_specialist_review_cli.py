@@ -57,7 +57,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         bin_root = root / "bin"
         for directory in (home, workspace, codex_home, bin_root):
             directory.mkdir(mode=0o700)
-        (home / "Library" / "Application Support").mkdir(parents=True, mode=0o700)
         git(workspace, "init", "-b", "main")
         git(workspace, "config", "user.name", "Dolgorae E2E")
         git(workspace, "config", "user.email", "dolgorae@example.invalid")
@@ -78,7 +77,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if initialized.returncode != 0:
             raise AssertionError(f"workspace initialization failed: {envelope!r}")
         workspace_id = str(envelope["data"]["workspace_id"])  # type: ignore[index]
-        state_root = home / "Library" / "Application Support" / "Dolgorae" / "workspaces" / workspace_id
+        state_root = home / ".dolgorae" / "workspaces" / workspace_id
         operator = root / "operator"
         initialized_operator, operator_envelope = invoke(
             binary, home, ["operator", "credential", "initialize", "--output", str(operator)]

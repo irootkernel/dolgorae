@@ -371,7 +371,7 @@ mod tests {
             profile_name: "reviewer".to_owned(),
             canonical_codex_home: "/tmp/codex-home".to_owned(),
             normalized_argv: vec!["/usr/bin/codex".to_owned()],
-            launch_cwd_policy: "application_support_profile_root".to_owned(),
+            launch_cwd_policy: "profile_state_directory_v1".to_owned(),
             derived_launch_cwd: "/tmp/profile".to_owned(),
             sanitized_environment: BTreeMap::from([
                 ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),

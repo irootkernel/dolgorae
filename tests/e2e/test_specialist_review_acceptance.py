@@ -88,9 +88,7 @@ def main() -> int:
         reviewer_state = (
             root
             / "home"
-            / "Library"
-            / "Application Support"
-            / "Dolgorae"
+            / ".dolgorae"
             / "workspaces"
             / "fake"
             / "runs"
@@ -161,7 +159,7 @@ def main() -> int:
         else:
             raise AssertionError("ignored workspace mutation was accepted")
 
-        state = root / "home" / "Library" / "Application Support" / "Dolgorae"
+        state = root / "home" / ".dolgorae"
         state.mkdir(parents=True, exist_ok=True)
         (state / "event.jsonl").write_text(canary, encoding="utf-8")
         assert MODULE.canary_absent_from_state(state, canary) is False

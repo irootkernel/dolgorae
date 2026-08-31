@@ -227,7 +227,7 @@ pub fn capabilities() -> RuntimeCapabilities {
         "maximum_rpc_client_version": 1,
         "rpc_descriptor_sha256": PUBLIC_V1_DESCRIPTOR_SHA256,
         "grpc_methods": ["RuntimeService.GetCapabilities"],
-        "controller_carrier_root": "application_support/Dolgorae/controller-carriers",
+        "controller_carrier_root": "home/.dolgorae/controller-carriers",
         "controller_credential": {
             "schema_id": "https://dolgorae.local/schema/controller-credential/v1",
             "schema_version": 1,

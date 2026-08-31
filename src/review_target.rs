@@ -1,6 +1,7 @@
 //! Immutable review-target capture and owner-bound settlement.
 
 use crate::machine::{MachineError, new_uuid_v7};
+use crate::paths::DolgoraeHome;
 use crate::workspace::{WorkspaceService, workspace_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -147,7 +148,7 @@ fn capture(arguments: &[OsString]) -> Result<Value, MachineError> {
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
     let root = view.canonical_path.to_path_buf()?;
     require_outside_workspace(&owner_file, &root, "--settlement-owner-file", false)?;
-    let targets = state_root(&root).join("review-targets");
+    let targets = state_root(&root)?.join("review-targets");
     secure_directory(&targets)?;
     let capture_ref = new_uuid_v7();
     let temporary = targets.join(format!(".capture-{capture_ref}"));
@@ -230,7 +231,7 @@ fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {
     let root = view.canonical_path.to_path_buf()?;
     require_outside_workspace(&owner_file, &root, "--settlement-owner-file", true)?;
     require_outside_workspace(&receipt_file, &root, "--terminal-receipt-file", true)?;
-    let capture_root = state_root(&root)
+    let capture_root = state_root(&root)?
         .join("review-targets")
         .join(capture_ref.to_string());
     settle_at(
@@ -896,12 +897,8 @@ fn line(bytes: &[u8]) -> Result<String, MachineError> {
     Ok(value.to_owned())
 }
 
-fn state_root(root: &Path) -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    home.join("Library/Application Support/Dolgorae/workspaces")
-        .join(workspace_id(root))
+fn state_root(root: &Path) -> Result<PathBuf, MachineError> {
+    Ok(DolgoraeHome::system()?.workspace_root(&workspace_id(root)))
 }
 
 fn secure_directory(path: &Path) -> Result<(), MachineError> {

@@ -801,11 +801,11 @@ def validate_foreign_thread(binary: pathlib.Path) -> None:
         enclosing = pathlib.Path(temporary)
         enclosing.chmod(0o700)
         # A faithful durable layout: the worker locates its Runtime Profile's
-        # diagnostic journal from the Application Support root above the
+        # diagnostic journal from the Dolgorae home above the
         # workspace state root, so the state root has to sit where a real one
         # does.
-        application_support = enclosing / "application-support"
-        root = application_support / "workspaces" / WORKSPACE_ID
+        dolgorae_home = enclosing / "dolgorae-home"
+        root = dolgorae_home / "workspaces" / WORKSPACE_ID
         private_directory(root)
         codex_home = enclosing / "codex-home"
         workspace = enclosing / "workspace"
@@ -880,7 +880,7 @@ def validate_foreign_thread(binary: pathlib.Path) -> None:
             # The observation is durable, in the Runtime Profile's journal
             # rather than the Run ledger, and carries no request payload.
             journal = (
-                application_support / "profiles" / ("44" * 32) / "diagnostics.jsonl"
+                dolgorae_home / "profiles" / ("44" * 32) / "diagnostics.jsonl"
             )
             if not journal.exists():
                 raise AssertionError("no profile diagnostic journal was written")
@@ -1228,10 +1228,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
     """
     machine_schema = validator(pathlib.Path("docs/protocol").resolve(), "dolgorae-machine-v1.schema.json")
     home = pathlib.Path(os.environ["HOME"])
-    application_support = home / "Library" / "Application Support"
-    if not application_support.exists():
-        application_support.mkdir(parents=True, mode=0o700)
-    state_home = application_support / "Dolgorae" / "workspaces"
+    state_home = home / ".dolgorae" / "workspaces"
     with tempfile.TemporaryDirectory(prefix="dolgorae-epic002-runcli-") as temporary:
         root = pathlib.Path(temporary)
         root.chmod(0o700)
@@ -1747,10 +1744,8 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
         home = root / "home"
         for directory in (codex_home, workspace, bin_root, home):
             private_directory(directory)
-        application_support = home / "Library" / "Application Support"
-        application_support.mkdir(parents=True, mode=0o700)
         account = {"HOME": str(home)}
-        state_home = application_support / "Dolgorae" / "workspaces"
+        state_home = home / ".dolgorae" / "workspaces"
         status, objects = machine(binary, "init", str(workspace), "--non-git", environment=account)
         if status != 0 or len(objects) != 1:
             raise AssertionError(f"init did not publish one workspace: {status} {objects!r}")

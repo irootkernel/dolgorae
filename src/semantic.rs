@@ -5,8 +5,7 @@ use crate::conformance::{
 };
 use crate::controller::{
     CredentialCarrier, RunMutationLock, RunResetEnvironment, authorize_controller,
-    binding_from_carrier, carrier_from_options, default_operator_root,
-    load_reconciled_controller_binding,
+    binding_from_carrier, carrier_from_options, load_reconciled_controller_binding,
 };
 use crate::darwin::DarwinSystem;
 use crate::domain::{Access, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind};
@@ -14,6 +13,7 @@ use crate::event::EventProjection;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
+use crate::paths::DolgoraeHome;
 use crate::profile::{ProfileOperation, ServerState};
 use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, AppServerFacts, AuditPolicy,
@@ -2036,11 +2036,7 @@ fn current_binary_sha256() -> Result<String, MachineError> {
 }
 
 fn workspace_state_root(view: &WorkspaceView) -> Result<PathBuf, MachineError> {
-    Ok(default_operator_root()?
-        .parent()
-        .ok_or_else(|| internal("operator root has no Application Support parent"))?
-        .join("workspaces")
-        .join(&view.workspace_id))
+    Ok(DolgoraeHome::system()?.workspace_root(&view.workspace_id))
 }
 
 fn required_capabilities(args: &[OsString]) -> Vec<String> {

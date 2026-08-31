@@ -257,7 +257,7 @@ Orca provider supervision, or Mulgae adjudication and publication.
 The Coordinator reads Git objects, the index, and eligible worktree paths
 without mutating the source repository. Whole-tree targets use `current/`;
 transition targets use `before/` and `after/`. Captures live in an owner-only
-Dolgorae Application Support area, use read-only materialized files and
+Dolgorae home, use read-only materialized files and
 directories, and carry a safe manifest with relative paths, byte sizes,
 SHA-256 digests, content classifications, inclusion dispositions, resolved Git
 objects, and the whole-target digest. The source repository path and private
@@ -457,8 +457,8 @@ then advertises the complete descriptor method inventory. An unadvertised
 method is unavailable even though generated stubs exist, and the adapter fails
 closed rather than routing it to an incomplete semantic handler.
 
-The gateway holds the installation-scoped Application Support
-`Dolgorae/rpc/gateway.lock` for its lifetime and publishes `gateway.json` with
+The gateway holds the installation-scoped Dolgorae-home
+`rpc/gateway.lock` for its lifetime and publishes `gateway.json` with
 boot UUID, PID/start identity, binary digest, socket path/inode, server instance
 ID, and protocol range. The lock is never acquired by an ordinary semantic
 operation and therefore is outside the global operation lock hierarchy. A
@@ -802,9 +802,9 @@ Specialist Policy JSON documents. A launch resolves one explicit name, validates
 all referenced Agent Configurations against current profile capabilities, and
 copies the complete policy plus JCS digest into the session before root Run
 allocation. Existing sessions never reread the registry.
-The platform Application Support root contains a canonical-home coordinator at
-`Dolgorae/homes/<home-key>/{home.lock,active.json}` and contract state at
-`Dolgorae/profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,epoch,server.log,server.log.1}`.
+The Dolgorae home contains a canonical-home coordinator at
+`homes/<home-key>/{home.lock,active.json}` and contract state at
+`profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,epoch,server.log,server.log.1}`.
 All components are current-uid-owned mode 0700/0600 and descriptor-relative.
 The socket node uses the validated short path
 `/tmp/dolgorae-<uid>/p/<base32-first-160-server-key-bits>.sock`; its full path
@@ -875,7 +875,7 @@ file locks before process, network, turn, or user waits; no path acquires upward
 
 ### Persistent Run Store
 
-The Run store is located below the per-workspace Application Support state
+The Run store is located below the per-workspace Dolgorae-home state
 root and is never agent-writable. `audit.jsonl` is the sole per-Run event
 authority. `state.json`, transcripts, status views, and exports are
 projections. The Codex thread remains independently stored in the pinned
@@ -935,8 +935,8 @@ carrier and are consumed before worker discovery; they never enter argv,
 environment, logs, audit, runtime records, or machine output.
 
 For public gRPC, the only accepted Controller carrier is an absolute protected
-file reference below the canonical mode-0700 Application Support directory
-`Dolgorae/controller-carriers/`. The Protobuf request contains the path and
+file reference below the canonical mode-0700 Dolgorae-home directory
+`controller-carriers/`. The Protobuf request contains the path and
 expected public Controller ID/generation, never capability bytes. The semantic
 service reopens the file beneath an already validated directory descriptor and
 revalidates root containment, regular-file type, no-symlink identity, current
@@ -1213,10 +1213,11 @@ policy:
 All machine-local configuration and mutable authority are outside the workspace:
 
 ```text
-~/Library/Application Support/Dolgorae/
+~/.dolgorae/
   rpc/
   controller-carriers/
   operator/
+  homes/
   profiles/
   workspaces/
     <workspace-id>/
@@ -1238,20 +1239,25 @@ All machine-local configuration and mutable authority are outside the workspace:
       cache/
 ```
 
+The root is fixed below canonical `HOME`; there is no platform-specific or
+environment override. Dolgorae reads and writes no alternate per-user state
+root and carries no discovery, migration, or compatibility path for state made
+by earlier development versions.
+
 `workspace.json` binds the full workspace ID to the lossless canonical path and
 initialization mode. `idempotency/run-start/` is the workspace-scoped allocation
 index: one mode-0600 record per `run start` key, named by the key's digest
 rather than the key itself, holding the normalized allocation digest and the Run
 identity it is bound to. It is fsynced before the Run directory is published, so
 a response lost after allocation is reconciled by retrying the identical key
-instead of allocating a second Run. Both the canonical workspace and its Application Support
+instead of allocating a second Run. Both the canonical workspace and its Dolgorae-home
 state root must satisfy the v1 local-APFS requirement. The state root is
 current-uid-owned mode 0700, mutable files are mode 0600, and no path below it
 is included in a Codex writable root or model-visible projection.
 
 Worker and App Server sockets remain below the user-private short `/tmp` roots
 specified by the Run and Profile contracts. Those nodes are locators only. An
-attach or cleanup decision is authorized by exact Application Support records,
+attach or cleanup decision is authorized by exact Dolgorae-home records,
 held locks, process identity, and socket inode.
 
 Git worktrees remain distinct workspaces because each canonical top-level path
@@ -1467,7 +1473,7 @@ additional credential facts beyond information already available to local
 observers.
 
 An installation-scoped operator credential has a separate persisted digest and
-generation in the Application Support root. Initialization is create-exclusive;
+generation in the Dolgorae home. Initialization is create-exclusive;
 rotation requires the current capability. Profile stop/restart and controller
 reset accept it only by protected file/fd, while controller reset accepts the
 new controller through a distinct carrier. Server key is public identity, not
@@ -1693,6 +1699,9 @@ fcntl/flock inspection, `fstatfs/MNT_LOCAL/APFS`, and boot-UUID sysctl. Core rec
 receives safe typed verdicts through injectable monotonic-clock, boot, identity,
 enumeration, and fault-barrier interfaces. RFC 8785 canonicalization is an
 in-repository safe module rather than an unspecified serializer dependency.
+The dependency-free `paths` module is the sole physical Dolgorae-home locator;
+state-owning modules derive their workspace, profile, Operator, and carrier
+roots from it rather than rereading platform-specific path conventions.
 
 The approved safe-Rust mechanisms are `clap` for CLI parsing, `uuid` for
 UUIDv7, `sha2` for SHA-256, `sha1` only for the RFC 6455 WebSocket accept-key

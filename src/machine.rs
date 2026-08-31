@@ -33,6 +33,13 @@ pub struct MachineError {
     pub details: Value,
 }
 
+impl From<crate::paths::DolgoraeHomeError> for MachineError {
+    fn from(error: crate::paths::DolgoraeHomeError) -> Self {
+        let (path, reason) = error.into_parts();
+        Self::runtime_path_invalid(path, reason)
+    }
+}
+
 impl MachineError {
     #[must_use]
     pub fn new(

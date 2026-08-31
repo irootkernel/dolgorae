@@ -4,6 +4,7 @@ use crate::app_server::{JsonRpcConnection, TransportError};
 use crate::darwin::DarwinSystem;
 use crate::jcs::{PayloadRepresentation, canonicalize, parse, represent_payload};
 use crate::machine::MachineError;
+use crate::paths::DolgoraeHome;
 use crate::workspace::{
     LocalProfileRegistry, NativeSubagents, RuntimeProfile, WorkspaceService, parse_local_profiles,
 };
@@ -214,7 +215,7 @@ pub struct DoctorResult {
 struct Context {
     workspace_id: String,
     registry_path: PathBuf,
-    application_support_root: PathBuf,
+    dolgorae_home_root: PathBuf,
 }
 
 #[derive(Debug)]
@@ -751,7 +752,7 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
             json!(false),
         ));
     }
-    let old_root = context.application_support_root.join("profiles").join(&old);
+    let old_root = context.dolgorae_home_root.join("profiles").join(&old);
     let new_root = profile_root(&context, &snapshot);
     verify_private_directory(&old_root)?;
     secure_dir(&new_root)?;
@@ -1174,7 +1175,7 @@ fn reconcile_blocked_migration(
     if active.server_key == confirmed_new_key {
         let state = read_state_if_running(
             &context
-                .application_support_root
+                .dolgorae_home_root
                 .join("profiles")
                 .join(confirmed_new_key)
                 .join("state.json"),
@@ -1197,7 +1198,7 @@ fn reconcile_blocked_migration(
     if active.server_key == confirmed_old_key {
         let state = read_state_if_running(
             &context
-                .application_support_root
+                .dolgorae_home_root
                 .join("profiles")
                 .join(confirmed_old_key)
                 .join("state.json"),
@@ -1272,7 +1273,7 @@ fn automatic_quiescent_migration(
     let active_path = home.join("active.json");
     let migration_path = home.join("migration.json");
     let old_root = context
-        .application_support_root
+        .dolgorae_home_root
         .join("profiles")
         .join(old_server_key);
     let new_root = profile_root(context, new_snapshot);
@@ -1642,19 +1643,12 @@ fn selected_profile_from(
 fn context(workspace: Option<&Path>) -> Result<Context, MachineError> {
     let service = WorkspaceService::system()?;
     let view = service.discover(workspace)?;
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| MachineError::runtime_path_invalid("HOME", "HOME is not set"))?;
-    let application_support_root = fs::canonicalize(home)
-        .map_err(io_error)?
-        .join("Library/Application Support/Dolgorae");
-    let state_root = application_support_root
-        .join("workspaces")
-        .join(&view.workspace_id);
+    let dolgorae_home = DolgoraeHome::system()?;
+    let state_root = dolgorae_home.workspace_root(&view.workspace_id);
     Ok(Context {
         workspace_id: view.workspace_id,
         registry_path: state_root.join("local.yaml"),
-        application_support_root,
+        dolgorae_home_root: dolgorae_home.root().to_path_buf(),
     })
 }
 
@@ -1770,7 +1764,7 @@ fn snapshot_for(
         let server_key =
             domain_separated_sha256(b"dolgorae-profile-server-key-v1\0", &launch_contract)?;
         let derived_launch_cwd = context
-            .application_support_root
+            .dolgorae_home_root
             .join("profiles")
             .join(&server_key);
         Ok(ProfileSnapshot {
@@ -3867,10 +3861,7 @@ fn process_identity_matches(pid: u32, uid: u32, pgid: u32, fingerprint: &str) ->
 /// (`profile state reset`, migration-fence repair) requires before acting.
 fn server_lifetime_absent(context: &Context, server_key: &str) -> Result<bool, MachineError> {
     require_canonical_persisted_server_key(server_key)?;
-    let root = context
-        .application_support_root
-        .join("profiles")
-        .join(server_key);
+    let root = context.dolgorae_home_root.join("profiles").join(server_key);
     let state_path = root.join("state.json");
     if read_state_if_running(&state_path)?.is_some() {
         return Ok(false);
@@ -4107,7 +4098,7 @@ fn probe_server(
 
 fn profile_root(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
     context
-        .application_support_root
+        .dolgorae_home_root
         .join("profiles")
         .join(&snapshot.server_key)
 }
@@ -4121,7 +4112,7 @@ fn home_root(context: &Context, canonical_codex_home: &str) -> Result<PathBuf, M
     hasher.update(b"dolgorae-home-v1\0");
     hasher.update(canonical_codex_home.as_bytes());
     Ok(context
-        .application_support_root
+        .dolgorae_home_root
         .join("homes")
         .join(format!("{:x}", hasher.finalize())))
 }
@@ -4307,7 +4298,7 @@ fn membership_orphans(
             continue;
         };
         let manifest_path = context
-            .application_support_root
+            .dolgorae_home_root
             .join("workspaces")
             .join(&record.workspace_id)
             .join("runs")
@@ -4419,10 +4410,7 @@ pub fn release_run_member_by_identity(
     reason: RunMemberRelease,
 ) -> Result<MembershipReceipt, MachineError> {
     let context = context(workspace)?;
-    let root = context
-        .application_support_root
-        .join("profiles")
-        .join(server_key);
+    let root = context.dolgorae_home_root.join("profiles").join(server_key);
     verify_private_directory(&root)?;
     let state = read_state_if_running(&root.join("state.json"))?.ok_or_else(|| {
         profile_server_busy(
@@ -4547,7 +4535,7 @@ fn record_membership(
 /// the caller's own recorded launch contract names.
 fn member_root(context: &Context, state: &ServerState) -> Result<PathBuf, MachineError> {
     let root = context
-        .application_support_root
+        .dolgorae_home_root
         .join("profiles")
         .join(&state.server_key);
     let recorded = path_utf8(&root)?;
@@ -5655,7 +5643,9 @@ mod tests {
         ]
         .map(OsString::from);
         let parsed = Parsed::new(&args, ProfileOperation::StateReset).unwrap();
-        let error = parsed.precheck_operator("profile.state.reset").unwrap_err();
+        let carrier = parsed.operator_carrier().unwrap();
+        let store = crate::controller::OperatorStore::new(root.join("operator"));
+        let error = authorize_operator_in(&store, &carrier, "profile.state.reset").unwrap_err();
         assert_eq!(error.code, "OPERATOR_MISMATCH");
         assert_eq!(error.details["operation"], "profile.state.reset");
         fs::remove_dir_all(root).unwrap();
@@ -5736,7 +5726,7 @@ mod tests {
         let context = Context {
             workspace_id: "test".to_owned(),
             registry_path: std::env::temp_dir().join("unused.yaml"),
-            application_support_root: std::env::temp_dir()
+            dolgorae_home_root: std::env::temp_dir()
                 .join(format!("dolgorae-lifetime-test-{}", Uuid::now_v7())),
         };
         assert!(server_lifetime_absent(&context, &"b".repeat(64)).unwrap());
@@ -5747,10 +5737,10 @@ mod tests {
         let context = Context {
             workspace_id: "test".to_owned(),
             registry_path: std::env::temp_dir().join("unused.yaml"),
-            application_support_root: std::env::temp_dir()
+            dolgorae_home_root: std::env::temp_dir()
                 .join(format!("dolgorae-repair-test-{}", Uuid::now_v7())),
         };
-        let home = context.application_support_root.join("homes").join("h");
+        let home = context.dolgorae_home_root.join("homes").join("h");
         secure_dir(&home).unwrap();
         assert!(!repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
 
@@ -5801,7 +5791,7 @@ mod tests {
         assert!(repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
         let repaired: Value = serde_json::from_slice(&fs::read(&migration_path).unwrap()).unwrap();
         assert_eq!(repaired["phase"], "rolled_back");
-        fs::remove_dir_all(&context.application_support_root).unwrap();
+        fs::remove_dir_all(&context.dolgorae_home_root).unwrap();
     }
 
     #[test]
@@ -6388,7 +6378,7 @@ mod tests {
         let context = Context {
             workspace_id: "test".to_owned(),
             registry_path: support.join("unused.yaml"),
-            application_support_root: support.clone(),
+            dolgorae_home_root: support.clone(),
         };
         let mut snapshot = stopped_snapshot();
         snapshot.server_key = new_key.clone();
@@ -6506,7 +6496,7 @@ mod tests {
         let context = Context {
             workspace_id: "test".to_owned(),
             registry_path: support.join("unused.yaml"),
-            application_support_root: support.clone(),
+            dolgorae_home_root: support.clone(),
         };
 
         let recovered = reconcile_blocked_migration(

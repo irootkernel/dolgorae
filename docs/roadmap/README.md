@@ -174,7 +174,7 @@ Status: `COMPLETE`
 Implement Git and explicit non-Git initialization, per-worktree canonical
 workspace identity, upward `.dolgorae` discovery, minimal policy files, generated
 local ignore policy, dirty-worktree baseline capture, and safe permission
-creation. Establish the Application Support per-workspace mutable state root, its
+creation. Establish the Dolgorae-home per-workspace mutable state root, its
 `runtime/locks/` and `orchestration/` authorities, mandatory local-APFS checks
 with no override, and strict portable-policy and machine-local profile schemas.
 
@@ -263,7 +263,7 @@ survival, byte-1 loser zero-side-effect behavior, and verified stale-socket unli
 
 Status: `COMPLETE`
 
-Implement per-workspace Application Support `local.yaml` profile CRUD, direct executable, normalized
+Implement per-workspace Dolgorae-home `local.yaml` profile CRUD, direct executable, normalized
 global argv, absolute `CODEX_HOME`, and explicit environment-map validation;
 deterministic environment preparation; schema generation into temporary storage; required
 stable-subset comparison, app-server handshake, `codexHome` matching,
@@ -408,7 +408,7 @@ Status: `COMPLETE`
 
 Implement the minimal External Specialist Engagement production path required
 by a one-shot review, using the existing checked External Specialist Facade and
-the Application Support SQLite WAL authority. Implement explicit open, safe
+the Dolgorae-home SQLite WAL authority. Implement explicit open, safe
 get, write-ahead Reviewer hire, one read-only task assignment, bounded await,
 result collection, cancellation, release, and close. Reserve engagement,
 operation, member, child Run, and task identities before runtime side effects;
@@ -623,7 +623,7 @@ after side of `dirty` materialize one final worktree-over-index byte sequence pe
 path. `staged` materializes the captured index over captured `HEAD`, while
 `head`, `commit`, and `range` use only resolved Git objects; none of those four
 scopes may substitute current worktree bytes. Captures live outside the source
-repository under Dolgorae Application Support and disclose the same-user
+repository under Dolgorae home and disclose the same-user
 visibility limitation.
 
 Verification: checked request/result schemas; unit and black-box tests for all
@@ -823,9 +823,13 @@ Controller-authorized interaction, and conservative failure semantics.
 Status: `PLANNED`
 
 Build on TASK-008's read-only Specialist and ordinary reader baseline.
+First establish canonical `~/.dolgorae` as the only per-user configuration and
+mutable-authority root used by every existing subsystem, with no alternate-root
+discovery, migration, or compatibility behavior. Keep stateless version, help,
+and capability discovery available.
 Implement the per-worktree durable writer authority state machine, with BSD
 `flock(2)` used only as a short transaction serializer, close-on-exec descriptor
-hygiene, Application Support permanent-lock validation, explicit
+hygiene, Dolgorae-home permanent-lock validation, explicit
 `--write`/acquire/release, idle-only
 cross-profile same-controller prepare/commit/cancel handoff, and fail-closed
 background-execution uncertainty before activating or releasing authority.
@@ -866,6 +870,9 @@ fail-closed byte-1 control timeout without any activity-derived signal.
 Include brokered children created from Gul-shaped and ordinary-Codex-shaped
 parents in the same-workspace writer race; client origin and parent reference
 must not affect the one-writer result.
+The root-transition subset additionally verifies one locator across workspace,
+profile, Operator, carrier, review-target, and worker diagnostics; mode-0700
+creation; and absence of any additional per-user state root.
 Measure the exact SPEC-007 writer turn carrier, including
 `excludeSlashTmp:false` and `excludeTmpdirEnvVar:false`, against the pinned
 profile and prove that a writer turn can write both the workspace and the OS

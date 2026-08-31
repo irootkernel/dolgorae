@@ -14,6 +14,7 @@ pub mod ledger;
 pub mod machine;
 pub mod mcp_review;
 pub mod mcp_review_server;
+pub mod paths;
 pub mod profile;
 pub mod projection;
 pub mod protocol;

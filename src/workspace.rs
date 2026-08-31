@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 use crate::darwin::{DarwinSystem, FilesystemInfo};
 use crate::machine::MachineError;
+use crate::paths::DolgoraeHome;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -256,40 +257,28 @@ impl GitRunner for SystemGitRunner {
 pub struct WorkspaceService<P = SystemWorkspacePlatform, G = SystemGitRunner> {
     platform: P,
     git: G,
-    application_support_root: PathBuf,
+    dolgorae_home_root: PathBuf,
 }
 
 impl WorkspaceService<SystemWorkspacePlatform, SystemGitRunner> {
     pub fn system() -> Result<Self, MachineError> {
-        let home = std::env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| MachineError::runtime_path_invalid("HOME", "HOME is not set"))?;
-        if !home.is_absolute() {
-            return Err(MachineError::runtime_path_invalid(
-                &home,
-                "HOME is not absolute",
-            ));
-        }
         let platform = SystemWorkspacePlatform;
-        let canonical_home = platform
-            .canonicalize(&home)
-            .map_err(|error| MachineError::runtime_path_invalid(&home, error.to_string()))?;
+        let dolgorae_home = DolgoraeHome::system()?;
         Ok(Self::new(
             platform,
             SystemGitRunner,
-            canonical_home.join("Library/Application Support/Dolgorae"),
+            dolgorae_home.root().to_path_buf(),
         ))
     }
 }
 
 impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
     #[must_use]
-    pub const fn new(platform: P, git: G, application_support_root: PathBuf) -> Self {
+    pub const fn new(platform: P, git: G, dolgorae_home_root: PathBuf) -> Self {
         Self {
             platform,
             git,
-            application_support_root,
+            dolgorae_home_root,
         }
     }
 
@@ -329,7 +318,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         let workspace_id = workspace_id(&canonical);
         let policy_root = canonical.join(".dolgorae");
         let state_root = self
-            .application_support_root
+            .dolgorae_home_root
             .join("workspaces")
             .join(&workspace_id);
         self.require_state_separation(&canonical, &state_root)?;
@@ -470,7 +459,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         };
         self.require_local_apfs(&canonical)?;
         let id = workspace_id(&canonical);
-        let state_root = self.application_support_root.join("workspaces").join(&id);
+        let state_root = self.dolgorae_home_root.join("workspaces").join(&id);
         self.require_state_separation(&canonical, &state_root)?;
         let record = self
             .validate_existing(
@@ -648,7 +637,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         {
             return Err(MachineError::runtime_path_invalid(
                 state_root,
-                "Application Support authority overlaps the canonical workspace",
+                "Dolgorae home authority overlaps the canonical workspace",
             ));
         }
         Ok(())
@@ -755,13 +744,10 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
     }
 
     fn create_state_parents(&self, state_root: &Path) -> Result<(), MachineError> {
-        let mut current = self.application_support_root.clone();
+        let mut current = self.dolgorae_home_root.clone();
         if !current.exists() {
             let parent = current.parent().ok_or_else(|| {
-                MachineError::runtime_path_invalid(
-                    &current,
-                    "Application Support root has no parent",
-                )
+                MachineError::runtime_path_invalid(&current, "Dolgorae home root has no parent")
             })?;
             self.require_local_apfs(parent)?;
             create_directory(&current, 0o700)
@@ -1483,7 +1469,11 @@ mod tests {
         fs::write(root.join("tracked.txt"), "changed\n").unwrap();
         fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
-        let service = WorkspaceService::system().unwrap();
+        let service = WorkspaceService::new(
+            SystemWorkspacePlatform,
+            SystemGitRunner,
+            root.join("dolgorae-home"),
+        );
         let view = WorkspaceView {
             workspace_id: workspace_id(&root),
             canonical_path: LosslessPath::from_path(&root),

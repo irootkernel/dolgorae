@@ -165,7 +165,7 @@ fn partial_layout_is_an_initialization_conflict() {
 }
 
 #[test]
-fn application_support_authority_cannot_overlap_the_workspace() {
+fn dolgorae_home_authority_cannot_overlap_the_workspace() {
     for use_symlink in [false, true] {
         let tree = TestTree::new();
         let workspace = tree.path("workspace");

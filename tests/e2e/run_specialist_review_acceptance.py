@@ -212,7 +212,7 @@ def observable_scan(payload: bytes, workspace: Path, canary: str) -> dict[str, b
         ),
         "private_endpoint_absent": not any(
             marker in text
-            for marker in ("unix://", ".sock", str(workspace / ".dolgorae"), home + "/Library/Application Support/Dolgorae")
+            for marker in ("unix://", ".sock", str(workspace / ".dolgorae"), home + "/.dolgorae")
         ),
     }
 
@@ -355,7 +355,7 @@ def success_evidence(
     findings = data.get("findings")
     if not isinstance(findings, list):
         raise ValueError("review findings are not an array")
-    state_root = Path(env["HOME"]) / "Library" / "Application Support" / "Dolgorae"
+    state_root = Path(env["HOME"]) / ".dolgorae"
     isolation = reviewer_isolation_evidence(state_root, str(data.get("reviewer_run_id")))
     scan = observable_scan(combined, workspace, canary)
     scan["host_context_canary_absent_from_state"] = canary_absent_from_state(
@@ -408,7 +408,7 @@ def failure_evidence(binary: Path, workspace: Path, codex: Path, canary: str) ->
         raise ValueError("missing-profile probe returned the wrong failure code")
     scan = observable_scan(combined, workspace, canary)
     scan["host_context_canary_absent_from_state"] = canary_absent_from_state(
-        Path(env["HOME"]) / "Library" / "Application Support" / "Dolgorae", canary
+        Path(env["HOME"]) / ".dolgorae", canary
     )
     if before != after or error.get("retryable") is not False or not all(scan.values()):
         raise ValueError("safe-failure cleanup or observable-output canary failed")
@@ -432,7 +432,7 @@ def cancellation_evidence(
 ) -> dict[str, Any]:
     env = checked_environment(canary)
     version = verify_codex(codex, workspace, env)
-    state_root = Path(env["HOME"]) / "Library" / "Application Support" / "Dolgorae"
+    state_root = Path(env["HOME"]) / ".dolgorae"
     before = workspace_fingerprint(workspace)
     engagements_before = engagement_states(state_root)
     completed = execute_review(

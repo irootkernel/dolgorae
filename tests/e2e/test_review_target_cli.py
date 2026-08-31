@@ -98,7 +98,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         root = pathlib.Path(temporary)
         home = root / "home"
         home.mkdir(mode=0o700)
-        (home / "Library" / "Application Support").mkdir(parents=True, mode=0o700)
         repository = root / "repository"
         repository.mkdir(mode=0o700)
         git(repository, "init", "-b", "main")

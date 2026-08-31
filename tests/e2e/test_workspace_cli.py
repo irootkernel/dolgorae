@@ -62,8 +62,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory(prefix="dolgorae-task002-validator-") as temporary:
         root = pathlib.Path(temporary)
         home = root / "home"
-        application_support = home / "Library" / "Application Support"
-        application_support.mkdir(parents=True, mode=0o700)
+        home.mkdir(mode=0o700)
         repository = root / "repository"
         repository.mkdir(mode=0o700)
         git(repository, "init", "-b", "main")
@@ -88,6 +87,9 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if initialized_envelope["data"]["created"] is not True:
             raise AssertionError("first initialization did not report created:true")
         workspace_id = initialized_envelope["data"]["workspace_id"]
+        home_entries = {entry.name for entry in home.iterdir()}
+        if home_entries != {".dolgorae"}:
+            raise AssertionError(f"unexpected per-user state roots: {home_entries!r}")
 
         repeated = run(binary, ["init", str(repository)], home)
         if repeated.returncode != 0:
@@ -131,7 +133,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if inspected_envelope["data"]["workspace_id"] != workspace_id:
             raise AssertionError("upward discovery selected the wrong workspace")
 
-        state_root = application_support / "Dolgorae" / "workspaces" / workspace_id
+        state_root = home / ".dolgorae" / "workspaces" / workspace_id
         record = json.loads((state_root / "workspace.json").read_text(encoding="utf-8"))
         assert_valid(record, workspace_record, "workspace record")
         if record["initial_git_baseline"]["tracked_changes"] != ["tracked.txt"]:

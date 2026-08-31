@@ -12,5 +12,5 @@
   "backend_kind": "dolgorae-specialist-review",
   "backend_lifecycle_id": "engagement-018f0c6a",
   "owner_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  "immutable_root": "/Users/example/Library/Application Support/Dolgorae/workspaces/example/review-targets/018f0c6a-7b01-7abc-8def-0123456789ab/source"
+  "immutable_root": "/Users/example/.dolgorae/workspaces/example/review-targets/018f0c6a-7b01-7abc-8def-0123456789ab/source"
 }

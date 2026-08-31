@@ -89,7 +89,7 @@ source identity changes while capture is in progress. After a successful
 capture, later source changes do not stale the captured target; the reviewer
 result binds to the captured digest instead.
 
-The captured view lives under Dolgorae Application Support rather than inside
+The captured view lives under Dolgorae home rather than inside
 the source repository. It contains `current/` for whole-tree
 targets or `before/` and `after/` for transition targets, use read-only file and
 directory modes, and carry a manifest with safe relative paths, sizes, SHA-256

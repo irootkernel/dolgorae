@@ -439,7 +439,7 @@ All machine-local configuration and mutable authority live outside the
 canonical workspace at:
 
 ```text
-~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/
+~/.dolgorae/workspaces/<workspace-id>/
   workspace.json
   local.yaml
   specialist-policies/
@@ -462,9 +462,15 @@ policy files when the task requires it, but it cannot reach machine-local
 profiles, Specialist Policies, or mutable Dolgorae authority through the
 workspace sandbox.
 
+The fixed per-user Dolgorae home is `~/.dolgorae`; there is no environment or
+platform-specific override. V1 reads and writes no other per-user root and does
+not discover, migrate, or provide compatibility with state created by earlier
+development versions. Stateless `help`, `version`, and `runtime capabilities`
+remain available.
+
 Initialization uses create-exclusive temporary files, file `fsync`, rename,
-and parent-directory `fsync` for both project policy and the Application
-Support workspace record. Repeating `init` succeeds with `created:false` only
+and parent-directory `fsync` for both project policy and the Dolgorae-home
+workspace record. Repeating `init` succeeds with `created:false` only
 when mode, canonical workspace, workspace ID, schema, and existing policy files
 are compatible. It never overwrites an existing tracked policy file. A partial
 layout, nested workspace, changed mode, state-root identity conflict, or
@@ -480,7 +486,7 @@ census.
 The machine-local Runtime Profile registry lives at:
 
 ```text
-~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/local.yaml
+~/.dolgorae/workspaces/<workspace-id>/local.yaml
 ```
 
 The canonical workspace contains no mutable profile registry. Runtime Profile
@@ -541,10 +547,10 @@ Environment names are explicit, require `PATH`, `LANG`, and `LC_ALL`, reserve `C
 all stored values as non-secret local configuration. Unknown or duplicate keys,
 empty argv, relative homes,
 wrong types, a missing required environment value, malformed YAML, and unsupported schema versions return
-`PROFILE_CONFIG_INVALID`. Profile add/remove holds a per-workspace Application Support config lock and uses
+`PROFILE_CONFIG_INVALID`. Profile add/remove holds a per-workspace Dolgorae-home config lock and uses
 write-temp, file `fsync`, rename, and directory `fsync`; the registry is
 hand-editable and MUST NOT contain credentials, tokens, or other secrets.
-The per-workspace Application Support root is mode 0700 and `local.yaml` is
+The per-workspace Dolgorae-home root is mode 0700 and `local.yaml` is
 mode 0600; creation and replacement reject a wrong-owner or more-permissive
 file. That root is outside the agent-writable workspace.
 
@@ -559,7 +565,7 @@ requires an explicit remove followed by add.
 The machine-local Specialist Policy Registry lives at:
 
 ```text
-~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/specialist-policies/
+~/.dolgorae/workspaces/<workspace-id>/specialist-policies/
 ```
 
 Each entry is a create-exclusive `<policy-name>.json` file that validates
@@ -631,7 +637,7 @@ The launch-authority contract records
 `launch_cwd_policy:"profile_state_directory_v1"`; it MUST NOT contain the
 server-key-derived concrete path. The server key is computed first, after which
 the current-uid-owned mode-0700 concrete cwd is derived as
-`Dolgorae/profiles/<server-key>/` in Application Support. `PWD` is constructed
+`profiles/<server-key>/` below Dolgorae home. `PWD` is constructed
 from that path and caller cwd is never inherited. Every launch and doctor check
 verifies the derived path against the policy and recorded full server key. The launch
 contract is the JCS object with exactly these keys: `schema_version`,
@@ -706,10 +712,10 @@ Dolgorae, not the official Codex daemon lifecycle, starts the singleton as the
 validated profile argv followed by `app-server --listen
 unix://<dedicated-socket>`. Authority files live below the platform Application
 Support directory. A home-keyed root
-`Dolgorae/homes/<home-key>/{home.lock,active.json}` uses domain-separated
+`homes/<home-key>/{home.lock,active.json}` below Dolgorae home uses domain-separated
 SHA-256 of canonical `CODEX_HOME`; `active.json` records the only starting/ready
 server key and epoch for that home. Contract state lives at
-`Dolgorae/profiles/<server-key>/`. All components are current-uid-owned mode
+`profiles/<server-key>/` below Dolgorae home. All components are current-uid-owned mode
 0700/0600 and opened without symlink traversal.
 
 The socket node instead uses the macOS-safe short path
@@ -1698,11 +1704,11 @@ changes during the terminal turn interval. In Git mode they are the sorted
 unique workspace-relative paths from
 `git status --porcelain=v2 -z --untracked-files=all`; ignored paths and
 `.dolgorae/exports/` are excluded, while tracked `.dolgorae/config.yaml` and
-`.dolgorae/.gitignore` policy-file changes remain visible. Application Support
+`.dolgorae/.gitignore` policy-file changes remain visible. Dolgorae-home
 state is outside the workspace and therefore cannot appear in Git status. In
 non-Git mode observed paths are the changed regular files from no-follow pre/post
 `(device,inode,size,mtime_ns)` snapshots, also excluding `.dolgorae/exports/` and
-never traversing the Application Support state root. Valid UTF-8 paths are strings; other POSIX bytes use
+never traversing the Dolgorae-home state root. Valid UTF-8 paths are strings; other POSIX bytes use
 `{"$dolgorae_path_bytes":"<base64>"}` using padded RFC 4648 base64 grammar.
 The machine schemas enforce the alphabet, four-character grouping, and exact
 terminal padding in addition to declaring `contentEncoding`. At most 4,096 paths are retained and
@@ -2660,7 +2666,7 @@ There is no retention limit or automatic deletion. `run delete` is allowed
 only for closed or start-failed runs and requires `--confirm`; it is the sole
 state-changing command allowed after audit integrity failure and appends no
 record to a ledger it cannot trust. It permanently
-deletes the Dolgorae Application Support Run directory only. It MUST NOT delete the Codex thread from
+deletes the Dolgorae-home Run directory only. It MUST NOT delete the Codex thread from
 `CODEX_HOME`, and Dolgorae MUST NOT later auto-import that orphaned thread.
 When verification fails, this escape additionally requires the final complete
 ledger line to remain an independently canonical, self-hashed terminal seal and
@@ -2726,7 +2732,7 @@ Dolgorae distinguishes enforced invariants from agent behavior policy.
 
 The tracked `.dolgorae/config.yaml` and `.dolgorae/.gitignore` files are ordinary
 workspace policy files. Mutable Run, writer, audit, orchestration, profile,
-evidence, and cache authority is under Application Support and MUST NOT be in a
+evidence, and cache authority is under Dolgorae home and MUST NOT be in a
 Codex writable root. Prompt policy is not a hostile same-user security boundary.
 
 The profile's Codex configuration, AGENTS instructions, skills, plugins, apps,
@@ -3473,7 +3479,7 @@ The gRPC adapter MUST NOT accept Controller or Operator secret bytes in a
 Protobuf field or gRPC metadata. Its `ControllerCarrierRef` contains only an
 absolute protected file path plus the expected public Controller ID and
 generation. The path MUST remain below the canonical current-uid-owned
-mode-0700 Application Support root `Dolgorae/controller-carriers/`. Immediately
+mode-0700 Dolgorae home `~/.dolgorae/controller-carriers/`. Immediately
 before authorization, the semantic service MUST reopen it descriptor-relative,
 reject every symlink, require a same-uid mode-0600 regular file no larger than 4
 KiB, parse the expected Controller identity, compare the current Run generation
@@ -3509,7 +3515,7 @@ the same immediate Controller revalidation even though they are reads.
 
 The operator credential is a separate UUIDv7 and canonical 256-bit capability
 registered by create-exclusive `operator credential initialize` in the
-user-private Application Support root. Only its domain-separated digest and
+user-private Dolgorae home. Only its domain-separated digest and
 monotonic generation persist. Rotation requires the current credential and
 atomically publishes a new digest; loss fails closed. Operator credentials use
 the same file/fd carrier checks and secret exclusions as controllers and never
@@ -3861,8 +3867,8 @@ mode 0700 and every carrier is a same-uid, no-symlink, mode-0600 regular file.
 Controller kinds, 32-byte base64url-no-padding capability encoding, 4-KiB file
 bound, root/layout policy, generation-1 rule, and normalized-principal rule. The
 gRPC projection carries the canonical
-`application_support/Dolgorae/controller-carriers` root locator separately from
-the typed Dolgorae-owned Application Support root policy. Capability encoding
+`home/.dolgorae/controller-carriers` root locator separately from
+the typed Dolgorae-owned home-root policy. Capability encoding
 and normalized-principal selection are closed enums; Gul MUST NOT parse
 diagnostic text to derive either rule.
 Method availability is capability-advertised;

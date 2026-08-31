@@ -175,7 +175,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         workspace = root / "workspace"
         home.mkdir(mode=0o700)
         workspace.mkdir(mode=0o700)
-        (home / "Library" / "Application Support").mkdir(parents=True, mode=0o700)
         git(workspace, "init", "-b", "main")
         git(workspace, "config", "user.name", "Dolgorae E2E")
         git(workspace, "config", "user.email", "dolgorae@example.invalid")
@@ -186,7 +185,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if code != 0:
             raise AssertionError(f"init failed: {initialized!r}")
         workspace_id = str(initialized["data"]["workspace_id"])  # type: ignore[index]
-        targets = home / "Library" / "Application Support" / "Dolgorae" / "workspaces" / workspace_id / "review-targets"
+        targets = home / ".dolgorae" / "workspaces" / workspace_id / "review-targets"
         try:
             drift_codex = add_profile(
                 binary, home, workspace, root, schema_source, "drift-reviewer", "scoped_specialist_review.json"

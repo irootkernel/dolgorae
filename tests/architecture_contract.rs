@@ -56,6 +56,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "jcs",
                 "ledger",
                 "machine",
+                "paths",
                 "projection",
                 "run",
                 "workspace",
@@ -83,7 +84,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
-        ("machine", &["workspace"][..]),
+        ("machine", &["paths", "workspace"][..]),
         ("mcp_review", &[][..]),
         (
             "mcp_review_server",
@@ -97,12 +98,14 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "darwin",
                 "jcs",
                 "machine",
+                "paths",
                 "workspace",
             ][..],
         ),
         ("projection", &["audit", "domain", "jcs"][..]),
         ("protocol", &[][..]),
         ("providers", &[][..]),
+        ("paths", &[][..]),
         // The one-shot review coordinator is the product composition boundary:
         // it binds trusted adapter state, the durable engagement, and the
         // ordinary semantic Run service without moving product logic into main.
@@ -125,7 +128,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         // The immutable target coordinator owns source capture and settlement
         // while delegating canonical workspace discovery and Machine errors to
         // their existing authorities.
-        ("review_target", &["cli", "machine", "workspace"][..]),
+        (
+            "review_target",
+            &["cli", "machine", "paths", "workspace"][..],
+        ),
         // `run` names `projection` because the Run record and the Run's
         // durable state projection are two halves of the same durable state: an
         // observer that may not take the ledger still has to read the
@@ -159,6 +165,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "jcs",
                 "ledger",
                 "machine",
+                "paths",
                 "profile",
                 "projection",
                 "run",
@@ -185,7 +192,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
-        ("workspace", &["darwin", "jcs", "machine"][..]),
+        ("workspace", &["darwin", "jcs", "machine", "paths"][..]),
         // `worker` names `controller` because ADR-016 makes the hidden worker
         // the authoritative consumer of a Controller credential: it rereads
         // the descriptor it received over SCM_RIGHTS and revalidates it under

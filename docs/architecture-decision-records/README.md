@@ -288,7 +288,7 @@ evidence.
 ### Consequences
 
 - Existing runs remain bound to the account that created them.
-- Per-workspace Application Support profile edits affect only future Runs
+- Per-workspace Dolgorae-home profile edits affect only future Runs
   unless an Operator explicitly migrates the shared server contract.
 - Executable or process-static updates require a server-key migration and do
   not change the expected home.
@@ -786,7 +786,7 @@ source capsule before starting the destination capsule. Once source retirement
 is proved, destination failure leaves authority `none`; uncertain cleanup is
 `blocked_unknown`. No transition restarts the shared reader singleton.
 
-Maintain a hash-chained append-only Application Support membership journal and
+Maintain a hash-chained append-only Dolgorae-home membership journal and
 a revision/checksum-bound derived index so profile-wide stop and restart can
 enumerate every alias and run across projects. The manager replays the journal
 and validates referenced records before acting; incomplete membership fails
@@ -1247,7 +1247,7 @@ binds only a Unix domain socket, validates the peer UID, and exposes no TCP,
 remote bind, Tailscale, HTTP authentication, client-streaming, or bidirectional
 streaming contract. One gateway may run per Dolgorae user installation. A
 lifetime `gateway.lock` and identity-complete `gateway.json` under the
-user-private Application Support root serialize startup without entering the
+user-private Dolgorae home serialize startup without entering the
 ordinary operation lock hierarchy.
 
 The supplied socket parent must already be a current-uid-owned non-symlink
@@ -1427,7 +1427,7 @@ not active product authority.
 
 ## ADR-023: Expose Two User-Facing Use Cases and Own Brokered Recovery State
 
-Status: Accepted, amended by ADR-027 and ADR-028
+Status: Accepted, amended by ADR-027, ADR-028, and ADR-033
 
 ### Context
 
@@ -1461,9 +1461,11 @@ at most one active aggregate. Forbid active reparenting, in-place role
 conversion, nested first-class hiring from an External Specialist Engagement,
 and in-place transfer between use cases.
 
-Keep the checked public v1 Protobuf source and descriptor unchanged. Existing
-Run operations remain the low-level client contract. Future additive aggregate
-queries may improve discovery but do not move state ownership back to Gul.
+Keep the checked public v1 Run and aggregate method and field surface unchanged.
+ADR-033 may additively amend carrier-root policy metadata without adding Run or
+aggregate operations. Existing Run operations remain the low-level client
+contract. Future additive aggregate queries may improve discovery but do not
+move state ownership back to Gul.
 
 ### Consequences
 
@@ -1488,7 +1490,7 @@ queries may improve discovery but do not move state ownership back to Gul.
 
 ## ADR-024: Separate Runtime Profile From Agent Configuration
 
-Status: Accepted
+Status: Accepted, amended by ADR-033
 
 ### Context
 
@@ -1527,7 +1529,7 @@ snapshot digests are the Dolgorae-owned role authority.
 
 ## ADR-025: Keep Mutable Authority Outside the Agent-Writable Workspace
 
-Status: Accepted
+Status: Accepted, amended by ADR-033
 
 ### Context
 
@@ -1540,13 +1542,13 @@ prevent accidental deletion or corruption of the control plane.
 
 Keep only portable tracked policy in `<workspace>/.dolgorae/`. Store
 machine-local configuration and every mutable authority below
-`~/Library/Application Support/Dolgorae/workspaces/<workspace-id>/`. Bind the
+`~/.dolgorae/workspaces/<workspace-id>/`. Bind the
 roots through the canonical workspace ID and lossless path record. Never include
-the Application Support workspace state root in Codex writable roots or
+the Dolgorae-home workspace state root in Codex writable roots or
 model-visible path projections.
 
 Preserve private short `/tmp` sockets as locators only. Their exact attach and
-cleanup authority remains the Application Support state plus held locks and
+cleanup authority remains the Dolgorae-home state plus held locks and
 process identity.
 
 ### Consequences
@@ -1632,7 +1634,7 @@ Controller authority, but allow logical direct request and response through an
 internal Collaboration Plane. Do not offer this path to External Specialist
 Engagements in v1.
 
-Use one Application Support SQLite database per workspace as the transactional
+Use one Dolgorae-home SQLite database per workspace as the transactional
 orchestration authority. Enable WAL, foreign keys, full synchronous durability,
 and one mutation owner. Store Collaboration Exchanges, per-Run mailbox items,
 activation operations, result-delivery state, and a hash-chained append-only
@@ -1727,9 +1729,10 @@ creation and child creation have independent retry and recovery boundaries.
 
 ### Decision
 
-Keep the checked public Protobuf source and descriptor unchanged. Use explicit,
-durable aggregate bootstrap and two private specialist facades over the shared
-semantic Run core.
+Keep the checked public Run and aggregate method and field surface unchanged.
+ADR-033 may additively amend carrier-root policy metadata without adding Run or
+aggregate operations. Use explicit, durable aggregate bootstrap and two private
+specialist facades over the shared semantic Run core.
 
 For a Dolgorae-Orchestrated Session, require a protected `human_cli` or
 `interactive_client` Controller carrier containing a checked Orchestration
@@ -2096,3 +2099,47 @@ its ordered Tasks and runtime Completed Confirm.
   conformance does not justify cross-product storage and release coupling.
 - Rewrite the existing `working-tree` request in place: rejected because the
   checked preview contract is already complete and must remain compatible.
+
+## ADR-033: Use One Fixed Per-User Dolgorae Home
+
+Status: Accepted
+
+### Context
+
+The former platform-specific root was embedded in workspace discovery, profile
+management, Operator authority, review capture, capability metadata, and tests.
+Keeping that physical convention would make a future Linux port carry
+platform-specific storage semantics through every control-plane component.
+
+### Decision
+
+Use canonical `$HOME/.dolgorae` as the single Dolgorae-owned configuration and
+mutable-authority root on every supported platform. Resolve it through one
+internal locator with no XDG, environment, or platform override. Preserve
+ADR-025's separation from the agent-writable workspace and the existing
+mode-0700 directory, mode-0600 file, same-uid, and no-symlink rules.
+
+Do not discover, inspect, migrate, or provide compatibility for alternate
+per-user roots. Earlier development binaries and their state are outside the
+v0.1.1 runtime contract. Keep stateless help, version, and capability discovery
+available.
+
+Amend the public v1 descriptor additively: preserve and deprecate the existing
+numeric value for the former carrier-root policy, add a new
+Dolgorae-owned-home policy value, and publish
+`home/.dolgorae/controller-carriers` as its locator. The protocol version
+remains 1, and there are no Run or aggregate method or field changes.
+
+### Consequences
+
+- Configuration, ledgers, locks, profile state, carriers, and recovery evidence
+  share one platform-neutral derivation.
+- This removes one path-level Linux blocker but does not relax the macOS/APFS
+  release boundary or port Darwin-specific locking and process mechanisms.
+
+### Rejected alternatives
+
+- Use macOS Application Support and Linux XDG roots: rejected because it keeps
+  platform policy in the durable-authority locator and complicates recovery.
+- Automatically move earlier development state: rejected because migration and
+  compatibility are outside the v0.1.1 contract.

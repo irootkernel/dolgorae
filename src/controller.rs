@@ -8,6 +8,7 @@ use crate::domain::{ControllerIdentity, ControllerKind, Purpose, RunLifecycle};
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{LedgerClock as _, SystemLedgerClock};
 use crate::machine::{MachineError, new_uuid_v7};
+use crate::paths::DolgoraeHome;
 use crate::projection::{ProjectedWriterAuthority, RunStateProjection};
 use crate::run::{ControllerBinding, ParentReference, RunStore, controller_capability_digest};
 use crate::workspace::{SystemWorkspacePlatform, WorkspaceService};
@@ -213,13 +214,11 @@ fn verify_run(arguments: &[std::ffi::OsString]) -> Result<serde_json::Value, Mac
         .map_err(|_| MachineError::invalid_argument("run-id", "run id must be a UUID"))?;
     let workspace = optional_os(arguments, "--workspace")?.map(PathBuf::from);
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
-    let application_support = default_operator_root()?
+    let dolgorae_home = default_operator_root()?
         .parent()
-        .expect("operator root has Application Support parent")
+        .expect("operator root has Dolgorae home parent")
         .to_path_buf();
-    let state_root = application_support
-        .join("workspaces")
-        .join(&view.workspace_id);
+    let state_root = dolgorae_home.join("workspaces").join(&view.workspace_id);
     let binding = load_reconciled_controller_binding(&state_root, run_id)?;
     let carrier = carrier_from_options(arguments, "--controller-file", "--controller-fd")?;
     let controller = authorize_controller(run_id, "run.controller.verify", &binding, &carrier)?;
@@ -249,13 +248,11 @@ pub fn reset_run(
         .map_err(|_| MachineError::invalid_argument("--confirm", "confirmation must be a UUID"))?;
     let workspace = optional_os(arguments, "--workspace")?.map(PathBuf::from);
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
-    let application_support = default_operator_root()?
+    let dolgorae_home = default_operator_root()?
         .parent()
-        .expect("operator root has Application Support parent")
+        .expect("operator root has Dolgorae home parent")
         .to_path_buf();
-    let state_root = application_support
-        .join("workspaces")
-        .join(&view.workspace_id);
+    let state_root = dolgorae_home.join("workspaces").join(&view.workspace_id);
     let run_root = state_root.join("runs").join(run_id.to_string());
     let binding = load_controller_binding_for_reset(&state_root, run_id)?;
     let operator = carrier_from_options(arguments, "--operator-file", "--operator-fd")?;
@@ -795,12 +792,7 @@ fn atomic_replace_binding(
 }
 
 pub fn default_operator_root() -> Result<PathBuf, MachineError> {
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| MachineError::runtime_path_invalid("HOME", "HOME is not set"))?;
-    let canonical = fs::canonicalize(home)
-        .map_err(|_| MachineError::runtime_path_invalid("HOME", "HOME cannot be resolved"))?;
-    Ok(canonical.join("Library/Application Support/Dolgorae/operator"))
+    Ok(DolgoraeHome::system()?.operator_root())
 }
 
 pub fn carrier_from_options(

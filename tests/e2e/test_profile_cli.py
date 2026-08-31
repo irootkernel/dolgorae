@@ -256,7 +256,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         bin_root = root / "bin"
         for directory in (home, workspace, codex_home, bin_root):
             directory.mkdir(mode=0o700)
-        (home / "Library" / "Application Support").mkdir(parents=True, mode=0o700)
         subprocess.run(["git", "-C", str(workspace), "init", "-b", "main"], check=True, capture_output=True)
         initialized = run(binary, home, "init", str(workspace))
         if initialized.returncode != 0:
@@ -270,7 +269,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if added.returncode != 0 or added_envelope["data"]["name"] != "default":
             raise AssertionError(f"profile add failed: {added.stdout}")
         assert_valid(added_envelope, machine, "profile-add Machine envelope")
-        registry_path = next((home / "Library" / "Application Support" / "Dolgorae" / "workspaces").glob("*/local.yaml"))
+        registry_path = next((home / ".dolgorae" / "workspaces").glob("*/local.yaml"))
         if stat.S_IMODE(registry_path.stat().st_mode) != 0o600:
             raise AssertionError("profile registry mode is not 0600")
 
@@ -426,9 +425,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 )
         profile_root = (
             home
-            / "Library"
-            / "Application Support"
-            / "Dolgorae"
+            / ".dolgorae"
             / "profiles"
             / exact_data["server_key"]
         )
@@ -796,7 +793,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         home_hash = hashlib.sha256(
             b"dolgorae-home-v1\0" + exact_data["expected_codex_home"].encode("utf-8")
         ).hexdigest()
-        home_dir = home / "Library" / "Application Support" / "Dolgorae" / "homes" / home_hash
+        home_dir = home / ".dolgorae" / "homes" / home_hash
         home_dir.mkdir(parents=True, exist_ok=True)
         home_dir.chmod(0o700)
         migration_path = home_dir / "migration.json"

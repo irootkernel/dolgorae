@@ -5,7 +5,12 @@ Dolgorae. Releases receive a version and date only when the repository has
 corresponding release authority; historical releases are not inferred from
 development commits.
 
-## Unreleased
+## v0.1.1 - Unreleased
+
+### Changed
+
+- Moved all per-user configuration and mutable authority to the fixed
+  `~/.dolgorae` root.
 
 ## 0.1.0 - 2026-08-30
 

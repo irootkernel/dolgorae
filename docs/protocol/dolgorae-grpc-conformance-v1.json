@@ -471,7 +471,7 @@
       "machine_command": "runtime.capabilities",
       "grpc_message": "dolgorae.public.v1.GetCapabilitiesResponse",
       "machine_projection": {
-        "controller_carrier_root": "application_support/Dolgorae/controller-carriers",
+        "controller_carrier_root": "home/.dolgorae/controller-carriers",
         "controller_credential": {
           "capability_encoding": "base64url_no_padding",
           "normalized_principal": "kind+subject_id_else_kind+instance_id"
@@ -482,8 +482,8 @@
           "schemaId": "https://dolgorae.local/schema/controller-credential/v1",
           "schemaVersion": 1,
           "schemaSha256": "01b3d8b24b8cb7ecb2664ff10625e1d313890fd67259ae672b3842622ea5076c",
-          "carrierRootLocator": "application_support/Dolgorae/controller-carriers",
-          "carrierRootPolicy": "CONTROLLER_CARRIER_ROOT_POLICY_DOLGORAE_OWNED_APPLICATION_SUPPORT",
+          "carrierRootLocator": "home/.dolgorae/controller-carriers",
+          "carrierRootPolicy": "CONTROLLER_CARRIER_ROOT_POLICY_DOLGORAE_OWNED_HOME",
           "acceptedControllerKinds": [
             "CONTROLLER_KIND_INTERACTIVE_CLIENT"
           ],
@@ -505,7 +505,7 @@
         {
           "machine_path": "controller_carrier_root",
           "grpc_path": "controller_carrier.carrier_root_locator",
-          "expected": "application_support/Dolgorae/controller-carriers"
+          "expected": "home/.dolgorae/controller-carriers"
         },
         {
           "machine_path": "controller_credential.capability_encoding",
