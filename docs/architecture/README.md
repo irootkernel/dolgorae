@@ -793,11 +793,11 @@ enforcement remains unavailable. These results do not claim strong containment.
 
 ### Profile Registry and Singleton Membership
 
-`<application-support-workspace>/local.yaml` is machine-local and stores named
+`~/.dolgorae/workspaces/<workspace-id>/local.yaml` is machine-local and stores named
 Runtime Profile launch definitions, including explicit non-secret environment
 values but no credential. Agent Configurations are separate immutable Run
 snapshots and are not inferred from Runtime Profile display names.
-`<application-support-workspace>/specialist-policies/` stores checked named
+`~/.dolgorae/workspaces/<workspace-id>/specialist-policies/` stores checked named
 Specialist Policy JSON documents. A launch resolves one explicit name, validates
 all referenced Agent Configurations against current profile capabilities, and
 copies the complete policy plus JCS digest into the session before root Run
@@ -955,7 +955,7 @@ and capability.
 
 ### Durable Aggregate Store
 
-`<application-support-workspace>/orchestration/orchestration.sqlite3` is the sole
+`~/.dolgorae/workspaces/<workspace-id>/orchestration/orchestration.sqlite3` is the sole
 transactional authority for aggregate bootstrap operations, Orchestration
 Sessions, External Specialist Engagements, membership, spawn or hire operations,
 Specialist tasks,
@@ -1082,7 +1082,7 @@ base32 encoding of the domain-separated workspace-digest/run-UUID preimage in
 SPEC-002.
 The composed path must fit the macOS `sun_path` limit; overflow fails with
 `RUNTIME_PATH_INVALID`. There is no sibling identity sidecar. The durable
-`<application-support-workspace>/runtime/runs/<run-id>.json` record is the sole identity authority for
+`~/.dolgorae/workspaces/<workspace-id>/runtime/runs/<run-id>.json` record is the sole identity authority for
 the volatile socket: an existing path without an exact matching record fails
 with `RUNTIME_PATH_COLLISION`, and only the byte-0 winner may unlink it after
 the recorded generation is proved absent. Every request also contains the
@@ -1110,7 +1110,7 @@ replacement. An occupied or unsafe replacement path is fail-closed: the worker
 interrupts an active turn, records bounded evidence, and requires recovery.
 
 The actual socket path and process identity are discoverable from
-`<application-support-workspace>/runtime/runs/<run-id>.json`; discovery never recomputes a path from
+`~/.dolgorae/workspaces/<workspace-id>/runtime/runs/<run-id>.json`; discovery never recomputes a path from
 `$TMPDIR`. The record contains the full worker identity tuple and App Server
 connection identity: PID, PGID, UID, start seconds/microseconds, live executable
 path/device/inode/SHA-256, together with
@@ -1119,13 +1119,13 @@ version, binary digest, IPC protocol version, socket inode,
 `control_socket_epoch`, `server_key`, `server_epoch`, and `run_generation`. A
 new shared or dedicated lane-server epoch never validates a stale connection
 generation.
-`<application-support-workspace>/runtime/writer.json` is durable workspace authority, not a recoverable
+`~/.dolgorae/workspaces/<workspace-id>/runtime/writer.json` is durable workspace authority, not a recoverable
 pointer. It stores the writer state and all facts required to reconcile a lost
 worker against its selected lane-server epoch and thread/turn. Other runtime records remain
 recoverable caches; the fsynced run ledger owns run history.
 
 Writer transaction and startup locks live at fixed paths below
-`<application-support-workspace>/runtime/locks/`. The writer and handoff files are `writer.lock` and
+`~/.dolgorae/workspaces/<workspace-id>/runtime/locks/`. The writer and handoff files are `writer.lock` and
 `handoff.lock`; startup files are `startup/<run-id>.lock`. The directory is
 opened through descriptor-relative, no-symlink operations, must be
 current-uid-owned mode 0700, and resides on the already-required local APFS

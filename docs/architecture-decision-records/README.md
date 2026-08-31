@@ -169,7 +169,7 @@ canonical identity is domain-separated SHA-256 of libc `realpath(3)` bytes with
 no extra case/Unicode folding; sockets and both locks reuse that digest. The
 transaction lock is close-on-exec and is never inherited by workers or the
 singleton. Permanent lock pathnames live below
-`<application-support-workspace>/runtime/locks/` on the already-required local APFS state root. An
+`~/.dolgorae/workspaces/<workspace-id>/runtime/locks/` on the already-required local APFS state root. An
 unverifiable generation blocks same-thread recovery. A stale foreign-run
 `writer.json` remains authoritative until evidence proves a safe transition;
 process absence and a free transaction lock are insufficient.
@@ -268,7 +268,8 @@ thread between account homes or launch contracts.
 
 ### Decision
 
-Store Runtime Profile definitions in mode-0600 `<application-support-workspace>/local.yaml`.
+Store Runtime Profile definitions in mode-0600
+`~/.dolgorae/workspaces/<workspace-id>/local.yaml`.
 Snapshot the complete restorable non-secret launch contract into each run:
 profile name, direct executable identity, normalized global argv, deterministic
 launch cwd and `PWD`, sanitized environment, closed-classified process-static
@@ -1284,7 +1285,7 @@ or opaque POSIX bytes, and capability blocker codes are closed enums.
 version-zero handshake and publishes the full capability and Controller-carrier
 schema inventory plus exact Interaction response/payload and artifact bounds.
 The carrier capability separates its canonical
-Application-Support-relative root locator from a closed root-policy enum, and
+Dolgorae-home-relative root locator from a closed root-policy enum, and
 uses closed enums for capability encoding and normalized-principal rules.
 `SubmitTurn` returns accepted Turn plus typed Run and Writer
 snapshots. `CreateWriteContinuation` returns the destination, immutable

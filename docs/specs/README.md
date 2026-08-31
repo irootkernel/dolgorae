@@ -710,8 +710,8 @@ Every singleton lifetime has a monotonically increasing `server_epoch`.
 
 Dolgorae, not the official Codex daemon lifecycle, starts the singleton as the
 validated profile argv followed by `app-server --listen
-unix://<dedicated-socket>`. Authority files live below the platform Application
-Support directory. A home-keyed root
+unix://<dedicated-socket>`. Authority files live below the fixed Dolgorae home.
+A home-keyed root
 `homes/<home-key>/{home.lock,active.json}` below Dolgorae home uses domain-separated
 SHA-256 of canonical `CODEX_HOME`; `active.json` records the only starting/ready
 server key and epoch for that home. Contract state lives at
@@ -885,11 +885,12 @@ Unknown events are ignored only when the required-subset policy proves them
 non-semantic; an event that could affect an active turn fails closed. The
 CLI-worker socket MUST use a short
 user-private runtime path derived from the canonical workspace identity and run
-ID; durable state remains under `<application-support-workspace>/runs/`.
+ID; durable state remains under
+`~/.dolgorae/workspaces/<workspace-id>/runs/`.
 
-The actual worker socket node is the sole per-Run exception to Application
-Support runtime storage and lives below `/tmp/dolgorae-<uid>/s/`; its identity authority
-lives in `<application-support-workspace>/runtime/runs/<run-id>.json`. A live worker MUST detect a
+The actual worker socket node is the sole per-Run exception to Dolgorae-home
+runtime storage and lives below `/tmp/dolgorae-<uid>/s/`; its identity authority
+lives in `~/.dolgorae/workspaces/<workspace-id>/runtime/runs/<run-id>.json`. A live worker MUST detect a
 missing socket pathname or private directory, safely recreate the private root,
 bind a replacement listener, increment `control_socket_epoch`, and atomically
 replace the runtime record without restarting its active App Server connection
@@ -1770,8 +1771,8 @@ explicit release or safe terminal/absence reconciliation completes. Acquisition
 never queues automatically.
 
 The writer serializer is BSD `flock(2)` with exclusive semantics on
-`<application-support-workspace>/runtime/locks/writer.lock`; a free lock is never evidence that no
-writer exists. The authoritative `<application-support-workspace>/runtime/writer.json` is a
+`~/.dolgorae/workspaces/<workspace-id>/runtime/locks/writer.lock`; a free lock is never evidence that no
+writer exists. The authoritative `~/.dolgorae/workspaces/<workspace-id>/runtime/writer.json` is a
 versioned, atomically replaced and directory-fsynced state machine with
 `none`, `reserved`, `active`, `releasing`, `handoff_prepared`, and
 `blocked_unknown` states. It
@@ -1779,8 +1780,8 @@ records workspace/run IDs, controller ID/generation, writer and worker
 generations, profile server key/epoch, thread/active-turn IDs, lifecycle,
 pending interaction count, last durable event cursor, and recovery state.
 Per-run startup locks are
-`<application-support-workspace>/runtime/locks/startup/<run-id>.lock`; the handoff serializer is
-`<application-support-workspace>/runtime/locks/handoff.lock`. Creation and validation use
+`~/.dolgorae/workspaces/<workspace-id>/runtime/locks/startup/<run-id>.lock`; the handoff serializer is
+`~/.dolgorae/workspaces/<workspace-id>/runtime/locks/handoff.lock`. Creation and validation use
 workspace-fd-relative no-symlink operations, validate `EEXIST`, ownership and
 mode 0700/0600 with `fstat`, and require the canonical workspace to report
 `MNT_LOCAL` plus `f_fstypename == "apfs"`. Path or device/inode drift fails
@@ -2068,7 +2069,7 @@ If worker `SIGTERM` arrives during an active turn, it sends `turn/interrupt`,
 waits up to five seconds for a terminal event, fsyncs terminal evidence when
 observed, and records `outcome_unknown` on expiry before generation cleanup.
 The worker holding byte 1 normally unlinks its own socket. There is no volatile
-sibling sidecar: `<application-support-workspace>/runtime/runs/<run-id>.json` is the sole socket
+sibling sidecar: `~/.dolgorae/workspaces/<workspace-id>/runtime/runs/<run-id>.json` is the sole socket
 identity authority. On recovery, only the byte-0 election winner may authorize
 unlink after an exact matching runtime record and prior-generation absence are
 proved; the replacement worker performs it after acquiring byte 1 and before
@@ -2424,7 +2425,8 @@ capability but is not exposed as v1 public input.
 
 ## SPEC-010: Audit, Retention, and Deletion
 
-Every allocated Run has a private directory at `<application-support-workspace>/runs/<run-id>/` with:
+Every allocated Run has a private directory at
+`~/.dolgorae/workspaces/<workspace-id>/runs/<run-id>/` with:
 
 - `manifest.json`: fixed run configuration and provenance;
 - `audit.jsonl`: the sole append-only audit authority;
@@ -2433,7 +2435,7 @@ Every allocated Run has a private directory at `<application-support-workspace>/
 - `recovery/`: preserved torn-tail and repair evidence.
 
 The workspace also has
-`<application-support-workspace>/orchestration/orchestration.sqlite3` as the sole
+`~/.dolgorae/workspaces/<workspace-id>/orchestration/orchestration.sqlite3` as the sole
 transactional authority for Dolgorae-Orchestrated Session, External Specialist
 Engagement, aggregate bootstrap, membership, spawn or hire operation, Specialist task,
 Collaboration Exchange, mailbox, activation, and result-delivery transitions.
@@ -2594,7 +2596,7 @@ records only `payload_unrepresentable` metadata and never raw bytes.
 Run directories use mode 0700 and sensitive files mode 0600. Prompts and command
 or tool output may still contain secrets; same-OS-user confidentiality is not
 guaranteed.
-`<application-support-workspace>/runtime/` is mode 0700 and its records are mode 0600. `worker.log` is
+`~/.dolgorae/workspaces/<workspace-id>/runtime/` is mode 0700 and its records are mode 0600. `worker.log` is
 limited to 1 MiB with one rotation and remains diagnostics-only.
 
 Audit completeness is limited to Dolgorae lifecycle, app-server-exposed main-turn
@@ -2658,7 +2660,7 @@ path MUST NOT already exist; Dolgorae never merges or overwrites an export and
 returns `INVALID_ARGUMENT` on collision.
 
 Automatically retained probe, recovery, and diagnostic evidence MUST live under
-`<application-support-workspace>/evidence/`. An export without an explicit output path defaults to a
+`~/.dolgorae/workspaces/<workspace-id>/evidence/`. An export without an explicit output path defaults to a
 create-exclusive child of that directory. A user MAY explicitly request an
 external export destination; that copy is user output, not runtime authority.
 
@@ -3242,7 +3244,7 @@ revalidation.
 ### Durable Broker State and Operations
 
 The authoritative orchestration store is
-`<application-support-workspace>/orchestration/orchestration.sqlite3` in WAL
+`~/.dolgorae/workspaces/<workspace-id>/orchestration/orchestration.sqlite3` in WAL
 mode with foreign keys enabled and full synchronous durability. A hash-chained
 append-only event table is committed in the same transactions as aggregate,
 mailbox, activation, execution, and delivery state. JSONL and JSON snapshots are
