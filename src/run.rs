@@ -430,17 +430,17 @@ impl<P: WorkspacePlatform> RunStore<P> {
         let runs = self.state_root.join("runs");
         verify_secure_directory(&runs, self.platform.current_uid())?;
         let root = runs.join(run_id.to_string());
+        match fs::symlink_metadata(&root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(run_not_found(run_id));
+            }
+            Err(error) => return Err(run_path_error(&root, error.to_string())),
+        }
         verify_secure_directory(&root, self.platform.current_uid())?;
         let path = root.join("manifest.json");
         verify_secure_file(&path, self.platform.current_uid())?;
-        let bytes = fs::read(&path).map_err(|_| {
-            MachineError::new(
-                "RUN_NOT_FOUND",
-                "run is unavailable",
-                false,
-                serde_json::json!({"run_id": run_id}),
-            )
-        })?;
+        let bytes = fs::read(&path).map_err(|_| run_not_found(run_id))?;
         if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
             return Err(run_state_invariant(
                 run_id,
@@ -1216,6 +1216,15 @@ fn is_sha256(value: &str) -> bool {
 
 fn run_path_error(path: impl AsRef<Path>, reason: impl Into<String>) -> MachineError {
     MachineError::runtime_path_invalid(path, reason)
+}
+
+fn run_not_found(run_id: Uuid) -> MachineError {
+    MachineError::new(
+        "RUN_NOT_FOUND",
+        "run is unavailable",
+        false,
+        serde_json::json!({"run_id": run_id}),
+    )
 }
 
 fn cleanup_staging(staging: &Path) {

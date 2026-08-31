@@ -206,6 +206,33 @@ fn run_publication_is_exclusive_canonical_and_permission_safe() {
 }
 
 #[test]
+fn absent_run_directory_is_not_found_without_weakening_path_checks() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let run_id = Uuid::now_v7();
+
+    let error = store.load_manifest(run_id).unwrap_err();
+    assert_eq!(error.code, "RUN_NOT_FOUND");
+    assert_eq!(error.details, serde_json::json!({"run_id": run_id}));
+
+    let linked_run_id = Uuid::now_v7();
+    let linked_target = tree.path("linked-run");
+    make_dir(&linked_target);
+    std::os::unix::fs::symlink(
+        &linked_target,
+        state_root.join("runs").join(linked_run_id.to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        store.load_manifest(linked_run_id).unwrap_err().code,
+        "RUNTIME_PATH_INVALID"
+    );
+}
+
+#[test]
 fn run_store_owns_external_reviewer_thread_lookup() {
     let tree = TestTree::new();
     let state_root = tree.path("state");

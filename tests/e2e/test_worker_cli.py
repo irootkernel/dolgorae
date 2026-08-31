@@ -1692,6 +1692,45 @@ def validate_run_cli(binary: pathlib.Path) -> None:
             stop_fake_app_server(fake, socket_path)
 
 
+def validate_absent_run_status(binary: pathlib.Path) -> None:
+    """An absent valid Run identity is a not-found result, not a path failure."""
+    with tempfile.TemporaryDirectory(prefix="dolgorae-run-not-found-") as temporary:
+        root = pathlib.Path(temporary)
+        root.chmod(0o700)
+        home = root / "home"
+        workspace = root / "workspace"
+        private_directory(home)
+        private_directory(workspace)
+        environment = {"HOME": str(home)}
+
+        init_status, init_objects = machine(
+            binary, "init", str(workspace), "--non-git", environment=environment
+        )
+        if init_status != 0 or len(init_objects) != 1:
+            raise AssertionError(
+                f"init did not publish one workspace: {init_status} {init_objects!r}"
+            )
+
+        run_id = fresh_run_id()
+        query_status, query_objects = machine(
+            binary,
+            "run",
+            "status",
+            run_id,
+            "--workspace",
+            str(workspace),
+            environment=environment,
+        )
+        if query_status != 3 or len(query_objects) != 1:
+            raise AssertionError(
+                f"absent run status returned the wrong exit or envelope: "
+                f"{query_status} {query_objects!r}"
+            )
+        error = query_objects[0].get("error")
+        if not isinstance(error, dict) or error.get("code") != "RUN_NOT_FOUND":
+            raise AssertionError(f"absent run status was misclassified: {query_objects!r}")
+
+
 def worker_pid(state_root: pathlib.Path, run_id: str) -> int | None:
     """The PID a Run's own runtime record published, for cleanup only.
 
@@ -2080,6 +2119,7 @@ def main() -> int:
         "sigterm": validate_shutdown_interrupt,
         "streamed": validate_streamed_history,
         "runcli": validate_run_cli,
+        "runnotfound": validate_absent_run_status,
         "runstart": validate_run_start_model_resolution,
     }
     if arguments.only:
@@ -2093,11 +2133,13 @@ def main() -> int:
     validate_shutdown_interrupt(binary)
     validate_streamed_history(binary)
     validate_run_cli(binary)
+    validate_absent_run_status(binary)
     validate_run_start_model_resolution(binary)
     print(
         "Worker CLI validation passed: independent fixture, fd-3, replay, reconnect, "
         "identity, cleanup, multi-turn session, foreign-thread isolation, "
         "SIGTERM turn interruption, streamed history, machine-CLI run verbs, "
+        "absent-Run classification, "
         "turn text sources, write refusal, the caller duration grammar, and "
         "argv `run start` model resolution against the faked app-server"
     )
