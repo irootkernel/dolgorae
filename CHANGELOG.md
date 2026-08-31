@@ -12,7 +12,7 @@ development commits.
 - Moved all per-user configuration and mutable authority to the fixed
   `~/.dolgorae` root.
 
-## 0.1.0 - 2026-08-30
+## v0.1.0 - 2026-08-30
 
 ### Added
 

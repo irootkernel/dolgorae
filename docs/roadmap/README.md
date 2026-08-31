@@ -58,9 +58,10 @@ or any safety limitation stated in its owning Epic.
 | Version | Classification | Required completion boundary | Cumulative product milestones |
 | --- | --- | --- | --- |
 | `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
-| `v0.1.1` | Milestone Preview | `EPIC-006` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
-| `v0.1.2` | Milestone Preview | `EPIC-008` complete, including the preceding `EPIC-007` control-plane core | Through `MILESTONE-BH1` |
-| `v0.1.3` | Milestone Preview | `EPIC-009` complete | Through `MILESTONE-BC1` |
+| `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; `TASK-017` remains `PLANNED` | `MILESTONE-SR1`, `MILESTONE-IR1` |
+| `v0.1.2` | Milestone Preview | `EPIC-006` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
+| `v0.1.3` | Milestone Preview | `EPIC-008` complete, including the preceding `EPIC-007` control-plane core | Through `MILESTONE-BH1` |
+| `v0.1.4` | Milestone Preview | `EPIC-009` complete | Through `MILESTONE-BC1` |
 | `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha

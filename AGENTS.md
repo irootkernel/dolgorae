@@ -72,6 +72,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - `docs/architecture-decision-records/README.md` records accepted decisions, rationale, and rejected alternatives.
 - `docs/protocol/` owns checked wire, persisted-state, and machine-output shapes.
 - `docs/roadmap/README.md` is the sole delivery-order and delivery-status authority.
+- Aquarium release notes: CHANGELOG.md
 - If canonical documents disagree, resolve the contradiction before changing implementation. For behavior or architecture changes, update the owning document first, then synchronize affected protocol artifacts, implementation, tests, and roadmap entries.
 - The supported toolchain is Rust 1.97.1, Buf 1.66.1, and Python 3 with the validation dependencies in `tools/validation/requirements.txt`.
 - The complete repository gate is `make PYTHON_BIN=.venv/bin/python test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.
@@ -85,6 +86,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - Use the owning roadmap task ID, such as `[TASK-014] <summary>`, when one task owns the change.
 - Use the owning roadmap epic ID, such as `[EPIC-004] <summary>`, only when no task owns the epic-level change.
 - Use `[INT] <summary>` when no unambiguous roadmap task or epic owns the change. Do not invent an ID from branches, issues, or nearby documentation.
+- Use `[REL] Release v<version>` only for the release metadata commit that closes the matching changelog cycle after release QA passes.
 - When multiple roadmap items are related, use the primary owner in the title and record the others through useful Lore `Related:` trailers.
 - Use `$lore-commits` for non-trivial commit messages. Lore trailers remain optional for trivial changes, but the title header is always required.
 
