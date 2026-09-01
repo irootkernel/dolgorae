@@ -7,6 +7,12 @@ development commits.
 
 ## v0.1.2 - Unreleased
 
+### Added
+
+- Added the optional source-distributed `use-dolgorae` agent skill for
+  capability-aware workspace, profile, immutable-target, and one-shot review
+  workflows.
+
 ## v0.1.1 - 2026-08-31
 
 ### Changed

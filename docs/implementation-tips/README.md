@@ -26,7 +26,9 @@ The Make targets define four ordered validation layers:
 
 - `make test-prepare` applies `cargo fmt`, then runs Clippy, `cargo check`,
   architecture guardrails, Buf checks, JSON duplicate-key and schema
-  meta-validation, Markdown-link validation, and Git whitespace checks.
+  meta-validation, schema-example validation, Markdown-link validation,
+  source-distributed agent-skill validation, Aquarium development-channel
+  producer tests, and Git whitespace checks.
 - `make test-unit` runs Rust library and binary unit tests.
 - `make test-int` runs the explicitly selected Rust integration suites using
   fakes, stubs, and isolated filesystem fixtures. It does not invoke the

@@ -1528,12 +1528,13 @@ pub struct OperatorStore {
 
 /// Exclusive hold on the one global `operator.lock`.
 ///
-/// `flock` is tied to the open file description, so the hold lasts exactly as
-/// long as this value and a second `open` of the same path — even from this
-/// same process — waits behind it. That is what makes re-entry a deadlock
-/// rather than a no-op, so anything that must act while a hold is already
-/// alive is reached through a `*_holding` entry point that reuses the hold
-/// instead of reopening the path.
+/// `flock` is tied to the open file description, so a second `open` of the same
+/// path — even from this same process — waits behind it. `Drop` issues an
+/// explicit `LOCK_UN` before closing the descriptor: close alone is insufficient
+/// when a concurrent fork inherited another reference before exec. Re-entry is
+/// therefore a deadlock rather than a no-op, so anything that must act while a
+/// hold is already alive is reached through a `*_holding` entry point that
+/// reuses the hold instead of reopening the path.
 #[derive(Debug)]
 #[must_use = "operator.lock is held only while this value is alive"]
 pub(crate) struct OperatorLock {
@@ -1544,7 +1545,16 @@ impl OperatorLock {
     /// Releases `operator.lock` at an explicit point rather than wherever the
     /// enclosing scope happens to end.
     pub(crate) fn release(self) {
-        drop(self.file);
+        drop(self);
+    }
+}
+
+impl Drop for OperatorLock {
+    fn drop(&mut self) {
+        // The descriptor is live and was verified as a regular private file
+        // before the lock was taken. Closing remains the final fallback if an
+        // invariant violation nevertheless makes the explicit unlock fail.
+        let _ = DarwinSystem.unlock(&self.file);
     }
 }
 
@@ -1611,10 +1621,14 @@ impl OperatorStore {
     pub(crate) fn try_lock_exclusive(&self) -> Result<Option<OperatorLock>, MachineError> {
         self.ensure_root()?;
         let file = self.open_lock()?;
-        Ok(DarwinSystem
-            .lock_exclusive_nonblocking(&file)
-            .ok()
-            .map(|()| OperatorLock { file }))
+        loop {
+            match DarwinSystem.lock_exclusive_nonblocking(&file) {
+                Ok(()) => return Ok(Some(OperatorLock { file })),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(operator_error("operator.lock")),
+            }
+        }
     }
 
     pub fn initialize(
@@ -3207,6 +3221,21 @@ mod tests {
                 .operator_generation,
             2
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn releasing_an_operator_lock_unlocks_a_fork_style_duplicate() {
+        let root = private_directory();
+        let store = OperatorStore::new(root.join("operator"));
+        let lock = store.lock_exclusive().unwrap();
+        let inherited = lock.file.try_clone().unwrap();
+
+        assert!(store.try_lock_exclusive().unwrap().is_none());
+        lock.release();
+        assert!(store.try_lock_exclusive().unwrap().is_some());
+
+        drop(inherited);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -24,6 +24,10 @@ machine-output contracts from the product specification. The
 is a supporting accepted design study, not runtime or completion evidence. The
 root [contribution guide](../CONTRIBUTING.md) is an entrypoint to implementation
 guidance, and the public [changelog](../CHANGELOG.md) owns release history.
+Optional source-distributed agent guidance lives under [`skills/`](../skills/).
+It consumes these authorities and current runtime capability output; it does
+not redefine product behavior, grant operational authorization, or install with
+the binary.
 
 ## Precedence and synchronization
 
@@ -54,11 +58,12 @@ these lifecycle fields remains unchanged.
 
 ## Language and validation
 
-Canonical repository documentation is written in English. Run the non-writing
-Markdown check with:
+Canonical repository documentation and source-distributed skills are written in
+English. Run the non-writing Markdown and skill checks with:
 
 ```sh
 .venv/bin/python tools/validators/validate_markdown.py
+.venv/bin/python tools/validators/validate_agent_skills.py
 ```
 
 Rust tests own product semantics. Python remains limited to small independent

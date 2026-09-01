@@ -12,6 +12,12 @@ behavior, but they are not procedural authorization. Add a runbook only after
 its target, prerequisites, safe diagnosis, bounded resolution, success checks,
 rollback, and escalation path are verified against the implementation.
 
+The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
+provides capability-adaptive agent guidance for the currently supported setup,
+configuration, immutable-target, and one-shot review surfaces. It is not an
+operator runbook or a semantic authority, and loading it never authorizes a
+mutation, external review, installation, or recovery action.
+
 Development, testing, and release-engineering guidance belongs in the
 [implementation tips](../implementation-tips/README.md), not this operations
 owner. Never record credentials, tokens, private keys, live secret values, or

@@ -53,6 +53,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - Use `$aquarium:docs-setup` to audit, establish, adopt, or migrate canonical documentation structure and roadmap IDs.
 - Use `$aquarium:test-setup` to audit or configure the common Make or Bun testing contract and evidence-backed legacy waivers.
 - Use `$aquarium:release-handler` for one stable release lifecycle and `$aquarium:release-qa` for its exact committed-candidate scenario verification.
+- Use `$use-dolgorae` for an explicitly requested Dolgorae workspace, Runtime Profile, immutable-target, one-shot review, diagnosis, lifecycle, or recovery operation. It is source-distributed at `skills/use-dolgorae/SKILL.md` and installed through the README's Agent skill procedure. The skill's presence never authorizes initialization, external review, server control, credential mutation, cancellation, settlement, or repair. Specialist Policy operations remain unavailable until their owning roadmap task is implemented.
 - Use `$use-mulgae` for an authorized Mulgae review, run inspection, finding follow-up, configuration diagnosis, cleanup plan, or recovery.
 - Use `$use-gaori` when a selected long or noisy check is routed through Gaori or existing Gaori evidence must be inspected.
 - Let Aquarium workflows use Podway by default for Git-backed work unless Master opts out before the first managed-session mutation. No Aquarium skill owns a Podway session; only when starting a different session should the workflow ask whether to preserve, finish, delete, or replace the existing one.

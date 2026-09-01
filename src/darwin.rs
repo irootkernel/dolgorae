@@ -418,12 +418,32 @@ impl DarwinSystem {
     }
 
     pub fn lock_exclusive(self, file: &std::fs::File) -> Result<(), std::io::Error> {
-        // SAFETY: flock borrows the live descriptor and retains no pointer. The
-        // resulting lock remains tied to the caller-owned open file description.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
+        loop {
+            // SAFETY: flock borrows the live descriptor and retains no pointer. The
+            // resulting lock remains tied to the caller-owned open file description.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
         }
-        Ok(())
+    }
+
+    pub fn unlock(self, file: &std::fs::File) -> Result<(), std::io::Error> {
+        loop {
+            // SAFETY: flock borrows the live descriptor and retains no pointer.
+            // LOCK_UN releases the shared lock identity even when fork or dup
+            // left another descriptor referring to the same open file.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
     }
 
     pub fn spawn_detached(self, command: &mut Command) -> Result<Child, std::io::Error> {

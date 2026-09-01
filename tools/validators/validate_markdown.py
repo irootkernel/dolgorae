@@ -18,6 +18,7 @@ def main() -> int:
     checked_files = 0
     paths = [ROOT / "README.md", ROOT / "CONTRIBUTING.md"]
     paths.extend(sorted((ROOT / "docs").rglob("*.md")))
+    paths.extend(sorted((ROOT / "skills").rglob("*.md")))
     for path in paths:
         checked_files += 1
         text = path.read_text(encoding="utf-8")
