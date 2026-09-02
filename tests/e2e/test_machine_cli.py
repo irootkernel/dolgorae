@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box validation of executable output against the Machine v1 schema."""
+"""Black-box validation of the version and Machine v1 CLI contracts."""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ from schema_support import assert_valid, validator
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
+    version_schema = validator(protocol_root, "dolgorae-version-v1.schema.json")
     cases = (
         ("--help",),
         ("help",),
         ("help", "runtime"),
-        ("--version",),
         ("runtime", "capabilities"),
     )
     for arguments in cases:
@@ -61,6 +61,63 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 raise AssertionError(f"help used the wrong command: {arguments}")
             if not instance["data"]["text"].startswith("Usage: dolgorae"):
                 raise AssertionError(f"help omitted usage text: {arguments}")
+            if len(arguments) == 1 and "  version" not in instance["data"]["text"]:
+                raise AssertionError(f"top-level help omitted version: {arguments}")
+
+    text_version = None
+    for arguments in (
+        ("version",),
+        ("--version",),
+        ("-V",),
+        ("--human", "version"),
+        ("--human", "--version"),
+        ("--human", "-V"),
+        ("version", "--human"),
+    ):
+        completed = subprocess.run(
+            [str(binary), *arguments], check=True, capture_output=True, text=True
+        )
+        if completed.stderr:
+            raise AssertionError(f"unexpected version stderr for {arguments}: {completed.stderr}")
+        if not completed.stdout.startswith("dolgorae v") or not completed.stdout.endswith("\n"):
+            raise AssertionError(f"invalid text version for {arguments}: {completed.stdout!r}")
+        if "\n" in completed.stdout[:-1]:
+            raise AssertionError(f"text version is not one line for {arguments}")
+        if text_version is None:
+            text_version = completed.stdout.removeprefix("dolgorae ").removesuffix("\n")
+        elif completed.stdout != f"dolgorae {text_version}\n":
+            raise AssertionError(f"version aliases disagree for {arguments}: {completed.stdout!r}")
+
+    json_version = subprocess.run(
+        [str(binary), "version", "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if json_version.stderr:
+        raise AssertionError(f"unexpected JSON version stderr: {json_version.stderr}")
+    expected_json = f'{{"name":"dolgorae","version":"{text_version}"}}\n'
+    if json_version.stdout != expected_json:
+        raise AssertionError(
+            f"JSON version does not match the compact contract: {json_version.stdout!r}"
+        )
+    assert_valid(json.loads(json_version.stdout), version_schema, "JSON version output")
+
+    conflicting_version_modes = subprocess.run(
+        [str(binary), "--human", "version", "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        conflicting_version_modes.returncode != 2
+        or conflicting_version_modes.stdout
+        or "INVALID_ARGUMENT" not in conflicting_version_modes.stderr
+    ):
+        raise AssertionError(
+            "version output mode conflict did not use the human syntax-error boundary: "
+            f"{conflicting_version_modes!r}"
+        )
 
     home = pathlib.Path(os.environ["HOME"])
     controller = home / "controller.json"
@@ -127,21 +184,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     if unknown_envelope["error"]["code"] != "INVALID_ARGUMENT":
         raise AssertionError("unknown command used the wrong error code")
 
-    human = subprocess.run(
-        [str(binary), "--human", "--version"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    if human.stderr or not human.stdout.startswith("dolgorae "):
-        raise AssertionError(f"human version boundary failed: {human!r}")
-    try:
-        json.loads(human.stdout)
-    except json.JSONDecodeError:
-        pass
-    else:
-        raise AssertionError("--human --version unexpectedly emitted JSON")
-
     human_help = subprocess.run(
         [str(binary), "--human", "help", "runtime"],
         check=True,
@@ -160,7 +202,7 @@ def main() -> int:
     )
     arguments = parser.parse_args()
     validate(arguments.binary.resolve(), arguments.protocol_root.resolve())
-    print("Machine CLI validation passed: envelopes, errors, human boundary")
+    print("CLI validation passed: compact version, envelopes, errors, human boundary")
     return 0
 
 

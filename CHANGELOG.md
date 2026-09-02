@@ -13,6 +13,11 @@ development commits.
   capability-aware workspace, profile, immutable-target, and one-shot review
   workflows.
 
+### Changed
+
+- Changed `version`, `--version`, and `-V` to compact `dolgorae v<version>`
+  output and added exact two-field JSON through `version --json`.
+
 ## v0.1.1 - 2026-08-31
 
 ### Changed

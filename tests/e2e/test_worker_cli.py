@@ -1142,10 +1142,10 @@ def binary_sha256(binary: pathlib.Path) -> str:
 
 def binary_version(binary: pathlib.Path) -> str:
     completed = subprocess.run(
-        [str(binary), "--version"], capture_output=True, text=True, check=True
+        [str(binary), "version", "--json"], capture_output=True, text=True, check=True
     )
-    text = str(json.loads(completed.stdout)["data"]["text"])
-    return text.removeprefix("dolgorae ").strip()
+    version = str(json.loads(completed.stdout)["version"])
+    return version.removeprefix("v")
 
 
 def publish_run_for_cli(

@@ -22,6 +22,7 @@ pub enum Command {
     Worker(WorkerArgs),
     #[command(name = "__specialist-review-mcp", hide = true)]
     SpecialistReviewMcp(SpecialistReviewMcpArgs),
+    Version(VersionArgs),
     Init(InitArgs),
     Serve(LeafArgs),
     Runtime {
@@ -66,6 +67,7 @@ impl Command {
         match self {
             Self::Worker(_) => "__worker",
             Self::SpecialistReviewMcp(_) => "__specialist-review-mcp",
+            Self::Version(_) => "version",
             Self::Init(_) => "init",
             Self::Serve(_) => "serve",
             Self::Runtime { command } => command.machine_name(),
@@ -85,6 +87,7 @@ impl Command {
         match self {
             Self::Worker(_)
             | Self::SpecialistReviewMcp(_)
+            | Self::Version(_)
             | Self::Init(_)
             | Self::Runtime { .. } => None,
             Self::Serve(args) => Some(args),
@@ -542,6 +545,12 @@ impl RunCommand {
             },
         })
     }
+}
+
+#[derive(Debug, Args)]
+pub struct VersionArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

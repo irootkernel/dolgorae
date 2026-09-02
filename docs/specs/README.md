@@ -944,6 +944,8 @@ The initial public command surface is:
 
 ```text
 dolgorae [--human] --help
+dolgorae [--human] version
+dolgorae version --json
 dolgorae [--human] --version
 dolgorae [--human] init [PATH] [--non-git]
 dolgorae [--human] serve --socket <absolute-private-socket-path> [--ready-fd <fd>]
@@ -1120,10 +1122,16 @@ five-second drain contract. Startup collision, unsafe socket state, or a fatal
 runtime failure exits with the mapped typed error and MUST NOT affect Runs,
 workers, writer authority, Profile Servers, or Dedicated Lane Servers.
 
-In JSON mode `--help` and `--version` emit ordinary success envelopes with
-commands `help` and `version`; `--human` selects presentation-only text. A
-syntax failure before command identification emits the ordinary failure
-envelope with command `unknown`.
+In JSON mode `--help` emits an ordinary success envelope with command `help`;
+`--human` selects presentation-only text. Version reporting is the stateless
+exception to the Machine envelope. `version`, `--version`, and `-V` emit exactly
+`dolgorae v<package-version>` plus LF, and the redundant `--human` modifier is
+accepted for those text forms. `version --json` emits the checked version-output
+object with exactly `name` and `version` plus LF; `name` is `dolgorae` and
+`version` is the Cargo package version prefixed by `v`. `--json` is available
+only on the `version` subcommand and conflicts with `--human`. Syntax failures
+retain the ordinary failure envelope and exit status 2; a failure before command
+identification uses command `unknown`.
 
 The two app-server requests are not claimed to be atomic. After `thread/start`,
 Dolgorae appends and fsyncs the provisional thread ID before sending `turn/start`.
@@ -1239,7 +1247,8 @@ verification retains readers for every released bundle version. A newer binary
 opening an unsupported on-disk run, audit, or hash version fails closed and
 requires the matching binary; v1 defines no in-place migration.
 
-The checked [machine-output schema](../protocol/dolgorae-machine-v1.schema.json),
+The checked [version-output schema](../protocol/dolgorae-version-v1.schema.json),
+[machine-output schema](../protocol/dolgorae-machine-v1.schema.json),
 [error contract](../protocol/dolgorae-error-contract-v1.json),
 [client-event-record schema](../protocol/dolgorae-event-record-v1.schema.json),
 [event-delivery schema](../protocol/dolgorae-event-delivery-v1.schema.json),

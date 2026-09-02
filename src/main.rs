@@ -34,8 +34,8 @@ fn main() -> ExitCode {
     if is_help(&args) {
         return render_help(human);
     }
-    if is_version(&args) {
-        return render_version(human);
+    if let Some(json_output) = version_output_mode(&args) {
+        return render_version(json_output);
     }
 
     match Cli::try_parse_from(&args) {
@@ -67,9 +67,20 @@ fn is_help(args: &[OsString]) -> bool {
         || args.len() == 3 && args[1] == "--human" && (args[2] == "--help" || args[2] == "-h")
 }
 
-fn is_version(args: &[OsString]) -> bool {
-    args.len() == 2 && (args[1] == "--version" || args[1] == "-V")
-        || args.len() == 3 && args[1] == "--human" && (args[2] == "--version" || args[2] == "-V")
+fn version_output_mode(args: &[OsString]) -> Option<bool> {
+    match args.get(1..)? {
+        [argument] if argument == "version" || argument == "--version" || argument == "-V" => {
+            Some(false)
+        }
+        [command, argument] if command == "version" && argument == "--json" => Some(true),
+        [human, argument]
+            if human == "--human"
+                && (argument == "version" || argument == "--version" || argument == "-V") =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
 }
 
 fn render_help(human: bool) -> ExitCode {
@@ -99,20 +110,37 @@ fn render_generated_help(human: bool, text: String) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn render_version(human: bool) -> ExitCode {
-    if human {
-        println!("dolgorae {}", env!("CARGO_PKG_VERSION"));
+#[derive(Serialize)]
+struct VersionOutput<'a> {
+    name: &'static str,
+    version: &'a str,
+}
+
+fn render_version(json_output: bool) -> ExitCode {
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    if json_output {
+        render_json(&VersionOutput {
+            name: "dolgorae",
+            version: &version,
+        });
     } else {
-        render_json(&SuccessEnvelope::new(
-            "version",
-            json!({"text": format!("dolgorae {}", env!("CARGO_PKG_VERSION"))}),
-        ));
+        println!("dolgorae {version}");
     }
     ExitCode::SUCCESS
 }
 
 fn execute(cli: Cli) -> ExitCode {
     let command_name = cli.command.machine_name();
+    if let Command::Version(args) = &cli.command {
+        if args.json && cli.human {
+            return render_failure(
+                cli.human,
+                command_name,
+                MachineError::invalid_argument("--json", "--json conflicts with --human"),
+            );
+        }
+        return render_version(args.json);
+    }
     if let Command::SpecialistReviewMcp(args) = &cli.command {
         return match dolgorae::mcp_review_server::serve_stdio(&args.workspace, &args.profile) {
             Ok(()) => ExitCode::SUCCESS,
@@ -366,6 +394,7 @@ fn execute(cli: Cli) -> ExitCode {
         Command::SpecialistReviewMcp(_) => {
             unreachable!("hidden MCP server handled before semantic dispatch")
         }
+        Command::Version(_) => unreachable!("version handled before semantic dispatch"),
         Command::ReviewTarget { .. } => {
             unreachable!("review target handled before semantic dispatch")
         }
