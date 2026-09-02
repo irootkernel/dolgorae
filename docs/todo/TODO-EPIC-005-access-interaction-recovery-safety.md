@@ -57,8 +57,9 @@ without creating pending lifecycle state.
 Implement idle and interrupting pause or close, immutable closure, access
 instruction replacement, terminal sealing, and verified cleanup of the worker,
 connection, and owned Dedicated Run Server descendants. Preserve the shared
-Profile Server. Keep live control-socket self-heal fail closed until the
-four-verdict process-identity proof owned by the following task is available.
+Profile Server. Keep live control-socket cleanup on TASK-004's fail-closed
+primitive; TASK-020 owns self-heal after establishing four-verdict process
+identity.
 
 ### Process identity and group recovery
 
@@ -66,7 +67,9 @@ Establish four-verdict worker and Dedicated Run Server identity with boot-sessio
 proof, provisional identity, kqueue continuity, persisted member snapshots, and
 complete process-group, parent, and session census. Recovery must detect PID,
 group, session, boot, and inode reuse; signal no unrelated process; and continue
-cleanup only from verified identities and complete empty censuses.
+cleanup only from verified identities and complete empty censuses. Add live
+control-socket self-heal only when that proof authorizes replacement of the
+existing pathname.
 
 ### History reconciliation, outcome unknown, and fork
 
