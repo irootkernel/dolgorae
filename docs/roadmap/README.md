@@ -816,6 +816,8 @@ run a fresh Codex Reviewer without Orca objects. Completion unlocks
 
 Status: `PLANNED`
 
+Detailed SOT: [EPIC-005 dossier](../todo/TODO-EPIC-005-access-interaction-recovery-safety.md)
+
 Goal: Enforce Dolgorae's one-durable-writer-authority-per-worktree scope,
 Controller-authorized interaction, and conservative failure semantics.
 

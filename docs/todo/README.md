@@ -9,6 +9,8 @@ None.
 
 ## Adopted active-Epic dossiers
 
+- [`EPIC-005: Access, Interaction, and Recovery Safety`](TODO-EPIC-005-access-interaction-recovery-safety.md)
+
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the
 [roadmap](../roadmap/README.md) with `Detailed SOT`. Closeout promotes durable
