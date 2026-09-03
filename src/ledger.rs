@@ -493,6 +493,26 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         self.append(record, AppendDurability::Required)
     }
 
+    pub(crate) fn append_conformance_payload<T: serde::Serialize>(
+        &mut self,
+        kind: AuditKind,
+        payload: &T,
+        run_generation: u64,
+    ) -> Result<(), LedgerError> {
+        let serialized = serde_json::to_string(payload)
+            .map_err(|error| LedgerError::InvalidRecord(error.to_string()))?;
+        let record = AuditRecord::new(
+            self.next_sequence(),
+            self.clock.timestamp(),
+            self.run_id,
+            run_generation,
+            kind,
+            parse(&serialized).map_err(|error| LedgerError::InvalidRecord(error.to_string()))?,
+            self.previous_hash(),
+        )?;
+        self.append_conformance_record(record, AppendDurability::Required)
+    }
+
     pub fn append_client_event(
         &mut self,
         record: ClientEventRecord,
@@ -1363,6 +1383,19 @@ impl ObservedLedger {
         serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|error| LedgerError::Integrity(error.to_string()))
+    }
+
+    pub fn payloads_of_kind(&self, kind: AuditKind) -> Result<Vec<serde_json::Value>, LedgerError> {
+        self.records
+            .iter()
+            .filter(|record| record.kind() == kind)
+            .map(|record| {
+                let bytes = canonicalize(record.payload())
+                    .map_err(|error| LedgerError::Integrity(error.to_string()))?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| LedgerError::Integrity(error.to_string()))
+            })
+            .collect()
     }
 
     /// One page of durable deliveries strictly after `after`, bounded exactly

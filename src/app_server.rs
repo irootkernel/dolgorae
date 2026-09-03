@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub const MAX_HTTP_UPGRADE_BYTES: usize = 16 * 1024;
 pub const MAX_WEBSOCKET_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -1010,6 +1011,18 @@ impl DuplexConnection {
     pub fn send(&self, value: &Value) -> Result<(), TransportError> {
         let bytes = serde_json::to_vec(value).map_err(|_| TransportError::InvalidJson)?;
         self.writer.send_text(&bytes)
+    }
+
+    /// Send a protected JSON-RPC message and scrub both serialization buffers.
+    ///
+    /// The caller still owns and scrubs `value`; this method covers the two
+    /// additional plaintext copies created by JSON encoding and WebSocket
+    /// framing before the kernel write completes.
+    pub fn send_sensitive(&self, value: &Value) -> Result<(), TransportError> {
+        let bytes =
+            Zeroizing::new(serde_json::to_vec(value).map_err(|_| TransportError::InvalidJson)?);
+        let frame = Zeroizing::new(frame_bytes(true, 0x1, &bytes)?);
+        self.writer.emit(&frame)
     }
 
     /// Read one whole message, queued ones first.

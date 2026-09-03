@@ -14,6 +14,8 @@ development commits.
   workflows.
 - Durable per-worktree writer authority, explicit access transitions, write
   continuations, and safe cross-profile handoff.
+- Reconnectable Controller-authorized command, file-change, and user-input
+  interactions.
 
 ### Changed
 

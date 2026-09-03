@@ -479,17 +479,20 @@ impl Run {
                     canonical_codex_home: server.codex_home.to_str().unwrap().to_owned(),
                     server_key: "a".repeat(64),
                     server_epoch: 1,
+                    controller_id: created.credential.controller_id,
+                    control_mode: "direct_interactive".to_owned(),
                     fixed_model: "gpt-5".to_owned(),
                     default_effort: "medium".to_owned(),
                     supported_efforts: vec!["medium".to_owned(), "low".to_owned()],
                     cwd: root.clone(),
                     developer_instructions: "fixed".to_owned(),
                     sandbox: "read-only".to_owned(),
-                    approval_policy: "never".to_owned(),
+                    approval_policy: "on-request".to_owned(),
                     safety_policy: dolgorae::turn::SessionSafetyPolicy::Standard,
                     artifact_root: root.join("artifacts"),
                     attach: SessionAttach::Start,
                     transport_timeout_seconds: 60,
+                    dedicated_server: None,
                 },
                 RunFacts {
                     run_id,
@@ -776,6 +779,21 @@ impl Run {
             caller: None,
             expected: self.identity.clone(),
             interrupt,
+        }
+    }
+
+    fn pause(&self, interrupt: bool) -> ControlRequestV1 {
+        ControlRequestV1::Pause {
+            caller: None,
+            expected: self.identity.clone(),
+            interrupt,
+        }
+    }
+
+    fn resume(&self) -> ControlRequestV1 {
+        ControlRequestV1::Resume {
+            caller: None,
+            expected: self.identity.clone(),
         }
     }
 
@@ -1076,17 +1094,47 @@ fn an_interaction_pauses_a_blocked_caller_and_its_answer_resumes_the_turn() {
             caller: None,
             expected: run.identity.clone(),
             request_id: 4_100,
-            response: json!({"decision": "approved"}),
+            idempotency_key: "approval-4100".to_owned(),
+            response: json!({"decision": "accept_once"}),
         }),
-        ControlResponseV1::Responded { request_id: 4_100 }
+        ControlResponseV1::Responded {
+            request_id: 4_100,
+            resolution_receipt_id: None,
+        }
     );
     let replies = run.server.replies();
     assert!(
-        replies
-            .iter()
-            .any(|reply| reply.get("id").and_then(Value::as_u64) == Some(4_100)),
+        replies.iter().any(|reply| {
+            reply.get("id").and_then(Value::as_u64) == Some(4_100)
+                && reply.pointer("/result/decision").and_then(Value::as_str) == Some("accept")
+        }),
         "the interaction answer never reached the app-server: {replies:?}"
     );
+    assert_eq!(
+        run.call(&ControlRequestV1::Respond {
+            caller: None,
+            expected: run.identity.clone(),
+            request_id: 4_100,
+            idempotency_key: "approval-4100".to_owned(),
+            response: json!({"decision": "accept_once"}),
+        }),
+        ControlResponseV1::Responded {
+            request_id: 4_100,
+            resolution_receipt_id: None,
+        }
+    );
+    match run.call(&ControlRequestV1::Respond {
+        caller: None,
+        expected: run.identity.clone(),
+        request_id: 4_100,
+        idempotency_key: "approval-other".to_owned(),
+        response: json!({"decision": "decline"}),
+    }) {
+        ControlResponseV1::Failed { code, .. } => {
+            assert_eq!(code, "INTERACTION_ALREADY_RESOLVED")
+        }
+        other => panic!("expected resolved conflict, got {other:?}"),
+    }
 
     // The Turn resumes, and the next caller blocks on it again.
     run.await_lifecycle("running");
@@ -1325,13 +1373,55 @@ fn close_refuses_a_live_run_until_the_caller_asks_for_the_interrupt() {
         "close interrupted a turn the caller never authorised it to interrupt"
     );
 
-    // With the flag the Run closes, and the interrupt reaches the app-server.
+    // With the flag the worker interrupts first, but does not claim the Run is
+    // closed until terminal evidence arrives and a second idle close seals it.
     match run.call(&run.close(true)) {
+        ControlResponseV1::Interrupted {
+            turn_id: observed, ..
+        } => {
+            assert_eq!(observed, turn_id);
+        }
+        other => panic!("expected an interrupt acknowledgement, got {other:?}"),
+    }
+    run.server.await_call("turn/interrupt", 1);
+    run.server.complete_turn(&turn_id, "interrupted", "stopped");
+    assert_eq!(
+        terminal(&run.call(&run.wait(&turn_id))),
+        (turn_id.clone(), "interrupted".to_owned())
+    );
+    match run.call(&run.close(false)) {
         ControlResponseV1::Closed { .. } => {}
         other => panic!("expected a closed run, got {other:?}"),
     }
-    run.server.await_call("turn/interrupt", 1);
-    assert_eq!(run.await_lifecycle("closed"), Some(turn_id));
+    assert_eq!(run.await_lifecycle("closed"), None);
+}
+
+#[test]
+fn idle_pause_and_resume_are_durable_and_fence_turns() {
+    let run = Run::start(Behaviour::default());
+
+    match run.call(&run.pause(false)) {
+        ControlResponseV1::Status { lifecycle, .. } => assert_eq!(lifecycle, "paused"),
+        other => panic!("expected paused status, got {other:?}"),
+    }
+    assert_eq!(run.await_lifecycle("paused"), None);
+    match run.call(&run.submit("paused-turn")) {
+        ControlResponseV1::Failed { code, .. } => assert_eq!(code, "RUN_BUSY"),
+        other => panic!("expected paused turn refusal, got {other:?}"),
+    }
+    match run.call(&run.resume()) {
+        ControlResponseV1::Status { lifecycle, .. } => assert_eq!(lifecycle, "idle"),
+        other => panic!("expected idle status, got {other:?}"),
+    }
+    assert_eq!(run.await_lifecycle("idle"), None);
+    let kinds = run.recorded_kinds();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == AuditKind::LifecycleTransition)
+            .count(),
+        2
+    );
 }
 
 /// H3: `status` carries the terminal the drain observed.
@@ -1959,7 +2049,13 @@ fn worker_identity(run_id: Uuid) -> WorkerIdentity {
         boot_uuid: Uuid::parse_str("2e349290-1744-4fc3-bb62-9cbf9f5859c0").unwrap(),
         pid: std::process::id(),
         process_group_id: std::process::id(),
+        session_id: std::process::id(),
         uid: fs::metadata(".").unwrap().uid(),
+        start_tvsec: 1,
+        start_tvusec: 0,
+        executable_path: PathBuf::from("/usr/bin/true"),
+        executable_device: 1,
+        executable_inode: 1,
         executable_sha256: "2".repeat(64),
     }
 }
@@ -2066,6 +2162,7 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         required_capabilities: vec!["reader".to_owned()],
         thread_id: None,
         fork_provenance: None,
+        write_continuation_provenance: None,
         aggregate_binding: None,
         audit: AuditPolicy::default(),
         compatibility: CompatibilityVerdict::Accepted,
