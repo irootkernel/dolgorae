@@ -347,6 +347,23 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         self.durable_records()
     }
 
+    pub fn payloads_of_kind(&self, kind: AuditKind) -> Result<Vec<serde_json::Value>, LedgerError> {
+        self.durable_records()?
+            .iter()
+            .filter(|record| record.kind() == kind)
+            .map(|record| {
+                let bytes = canonicalize(record.payload())
+                    .map_err(|error| LedgerError::Integrity(error.to_string()))?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| LedgerError::Integrity(error.to_string()))
+            })
+            .collect()
+    }
+
+    pub fn approval_decisions(&self) -> Result<Vec<serde_json::Value>, LedgerError> {
+        self.payloads_of_kind(AuditKind::ApprovalDecided)
+    }
+
     pub(crate) fn check_open_replay_budget(&self) -> Result<(), LedgerError> {
         check_replay_budget(&*self.clock, self.replay_started_millis)
     }

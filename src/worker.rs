@@ -360,7 +360,7 @@ pub struct BackgroundAbsenceEvidence {
 pub fn prove_worker_workload_absent(
     record: &WorkerRuntimeRecord,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
-    prove_group_empty(record, true)
+    prove_group_empty(record, true, false)
 }
 
 /// Prove that a recorded worker generation and its entire process group are
@@ -370,12 +370,13 @@ pub fn prove_worker_workload_absent(
 pub fn prove_worker_generation_absent(
     record: &WorkerRuntimeRecord,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
-    prove_group_empty(record, false)
+    prove_group_empty(record, false, false)
 }
 
 fn prove_group_empty(
     record: &WorkerRuntimeRecord,
     allow_recorded_worker: bool,
+    allow_recorded_dedicated_server: bool,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
     let expected = if allow_recorded_worker {
         ProcessIdentityVerdict::Match
@@ -387,13 +388,16 @@ fn prove_group_empty(
             return Err(WorkerProtocolError::InvalidIdentity);
         }
         if let Some(server) = &record.dedicated_server_identity {
-            let expected_server = if allow_recorded_worker {
+            let expected_server = if allow_recorded_worker || allow_recorded_dedicated_server {
                 ProcessIdentityVerdict::Match
             } else {
                 ProcessIdentityVerdict::Absent
             };
             if classify_dedicated_server_identity(server) != expected_server
-                || !dedicated_group_has_only_expected_leader(server, allow_recorded_worker)?
+                || !dedicated_group_has_only_expected_leader(
+                    server,
+                    allow_recorded_worker || allow_recorded_dedicated_server,
+                )?
             {
                 return Err(WorkerProtocolError::InvalidIdentity);
             }
@@ -2931,11 +2935,18 @@ impl WorkerSession {
             let mailbox = Arc::clone(&mailbox);
             move || read_app_server(&wire, &mailbox)
         });
-        let replayed = ledger
-            .lock()
-            .map_err(|_| WorkerProtocolError::LedgerReplay)?
-            .projection()
-            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+        let (replayed, interaction_decisions) = {
+            let ledger = ledger
+                .lock()
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            let replayed = ledger
+                .projection()
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            let interaction_decisions = ledger
+                .approval_decisions()
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            (replayed, interaction_decisions)
+        };
         let coordinator = TurnCoordinator::initialize(
             SessionServer::new(
                 Arc::clone(&wire),
@@ -2980,6 +2991,9 @@ impl WorkerSession {
             replayed.active_turn_id,
             replayed.latest_turn_id,
         );
+        coordinator
+            .restore_interaction_resolutions(interaction_decisions)
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
         let progress = Arc::new(SessionProgress::new(facts.clone()));
         progress.publish(
             coordinator_control_state(&coordinator, false),
@@ -5115,6 +5129,7 @@ pub fn remove_verified_absent_runtime(
     uid: u32,
 ) -> Result<(), WorkerProtocolError> {
     let record = read_runtime_record(runtime_record, uid)?;
+    stop_orphaned_dedicated_server(&record)?;
     prove_worker_generation_absent(&record)?;
     match fs::symlink_metadata(&record.socket_path) {
         Ok(metadata) => {
@@ -5146,6 +5161,64 @@ pub fn remove_verified_absent_runtime(
     )
     .and_then(|directory| directory.sync_all())
     .map_err(|_| WorkerProtocolError::Io)
+}
+
+/// Retire a Dedicated Run Server that survived its owning worker. The worker
+/// must first be proved absent, and every signal is guarded by the recorded
+/// four-verdict identity plus a complete same-scope census. A mismatched or
+/// unreadable generation remains untouched and blocks replacement.
+fn stop_orphaned_dedicated_server(record: &WorkerRuntimeRecord) -> Result<(), WorkerProtocolError> {
+    let Some(server) = record.dedicated_server_identity.as_ref() else {
+        return Ok(());
+    };
+    match classify_dedicated_server_identity(server) {
+        ProcessIdentityVerdict::Absent => return Ok(()),
+        ProcessIdentityVerdict::Match if dedicated_group_safe_to_signal(server) => {
+            prove_group_empty(record, false, true)?;
+        }
+        _ => return Err(WorkerProtocolError::InvalidIdentity),
+    }
+
+    let _ = DarwinSystem.signal_process_group(server.process_group_id, libc::SIGTERM);
+    let term_deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .unwrap_or_else(Instant::now);
+    while Instant::now() < term_deadline {
+        if recorded_dedicated_group_stopped(server) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if !recorded_dedicated_group_stopped(server) {
+        if classify_dedicated_server_identity(server) != ProcessIdentityVerdict::Match
+            || !dedicated_group_safe_to_signal(server)
+        {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        let _ = DarwinSystem.signal_process_group(server.process_group_id, libc::SIGKILL);
+    }
+
+    let total_deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .unwrap_or_else(Instant::now);
+    let mut empty_samples = 0_u8;
+    while Instant::now() < total_deadline {
+        if recorded_dedicated_group_stopped(server) {
+            empty_samples = empty_samples.saturating_add(1);
+            if empty_samples == 5 {
+                return Ok(());
+            }
+        } else {
+            empty_samples = 0;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(WorkerProtocolError::InvalidIdentity)
+}
+
+fn recorded_dedicated_group_stopped(server: &DedicatedServerIdentity) -> bool {
+    classify_dedicated_server_identity(server) == ProcessIdentityVerdict::Absent
+        && dedicated_group_has_only_expected_leader(server, false).is_ok_and(|empty| empty)
 }
 
 pub fn write_frame<W: Write, T: Serialize>(
@@ -5944,6 +6017,91 @@ mod tests {
         let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
         let _ = DarwinSystem.signal_process_group(server.id(), libc::SIGKILL);
         let _ = worker.wait();
+        let _ = server.wait();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_orphaned_dedicated_server_is_retired_only_after_worker_absence() {
+        let mut worker_command = Command::new("/bin/sleep");
+        worker_command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut worker = DarwinSystem.spawn_detached(&mut worker_command).unwrap();
+        let mut server_command = Command::new("/bin/sleep");
+        server_command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut server = DarwinSystem.spawn_detached(&mut server_command).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let worker_observed = DarwinSystem.bsd_process_identity(worker.id()).unwrap();
+        let observed = DarwinSystem.bsd_process_identity(server.id()).unwrap();
+        let executable_path = DarwinSystem.realpath(Path::new("/bin/sleep")).unwrap();
+        let metadata = fs::metadata(&executable_path).unwrap();
+        let server_identity = DedicatedServerIdentity {
+            pid: observed.pid,
+            process_group_id: observed.process_group_id,
+            session_id: observed.session_id,
+            uid: observed.uid,
+            start_tvsec: observed.start_tvsec,
+            start_tvusec: observed.start_tvusec,
+            executable_path: executable_path.clone(),
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256: file_sha256(&executable_path).unwrap(),
+        };
+        let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
+        let _ = worker.wait();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let current = DarwinSystem.current_process().unwrap();
+        let workspace_id = "11".repeat(32);
+        let run_id = Uuid::now_v7();
+        let record = WorkerRuntimeRecord {
+            schema_version: 1,
+            socket_path: worker_socket_path(current.uid, &workspace_id, run_id).unwrap(),
+            identity: WorkerIdentity {
+                workspace_id,
+                run_id,
+                run_generation: 1,
+                boot_uuid: Uuid::now_v7(),
+                pid: worker_observed.pid,
+                process_group_id: worker_observed.process_group_id,
+                session_id: worker_observed.session_id,
+                uid: worker_observed.uid,
+                start_tvsec: worker_observed.start_tvsec,
+                start_tvusec: worker_observed.start_tvusec,
+                executable_path: executable_path.clone(),
+                executable_device: metadata.dev(),
+                executable_inode: metadata.ino(),
+                executable_sha256: file_sha256(&executable_path).unwrap(),
+            },
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            dedicated_server_identity: Some(server_identity.clone()),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
+        };
+
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Absent
+        );
+        stop_orphaned_dedicated_server(&record).unwrap();
+        assert_eq!(
+            classify_dedicated_server_identity(&server_identity),
+            ProcessIdentityVerdict::Absent
+        );
         let _ = server.wait();
     }
 

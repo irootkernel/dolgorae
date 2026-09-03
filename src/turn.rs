@@ -1579,6 +1579,67 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         };
     }
 
+    /// Restore the durable response receipts needed to make a retried
+    /// interaction response idempotent after a worker restart. The upstream
+    /// response is never replayed; only an exact winning key can recover its
+    /// already-recorded result.
+    pub fn restore_interaction_resolutions(
+        &mut self,
+        decisions: Vec<Value>,
+    ) -> Result<(), TurnError> {
+        for decision in decisions {
+            let request_id = decision
+                .get("request_id")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    TurnError::Journal("durable interaction request id is invalid".to_owned())
+                })?;
+            let idempotency_key = decision
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    TurnError::Journal("durable interaction idempotency key is invalid".to_owned())
+                })?
+                .to_owned();
+            let response_sha256 = match decision.get("response_sha256") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_str().map(str::to_owned).ok_or_else(|| {
+                    TurnError::Journal("durable interaction response digest is invalid".to_owned())
+                })?),
+            };
+            let resolution_receipt_id = match decision.get("resolution_receipt_id") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                        .ok_or_else(|| {
+                            TurnError::Journal("durable interaction receipt is invalid".to_owned())
+                        })?,
+                ),
+            };
+            let stale = decision
+                .pointer("/resolution/outcome")
+                .and_then(Value::as_str)
+                == Some("stale");
+            // Request ids are app-server scoped and may be reused by a later
+            // physical generation. Ledger order is authoritative, just as it
+            // is for the durable observer projection, so the latest decision
+            // replaces an older receipt with the same upstream id.
+            self.resolved_interactions.insert(
+                request_id,
+                InteractionResolution {
+                    idempotency_key,
+                    response_sha256,
+                    resolution_receipt_id,
+                    stale,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Read the pinned thread without resuming it or starting a Turn. A
     /// terminal observation moves the run to paused; absence remains
     /// outcome-unknown. Transport and shape failures append nothing, so a
@@ -3434,6 +3495,69 @@ mod tests {
             })
         );
         assert_eq!(params["approvalPolicy"], "on-request");
+    }
+
+    #[test]
+    fn durable_interaction_receipt_restores_idempotency_without_replaying_upstream() {
+        let mut coordinator = coordinator(FakeServer::default());
+        let receipt = Uuid::now_v7();
+        coordinator
+            .restore_interaction_resolutions(vec![serde_json::json!({
+                "request_id": "42",
+                "idempotency_key": "answer-once",
+                "response_sha256": null,
+                "resolution_receipt_id": receipt,
+                "resolution": {"outcome": "answered", "contained_secret": true}
+            })])
+            .unwrap();
+
+        assert_eq!(
+            coordinator.respond(
+                42,
+                "answer-once".to_owned(),
+                serde_json::json!({"answers":{"secret":["replacement-is-not-compared"]}}),
+            ),
+            Ok(Some(receipt))
+        );
+        assert!(matches!(
+            coordinator.respond(
+                42,
+                "different-key".to_owned(),
+                serde_json::json!({"answers":{"secret":["value"]}}),
+            ),
+            Err(TurnError::InteractionAlreadyResolved { request_id: 42 })
+        ));
+        assert!(coordinator.server.responses.is_empty());
+    }
+
+    #[test]
+    fn latest_durable_interaction_receipt_wins_when_an_upstream_id_is_reused() {
+        let mut coordinator = coordinator(FakeServer::default());
+        let latest_receipt = Uuid::now_v7();
+        coordinator
+            .restore_interaction_resolutions(vec![
+                serde_json::json!({
+                    "request_id": "7",
+                    "idempotency_key": "old-generation",
+                    "response_sha256": null,
+                    "resolution_receipt_id": Uuid::now_v7(),
+                    "resolution": {"outcome": "answered"}
+                }),
+                serde_json::json!({
+                    "request_id": "7",
+                    "idempotency_key": "new-generation",
+                    "response_sha256": null,
+                    "resolution_receipt_id": latest_receipt,
+                    "resolution": {"outcome": "answered"}
+                }),
+            ])
+            .unwrap();
+
+        assert_eq!(
+            coordinator.respond(7, "new-generation".to_owned(), serde_json::json!({})),
+            Ok(Some(latest_receipt))
+        );
+        assert!(coordinator.server.responses.is_empty());
     }
 
     #[test]

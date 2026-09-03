@@ -1989,6 +1989,264 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             if membership_records() != 3:
                 raise AssertionError("the fresh fork was not registered as a member")
 
+            runtime_record = state_root / "runtime" / "runs" / f"{started[0]}.json"
+            for verb in ("resume", "recover", "reconcile"):
+                refused = failure(
+                    ["run", "--controller-file", str(credential), verb, started[0], *owned],
+                    expect=4,
+                )
+                if refused["code"] != "RUN_STATE_CONFLICT":
+                    raise AssertionError(f"threadless {verb} used the wrong refusal: {refused!r}")
+                if runtime_record.exists():
+                    raise AssertionError(f"threadless {verb} spawned a worker before refusal")
+
+            terminal = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(credential),
+                    "send",
+                    started[0],
+                    *owned,
+                    "--message",
+                    "establish history",
+                    "--idempotency-key",
+                    "runstart-history-turn",
+                ]
+            )
+            if terminal["turn_id"] != "turn-1" or terminal["status"] != "completed":
+                raise AssertionError(f"source history did not become terminal: {terminal!r}")
+
+            closed = data(
+                ["run", "--controller-file", str(credential), "close", started[0], *owned]
+            )
+            if closed["thread_id"] != "thread-alpha" or closed["state"] != "closed":
+                raise AssertionError(f"terminal source did not close cleanly: {closed!r}")
+
+            history = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(credential),
+                    "fork",
+                    "--from",
+                    started[0],
+                    *owned,
+                    "--idempotency-key",
+                    "runstart-history-fork",
+                ]
+            )
+            started.append(str(history["run_id"]))
+            lineage = history["lineage"]
+            if (
+                history["thread_id"] is not None
+                or lineage["mode"] != "history_copy"  # type: ignore[index]
+                or lineage["source_run_id"] != started[0]  # type: ignore[index]
+                or lineage["source_thread_id"] != "thread-alpha"  # type: ignore[index]
+                or lineage["source_turn_id"] != "turn-1"  # type: ignore[index]
+                or lineage["last_confirmed_boundary"] != "completed"  # type: ignore[index]
+            ):
+                raise AssertionError(f"history-copy fork lost its boundary: {history!r}")
+            fork_turn = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(credential),
+                    "send",
+                    started[2],
+                    *owned,
+                    "--message",
+                    "continue copied history",
+                    "--idempotency-key",
+                    "runstart-history-fork-turn",
+                ]
+            )
+            if fork_turn["turn_id"] != "turn-2" or fork_turn["status"] != "completed":
+                raise AssertionError(f"history-copy fork did not run from its copied thread: {fork_turn!r}")
+            history_closed = data(
+                ["run", "--controller-file", str(credential), "close", started[2], *owned]
+            )
+            if history_closed["state"] != "closed" or history_closed["thread_id"] != "thread-beta":
+                raise AssertionError(f"history fork close lost its Thread: {history_closed!r}")
+
+            next_credential = root / "next-controller.json"
+            data(
+                [
+                    "controller",
+                    "credential",
+                    "create",
+                    "--kind",
+                    "automation",
+                    "--instance-id",
+                    "runstart-e2e",
+                    "--output",
+                    str(next_credential),
+                ]
+            )
+            continuation = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(credential),
+                    "create-write-continuation",
+                    "--from",
+                    started[0],
+                    "--from-turn",
+                    "turn-1",
+                    "--reason",
+                    "shared-readonly-source",
+                    "--purpose",
+                    "implementation",
+                    "--idempotency-key",
+                    "runstart-write-continuation",
+                    "--new-controller-file",
+                    str(next_credential),
+                    *owned,
+                ]
+            )
+            started.append(str(continuation["run_id"]))
+            continuation_lineage = continuation["lineage"]
+            if (
+                continuation["execution_lane"] != "dedicated"
+                or continuation["thread_id"] is not None
+                or continuation_lineage["source_run_id"] != started[0]  # type: ignore[index]
+                or continuation_lineage["source_turn_id"] != "turn-1"  # type: ignore[index]
+                or continuation_lineage["creation_reason"] != "shared_readonly_source"  # type: ignore[index]
+            ):
+                raise AssertionError(f"write continuation lost its lineage: {continuation!r}")
+
+            destination = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(next_credential),
+                    "start",
+                    *owned,
+                    "--profile",
+                    "default",
+                    "--control-mode",
+                    "managed-agent",
+                    "--execution-lane",
+                    "dedicated",
+                    "--required-assurance",
+                    "best-effort-personal-alpha",
+                    "--purpose",
+                    "implementation",
+                    "--instructions",
+                    "Receive writer authority.",
+                    "--idempotency-key",
+                    "runstart-writer-destination",
+                ]
+            )
+            started.append(str(destination["run_id"]))
+
+            write_turn = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(next_credential),
+                    "send",
+                    started[3],
+                    *owned,
+                    "--write",
+                    "--message",
+                    "own the writer",
+                    "--idempotency-key",
+                    "runstart-writer-source-turn",
+                ]
+            )
+            if write_turn["status"] != "completed":
+                raise AssertionError(f"write continuation did not complete: {write_turn!r}")
+            writer_status = data(["workspace", "writer", "status", *owned])
+            if (
+                writer_status["authority_state"] != "active"
+                or writer_status["writer_run_id"] != started[3]
+                or writer_status["writer_generation"] != 1
+            ):
+                raise AssertionError(f"writer acquisition was not durable: {writer_status!r}")
+
+            destination_turn = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(next_credential),
+                    "send",
+                    started[4],
+                    *owned,
+                    "--message",
+                    "prepare for handoff",
+                    "--idempotency-key",
+                    "runstart-writer-destination-turn",
+                ]
+            )
+            if destination_turn["status"] != "completed":
+                raise AssertionError(f"writer destination did not become idle: {destination_turn!r}")
+
+            prepare_args = [
+                "workspace",
+                "writer",
+                "handoff-prepare",
+                *owned,
+                "--from",
+                started[3],
+                "--to",
+                started[4],
+                "--expected-generation",
+                "1",
+                "--controller-file",
+                str(next_credential),
+            ]
+            cancelled_prepare = data(prepare_args)
+            cancelled = data(
+                [
+                    "workspace",
+                    "writer",
+                    "handoff-cancel",
+                    *owned,
+                    "--handoff-id",
+                    str(cancelled_prepare["handoff_id"]),
+                    "--controller-file",
+                    str(next_credential),
+                ]
+            )
+            if cancelled["status"] != "cancelled":
+                raise AssertionError(f"writer handoff did not cancel: {cancelled!r}")
+
+            prepared = data(prepare_args)
+            committed = data(
+                [
+                    "workspace",
+                    "writer",
+                    "handoff-commit",
+                    *owned,
+                    "--handoff-id",
+                    str(prepared["handoff_id"]),
+                    "--expected-generation",
+                    "1",
+                    "--controller-file",
+                    str(next_credential),
+                ]
+            )
+            if committed["status"] != "committed":
+                raise AssertionError(f"writer handoff did not commit: {committed!r}")
+            writer_status = data(["workspace", "writer", "status", *owned])
+            if (
+                writer_status["authority_state"] != "active"
+                or writer_status["writer_run_id"] != started[4]
+                or writer_status["writer_generation"] != 2
+            ):
+                raise AssertionError(f"writer handoff was not durable: {writer_status!r}")
+            data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(next_credential),
+                    "release-write",
+                    started[4],
+                    *owned,
+                ]
+            )
+
             stop = [
                 "profile",
                 "server",
@@ -2001,28 +2259,39 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             gated = failure(stop, expect=4)
             if gated["code"] != "PROFILE_MEMBERSHIP_INCOMPLETE":
                 raise AssertionError(f"a live member did not gate the stop: {gated!r}")
-            if "2 live run member(s)" not in str(gated["details"]["reason"]):  # type: ignore[index]
+            if "3 live run member(s)" not in str(gated["details"]["reason"]):  # type: ignore[index]
                 raise AssertionError(f"the stop gate did not count its members: {gated!r}")
 
-            runtime_record = state_root / "runtime" / "runs" / f"{started[0]}.json"
-            if runtime_record.exists():
-                raise AssertionError(
-                    f"lazy start unexpectedly published a worker record: "
-                    f"{runtime_record.read_text(encoding='utf-8')!r}"
-                )
-            closed = data(
-                ["run", "--controller-file", str(credential), "close", started[0], *owned]
-            )
-            # A threadless lazy Run closes entirely from durable state and
-            # never fabricates a worker generation merely to retire it.
-            if closed["run_id"] != started[0] or closed["identity_verdict"] != "Absent":
-                raise AssertionError(f"threadless run close fabricated a worker: {closed!r}")
             fork_closed = data(
                 ["run", "--controller-file", str(credential), "close", started[1], *owned]
             )
             if fork_closed["state"] != "closed" or fork_closed["thread_id"] is not None:
                 raise AssertionError(f"threadless fork close was not durable: {fork_closed!r}")
-            if membership_records() != 5:
+            continuation_closed = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(next_credential),
+                    "close",
+                    started[3],
+                    *owned,
+                ]
+            )
+            if continuation_closed["state"] != "closed" or continuation_closed["thread_id"] != "thread-alpha":
+                raise AssertionError(f"write continuation close lost its Thread: {continuation_closed!r}")
+            destination_closed = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(next_credential),
+                    "close",
+                    started[4],
+                    *owned,
+                ]
+            )
+            if destination_closed["state"] != "closed":
+                raise AssertionError(f"writer destination did not close: {destination_closed!r}")
+            if membership_records() != 11:
                 raise AssertionError("a successful close did not release the membership")
             # The same stop, unchanged, now that the member is gone.
             if data(stop, checked=False)["stopped"] is not True:
@@ -2038,19 +2307,17 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 if line.strip()
             ]
             pages = [message for message in sent if message.get("method") == "model/list"]
-            # Three walks — the probe's, the accepted Run's effort resolution,
-            # and the fresh fork's inherited-model validation — each exhaust
-            # the same three-page catalogue.
+            # Ten resolution walks each exhaust the same three-page catalogue.
             if [message["params"] for message in pages] != [
                 {"cursor": None, "limit": 100},
                 {"cursor": "page-2", "limit": 100},
                 {"cursor": "page-3", "limit": 100},
-            ] * 3:
+            ] * 10:
                 raise AssertionError(f"model/list was not walked as pinned: {pages!r}")
-            # Lazy start and fresh fork open no worker connection: only the
-            # probe and their two effort-resolution connections initialize.
-            if sum(1 for message in sent if message.get("method") == "initialize") != 3:
+            if sum(1 for message in sent if message.get("method") == "initialize") != 14:
                 raise AssertionError(f"the fixture served unexpected connections: {sent!r}")
+            if sum(1 for message in sent if message.get("method") == "thread/fork") != 1:
+                raise AssertionError(f"history-copy fork never reached thread/fork: {sent!r}")
             if sum(1 for message in sent if message.get("method") == "account/read") != 1:
                 raise AssertionError(f"the probe's account read is not once-only: {sent!r}")
             if sum(1 for message in sent if message.get("method") == "thread/read") != 1:

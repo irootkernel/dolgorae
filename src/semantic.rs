@@ -1385,6 +1385,17 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     if verb == RunVerb::Pending {
         return interaction_pending_at(&state_root, run_id).map(SemanticResult::Run);
     }
+    if verb == RunVerb::Resume {
+        let projection =
+            RunStore::new(SystemWorkspacePlatform, &state_root).load_state_projection(run_id)?;
+        if !resume_lifecycle_allowed(projection.lifecycle) {
+            return Err(run_state_conflict_error(
+                run_id,
+                projection.lifecycle,
+                "run.resume",
+            ));
+        }
+    }
     let uid = DarwinSystem.current_uid();
     // Every option is parsed before the socket is touched, so a malformed
     // request never reaches the worker and a worker thread is never held open
@@ -1764,13 +1775,7 @@ fn acquire_writer(
             json!({"run_id": run_id, "required_action": "submit_turn_write"}),
         ));
     }
-    if matches!(
-        projection.lifecycle,
-        RunLifecycle::Running
-            | RunLifecycle::WaitingInteraction
-            | RunLifecycle::OutcomeUnknown
-            | RunLifecycle::Closed
-    ) {
+    if !writer_acquire_lifecycle_allowed(projection.lifecycle) {
         return Err(run_state_conflict_error(
             run_id,
             projection.lifecycle,
@@ -1812,7 +1817,7 @@ fn acquire_writer(
         Ok(record) => record,
         Err(error) => {
             writer.transact(|record| {
-                record.cancel_acquire(transaction_id);
+                record.block_unknown(transaction_id);
                 Ok(())
             })?;
             return Err(error.machine_error(run_id, &runtime_record));
@@ -1829,7 +1834,7 @@ fn acquire_writer(
     }) {
         writer.transact(|record| {
             if record.transaction_id == Some(transaction_id) {
-                record.cancel_acquire(transaction_id);
+                record.block_unknown(transaction_id);
             }
             Ok(())
         })?;
@@ -1874,7 +1879,7 @@ fn acquire_writer(
             details,
         }) => {
             writer.transact(|record| {
-                record.cancel_acquire(transaction_id);
+                record.block_unknown(transaction_id);
                 Ok(())
             })?;
             return Err(MachineError::new(code, message, retryable, details));
@@ -1898,6 +1903,14 @@ fn acquire_writer(
     }
     writer.transact(|record| record.commit_acquire(transaction_id, next_generation))?;
     Ok(())
+}
+
+const fn resume_lifecycle_allowed(lifecycle: RunLifecycle) -> bool {
+    matches!(lifecycle, RunLifecycle::Paused)
+}
+
+const fn writer_acquire_lifecycle_allowed(lifecycle: RunLifecycle) -> bool {
+    matches!(lifecycle, RunLifecycle::Idle | RunLifecycle::Paused)
 }
 
 fn release_writer(
@@ -5250,5 +5263,26 @@ mod tests {
             error.details["reason"],
             "worker_or_group_absence_unverified"
         );
+    }
+
+    #[test]
+    fn resume_and_writer_acquire_refuse_uncertain_or_terminal_lifecycles() {
+        assert!(resume_lifecycle_allowed(RunLifecycle::Paused));
+        assert!(!resume_lifecycle_allowed(RunLifecycle::Idle));
+
+        for lifecycle in [RunLifecycle::Idle, RunLifecycle::Paused] {
+            assert!(writer_acquire_lifecycle_allowed(lifecycle));
+        }
+        for lifecycle in [
+            RunLifecycle::Starting,
+            RunLifecycle::Running,
+            RunLifecycle::WaitingInteraction,
+            RunLifecycle::ReconciliationRequired,
+            RunLifecycle::Closed,
+            RunLifecycle::StartFailed,
+            RunLifecycle::OutcomeUnknown,
+        ] {
+            assert!(!writer_acquire_lifecycle_allowed(lifecycle));
+        }
     }
 }

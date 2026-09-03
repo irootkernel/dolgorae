@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "run_start_model_list",
-  "description": "The complete paginated model/list surface used by a profile probe, a lazy run start, and a fresh fork.",
+  "description": "The paginated model/list and Run lifecycle surface used by EPIC-005 CLI acceptance.",
   "codex_home": "/tmp/codex-home",
   "steps": [
     {
@@ -200,6 +200,95 @@
           "nextCursor": null
         }
       }
+    },
+    {
+      "method": "model/list",
+      "occurrence": 10,
+      "respond": {"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 11,
+      "respond": {"result":{"data":[],"nextCursor":"page-3"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 12,
+      "respond": {"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 13,
+      "respond": {"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 14,
+      "respond": {"result":{"data":[],"nextCursor":"page-3"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 15,
+      "respond": {"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 16,
+      "respond": {"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 17,
+      "respond": {"result":{"data":[],"nextCursor":"page-3"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 18,
+      "respond": {"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 19,
+      "respond": {"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 20,
+      "respond": {"result":{"data":[],"nextCursor":"page-3"}}
+    },
+    {
+      "method": "model/list",
+      "occurrence": 21,
+      "respond": {"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}
+    },
+    {"method":"model/list","occurrence":22,"respond":{"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}},
+    {"method":"model/list","occurrence":23,"respond":{"result":{"data":[],"nextCursor":"page-3"}}},
+    {"method":"model/list","occurrence":24,"respond":{"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}},
+    {"method":"model/list","occurrence":25,"respond":{"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}},
+    {"method":"model/list","occurrence":26,"respond":{"result":{"data":[],"nextCursor":"page-3"}}},
+    {"method":"model/list","occurrence":27,"respond":{"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}},
+    {"method":"model/list","occurrence":28,"respond":{"result":{"data":[{"model":"gpt-5.4","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}],"nextCursor":"page-2"}}},
+    {"method":"model/list","occurrence":29,"respond":{"result":{"data":[],"nextCursor":"page-3"}}},
+    {"method":"model/list","occurrence":30,"respond":{"result":{"data":[{"model":"gpt-5.6","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]}],"nextCursor":null}}},
+    {
+      "method": "thread/start",
+      "respond": {"result":{"thread":{"id":"thread-alpha"}}}
+    },
+    {
+      "method": "thread/fork",
+      "respond": {"result":{"thread":{"id":"thread-beta"}}}
+    },
+    {
+      "method": "turn/start",
+      "occurrence": 1,
+      "respond": {"result":{"turn":{"id":"turn-1"}}},
+      "emit": [{"kind":"notification","method":"turn/completed","params":{"threadId":"${thread_id}","turn":{"id":"turn-1","status":"completed","items":[]}}}]
+    },
+    {
+      "method": "turn/start",
+      "occurrence": 2,
+      "respond": {"result":{"turn":{"id":"turn-2"}}},
+      "emit": [{"kind":"notification","method":"turn/completed","params":{"threadId":"${thread_id}","turn":{"id":"turn-2","status":"completed","items":[]}}}]
     },
     {
       "method": "thread/read",

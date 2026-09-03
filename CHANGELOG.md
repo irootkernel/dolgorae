@@ -26,6 +26,9 @@ development commits.
   output and added exact two-field JSON through `version --json`.
 - Run and profile recovery now require four-verdict Darwin process identity
   before cleanup or live-socket repair.
+- Writer transitions now fail closed after uncertain worker outcomes, orphaned
+  dedicated servers are retired only after identity-proven worker absence, and
+  interaction-response receipts survive worker restart.
 
 ## v0.1.1 - 2026-08-31
 
