@@ -2168,6 +2168,14 @@ fn prepare_writer_handoff(
             json!({"source_run_id": source, "destination_run_id": destination}),
         ));
     }
+    let source_manifest = runs.load_manifest(source)?;
+    let destination_manifest = runs.load_manifest(destination)?;
+    ensure_writer_handoff_lanes(
+        source,
+        source_manifest.execution_lane,
+        destination,
+        destination_manifest.execution_lane,
+    )?;
     for run_id in [source, destination] {
         let projection = runs.load_state_projection(run_id)?;
         if projection.lifecycle != RunLifecycle::Idle || !projection.pending_requests.is_empty() {
@@ -2255,6 +2263,14 @@ fn commit_writer_handoff(
         &destination_binding,
         &carrier,
     )?;
+    let source_manifest = runs.load_manifest(handoff.source_run_id)?;
+    let destination_manifest = runs.load_manifest(handoff.destination_run_id)?;
+    ensure_writer_handoff_lanes(
+        handoff.source_run_id,
+        source_manifest.execution_lane,
+        handoff.destination_run_id,
+        destination_manifest.execution_lane,
+    )?;
     let source_projection = runs.load_state_projection(handoff.source_run_id)?;
     let source_runtime_path = crate::worker::runtime_record_path(
         &crate::worker::runtime_root(state_root),
@@ -2311,15 +2327,19 @@ fn commit_writer_handoff(
         };
     }
     writer.transact_handoff(|record| record.retire_handoff_source(handoff_id))?;
-    let manifest = runs.load_manifest(handoff.destination_run_id)?;
     let projection = runs.load_state_projection(handoff.destination_run_id)?;
     let holder = crate::writer::WriterStore::holder(
         handoff.destination_run_id,
-        manifest.profile.profile_name.clone(),
+        destination_manifest.profile.profile_name.clone(),
         &destination_binding,
         projection.run_generation.max(1),
-        manifest.profile_capability_snapshot.server_key.clone(),
-        manifest.profile_capability_snapshot.server_epoch,
+        destination_manifest
+            .profile_capability_snapshot
+            .server_key
+            .clone(),
+        destination_manifest
+            .profile_capability_snapshot
+            .server_epoch,
         projection.thread_id,
         projection.lifecycle,
     );
@@ -2357,6 +2377,34 @@ fn commit_writer_handoff(
     }
     writer.transact_handoff(|record| record.commit_acquire(handoff_id, destination_generation))?;
     Ok(handoff_value(&handoff, "committed"))
+}
+
+fn ensure_writer_handoff_lanes(
+    source_run_id: Uuid,
+    source_lane: ExecutionLane,
+    destination_run_id: Uuid,
+    destination_lane: ExecutionLane,
+) -> Result<(), MachineError> {
+    let mut blockers = Vec::new();
+    if source_lane != ExecutionLane::Dedicated {
+        blockers.push("source_run_not_dedicated");
+    }
+    if destination_lane != ExecutionLane::Dedicated {
+        blockers.push("destination_run_not_dedicated");
+    }
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    Err(MachineError::new(
+        "WRITER_HANDOFF_NOT_ALLOWED",
+        "writer handoff requires dedicated source and destination runs",
+        false,
+        json!({
+            "source_run_id": source_run_id,
+            "destination_run_id": destination_run_id,
+            "blockers": blockers,
+        }),
+    ))
 }
 
 fn cancel_writer_handoff(
@@ -5106,5 +5154,49 @@ mod tests {
         let request = turn_request(&args).unwrap();
         assert_eq!(request.idempotency_key, "k1");
         assert!(request.images.is_empty());
+    }
+
+    /// SPEC-014: a shared Run "MUST NOT acquire workspace writer authority or
+    /// be promoted in place."  Both sides are checked because handoff retires
+    /// one writer before granting authority to the other Run.
+    #[test]
+    fn writer_handoff_requires_two_dedicated_runs() {
+        let source = Uuid::now_v7();
+        let destination = Uuid::now_v7();
+        assert!(
+            ensure_writer_handoff_lanes(
+                source,
+                ExecutionLane::Dedicated,
+                destination,
+                ExecutionLane::Dedicated,
+            )
+            .is_ok()
+        );
+
+        for (source_lane, destination_lane, expected_blockers) in [
+            (
+                ExecutionLane::SharedReadonly,
+                ExecutionLane::Dedicated,
+                vec!["source_run_not_dedicated"],
+            ),
+            (
+                ExecutionLane::Dedicated,
+                ExecutionLane::SharedReadonly,
+                vec!["destination_run_not_dedicated"],
+            ),
+            (
+                ExecutionLane::SharedReadonly,
+                ExecutionLane::SharedReadonly,
+                vec!["source_run_not_dedicated", "destination_run_not_dedicated"],
+            ),
+        ] {
+            let error =
+                ensure_writer_handoff_lanes(source, source_lane, destination, destination_lane)
+                    .unwrap_err();
+            assert_eq!(error.code, "WRITER_HANDOFF_NOT_ALLOWED");
+            assert_eq!(error.details["source_run_id"], source.to_string());
+            assert_eq!(error.details["destination_run_id"], destination.to_string());
+            assert_eq!(error.details["blockers"], json!(expected_blockers));
+        }
     }
 }
