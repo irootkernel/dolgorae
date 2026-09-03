@@ -739,6 +739,11 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
             0o600,
         )
         .map_err(|error| MachineError::initialization_conflict(canonical, error.to_string()))?;
+        crate::writer::WriterStore::initialize_layout(
+            state_root,
+            workspace_id,
+            self.platform.current_uid(),
+        )?;
         sync_directory(state_root)
             .map_err(|error| MachineError::initialization_conflict(canonical, error.to_string()))
     }

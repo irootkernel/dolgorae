@@ -134,6 +134,9 @@ fn nested_non_git_mode_change_and_missing_or_replaced_lock_are_refused() {
     let error = service.discover_from(&workspace, None).unwrap_err();
     assert_eq!(error.code, "RUNTIME_PATH_INVALID");
     fs::set_permissions(&lock_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_file(lock_root.join("writer.lock")).unwrap();
+    fs::remove_file(lock_root.join("handoff.lock")).unwrap();
+    fs::remove_dir(lock_root.join("startup")).unwrap();
     fs::remove_dir(&lock_root).unwrap();
     let error = service.discover_from(&workspace, None).unwrap_err();
     assert_eq!(error.code, "RUNTIME_PATH_COLLISION");

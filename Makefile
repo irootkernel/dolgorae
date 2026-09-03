@@ -15,7 +15,7 @@ INT_TESTS := \
 	--test workspace_contract
 
 .PHONY: test test-prepare test-unit test-int test-e2e validate-agent-skills \
-	test-live-specialist-review test-live-scoped-specialist-review \
+	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
 
@@ -141,3 +141,11 @@ test-live-scoped-specialist-review:
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--target-kind "$${DOLGORAE_REVIEW_TARGET_KIND:-workspace}" \
 		$${DOLGORAE_REVIEW_REVISION:+--revision "$${DOLGORAE_REVIEW_REVISION}"}
+
+test-live-access-safety:
+	@test "$${DOLGORAE_RUN_LIVE_ACCESS_SAFETY:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1 is required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_access_safety_acceptance.py \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"

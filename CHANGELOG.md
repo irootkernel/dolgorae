@@ -12,6 +12,8 @@ development commits.
 - Added the optional source-distributed `use-dolgorae` agent skill for
   capability-aware workspace, profile, immutable-target, and one-shot review
   workflows.
+- Durable per-worktree writer authority, explicit access transitions, write
+  continuations, and safe cross-profile handoff.
 
 ### Changed
 

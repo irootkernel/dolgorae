@@ -2425,6 +2425,14 @@ Command- and file-change approval decisions exposed by Dolgorae are:
 For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `decline`, and `cancel`.
 
+The opt-in access-safety acceptance carrier is `make test-live-access-safety`.
+It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.149.0
+executable. It verifies the complete writer `sandboxPolicy`, successful writes
+to both the canonical workspace and the OS temporary directory, and live
+command-execution and file-change approval requests against the pinned schema.
+It is intentionally outside the default complete repository gate because it
+contacts the configured Codex runtime.
+
 Reader auto-decline MUST be implemented solely by `approvalPolicy:"never"`;
 Dolgorae MUST NOT install a second approval interception mechanism. A server request
 that nevertheless arrives is handled by the recognized-unsupported rule above.

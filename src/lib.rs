@@ -28,6 +28,7 @@ pub mod specialist;
 pub mod turn;
 pub mod worker;
 pub mod workspace;
+pub mod writer;
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
