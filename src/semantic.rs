@@ -1,4 +1,5 @@
 use crate::app_server::JsonRpcConnection;
+use crate::audit::AuditKind;
 use crate::conformance::{
     BootstrapRecordKind, BootstrapRequest, ConformantLedger, IdempotencyIntent,
     IdempotencyOperation,
@@ -8,7 +9,9 @@ use crate::controller::{
     binding_from_carrier, carrier_from_options, load_reconciled_controller_binding,
 };
 use crate::darwin::DarwinSystem;
-use crate::domain::{Access, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind};
+use crate::domain::{
+    Access, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind, RunLifecycle,
+};
 use crate::event::EventProjection;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{LedgerClock, SystemLedgerClock};
@@ -17,17 +20,18 @@ use crate::paths::DolgoraeHome;
 use crate::profile::{ProfileOperation, ServerState};
 use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, AppServerFacts, AuditPolicy,
-    CompatibilityVerdict, DolgoraeBuild, ExecutableIdentity, InstructionSnapshot, ParentReference,
-    ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore, StartReservation,
-    StartReservationStore, launch_contract_digest, runtime_profile_snapshot_digest,
+    CompatibilityVerdict, DolgoraeBuild, ExecutableIdentity, ForkProvenance, InstructionSnapshot,
+    ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore,
+    StartReservation, StartReservationStore, WriteContinuationProvenance, launch_contract_digest,
+    runtime_profile_snapshot_digest,
 };
 use crate::runtime::{RuntimeCapabilities, capabilities};
 use crate::specialist::ReviewerRuntimePlan;
 use crate::specialist::ReviewerRuntimeRequest;
 use crate::turn::ImageDetail;
 use crate::worker::{
-    ControlRequestV1, ControlResponseV1, SessionAttach, TurnControlImage, TurnControlRequest,
-    WorkerSessionBootstrap,
+    ControlRequestV1, ControlResponseV1, DedicatedServerBootstrap, SessionAttach, TurnControlImage,
+    TurnControlRequest, WorkerSessionBootstrap,
 };
 use crate::workspace::{
     GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode, WorkspaceService,
@@ -36,6 +40,7 @@ use crate::workspace::{
 use serde_json::{Value, json};
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
@@ -49,9 +54,227 @@ pub enum RunVerb {
     Submit,
     Wait,
     Events,
+    Pending,
     Respond,
     Interrupt,
+    Pause,
+    Resume,
+    Recover,
+    Reconcile,
+    Fork,
+    AcquireWrite,
+    ReleaseWrite,
+    CreateWriteContinuation,
     Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceWriterVerb {
+    Status,
+    Reset,
+    HandoffPrepare,
+    HandoffCommit,
+    HandoffCancel,
+}
+
+pub fn workspace_writer(
+    verb: WorkspaceWriterVerb,
+    args: &[OsString],
+) -> Result<Value, MachineError> {
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let uid = DarwinSystem.current_uid();
+    let writer = crate::writer::WriterStore::new(&state_root, &view.workspace_id, uid);
+    match verb {
+        WorkspaceWriterVerb::Status => writer.status_value(),
+        WorkspaceWriterVerb::Reset => reset_writer(&view, &state_root, args),
+        WorkspaceWriterVerb::HandoffPrepare => prepare_writer_handoff(&view, &state_root, args),
+        WorkspaceWriterVerb::HandoffCommit => commit_writer_handoff(&view, &state_root, args),
+        WorkspaceWriterVerb::HandoffCancel => cancel_writer_handoff(&view, &state_root, args),
+    }
+}
+
+pub fn interaction_get(args: &[OsString]) -> Result<Value, MachineError> {
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let run_id = positional_run_id(args)?;
+    let request_id = positional_interaction_id(args)?;
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let binding = load_reconciled_controller_binding(&state_root, run_id)?;
+    authorize_controller(run_id, "run.interaction.get", &binding, &carrier)?;
+    durable_interactions(&state_root, run_id)?
+        .into_iter()
+        .find_map(|(interaction, _)| {
+            (interaction.get("request_id") == Some(&json!(request_id))).then_some(interaction)
+        })
+        .ok_or_else(|| {
+            MachineError::new(
+                "INTERACTION_NOT_FOUND",
+                "interaction is not present in this run",
+                false,
+                json!({"run_id": run_id, "request_id": request_id}),
+            )
+        })
+}
+
+fn interaction_pending_at(state_root: &Path, run_id: Uuid) -> Result<Value, MachineError> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = store.load_manifest(run_id)?;
+    let resolved = durable_resolved_interaction_ids(state_root, run_id)?;
+    let mut items = Vec::new();
+    for (interaction, upstream_id) in durable_interactions(state_root, run_id)? {
+        if resolved.contains(&upstream_id)
+            || interaction.get("status").and_then(Value::as_str) != Some("pending")
+        {
+            continue;
+        }
+        let kind = interaction
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| internal("durable interaction kind is missing"))?;
+        let protected_input = kind == "user_input"
+            && interaction
+                .pointer("/payload/questions")
+                .and_then(Value::as_array)
+                .is_some_and(|questions| {
+                    questions.iter().any(|question| {
+                        question.get("is_secret").and_then(Value::as_bool) == Some(true)
+                    })
+                });
+        let title = match (kind, protected_input) {
+            ("command_execution_approval", _) => "Command approval requested",
+            ("file_change_approval", _) => "File change approval requested",
+            ("user_input", true) => "Protected input requested",
+            ("user_input", false) => "User input requested",
+            _ => return Err(internal("durable interaction kind is unsupported")),
+        };
+        items.push(json!({
+            "schema_version": 1,
+            "request_id": interaction.get("request_id").cloned().unwrap_or(Value::Null),
+            "run_id": run_id,
+            "kind": kind,
+            "status": "pending",
+            "title": title,
+            "controller_kind": manifest.controller.identity.kind.as_str(),
+            "user_escalation_required": true,
+            "protected_input": protected_input,
+            "created_at": interaction.get("opened_at").cloned().unwrap_or(Value::Null),
+            "expires_at": Value::Null,
+            "resolved_at": Value::Null,
+        }));
+    }
+    Ok(json!({"items": items}))
+}
+
+fn durable_interactions(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<Vec<(Value, u64)>, MachineError> {
+    let head = durable_head(state_root, run_id)?;
+    let root = state_root.join("runs").join(run_id.to_string());
+    let ledger = crate::ledger::ObservedLedger::open(&root, run_id, head)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
+    let decisions = ledger
+        .payloads_of_kind(AuditKind::ApprovalDecided)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
+        .into_iter()
+        .filter_map(|payload| {
+            let request_id = payload.get("request_id")?.as_str()?.parse::<u64>().ok()?;
+            Some((request_id, payload))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    ledger
+        .payloads_of_kind(AuditKind::ApprovalRequested)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
+        .into_iter()
+        .map(|wrapper| {
+            let upstream_id = wrapper
+                .get("upstream_request_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| internal("durable interaction upstream id is missing"))?;
+            let mut interaction = wrapper
+                .get("interaction")
+                .cloned()
+                .ok_or_else(|| internal("durable normalized interaction is missing"))?;
+            if let Some(decision) = decisions.get(&upstream_id) {
+                let object = interaction
+                    .as_object_mut()
+                    .ok_or_else(|| internal("durable normalized interaction is invalid"))?;
+                let resolution = decision
+                    .get("resolution")
+                    .cloned()
+                    .ok_or_else(|| internal("durable interaction resolution is missing"))?;
+                object.insert(
+                    "status".to_owned(),
+                    json!(
+                        if resolution.get("outcome").and_then(Value::as_str) == Some("stale") {
+                            "stale"
+                        } else {
+                            "resolved"
+                        }
+                    ),
+                );
+                object.insert(
+                    "resolved_at".to_owned(),
+                    decision.get("resolved_at").cloned().unwrap_or(Value::Null),
+                );
+                object.insert("resolution".to_owned(), resolution);
+            }
+            Ok((interaction, upstream_id))
+        })
+        .collect()
+}
+
+fn durable_resolved_interaction_ids(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<std::collections::BTreeSet<u64>, MachineError> {
+    let head = durable_head(state_root, run_id)?;
+    let root = state_root.join("runs").join(run_id.to_string());
+    let ledger = crate::ledger::ObservedLedger::open(&root, run_id, head)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
+    ledger
+        .payloads_of_kind(AuditKind::InteractionResolved)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
+        .into_iter()
+        .map(|payload| {
+            payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| internal("durable resolved interaction id is invalid"))
+        })
+        .collect()
+}
+
+fn resolve_public_interaction_id(
+    state_root: &Path,
+    run_id: Uuid,
+    request_id: &str,
+) -> Result<u64, MachineError> {
+    let public_id = Uuid::parse_str(request_id)
+        .ok()
+        .filter(|value| value.get_version_num() == 7)
+        .ok_or_else(|| {
+            MachineError::invalid_argument("--request-id", "request id must be a UUIDv7")
+        })?;
+    durable_interactions(state_root, run_id)?
+        .into_iter()
+        .find_map(|(interaction, upstream)| {
+            (interaction.get("request_id") == Some(&json!(public_id))).then_some(upstream)
+        })
+        .ok_or_else(|| {
+            MachineError::new(
+                "INTERACTION_NOT_FOUND",
+                "interaction is not present in this run",
+                false,
+                json!({"run_id": run_id, "request_id": public_id}),
+            )
+        })
 }
 
 impl RunVerb {
@@ -59,7 +282,19 @@ impl RunVerb {
     pub const fn mutates(self) -> bool {
         matches!(
             self,
-            Self::Send | Self::Submit | Self::Respond | Self::Interrupt | Self::Close
+            Self::Send
+                | Self::Submit
+                | Self::Respond
+                | Self::Interrupt
+                | Self::Pause
+                | Self::Resume
+                | Self::Recover
+                | Self::Reconcile
+                | Self::Fork
+                | Self::Close
+                | Self::AcquireWrite
+                | Self::ReleaseWrite
+                | Self::CreateWriteContinuation
         )
     }
 
@@ -72,8 +307,17 @@ impl RunVerb {
             Self::Submit => "run.submit",
             Self::Wait => "run.wait",
             Self::Events => "run.events",
+            Self::Pending => "run.pending",
             Self::Respond => "run.respond",
             Self::Interrupt => "run.interrupt",
+            Self::Pause => "run.pause",
+            Self::Resume => "run.resume",
+            Self::Recover => "run.recover",
+            Self::Reconcile => "run.reconcile",
+            Self::Fork => "run.fork",
+            Self::AcquireWrite => "run.acquire_write",
+            Self::ReleaseWrite => "run.release_write",
+            Self::CreateWriteContinuation => "run.create_write_continuation",
             Self::Close => "run.close",
         }
     }
@@ -185,6 +429,12 @@ impl SemanticService for CoreSemanticService {
                 .map(SemanticResult::Workspace),
             SemanticCommand::Run { verb, args } => match verb {
                 RunVerb::Start => run_start(args).map(SemanticResult::Run),
+                RunVerb::CreateWriteContinuation => {
+                    run_create_write_continuation(args).map(SemanticResult::Run)
+                }
+                RunVerb::Fork => run_fork(args).map(SemanticResult::Run),
+                RunVerb::Recover => run_recover(args).map(SemanticResult::Run),
+                RunVerb::Reconcile => run_reconcile(args).map(SemanticResult::Run),
                 other => run_control(*other, args),
             },
             SemanticCommand::Future { dotted_name } => Err(MachineError::invalid_argument(
@@ -198,7 +448,564 @@ impl SemanticService for CoreSemanticService {
 /// Start a Run: pin the Runtime Profile, publish the run record, bootstrap the
 /// durable ledger, and hand the hidden worker the app-server session it will own.
 fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
-    run_start_with_context(args, None)
+    run_start_with_context(args, None, None, None)
+}
+
+fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineError> {
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let source_run_id = parse_uuid_flag(args, "--from")?;
+    let source_turn_id = required(args, "--from-turn")?;
+    let reason = match required(args, "--reason")?.as_str() {
+        "shared-readonly-source" | "shared_readonly_source" => "shared_readonly_source",
+        "access-transition-unavailable" | "access_transition_unavailable" => {
+            "access_transition_unavailable"
+        }
+        "access-transition-unverified" | "access_transition_unverified" => {
+            "access_transition_unverified"
+        }
+        _ => {
+            return Err(MachineError::invalid_argument(
+                "--reason",
+                "reason must be shared-readonly-source, access-transition-unavailable, or access-transition-unverified",
+            ));
+        }
+    };
+    let runs = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let source = runs.load_manifest(source_run_id)?;
+    let source_projection = runs.load_state_projection(source_run_id)?;
+    if source_projection.active_turn_id.is_some()
+        || !source_projection.pending_requests.is_empty()
+        || source_projection.latest_turn_id.as_deref() != Some(source_turn_id.as_str())
+        || source_projection.thread_id.is_none()
+    {
+        return Err(MachineError::new(
+            "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL",
+            "the named source turn is not the current terminal boundary",
+            false,
+            json!({
+                "source_run_id": source_run_id,
+                "source_turn_id": source_turn_id,
+                "current_turn_id": source_projection.latest_turn_id,
+            }),
+        ));
+    }
+    let reason_matches = match reason {
+        "shared_readonly_source" => source.execution_lane == ExecutionLane::SharedReadonly,
+        _ => source.execution_lane == ExecutionLane::Dedicated,
+    };
+    if !reason_matches {
+        return Err(MachineError::new(
+            "WRITE_CONTINUATION_LINEAGE_INVALID",
+            "the creation reason does not match the source execution lane",
+            false,
+            json!({"source_run_id": source_run_id, "reason": reason}),
+        ));
+    }
+
+    let source_carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let source_binding = runs.load_controller_binding(source_run_id)?;
+    authorize_controller(
+        source_run_id,
+        "run.create_write_continuation",
+        &source_binding,
+        &source_carrier,
+    )?;
+    let destination_carrier =
+        carrier_from_options(args, "--new-controller-file", "--new-controller-fd")?;
+    let destination_binding = binding_from_carrier(&destination_carrier, 1)?;
+    let source_principal = source_binding
+        .identity
+        .subject_id
+        .as_deref()
+        .unwrap_or(&source_binding.identity.instance_id);
+    let destination_principal = destination_binding
+        .identity
+        .subject_id
+        .as_deref()
+        .unwrap_or(&destination_binding.identity.instance_id);
+    if source_binding.identity.controller_id == destination_binding.identity.controller_id
+        || source_binding.identity.kind != destination_binding.identity.kind
+        || source_principal != destination_principal
+    {
+        return Err(MachineError::new(
+            "WRITE_CONTINUATION_CONTROLLER_INVALID",
+            "the destination controller must be fresh and represent the same principal",
+            false,
+            json!({"source_run_id": source_run_id}),
+        ));
+    }
+
+    let requested_assurance = optional(args, "--required-assurance")
+        .map_or(Ok(source.requested_assurance), |value| {
+            parse_assurance(&value)
+        })?;
+    if assurance_rank(requested_assurance) < assurance_rank(source.requested_assurance) {
+        return Err(MachineError::new(
+            "ASSURANCE_LEVEL_UNAVAILABLE",
+            "a write continuation cannot lower the source assurance",
+            false,
+            json!({
+                "requested": requested_assurance.as_str(),
+                "source": source.requested_assurance.as_str(),
+            }),
+        ));
+    }
+    let mut capabilities = source.required_capabilities.clone();
+    capabilities.extend(all(args, "--require-capability"));
+    capabilities.sort();
+    capabilities.dedup();
+
+    let destination_instructions = read_optional_text_fd(args, "--instructions-fd", 65_536)?;
+    let handoff_summary = read_optional_text_fd(args, "--handoff-summary-fd", 65_536)?;
+    let mut artifact_refs = all(args, "--artifact-ref")
+        .into_iter()
+        .map(|value| {
+            value.parse::<Uuid>().map_err(|_| {
+                MachineError::invalid_argument(
+                    "--artifact-ref",
+                    "artifact reference must be a UUID",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    artifact_refs.sort();
+    artifact_refs.dedup();
+    if artifact_refs.len() > 64 {
+        return Err(MachineError::invalid_argument(
+            "--artifact-ref",
+            "at most 64 artifact references are allowed",
+        ));
+    }
+    let instructions = format!(
+        "Dolgorae write continuation.\nControl mode: {}.\nPurpose: {}.\n{}{}",
+        source.control_mode.as_str(),
+        required(args, "--purpose")?,
+        handoff_summary
+            .as_deref()
+            .map_or(String::new(), |summary| format!(
+                "Handoff summary:\n{summary}\n"
+            )),
+        destination_instructions.unwrap_or_default(),
+    );
+    if instructions.len() > 65_536 {
+        return Err(MachineError::invalid_argument(
+            "--instructions-fd",
+            "composed instructions exceed 65536 bytes",
+        ));
+    }
+    let baseline_text = serde_json::to_string(&source.start_baseline)
+        .map_err(|error| internal(error.to_string()))?;
+    let baseline =
+        canonicalize(&parse(&baseline_text).map_err(|error| internal(error.to_string()))?)
+            .map_err(|error| internal(error.to_string()))?;
+    let provenance = WriteContinuationProvenance {
+        source_run_id,
+        source_turn_id,
+        source_thread_id: source_projection.thread_id.expect("checked above"),
+        creation_reason: reason.to_owned(),
+        source_controller_kind: source_binding.identity.kind.as_str().to_owned(),
+        destination_controller_kind: destination_binding.identity.kind.as_str().to_owned(),
+        handoff_summary_sha256: handoff_summary
+            .as_deref()
+            .map(|summary| sha256_hex(summary.as_bytes())),
+        artifact_refs,
+        workspace_baseline_sha256: sha256_hex(&baseline),
+        created_at: SystemLedgerClock::default().timestamp(),
+    };
+
+    let workspace_path = source
+        .canonical_workspace
+        .to_path_buf()
+        .map_err(|_| internal("source workspace path is not representable"))?;
+    let mut start_args = vec![
+        OsString::from("--workspace"),
+        workspace_path.into_os_string(),
+        OsString::from("--profile"),
+        OsString::from(&source.profile.profile_name),
+        OsString::from("--control-mode"),
+        OsString::from(source.control_mode.as_str()),
+        OsString::from("--execution-lane"),
+        OsString::from("dedicated"),
+        OsString::from("--required-assurance"),
+        OsString::from(requested_assurance.as_str()),
+        OsString::from("--model"),
+        OsString::from(optional(args, "--model").unwrap_or_else(|| source.model.clone())),
+        OsString::from("--effort"),
+        OsString::from(
+            optional(args, "--effort").unwrap_or_else(|| source.default_reasoning_effort.clone()),
+        ),
+        OsString::from("--purpose"),
+        OsString::from(required(args, "--purpose")?),
+        OsString::from("--instructions"),
+        OsString::from(instructions),
+        OsString::from("--idempotency-key"),
+        OsString::from(required(args, "--idempotency-key")?),
+        OsString::from("--controller-fd"),
+        OsString::from(destination_carrier.raw_fd().to_string()),
+    ];
+    if let Some(label) = optional(args, "--purpose-label") {
+        start_args.extend([OsString::from("--purpose-label"), OsString::from(label)]);
+    }
+    for capability in capabilities {
+        start_args.extend([
+            OsString::from("--require-capability"),
+            OsString::from(capability),
+        ]);
+    }
+    run_start_with_context(
+        &start_args,
+        None,
+        Some(&ContinuationStartContext {
+            provenance: &provenance,
+        }),
+        None,
+    )
+}
+
+fn run_fork(args: &[OsString]) -> Result<Value, MachineError> {
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let source_run_id = parse_uuid_flag(args, "--from")?;
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let source = store.load_manifest(source_run_id)?;
+    let projection = store.load_state_projection(source_run_id)?;
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let source_binding = store.load_controller_binding(source_run_id)?;
+    authorize_controller(source_run_id, "run.fork", &source_binding, &carrier)?;
+    if source.workspace_id != view.workspace_id {
+        return Err(MachineError::new(
+            "RUN_STATE_CONFLICT",
+            "a fork cannot cross canonical workspaces",
+            false,
+            json!({"run_id": source_run_id, "operation": "run.fork"}),
+        ));
+    }
+
+    let mut fresh = switch(args, "--fresh");
+    let (source_thread_id, source_turn_id, boundary) = if fresh {
+        if matches!(
+            projection.lifecycle,
+            RunLifecycle::Running | RunLifecycle::WaitingInteraction
+        ) && (projection_identity_verdict(&state_root, source_run_id) != "Unverifiable"
+            || !source_control_socket_unreachable(&state_root, source_run_id))
+        {
+            return Err(run_state_conflict_error(
+                source_run_id,
+                projection.lifecycle,
+                "run.fork",
+            ));
+        }
+        (None, None, None)
+    } else {
+        if !matches!(
+            projection.lifecycle,
+            RunLifecycle::Idle
+                | RunLifecycle::Paused
+                | RunLifecycle::Closed
+                | RunLifecycle::OutcomeUnknown
+        ) {
+            return Err(run_state_conflict_error(
+                source_run_id,
+                projection.lifecycle,
+                "run.fork",
+            ));
+        }
+        prove_source_generation_absent_for_fork(&state_root, source_run_id)?;
+        let (terminal, has_confirmed_turns) =
+            latest_forkable_terminal(&state_root, source_run_id, &projection)?;
+        if terminal.is_none()
+            && !has_confirmed_turns
+            && projection.lifecycle == RunLifecycle::OutcomeUnknown
+        {
+            fresh = true;
+            (None, None, None)
+        } else if let Some(terminal) = terminal {
+            let thread_id = projection.thread_id.clone().ok_or_else(|| {
+                MachineError::new(
+                    "THREAD_NOT_FOUND",
+                    "the source run has no confirmed Codex thread",
+                    false,
+                    json!({"run_id": source_run_id}),
+                )
+            })?;
+            (
+                Some(thread_id),
+                Some(terminal.turn_id),
+                Some(terminal.status),
+            )
+        } else {
+            return Err(MachineError::new(
+                "COMPATIBILITY_REJECTED",
+                "confirmed history has no profile-approved fork boundary",
+                false,
+                json!({
+                    "profile": source.profile.profile_name,
+                    "compatibility_surface": "forkable_turn_statuses",
+                    "required": ["completed"],
+                    "observed": projection.latest_turn_id,
+                }),
+            ));
+        }
+    };
+    let provenance = ForkProvenance {
+        source_run_id,
+        mode: if fresh { "fresh" } else { "history_copy" }.to_owned(),
+        source_turn_id,
+        source_thread_id,
+        last_confirmed_boundary: boundary,
+        observed_source_lifecycle: projection.lifecycle.as_str().to_owned(),
+        unresolved_turn_id: if fresh {
+            projection.active_turn_id.clone().or_else(|| {
+                (projection.lifecycle == RunLifecycle::OutcomeUnknown)
+                    .then(|| projection.latest_turn_id.clone())
+                    .flatten()
+            })
+        } else {
+            None
+        },
+    };
+
+    let workspace_path = source
+        .canonical_workspace
+        .to_path_buf()
+        .map_err(|_| internal("source workspace path is not representable"))?;
+    let mut start_args = vec![
+        OsString::from("--workspace"),
+        workspace_path.into_os_string(),
+        OsString::from("--profile"),
+        OsString::from(&source.profile.profile_name),
+        OsString::from("--control-mode"),
+        OsString::from(source.control_mode.as_str()),
+        OsString::from("--execution-lane"),
+        OsString::from(source.execution_lane.as_str()),
+        OsString::from("--required-assurance"),
+        OsString::from(source.requested_assurance.as_str()),
+        OsString::from("--model"),
+        OsString::from(optional(args, "--model").unwrap_or_else(|| source.model.clone())),
+        OsString::from("--effort"),
+        OsString::from(&source.default_reasoning_effort),
+        OsString::from("--purpose"),
+        OsString::from(source.purpose.kind.as_str()),
+        OsString::from("--instructions"),
+        OsString::from(&source.agent_configuration.normalized_instructions),
+        OsString::from("--idempotency-key"),
+        OsString::from(bounded_key(args, "--idempotency-key", 256)?),
+        OsString::from("--controller-fd"),
+        OsString::from(carrier.raw_fd().to_string()),
+    ];
+    if let Some(label) = &source.purpose.external_label {
+        start_args.extend([OsString::from("--purpose-label"), OsString::from(label)]);
+    }
+    if let Some(parent) = &source.parent_ref {
+        start_args.extend([
+            OsString::from("--parent-namespace"),
+            OsString::from(&parent.namespace),
+            OsString::from("--parent-kind"),
+            OsString::from(&parent.kind),
+            OsString::from("--parent-id"),
+            OsString::from(&parent.id),
+        ]);
+    }
+    for capability in &source.required_capabilities {
+        start_args.extend([
+            OsString::from("--require-capability"),
+            OsString::from(capability),
+        ]);
+    }
+    run_start_with_context(
+        &start_args,
+        None,
+        None,
+        Some(&ForkStartContext {
+            provenance: &provenance,
+        }),
+    )
+}
+
+fn source_control_socket_unreachable(state_root: &Path, run_id: Uuid) -> bool {
+    let Ok(path) =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+    else {
+        return false;
+    };
+    let Ok(record) = crate::worker::read_runtime_record(&path, DarwinSystem.current_uid()) else {
+        return false;
+    };
+    UnixStream::connect(&record.socket_path).is_err()
+}
+
+fn latest_forkable_terminal(
+    state_root: &Path,
+    run_id: Uuid,
+    projection: &crate::projection::RunStateProjection,
+) -> Result<(Option<crate::turn::TerminalTurn>, bool), MachineError> {
+    if projection.ledger_head.sequence == 0 {
+        return Ok((None, false));
+    }
+    let root = state_root.join("runs").join(run_id.to_string());
+    let ledger =
+        crate::ledger::ObservedLedger::open(&root, run_id, projection.ledger_head.sequence)
+            .map_err(|error| {
+                audit_integrity(run_id, projection.ledger_head.sequence, &error.to_string())
+            })?;
+    let terminals = ledger
+        .payloads_of_kind(AuditKind::TurnTerminal)
+        .map_err(|error| {
+            audit_integrity(run_id, projection.ledger_head.sequence, &error.to_string())
+        })?;
+    let has_confirmed_turns = !terminals.is_empty()
+        || !ledger
+            .payloads_of_kind(AuditKind::TurnStarted)
+            .map_err(|error| {
+                audit_integrity(run_id, projection.ledger_head.sequence, &error.to_string())
+            })?
+            .is_empty();
+    for payload in terminals.into_iter().rev() {
+        let terminal: crate::turn::TerminalTurn =
+            serde_json::from_value(payload).map_err(|error| {
+                audit_integrity(run_id, projection.ledger_head.sequence, &error.to_string())
+            })?;
+        if crate::turn::forkable_status(&terminal.status) {
+            return Ok((Some(terminal), true));
+        }
+    }
+    Ok((None, has_confirmed_turns))
+}
+
+fn prove_source_generation_absent_for_fork(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let record = crate::worker::read_runtime_record(&path, uid)
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    crate::worker::prove_worker_generation_absent(&record)
+        .map(|_| ())
+        .map_err(|_| {
+            let verdict = crate::worker::classify_worker_identity(&record);
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the source generation is not proved absent for history-copying fork",
+                false,
+                json!({
+                    "run_id": run_id,
+                    "generation": record.identity.run_generation,
+                    "identity_verdict": verdict.as_str(),
+                    "required_action": "recover_source_generation",
+                }),
+            )
+        })
+}
+
+fn run_recover(args: &[OsString]) -> Result<Value, MachineError> {
+    run_history_reconciliation(args, "run.recover")
+}
+
+fn run_reconcile(args: &[OsString]) -> Result<Value, MachineError> {
+    run_history_reconciliation(args, "run.reconcile")
+}
+
+fn run_history_reconciliation(
+    args: &[OsString],
+    operation: &'static str,
+) -> Result<Value, MachineError> {
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let run_id = positional_run_id(args)?;
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let projection = store.load_state_projection(run_id)?;
+    if !matches!(
+        projection.lifecycle,
+        RunLifecycle::Running
+            | RunLifecycle::WaitingInteraction
+            | RunLifecycle::ReconciliationRequired
+            | RunLifecycle::OutcomeUnknown
+    ) {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            operation,
+        ));
+    }
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let binding = load_reconciled_controller_binding(&state_root, run_id)?;
+    authorize_controller(run_id, operation, &binding, &carrier)?;
+    let control_socket_epoch = ensure_run_worker(&view, &state_root, run_id)?;
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, &state_root))?;
+    let response = crate::worker::call_run_worker(
+        &state_root,
+        run_id,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::Reconcile {
+            expected,
+            caller: None,
+        },
+    )
+    .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+    match control_response_value(
+        &state_root,
+        run_id,
+        control_socket_epoch,
+        RunVerb::Reconcile,
+        response,
+    )? {
+        SemanticResult::Run(value) => Ok(value),
+        _ => Err(internal("reconciliation returned a non-run result")),
+    }
+}
+
+fn assurance_rank(assurance: Assurance) -> u8 {
+    match assurance {
+        Assurance::BestEffortPersonalAlpha => 0,
+        Assurance::VerifiedThreadScopedControl => 1,
+        Assurance::StrongProcessContainment => 2,
+    }
+}
+
+fn read_optional_text_fd(
+    args: &[OsString],
+    flag: &str,
+    maximum: u64,
+) -> Result<Option<String>, MachineError> {
+    let Some(raw) = optional(args, flag) else {
+        return Ok(None);
+    };
+    let fd = raw
+        .parse::<i32>()
+        .ok()
+        .filter(|fd| *fd >= 0)
+        .ok_or_else(|| MachineError::invalid_argument(flag, "descriptor must be nonnegative"))?;
+    let mut file = std::fs::File::open(format!("/dev/fd/{fd}"))
+        .map_err(|_| MachineError::invalid_argument(flag, "descriptor is unreadable"))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| MachineError::invalid_argument(flag, "descriptor is unreadable"))?;
+    if bytes.len() as u64 > maximum {
+        return Err(MachineError::invalid_argument(
+            flag,
+            "descriptor content is too large",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| MachineError::invalid_argument(flag, "descriptor must contain UTF-8"))
 }
 
 pub(crate) struct ReviewerStartContext<'a> {
@@ -212,12 +1019,22 @@ pub(crate) fn start_reviewer_run(
     args: &[OsString],
     context: ReviewerStartContext<'_>,
 ) -> Result<Value, MachineError> {
-    run_start_with_context(args, Some(&context))
+    run_start_with_context(args, Some(&context), None, None)
+}
+
+struct ContinuationStartContext<'a> {
+    provenance: &'a WriteContinuationProvenance,
+}
+
+struct ForkStartContext<'a> {
+    provenance: &'a ForkProvenance,
 }
 
 fn run_start_with_context(
     args: &[OsString],
     reviewer: Option<&ReviewerStartContext<'_>>,
+    continuation: Option<&ContinuationStartContext<'_>>,
+    fork: Option<&ForkStartContext<'_>>,
 ) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(args, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
@@ -234,12 +1051,6 @@ fn run_start_with_context(
     // Checked before the reservation, not after it: a key this command would
     // refuse must never first become durable state under a Run identity.
     let idempotency_key = bounded_key(args, "--idempotency-key", 256)?;
-    if execution_lane != ExecutionLane::SharedReadonly {
-        return Err(MachineError::invalid_argument(
-            "--execution-lane",
-            "only shared_readonly Runs are available in this slice",
-        ));
-    }
     let state = profile_server_state(&view, &profile_name)?;
     let model = optional(args, "--model").unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
@@ -326,12 +1137,41 @@ fn run_start_with_context(
             .as_bytes(),
         );
     }
+    if let Some(context) = continuation {
+        normalized_identity_sha256 = sha256_hex(
+            format!(
+                "write-continuation-v1\0{normalized_identity_sha256}\0{}",
+                serde_json::to_string(context.provenance)
+                    .map_err(|error| internal(error.to_string()))?
+            )
+            .as_bytes(),
+        );
+    }
+    if let Some(context) = fork {
+        normalized_identity_sha256 = sha256_hex(
+            format!(
+                "fork-v1\0{normalized_identity_sha256}\0{}",
+                serde_json::to_string(context.provenance)
+                    .map_err(|error| internal(error.to_string()))?
+            )
+            .as_bytes(),
+        );
+    }
     let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
-    let reservation = match reservations.load(&idempotency_key)? {
+    let (reservation_directory, reservation_operation) = if fork.is_some() {
+        ("run-fork", "fork_run")
+    } else {
+        ("run-start", "start_run")
+    };
+    let reservation = match reservations.load_operation(
+        reservation_directory,
+        reservation_operation,
+        &idempotency_key,
+    )? {
         Some(held) => held,
         None => reservations.reserve(&StartReservation {
             schema_version: 1,
-            operation: "start_run".to_owned(),
+            operation: reservation_operation.to_owned(),
             idempotency_key: idempotency_key.clone(),
             normalized_identity_sha256: normalized_identity_sha256.clone(),
             run_id: reviewer.map_or_else(Uuid::now_v7, |context| context.reserved_run_id),
@@ -392,6 +1232,12 @@ fn run_start_with_context(
         manifest.aggregate_binding = Some(context.aggregate_binding.clone());
         context.plan.validate_manifest(&manifest)?;
     }
+    if let Some(context) = continuation {
+        manifest.write_continuation_provenance = Some(context.provenance.clone());
+    }
+    if let Some(context) = fork {
+        manifest.fork_provenance = Some(context.provenance.clone());
+    }
     let directory = store.publish(&manifest)?;
 
     let mut ledger = ConformantLedger::open_for_bootstrap(&directory.root, run_id)
@@ -402,7 +1248,11 @@ fn run_start_with_context(
             workspace_id: view.workspace_id.clone(),
             intent: IdempotencyIntent {
                 schema_version: 1,
-                operation: IdempotencyOperation::StartRun,
+                operation: if fork.is_some() {
+                    IdempotencyOperation::ForkRun
+                } else {
+                    IdempotencyOperation::StartRun
+                },
                 idempotency_key,
                 normalized_identity_sha256,
                 run_id,
@@ -412,6 +1262,11 @@ fn run_start_with_context(
             default_effort: Some(effort.clone()),
         })
         .map_err(|error| internal(error.to_string()))?;
+    if reviewer.is_none() {
+        ledger
+            .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
+            .map_err(|error| internal(error.to_string()))?;
+    }
     drop(ledger);
 
     // Membership is part of publishing the Run's connection authority, not a
@@ -419,11 +1274,23 @@ fn run_start_with_context(
     // refuse stop/restart before the worker can attach to this server.
     crate::profile::register_run_member(workspace.as_deref(), &state, &run_id.to_string())?;
 
+    // Public Run allocation is deliberately threadless and process-free. The
+    // first turn (or an explicit recovery/resume operation) wins the startup
+    // election and constructs the connection from the immutable manifest.
+    // Internal reviewer allocation retains its already-selected isolated cwd
+    // and starts immediately because that path is not part of the public Run
+    // manifest.
+    if reviewer.is_none() {
+        return run_object(&state_root, run_id, 0, "Absent");
+    }
+
     let session = WorkerSessionBootstrap {
         app_server_socket: PathBuf::from(&state.socket_path),
         canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
         server_key: state.snapshot.server_key.clone(),
         server_epoch: state.server_epoch,
+        controller_id: manifest.controller.identity.controller_id,
+        control_mode: manifest.control_mode.as_str().to_owned(),
         fixed_model: model.clone(),
         default_effort: effort.clone(),
         supported_efforts: efforts,
@@ -443,6 +1310,7 @@ fn run_start_with_context(
         artifact_root: directory.root.join("artifacts"),
         attach: SessionAttach::Start,
         transport_timeout_seconds: 900,
+        dedicated_server: None,
     };
     let control_socket_epoch = 1;
     if let Err(error) = start_worker(
@@ -492,13 +1360,51 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     } else {
         None
     };
+    if verb == RunVerb::AcquireWrite {
+        let carrier = carrier.as_ref().expect("mutating verb has a carrier");
+        acquire_writer(&view, &state_root, run_id, carrier, false)?;
+        return run_object(
+            &state_root,
+            run_id,
+            observed_control_socket_epoch(&state_root, run_id),
+            projection_identity_verdict(&state_root, run_id),
+        )
+        .map(SemanticResult::Run);
+    }
+    if verb == RunVerb::ReleaseWrite {
+        let carrier = carrier.as_ref().expect("mutating verb has a carrier");
+        release_writer(&view, &state_root, run_id, carrier)?;
+        return run_object(
+            &state_root,
+            run_id,
+            observed_control_socket_epoch(&state_root, run_id),
+            projection_identity_verdict(&state_root, run_id),
+        )
+        .map(SemanticResult::Run);
+    }
+    if verb == RunVerb::Pending {
+        return interaction_pending_at(&state_root, run_id).map(SemanticResult::Run);
+    }
     let uid = DarwinSystem.current_uid();
     // Every option is parsed before the socket is touched, so a malformed
     // request never reaches the worker and a worker thread is never held open
     // waiting for a caller that will fail anyway.
     let prepared = match verb {
-        RunVerb::Start => return Err(internal("run start is composed separately")),
-        RunVerb::Status | RunVerb::Interrupt => Prepared::Plain,
+        RunVerb::Start
+        | RunVerb::CreateWriteContinuation
+        | RunVerb::Fork
+        | RunVerb::Recover
+        | RunVerb::Reconcile => {
+            return Err(internal("run allocation is composed separately"));
+        }
+        RunVerb::Status | RunVerb::Interrupt | RunVerb::Resume => Prepared::Plain,
+        RunVerb::Pending => unreachable!("handled as a durable observer read"),
+        RunVerb::Pause => Prepared::Pause {
+            interrupt: switch(args, "--interrupt"),
+        },
+        RunVerb::AcquireWrite | RunVerb::ReleaseWrite => {
+            unreachable!("handled before worker request")
+        }
         // SPEC-005 grammar: `run wait <run-id> <turn-id>`.  The Turn is the
         // caller's, so it is carried to the worker instead of being inferred
         // there from whatever happens to be live.
@@ -516,7 +1422,24 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         // from the Run's own manifest, so the refusal names what this Run
         // actually is rather than what this slice happens to publish.
         RunVerb::Send | RunVerb::Submit if switch(args, "--write") => {
-            return Err(write_forbidden(&state_root, run_id));
+            let manifest =
+                RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+            if manifest.execution_lane == ExecutionLane::SharedReadonly {
+                return Err(write_forbidden(&state_root, run_id));
+            }
+            let request = turn_request(args)?;
+            let timeout_ms = caller_timeout_ms(args)?;
+            acquire_writer(
+                &view,
+                &state_root,
+                run_id,
+                carrier.as_ref().expect("mutating verb has carrier"),
+                true,
+            )?;
+            Prepared::Turn {
+                request,
+                timeout_ms,
+            }
         }
         RunVerb::Send | RunVerb::Submit => Prepared::Turn {
             request: turn_request(args)?,
@@ -528,17 +1451,38 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             return run_events(&state_root, run_id, uid, requested, &projection);
         }
         RunVerb::Respond => Prepared::Respond {
-            request_id: required(args, "--request-id")?
-                .parse::<u64>()
-                .map_err(|_| {
-                    MachineError::invalid_argument("--request-id", "request id must be an integer")
-                })?,
+            request_id: resolve_public_interaction_id(
+                &state_root,
+                run_id,
+                &required(args, "--request-id")?,
+            )?,
+            idempotency_key: required(args, "--idempotency-key")?,
             response: response_body(args)?,
         },
     };
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
             .map_err(|error| error.machine_error(run_id, &state_root))?;
+    if matches!(verb, RunVerb::Pause | RunVerb::Close)
+        && let Some(result) =
+            threadless_lifecycle_transition(&state_root, run_id, verb, &runtime_record)?
+    {
+        if verb == RunVerb::Close {
+            let manifest =
+                RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+            let _ = crate::profile::release_run_member_by_identity(
+                workspace.as_deref(),
+                &manifest.profile_capability_snapshot.profile_name,
+                &manifest.profile_capability_snapshot.server_key,
+                &run_id.to_string(),
+                crate::profile::RunMemberRelease::Closed,
+            );
+        }
+        return Ok(result);
+    }
+    if matches!(verb, RunVerb::Send | RunVerb::Submit | RunVerb::Resume) {
+        ensure_run_worker(&view, &state_root, run_id)?;
+    }
     let response = crate::worker::call_run_worker(
         &state_root,
         run_id,
@@ -546,6 +1490,10 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         carrier.as_ref().map(CredentialCarrier::raw_fd),
         |expected| match prepared {
             Prepared::Plain if verb == RunVerb::Status => ControlRequestV1::Status { expected },
+            Prepared::Plain if verb == RunVerb::Resume => ControlRequestV1::Resume {
+                expected,
+                caller: None,
+            },
             Prepared::Plain => ControlRequestV1::Interrupt {
                 expected,
                 caller: None,
@@ -560,6 +1508,11 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
                 timeout_ms,
             },
             Prepared::Close { interrupt } => ControlRequestV1::Close {
+                expected,
+                caller: None,
+                interrupt,
+            },
+            Prepared::Pause { interrupt } => ControlRequestV1::Pause {
                 expected,
                 caller: None,
                 interrupt,
@@ -580,11 +1533,13 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             },
             Prepared::Respond {
                 request_id,
+                idempotency_key,
                 response,
             } => ControlRequestV1::Respond {
                 expected,
                 caller: None,
                 request_id,
+                idempotency_key,
                 response,
             },
         },
@@ -606,9 +1561,68 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         }
         Err(error) => return Err(error.machine_error(run_id, &runtime_record)),
     };
-    let control_socket_epoch = crate::worker::read_runtime_record(&runtime_record, uid)
-        .map_or(1, |record| record.control_socket_epoch);
+    let response = if matches!(verb, RunVerb::Pause | RunVerb::Close)
+        && let ControlResponseV1::Interrupted { turn_id, .. } = &response
+    {
+        let waited = crate::worker::call_run_worker(&state_root, run_id, uid, None, |expected| {
+            ControlRequestV1::Wait {
+                expected,
+                caller: None,
+                turn_id: turn_id.clone(),
+                timeout_ms: Some(5_000),
+            }
+        })
+        .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+        if matches!(waited, ControlResponseV1::Terminal { .. }) {
+            crate::worker::call_run_worker(
+                &state_root,
+                run_id,
+                uid,
+                carrier.as_ref().map(CredentialCarrier::raw_fd),
+                |expected| match verb {
+                    RunVerb::Pause => ControlRequestV1::Pause {
+                        expected,
+                        caller: None,
+                        interrupt: false,
+                    },
+                    RunVerb::Close => ControlRequestV1::Close {
+                        expected,
+                        caller: None,
+                        interrupt: false,
+                    },
+                    _ => unreachable!("lifecycle retry is pause or close"),
+                },
+            )
+            .map_err(|error| error.machine_error(run_id, &runtime_record))?
+        } else {
+            crate::worker::call_run_worker(
+                &state_root,
+                run_id,
+                uid,
+                carrier.as_ref().map(CredentialCarrier::raw_fd),
+                |expected| ControlRequestV1::SettleLifecycleTimeout {
+                    expected,
+                    caller: None,
+                    close: verb == RunVerb::Close,
+                },
+            )
+            .map_err(|error| error.machine_error(run_id, &runtime_record))?
+        }
+    } else {
+        response
+    };
+    let lifecycle_stopped = match &response {
+        ControlResponseV1::Closed { .. } => true,
+        ControlResponseV1::Status { lifecycle, .. } => lifecycle == "paused",
+        _ => false,
+    };
     let closed = matches!(response, ControlResponseV1::Closed { .. });
+    let mut control_socket_epoch = crate::worker::read_runtime_record(&runtime_record, uid)
+        .map_or(1, |record| record.control_socket_epoch);
+    if lifecycle_stopped {
+        stop_lifecycle_generation(&state_root, run_id, &runtime_record)?;
+        control_socket_epoch = 0;
+    }
     let value = control_response_value(&state_root, run_id, control_socket_epoch, verb, response)?;
     if closed {
         let manifest = RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
@@ -626,6 +1640,816 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         );
     }
     Ok(value)
+}
+
+fn stop_lifecycle_generation(
+    state_root: &Path,
+    run_id: Uuid,
+    runtime_record: &Path,
+) -> Result<(), MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let record = crate::worker::read_runtime_record(runtime_record, uid)
+        .map_err(|error| error.machine_error(run_id, runtime_record))?;
+    let response = crate::worker::call_run_worker(state_root, run_id, uid, None, |expected| {
+        ControlRequestV1::Shutdown { expected }
+    })
+    .map_err(|error| error.machine_error(run_id, runtime_record))?;
+    if !matches!(response, ControlResponseV1::Shutdown { .. }) {
+        return Err(internal(
+            "lifecycle shutdown returned an unexpected response",
+        ));
+    }
+    let deadline = std::time::Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
+    loop {
+        let _ = DarwinSystem.reap_child_nonblocking(record.identity.pid);
+        if crate::worker::prove_worker_generation_absent(&record).is_ok() {
+            crate::worker::remove_verified_absent_runtime(runtime_record, uid)
+                .map_err(|error| error.machine_error(run_id, runtime_record))?;
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the stopped run generation did not reach verified absence",
+                false,
+                json!({
+                    "run_id": run_id,
+                    "generation": record.identity.run_generation,
+                    "identity_verdict": crate::worker::classify_worker_identity(&record).as_str(),
+                    "reason": "generation_cleanup_unverified",
+                }),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Complete pause/close for a run that has never allocated a Codex thread.
+/// The startup range excludes a concurrent first-turn worker election; after
+/// taking it we re-read both runtime and projection, so this path cannot race
+/// a worker into existence or mistake a crashed, history-bearing generation
+/// for a process-free run.
+fn threadless_lifecycle_transition(
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+    runtime_record: &Path,
+) -> Result<Option<SemanticResult>, MachineError> {
+    if runtime_record.exists() {
+        return Ok(None);
+    }
+    let lock = RunStartupLock::open(state_root, run_id)?;
+    lock.acquire()?;
+    let result = (|| {
+        if runtime_record.exists() {
+            return Ok(None);
+        }
+        let store = RunStore::new(SystemWorkspacePlatform, state_root);
+        let projection = store.load_state_projection(run_id)?;
+        if projection.thread_id.is_some()
+            || !matches!(
+                projection.lifecycle,
+                RunLifecycle::Idle | RunLifecycle::Paused
+            )
+        {
+            return Ok(None);
+        }
+        if verb == RunVerb::Pause && projection.lifecycle == RunLifecycle::Paused {
+            return run_object(state_root, run_id, 0, "Absent")
+                .map(SemanticResult::Run)
+                .map(Some);
+        }
+        let run_root = state_root.join("runs").join(run_id.to_string());
+        let mut ledger = ConformantLedger::open(&run_root, run_id)
+            .map_err(|error| internal(error.to_string()))?;
+        let timestamp = SystemLedgerClock::default().timestamp();
+        match verb {
+            RunVerb::Pause => ledger.pause_idle(&timestamp),
+            RunVerb::Close => ledger.seal_closed(
+                &timestamp,
+                "threadless_run_had_no_worker_connection_or_owned_runtime",
+            ),
+            _ => unreachable!("only pause and close use threadless lifecycle"),
+        }
+        .map_err(|error| internal(error.to_string()))?;
+        run_object(state_root, run_id, 0, "Absent")
+            .map(SemanticResult::Run)
+            .map(Some)
+    })();
+    lock.release();
+    result
+}
+
+fn acquire_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    allow_threadless: bool,
+) -> Result<(), MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = store.load_manifest(run_id)?;
+    let projection = store.load_state_projection(run_id)?;
+    if manifest.execution_lane != ExecutionLane::Dedicated {
+        return Err(write_forbidden(state_root, run_id));
+    }
+    if !allow_threadless && projection.thread_id.is_none() {
+        return Err(MachineError::new(
+            "THREADLESS_REQUIRES_WRITE_TURN",
+            "a threadless run must acquire writer authority through its first write turn",
+            false,
+            json!({"run_id": run_id, "required_action": "submit_turn_write"}),
+        ));
+    }
+    if matches!(
+        projection.lifecycle,
+        RunLifecycle::Running
+            | RunLifecycle::WaitingInteraction
+            | RunLifecycle::OutcomeUnknown
+            | RunLifecycle::Closed
+    ) {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            "run.acquire_write",
+        ));
+    }
+    let binding = store.load_controller_binding(run_id)?;
+    authorize_controller(run_id, "run.acquire_write", &binding, carrier)?;
+    let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
+    let transaction_id = Uuid::now_v7();
+    let holder = crate::writer::WriterStore::holder(
+        run_id,
+        manifest.profile.profile_name.clone(),
+        &binding,
+        projection.run_generation.max(1),
+        manifest.profile_capability_snapshot.server_key.clone(),
+        manifest.profile_capability_snapshot.server_epoch,
+        projection.thread_id.clone(),
+        projection.lifecycle,
+    );
+    let (_, (replayed, next_generation)) =
+        writer.transact(|record| record.prepare_acquire(run_id, holder.clone(), transaction_id))?;
+    if replayed {
+        return Ok(());
+    }
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    if !runtime_record.exists()
+        && let Err(error) = ensure_run_worker(view, state_root, run_id)
+    {
+        writer.transact(|record| {
+            record.cancel_acquire(transaction_id);
+            Ok(())
+        })?;
+        return Err(error);
+    }
+    let worker_record = match crate::worker::read_runtime_record(&runtime_record, uid) {
+        Ok(record) => record,
+        Err(error) => {
+            writer.transact(|record| {
+                record.cancel_acquire(transaction_id);
+                Ok(())
+            })?;
+            return Err(error.machine_error(run_id, &runtime_record));
+        }
+    };
+    if let Err(error) = writer.transact(|record| {
+        record.bind_reserved_generation(
+            transaction_id,
+            worker_record.identity.run_generation,
+            worker_record
+                .app_server_epoch
+                .unwrap_or(manifest.profile_capability_snapshot.server_epoch),
+        )
+    }) {
+        writer.transact(|record| {
+            if record.transaction_id == Some(transaction_id) {
+                record.cancel_acquire(transaction_id);
+            }
+            Ok(())
+        })?;
+        return Err(error);
+    }
+    if crate::worker::prove_worker_workload_absent(&worker_record).is_err() {
+        writer.transact(|record| {
+            record.block_unknown(transaction_id);
+            Ok(())
+        })?;
+        return Err(background_execution_unverified(
+            run_id,
+            &projection,
+            &worker_record,
+            "the recorded worker group did not produce five complete empty workload samples",
+            "retry_census",
+        ));
+    }
+    let response = crate::worker::call_run_worker(
+        state_root,
+        run_id,
+        uid,
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::SetWriterAccess {
+            expected,
+            caller: None,
+            write: true,
+            writer_generation: next_generation,
+            transaction_id,
+        },
+    );
+    match response {
+        Ok(ControlResponseV1::WriterAccessChanged {
+            write: true,
+            writer_generation,
+            ..
+        }) if writer_generation == next_generation => {}
+        Ok(ControlResponseV1::Failed {
+            code,
+            message,
+            retryable,
+            details,
+        }) => {
+            writer.transact(|record| {
+                record.cancel_acquire(transaction_id);
+                Ok(())
+            })?;
+            return Err(MachineError::new(code, message, retryable, details));
+        }
+        Err(error) => {
+            writer.transact(|record| {
+                record.block_unknown(transaction_id);
+                Ok(())
+            })?;
+            return Err(error.machine_error(run_id, &runtime_record));
+        }
+        _ => {
+            writer.transact(|record| {
+                record.block_unknown(transaction_id);
+                Ok(())
+            })?;
+            return Err(internal(
+                "worker returned an invalid writer transition response",
+            ));
+        }
+    }
+    writer.transact(|record| record.commit_acquire(transaction_id, next_generation))?;
+    Ok(())
+}
+
+fn release_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let projection = store.load_state_projection(run_id)?;
+    if !matches!(
+        projection.lifecycle,
+        RunLifecycle::Idle | RunLifecycle::Paused
+    ) {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            "run.release_write",
+        ));
+    }
+    let binding = store.load_controller_binding(run_id)?;
+    authorize_controller(run_id, "run.release_write", &binding, carrier)?;
+    let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
+    let transaction_id = Uuid::now_v7();
+    let (_, generation) =
+        writer.transact(|record| record.prepare_release(run_id, transaction_id))?;
+    let Some(generation) = generation else {
+        return Ok(());
+    };
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    let worker_record = match crate::worker::read_runtime_record(&runtime_record, uid) {
+        Ok(record) => record,
+        Err(error) => {
+            writer.transact(|record| {
+                record.rollback_release(transaction_id);
+                Ok(())
+            })?;
+            return Err(error.machine_error(run_id, &runtime_record));
+        }
+    };
+    if crate::worker::prove_worker_workload_absent(&worker_record).is_err() {
+        writer.transact(|record| {
+            record.block_unknown(transaction_id);
+            Ok(())
+        })?;
+        return Err(background_execution_unverified(
+            run_id,
+            &projection,
+            &worker_record,
+            "the recorded worker group did not produce five complete empty workload samples",
+            "retry_census",
+        ));
+    }
+    let response = crate::worker::call_run_worker(
+        state_root,
+        run_id,
+        uid,
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::SetWriterAccess {
+            expected,
+            caller: None,
+            write: false,
+            writer_generation: generation,
+            transaction_id,
+        },
+    );
+    match response {
+        Ok(ControlResponseV1::WriterAccessChanged {
+            write: false,
+            writer_generation,
+            ..
+        }) if writer_generation == generation => {}
+        Ok(ControlResponseV1::Failed {
+            code,
+            message,
+            retryable,
+            details,
+        }) => {
+            writer.transact(|record| {
+                record.rollback_release(transaction_id);
+                Ok(())
+            })?;
+            return Err(MachineError::new(code, message, retryable, details));
+        }
+        Err(error) => {
+            writer.transact(|record| {
+                record.block_unknown(transaction_id);
+                Ok(())
+            })?;
+            return Err(error.machine_error(run_id, &runtime_record));
+        }
+        _ => {
+            writer.transact(|record| {
+                record.block_unknown(transaction_id);
+                Ok(())
+            })?;
+            return Err(internal(
+                "worker returned an invalid writer transition response",
+            ));
+        }
+    }
+    writer.transact(|record| record.commit_release(transaction_id))?;
+    Ok(())
+}
+
+fn run_state_conflict_error(run_id: Uuid, state: RunLifecycle, operation: &str) -> MachineError {
+    MachineError::new(
+        "RUN_STATE_CONFLICT",
+        format!(
+            "{operation} is not allowed while the run is {}",
+            state.as_str()
+        ),
+        false,
+        json!({"run_id": run_id, "state": state.as_str(), "operation": operation}),
+    )
+}
+
+fn background_execution_unverified(
+    run_id: Uuid,
+    projection: &crate::projection::RunStateProjection,
+    worker: &crate::worker::WorkerRuntimeRecord,
+    reason: &str,
+    required_action: &str,
+) -> MachineError {
+    MachineError::new(
+        "BACKGROUND_EXECUTION_UNVERIFIED",
+        "dedicated workload absence could not be proved",
+        false,
+        json!({
+            "run_id": run_id,
+            "thread_id": projection.thread_id.clone().unwrap_or_else(|| "unbound".to_owned()),
+            "server_epoch": worker.control_socket_epoch.max(1),
+            "lane_id": run_id,
+            "process_generation": projection.run_generation.max(1),
+            "census_revision": worker.control_socket_epoch,
+            "reason": reason,
+            "required_action": required_action,
+        }),
+    )
+}
+
+fn parse_uuid_flag(args: &[OsString], flag: &str) -> Result<Uuid, MachineError> {
+    required(args, flag)?
+        .parse()
+        .map_err(|_| MachineError::invalid_argument(flag, "value must be a UUID"))
+}
+
+fn parse_u64_flag(args: &[OsString], flag: &str) -> Result<u64, MachineError> {
+    required(args, flag)?
+        .parse()
+        .map_err(|_| MachineError::invalid_argument(flag, "value must be a positive integer"))
+}
+
+fn reset_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    args: &[OsString],
+) -> Result<Value, MachineError> {
+    if required(args, "--confirm-workspace-id")? != view.workspace_id {
+        return Err(MachineError::invalid_argument(
+            "--confirm-workspace-id",
+            "confirmation does not match the canonical workspace",
+        ));
+    }
+    if !switch(args, "--require-worker-absence") {
+        return Err(MachineError::invalid_argument(
+            "--require-worker-absence",
+            "explicit worker-absence proof is required",
+        ));
+    }
+    let carrier = carrier_from_options(args, "--operator-file", "--operator-fd")?;
+    let authorization =
+        crate::controller::OperatorStore::new(crate::controller::default_operator_root()?)
+            .authorize(&carrier)?;
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let current = writer.load()?;
+    if let Some(holder) = &current.holder {
+        let path = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(state_root),
+            holder.run_id,
+        )
+        .map_err(|error| error.machine_error(holder.run_id, state_root))?;
+        if std::fs::symlink_metadata(&path).is_ok() {
+            let record = crate::worker::read_runtime_record(&path, DarwinSystem.current_uid())
+                .map_err(|error| error.machine_error(holder.run_id, &path))?;
+            if crate::worker::prove_worker_generation_absent(&record).is_err() {
+                authorization.release();
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the recorded writer worker and process group have not been proved absent",
+                    false,
+                    json!({
+                        "run_id": holder.run_id,
+                        "generation": holder.worker_generation,
+                        "identity_verdict": crate::worker::classify_worker_identity(&record).as_str(),
+                        "reason": "worker_or_group_absence_unverified",
+                    }),
+                ));
+            }
+        }
+    }
+    let (record, ()) = writer.transact(|record| {
+        if !matches!(record.state, crate::writer::WriterAuthorityState::BlockedUnknown | crate::writer::WriterAuthorityState::None) {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "writer reset is limited to blocked_unknown authority",
+                false,
+                json!({"reason": "authority_not_blocked", "required_action": "reconcile_dedicated_lane"}),
+            ));
+        }
+        let generation = record.writer_generation;
+        let writer_lock_device = record.writer_lock_device;
+        let writer_lock_inode = record.writer_lock_inode;
+        let handoff_lock_device = record.handoff_lock_device;
+        let handoff_lock_inode = record.handoff_lock_inode;
+        *record = crate::writer::WriterRecord::empty(&view.workspace_id);
+        record.writer_generation = generation;
+        record.writer_lock_device = writer_lock_device;
+        record.writer_lock_inode = writer_lock_inode;
+        record.handoff_lock_device = handoff_lock_device;
+        record.handoff_lock_inode = handoff_lock_inode;
+        Ok(())
+    })?;
+    authorization.release();
+    let _ = record;
+    writer.status_value()
+}
+
+fn prepare_writer_handoff(
+    view: &WorkspaceView,
+    state_root: &Path,
+    args: &[OsString],
+) -> Result<Value, MachineError> {
+    let source = parse_uuid_flag(args, "--from")?;
+    let destination = parse_uuid_flag(args, "--to")?;
+    if source == destination {
+        return Err(MachineError::invalid_argument(
+            "--to",
+            "handoff destination must differ",
+        ));
+    }
+    let expected = parse_u64_flag(args, "--expected-generation")?;
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let source_binding = runs.load_controller_binding(source)?;
+    let destination_binding = runs.load_controller_binding(destination)?;
+    authorize_controller(
+        source,
+        "workspace.writer.handoff_prepare",
+        &source_binding,
+        &carrier,
+    )?;
+    authorize_controller(
+        destination,
+        "workspace.writer.handoff_prepare",
+        &destination_binding,
+        &carrier,
+    )?;
+    if source_binding.identity.controller_id != destination_binding.identity.controller_id {
+        return Err(MachineError::new(
+            "CROSS_CONTROLLER_RELEASE_REQUIRED",
+            "writer handoff requires one controller to own both runs",
+            false,
+            json!({"source_run_id": source, "destination_run_id": destination}),
+        ));
+    }
+    for run_id in [source, destination] {
+        let projection = runs.load_state_projection(run_id)?;
+        if projection.lifecycle != RunLifecycle::Idle || !projection.pending_requests.is_empty() {
+            return Err(MachineError::new(
+                "WRITER_HANDOFF_NOT_ALLOWED",
+                "writer handoff requires idle runs without pending interactions",
+                false,
+                json!({"source_run_id": source, "destination_run_id": destination, "blockers": [format!("run_{run_id}_not_idle")]}),
+            ));
+        }
+    }
+    let handoff_id = Uuid::now_v7();
+    let expires_at_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| internal("system clock precedes Unix epoch"))?
+        .as_secs()
+        .saturating_add(300);
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let handoff = crate::writer::WriterHandoff {
+        handoff_id,
+        source_run_id: source,
+        destination_run_id: destination,
+        expected_writer_generation: expected,
+        expires_at_unix_seconds,
+        controller_id: source_binding.identity.controller_id,
+        controller_generation: source_binding.identity.generation,
+        source_retirement_started: false,
+        source_retired: false,
+    };
+    writer.transact_handoff(|record| record.prepare_handoff(handoff.clone()))?;
+    Ok(handoff_value(&handoff, "prepared"))
+}
+
+fn commit_writer_handoff(
+    view: &WorkspaceView,
+    state_root: &Path,
+    args: &[OsString],
+) -> Result<Value, MachineError> {
+    let handoff_id = parse_uuid_flag(args, "--handoff-id")?;
+    let expected = parse_u64_flag(args, "--expected-generation")?;
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let current = writer.load()?;
+    let handoff = current.handoff.clone().filter(|value| value.handoff_id == handoff_id)
+        .ok_or_else(|| MachineError::new(
+            "WRITER_HANDOFF_NOT_ALLOWED",
+            "writer handoff is not prepared",
+            false,
+            json!({"source_run_id": Value::Null, "destination_run_id": Value::Null, "blockers": ["handoff_not_prepared"]}),
+        ))?;
+    if current.writer_generation != expected || handoff.expected_writer_generation != expected {
+        return Err(MachineError::new(
+            "STALE_WRITER_GENERATION",
+            "writer generation changed before handoff commit",
+            false,
+            json!({"expected_generation": expected, "actual_generation": current.writer_generation}),
+        ));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| internal("system clock precedes Unix epoch"))?
+        .as_secs();
+    if now >= handoff.expires_at_unix_seconds {
+        return Err(MachineError::new(
+            "WRITER_HANDOFF_NOT_ALLOWED",
+            "writer handoff has expired",
+            false,
+            json!({"source_run_id": handoff.source_run_id, "destination_run_id": handoff.destination_run_id, "blockers": ["expired"]}),
+        ));
+    }
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let source_binding = runs.load_controller_binding(handoff.source_run_id)?;
+    let destination_binding = runs.load_controller_binding(handoff.destination_run_id)?;
+    authorize_controller(
+        handoff.source_run_id,
+        "workspace.writer.handoff_commit",
+        &source_binding,
+        &carrier,
+    )?;
+    authorize_controller(
+        handoff.destination_run_id,
+        "workspace.writer.handoff_commit",
+        &destination_binding,
+        &carrier,
+    )?;
+    let source_projection = runs.load_state_projection(handoff.source_run_id)?;
+    let source_runtime_path = crate::worker::runtime_record_path(
+        &crate::worker::runtime_root(state_root),
+        handoff.source_run_id,
+    )
+    .map_err(|error| error.machine_error(handoff.source_run_id, state_root))?;
+    let source_worker =
+        crate::worker::read_runtime_record(&source_runtime_path, DarwinSystem.current_uid())
+            .map_err(|error| error.machine_error(handoff.source_run_id, &source_runtime_path))?;
+    if crate::worker::prove_worker_workload_absent(&source_worker).is_err() {
+        writer.transact_handoff(|record| {
+            if record.transaction_id == Some(handoff_id) {
+                record.state = crate::writer::WriterAuthorityState::BlockedUnknown;
+                record.handoff = None;
+                record.recovery_action = Some("reconcile_dedicated_lane".to_owned());
+            }
+            Ok(())
+        })?;
+        return Err(background_execution_unverified(
+            handoff.source_run_id,
+            &source_projection,
+            &source_worker,
+            "source lane workload absence was not proved before handoff",
+            "reconcile_dedicated_lane",
+        ));
+    }
+    writer.transact_handoff(|record| record.begin_handoff_source_retirement(handoff_id))?;
+    if let Err(error) = transition_worker_access(
+        state_root,
+        handoff.source_run_id,
+        &carrier,
+        false,
+        expected,
+        handoff_id,
+    ) {
+        return match error {
+            WorkerAccessFailure::Refused(error) => {
+                writer.transact_handoff(|record| {
+                    record.abort_handoff_source_retirement(handoff_id)
+                })?;
+                Err(error)
+            }
+            WorkerAccessFailure::Unknown(error) => {
+                writer.transact_handoff(|record| {
+                    if record.transaction_id == Some(handoff_id) {
+                        record.state = crate::writer::WriterAuthorityState::BlockedUnknown;
+                        record.handoff = None;
+                        record.recovery_action = Some("reverify_writer_policy".to_owned());
+                    }
+                    Ok(())
+                })?;
+                Err(error)
+            }
+        };
+    }
+    writer.transact_handoff(|record| record.retire_handoff_source(handoff_id))?;
+    let manifest = runs.load_manifest(handoff.destination_run_id)?;
+    let projection = runs.load_state_projection(handoff.destination_run_id)?;
+    let holder = crate::writer::WriterStore::holder(
+        handoff.destination_run_id,
+        manifest.profile.profile_name.clone(),
+        &destination_binding,
+        projection.run_generation.max(1),
+        manifest.profile_capability_snapshot.server_key.clone(),
+        manifest.profile_capability_snapshot.server_epoch,
+        projection.thread_id,
+        projection.lifecycle,
+    );
+    let (_, destination_generation) = writer.transact_handoff(|record| {
+        record.reserve_handoff_destination(handoff_id, expected, holder.clone())
+    })?;
+    if let Err(error) = transition_worker_access(
+        state_root,
+        handoff.destination_run_id,
+        &carrier,
+        true,
+        destination_generation,
+        handoff_id,
+    ) {
+        return match error {
+            WorkerAccessFailure::Refused(error) => {
+                writer.transact_handoff(|record| {
+                    if record.transaction_id == Some(handoff_id) {
+                        record.cancel_acquire(handoff_id);
+                    }
+                    Ok(())
+                })?;
+                Err(error)
+            }
+            WorkerAccessFailure::Unknown(error) => {
+                writer.transact_handoff(|record| {
+                    if record.transaction_id == Some(handoff_id) {
+                        record.block_unknown(handoff_id);
+                    }
+                    Ok(())
+                })?;
+                Err(error)
+            }
+        };
+    }
+    writer.transact_handoff(|record| record.commit_acquire(handoff_id, destination_generation))?;
+    Ok(handoff_value(&handoff, "committed"))
+}
+
+fn cancel_writer_handoff(
+    view: &WorkspaceView,
+    state_root: &Path,
+    args: &[OsString],
+) -> Result<Value, MachineError> {
+    let handoff_id = parse_uuid_flag(args, "--handoff-id")?;
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let handoff = writer.load()?.handoff.filter(|value| value.handoff_id == handoff_id)
+        .ok_or_else(|| MachineError::new(
+            "WRITER_HANDOFF_NOT_ALLOWED",
+            "writer handoff is not prepared",
+            false,
+            json!({"source_run_id": Value::Null, "destination_run_id": Value::Null, "blockers": ["handoff_not_prepared"]}),
+        ))?;
+    let binding = runs.load_controller_binding(handoff.source_run_id)?;
+    authorize_controller(
+        handoff.source_run_id,
+        "workspace.writer.handoff_cancel",
+        &binding,
+        &carrier,
+    )?;
+    writer.transact_handoff(|record| record.cancel_handoff(handoff_id))?;
+    Ok(handoff_value(&handoff, "cancelled"))
+}
+
+fn transition_worker_access(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    write: bool,
+    generation: u64,
+    transaction_id: Uuid,
+) -> Result<(), WorkerAccessFailure> {
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| {
+                WorkerAccessFailure::Unknown(error.machine_error(run_id, state_root))
+            })?;
+    match crate::worker::call_run_worker(
+        state_root,
+        run_id,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::SetWriterAccess {
+            expected,
+            caller: None,
+            write,
+            writer_generation: generation,
+            transaction_id,
+        },
+    ) {
+        Ok(ControlResponseV1::WriterAccessChanged {
+            write: observed,
+            writer_generation,
+            ..
+        }) if observed == write && writer_generation == generation => Ok(()),
+        Ok(ControlResponseV1::Failed {
+            code,
+            message,
+            retryable,
+            details,
+        }) => Err(WorkerAccessFailure::Refused(MachineError::new(
+            code, message, retryable, details,
+        ))),
+        Ok(_) => Err(WorkerAccessFailure::Unknown(internal(
+            "worker returned an invalid writer transition response",
+        ))),
+        Err(error) => Err(WorkerAccessFailure::Unknown(
+            error.machine_error(run_id, &runtime_record),
+        )),
+    }
+}
+
+enum WorkerAccessFailure {
+    Refused(MachineError),
+    Unknown(MachineError),
+}
+
+fn handoff_value(handoff: &crate::writer::WriterHandoff, status: &str) -> Value {
+    json!({
+        "handoff_id": handoff.handoff_id,
+        "status": status,
+        "source_run_id": handoff.source_run_id,
+        "destination_run_id": handoff.destination_run_id,
+        "expected_writer_generation": handoff.expected_writer_generation,
+        "expires_at": crate::writer::timestamp_from_unix(handoff.expires_at_unix_seconds),
+        "blockers": [],
+    })
 }
 
 fn ensure_run_membership(
@@ -697,10 +2521,14 @@ fn write_forbidden(state_root: &Path, run_id: Uuid) -> MachineError {
 /// verdict is `Absent`.  One whose record exists but did not answer was not
 /// proved either way, which is exactly `Unverifiable`.
 fn absent_or_unverifiable(runtime_record: &Path) -> &'static str {
-    if std::fs::symlink_metadata(runtime_record).is_ok() {
-        "Unverifiable"
-    } else {
-        "Absent"
+    match std::fs::symlink_metadata(runtime_record) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return "Absent",
+        Err(_) => return "Unverifiable",
+        Ok(_) => {}
+    }
+    match crate::worker::read_runtime_record(runtime_record, DarwinSystem.current_uid()) {
+        Ok(record) => crate::worker::classify_worker_identity(&record).as_str(),
+        Err(_) => "Unverifiable",
     }
 }
 
@@ -959,6 +2787,9 @@ fn requested_cursor(args: &[OsString]) -> Result<RequestedCursor, MachineError> 
 /// A control request with everything but the worker's identity already decided.
 enum Prepared {
     Plain,
+    Pause {
+        interrupt: bool,
+    },
     Wait {
         turn_id: String,
         timeout_ms: Option<u64>,
@@ -972,6 +2803,7 @@ enum Prepared {
     },
     Respond {
         request_id: u64,
+        idempotency_key: String,
         response: Value,
     },
 }
@@ -1142,7 +2974,10 @@ fn last_terminal_value(sources: &RunSources, response: &ControlResponseV1) -> Va
 struct RunSources {
     manifest: RunManifest,
     projection: crate::projection::RunStateProjection,
+    writer: crate::writer::WriterRecord,
     control_socket_epoch: u64,
+    app_server_epoch: Option<u64>,
+    runtime_record: Option<crate::worker::WorkerRuntimeRecord>,
 }
 
 impl RunSources {
@@ -1152,10 +2987,28 @@ impl RunSources {
         control_socket_epoch: u64,
     ) -> Result<Self, MachineError> {
         let store = RunStore::new(SystemWorkspacePlatform, state_root);
+        let manifest = store.load_manifest(run_id)?;
+        let writer = crate::writer::WriterStore::new(
+            state_root,
+            &manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+        .load()?;
+        let runtime_record =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+                .ok()
+                .and_then(|path| {
+                    crate::worker::read_runtime_record(&path, DarwinSystem.current_uid()).ok()
+                });
         Ok(Self {
-            manifest: store.load_manifest(run_id)?,
+            manifest,
             projection: store.load_state_projection(run_id)?,
+            writer,
             control_socket_epoch,
+            app_server_epoch: runtime_record
+                .as_ref()
+                .and_then(|record| record.app_server_epoch),
+            runtime_record,
         })
     }
 
@@ -1168,7 +3021,8 @@ impl RunSources {
     }
 
     fn server_epoch(&self) -> u64 {
-        self.manifest.profile_capability_snapshot.server_epoch
+        self.app_server_epoch
+            .unwrap_or(self.manifest.profile_capability_snapshot.server_epoch)
     }
 
     /// The Run's recorded default reasoning effort.
@@ -1179,55 +3033,112 @@ impl RunSources {
             .unwrap_or_else(|| self.manifest.default_reasoning_effort.clone())
     }
 
-    /// This slice only publishes `shared_readonly` Runs, and the checked
-    /// schema binds every lane-shaped member of such a Run to one value.
-    /// Writing them out here rather than deriving them keeps the projection
-    /// honest about what it does and does not observe: nothing here claims a
-    /// dedicated lane, a writer, or a background census this slice never runs.
     fn run_value(&self, identity_verdict: &str, last_terminal: Value) -> Value {
         let manifest = &self.manifest;
         let projection = &self.projection;
         let lifecycle = projection.lifecycle.as_str();
+        let dedicated = manifest.execution_lane == ExecutionLane::Dedicated;
+        let owns_writer = dedicated
+            && self
+                .writer
+                .holder
+                .as_ref()
+                .is_some_and(|holder| holder.run_id == manifest.run_id);
+        let writer_state = if owns_writer {
+            self.writer.state.as_str()
+        } else {
+            "none"
+        };
+        let threadless = projection.thread_id.is_none();
+        let state_variant = if !dedicated {
+            "shared_readonly"
+        } else if threadless {
+            "dedicated_unstarted"
+        } else {
+            match writer_state {
+                "active" => "dedicated_writer_active",
+                "reserved" => "dedicated_writer_reserved",
+                "handoff_prepared" | "releasing" => "dedicated_releasing",
+                "blocked_unknown" => "dedicated_blocked_unknown",
+                _ if projection.lifecycle == RunLifecycle::Paused => "dedicated_paused",
+                _ => "dedicated_reader",
+            }
+        };
+        let access = if !dedicated || writer_state == "none" {
+            "read"
+        } else {
+            match writer_state {
+                "active" => "write",
+                "blocked_unknown" => "unknown",
+                _ => "transitioning",
+            }
+        };
+        let writer_generation = (owns_writer && self.writer.writer_generation > 0)
+            .then_some(self.writer.writer_generation);
+        let physical_server_epoch = (!threadless).then_some(self.server_epoch());
+        let observed_process_count = self.runtime_record.as_ref().and_then(|record| {
+            DarwinSystem
+                .process_group_pids(record.identity.process_group_id)
+                .ok()
+                .and_then(|members| u64::try_from(members.len()).ok())
+        });
+        let lane_state = if dedicated && threadless {
+            "absent"
+        } else if !dedicated {
+            "unverified"
+        } else {
+            match identity_verdict {
+                "Match" => "ready",
+                "Absent" => "absent",
+                _ => "unverified",
+            }
+        };
+        let lane_kind = manifest.execution_lane.as_str();
+        let lane_id = dedicated.then_some(manifest.run_id);
+        let lineage = manifest.write_continuation_provenance.as_ref().map_or_else(
+            || {
+                manifest
+                    .fork_provenance
+                    .as_ref()
+                    .map_or(Value::Null, |value| json!(value))
+            },
+            |value| json!(value),
+        );
         json!({
             "workspace_id": manifest.workspace_id,
             "run_id": manifest.run_id,
             "state": lifecycle,
-            "state_variant": "shared_readonly",
+            "state_variant": state_variant,
             "control_mode": manifest.control_mode.as_str(),
             "purpose": manifest.purpose,
             "execution_lane": manifest.execution_lane.as_str(),
             "effective_policy": {
-                "access": "read",
+                "access": access,
                 "verification": "verified",
-                // No policy transition is recordable for a read-only Run, and
-                // this slice binds one Thread per Run and never rebinds it, so
-                // the Thread's generation is exactly whether it has one.
-                "policy_epoch": 0,
+                "policy_epoch": if dedicated { self.writer.authority_revision } else { 0 },
                 "thread_generation": u64::from(projection.thread_id.is_some()),
-                "server_epoch": self.server_epoch(),
-                "writer_generation": Value::Null,
+                "server_epoch": if dedicated { json!(physical_server_epoch) } else { json!(self.server_epoch()) },
+                "writer_generation": writer_generation,
             },
             "writer_authority": {
-                "state": "none",
-                "writer_generation": 0,
-                "transaction_id": Value::Null,
-                "reconciliation_action": Value::Null,
+                "state": writer_state,
+                "writer_generation": if owns_writer { self.writer.writer_generation } else { 0 },
+                "transaction_id": if owns_writer { json!(self.writer.transaction_id) } else { Value::Null },
+                "reconciliation_action": if owns_writer { json!(self.writer.recovery_action) } else { Value::Null },
             },
             "server_lane": {
-                "kind": "shared_readonly",
-                "lane_id": Value::Null,
-                "process_generation": Value::Null,
-                "server_epoch": self.server_epoch(),
-                // The Run reached its worker, which owns the profile server
-                // session; the lane itself is not re-probed by a run verb.
-                "state": "unverified",
+                "kind": lane_kind,
+                "lane_id": lane_id,
+                "process_generation": if dedicated && !threadless { json!(projection.run_generation.max(1)) } else { Value::Null },
+                "server_epoch": if dedicated { json!(physical_server_epoch) } else { json!(self.server_epoch()) },
+                "state": lane_state,
                 "socket_identity_sha256": Value::Null,
             },
             "workload_background_state": {
-                "state": "not_applicable",
-                "mechanism": "shared_profile_aggregate",
-                "census_revision": 0,
-                "observed_process_count": 0,
+                "state": if dedicated { "unverified" } else { "not_applicable" },
+                "mechanism": if dedicated { "dedicated_lane_process_census" } else { "shared_profile_aggregate" },
+                "census_revision": if dedicated && observed_process_count.is_some() { json!(self.writer.authority_revision) } else { Value::Null },
+                "observed_process_count": observed_process_count,
                 "quiescent_since": Value::Null,
                 "consecutive_empty_samples": 0,
             },
@@ -1239,7 +3150,7 @@ impl RunSources {
                 "mode_prefix_version": manifest.instructions.mode_prefix_version,
                 "purpose_prefix_version": manifest.instructions.purpose_prefix_version,
             },
-            "lineage": Value::Null,
+            "lineage": lineage,
             "server_epoch": self.server_epoch(),
             "run_generation": projection.run_generation,
             "control_socket_epoch": self.control_socket_epoch,
@@ -1564,9 +3475,10 @@ fn response_body(args: &[OsString]) -> Result<Value, MachineError> {
             ));
         }
         let mut bytes = Vec::new();
-        std::io::Read::take(std::io::stdin(), MAX_RESPONSE_BYTES)
+        std::io::Read::take(std::io::stdin(), MAX_RESPONSE_BYTES.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| MachineError::invalid_argument("stdin", "response read failed"))?;
+        reject_oversized_response(args, &bytes)?;
         return decode_response(&bytes, "stdin");
     };
     let fd = value
@@ -1578,10 +3490,28 @@ fn response_body(args: &[OsString]) -> Result<Value, MachineError> {
             .map_err(|_| MachineError::invalid_argument("--response-fd", "fd is not readable"))?,
     );
     let mut bytes = Vec::new();
-    std::io::Read::take(&mut file, MAX_RESPONSE_BYTES)
+    std::io::Read::take(&mut file, MAX_RESPONSE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| MachineError::invalid_argument("--response-fd", "response read failed"))?;
+    reject_oversized_response(args, &bytes)?;
     decode_response(&bytes, "--response-fd")
+}
+
+fn reject_oversized_response(args: &[OsString], bytes: &[u8]) -> Result<(), MachineError> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= MAX_RESPONSE_BYTES {
+        return Ok(());
+    }
+    Err(MachineError::new(
+        "INTERACTION_RESPONSE_TOO_LARGE",
+        "interaction response exceeds the 1 MiB input limit",
+        false,
+        json!({
+            "run_id": positional_run_id(args)?,
+            "request_id": required(args, "--request-id")?,
+            "observed_bytes": bytes.len(),
+            "limit_bytes": MAX_RESPONSE_BYTES,
+        }),
+    ))
 }
 
 /// One bounded body, canonicalized before it is allowed to travel further.
@@ -1949,6 +3879,7 @@ fn build_manifest(
         required_capabilities,
         thread_id: None,
         fork_provenance: None,
+        write_continuation_provenance: None,
         aggregate_binding: None,
         audit: AuditPolicy::default(),
         compatibility: CompatibilityVerdict::Accepted,
@@ -2012,6 +3943,202 @@ fn start_worker(
             .map_err(|error| error.machine_error(start.run_id, state_root))?;
     crate::worker::start_run_worker(state_root, start)
         .map_err(|error| error.machine_error(start.run_id, &record))
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_run_worker(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<u64, MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    if runtime_record.exists() {
+        let record = crate::worker::read_runtime_record(&runtime_record, uid)
+            .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+        match crate::worker::classify_worker_identity(&record) {
+            crate::worker::ProcessIdentityVerdict::Match => {
+                return Ok(record.control_socket_epoch);
+            }
+            crate::worker::ProcessIdentityVerdict::Absent => {
+                crate::worker::remove_verified_absent_runtime(&runtime_record, uid)
+                    .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+            }
+            verdict => {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the prior worker generation cannot be safely replaced",
+                    false,
+                    json!({
+                        "run_id": run_id,
+                        "generation": record.identity.run_generation,
+                        "identity_verdict": verdict.as_str(),
+                        "reason": "worker_identity_does_not_authorize_replacement",
+                    }),
+                ));
+            }
+        }
+    }
+
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = store.load_manifest(run_id)?;
+    let projection = store.load_state_projection(run_id)?;
+    let state = profile_server_state(view, &manifest.profile.profile_name)?;
+    if state.snapshot.server_key != manifest.profile.initial_server_key {
+        return Err(MachineError::new(
+            "PROFILE_SERVER_EPOCH_MISMATCH",
+            "the run's pinned profile contract is not the active contract",
+            false,
+            json!({
+                "run_id": run_id,
+                "expected_server_key": manifest.profile.initial_server_key,
+                "expected_server_epoch": manifest.profile_capability_snapshot.server_epoch,
+                "actual_server_key": state.snapshot.server_key,
+                "actual_server_epoch": state.server_epoch,
+            }),
+        ));
+    }
+    let efforts = advertised_efforts(&state, &manifest.profile.profile_name, &manifest.model)?;
+    let writer = crate::writer::WriterStore::new(state_root, &manifest.workspace_id, uid).load()?;
+    let owns_write = matches!(
+        writer.state,
+        crate::writer::WriterAuthorityState::Reserved | crate::writer::WriterAuthorityState::Active
+    ) && writer
+        .holder
+        .as_ref()
+        .is_some_and(|holder| holder.run_id == run_id);
+    let run_generation = projection.run_generation.saturating_add(1).max(1);
+    let control_socket_epoch = observed_control_socket_epoch(state_root, run_id)
+        .saturating_add(1)
+        .max(1);
+    let workspace_path = view
+        .canonical_path
+        .to_path_buf()
+        .map_err(|_| internal("workspace path is not representable"))?;
+    let dedicated_server = if manifest.execution_lane == ExecutionLane::Dedicated {
+        let socket_path = crate::worker::dedicated_server_socket_path(uid, run_id, run_generation)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+        let server_epoch = crate::writer::WriterStore::new(state_root, &manifest.workspace_id, uid)
+            .allocate_server_epoch(state.server_epoch)?;
+        Some(DedicatedServerBootstrap {
+            socket_path,
+            argv: manifest.profile.normalized_argv.clone(),
+            cwd: PathBuf::from(&manifest.profile.derived_launch_cwd),
+            environment: manifest.profile.sanitized_environment.clone(),
+            log_path: state_root
+                .join("runs")
+                .join(run_id.to_string())
+                .join(format!("dedicated-server-{run_generation}.log")),
+            executable_device: manifest.profile.executable_identity.device,
+            executable_inode: manifest.profile.executable_identity.inode,
+            executable_sha256: manifest.profile.executable_identity.sha256.clone(),
+            server_epoch,
+        })
+    } else {
+        None
+    };
+    let app_server_socket = dedicated_server.as_ref().map_or_else(
+        || PathBuf::from(&state.socket_path),
+        |server| server.socket_path.clone(),
+    );
+    let server_epoch = dedicated_server
+        .as_ref()
+        .map_or(state.server_epoch, |server| server.server_epoch);
+    let session = WorkerSessionBootstrap {
+        app_server_socket,
+        canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
+        server_key: state.snapshot.server_key.clone(),
+        server_epoch,
+        controller_id: manifest.controller.identity.controller_id,
+        control_mode: manifest.control_mode.as_str().to_owned(),
+        fixed_model: manifest.model.clone(),
+        default_effort: projection
+            .default_effort
+            .clone()
+            .unwrap_or_else(|| manifest.default_reasoning_effort.clone()),
+        supported_efforts: efforts,
+        cwd: workspace_path,
+        developer_instructions: manifest.agent_configuration.normalized_instructions.clone(),
+        sandbox: if owns_write {
+            "workspace-write"
+        } else {
+            "read-only"
+        }
+        .to_owned(),
+        approval_policy: if owns_write { "on-request" } else { "never" }.to_owned(),
+        safety_policy: crate::turn::SessionSafetyPolicy::Standard,
+        artifact_root: state_root
+            .join("runs")
+            .join(run_id.to_string())
+            .join("artifacts"),
+        attach: match &manifest.fork_provenance {
+            Some(provenance) if provenance.mode == "history_copy" => SessionAttach::Fork {
+                source_thread_id: provenance
+                    .source_thread_id
+                    .clone()
+                    .ok_or_else(|| internal("history-copy fork lacks source thread"))?,
+                last_turn_id: provenance
+                    .source_turn_id
+                    .clone()
+                    .ok_or_else(|| internal("history-copy fork lacks source turn"))?,
+            },
+            _ => projection
+                .thread_id
+                .clone()
+                .map_or(SessionAttach::Start, |thread_id| SessionAttach::Resume {
+                    thread_id,
+                }),
+        },
+        transport_timeout_seconds: 900,
+        dedicated_server,
+    };
+    let start = start_worker(
+        state_root,
+        &crate::worker::RunWorkerStart {
+            workspace_id: manifest.workspace_id,
+            run_id,
+            run_generation,
+            ledger_root: state_root.join("runs").join(run_id.to_string()),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
+            control_socket_epoch,
+            profile: manifest.profile.profile_name,
+            session: Some(session),
+        },
+    );
+    if let Err(error) = start {
+        if manifest.execution_lane == ExecutionLane::Dedicated {
+            return Err(MachineError::new(
+                "DEDICATED_SERVER_START_FAILED",
+                "the run-owned dedicated app-server generation did not become ready",
+                true,
+                json!({
+                    "run_id": run_id,
+                    "execution_lane": "dedicated",
+                    "reason": error.message,
+                    "required_action": "retry_dedicated_start",
+                }),
+            ));
+        }
+        return Err(error);
+    }
+    Ok(control_socket_epoch)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_run_worker(
+    _view: &WorkspaceView,
+    _state_root: &Path,
+    run_id: Uuid,
+) -> Result<u64, MachineError> {
+    Err(MachineError::new(
+        "INTERNAL_ERROR",
+        "per-Run workers are supported on macOS only",
+        false,
+        json!({"invariant": format!("worker start is unavailable for {run_id}")}),
+    ))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2141,6 +4268,20 @@ fn positional_turn_id(args: &[OsString]) -> Result<String, MachineError> {
         ));
     }
     Ok(value.to_owned())
+}
+
+fn positional_interaction_id(args: &[OsString]) -> Result<Uuid, MachineError> {
+    let Some(value) = positionals(args).get(1).copied() else {
+        return Err(MachineError::invalid_argument(
+            "request-id",
+            "interaction get requires both run and request ids",
+        ));
+    };
+    value
+        .to_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .filter(|value| value.get_version_num() == 7)
+        .ok_or_else(|| MachineError::invalid_argument("request-id", "request id must be a UUIDv7"))
 }
 
 /// The caller's own `--timeout`, in milliseconds.
@@ -2418,7 +4559,7 @@ fn compatibility_rejected(
 }
 
 /// A control response body is bounded by the interaction payload contract.
-const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 /// A Turn's text is one bounded payload, not a stream: docs/specs/README.md bounds "raw
 /// app-server payloads selected for ledger representation to 2 MiB", and the
 /// message the caller pipes in is exactly such a payload.

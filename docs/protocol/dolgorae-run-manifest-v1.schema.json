@@ -32,6 +32,7 @@
     "required_capabilities",
     "thread_id",
     "fork_provenance",
+    "write_continuation_provenance",
     "aggregate_binding",
     "audit",
     "compatibility"
@@ -74,6 +75,9 @@
     "thread_id": { "type": ["string", "null"], "minLength": 1 },
     "fork_provenance": {
       "oneOf": [{ "$ref": "#/$defs/fork_provenance" }, { "type": "null" }]
+    },
+    "write_continuation_provenance": {
+      "oneOf": [{ "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/write_continuation_lineage" }, { "type": "null" }]
     },
     "aggregate_binding": {
       "oneOf": [{ "$ref": "#/$defs/aggregate_binding" }, { "type": "null" }]
@@ -145,6 +149,50 @@
     {
       "if": { "properties": { "compatibility": { "const": "rejected" } }, "required": ["compatibility"] },
       "then": { "properties": { "app_server": { "properties": { "schema_status": { "const": "rejected" } } } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "fork_provenance": {
+            "properties": { "mode": { "const": "history_copy" } },
+            "required": ["mode"]
+          }
+        },
+        "required": ["fork_provenance"]
+      },
+      "then": {
+        "properties": {
+          "fork_provenance": {
+            "properties": {
+              "source_turn_id": { "type": "string" },
+              "source_thread_id": { "type": "string" },
+              "last_confirmed_boundary": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fork_provenance": {
+            "properties": { "mode": { "const": "fresh" } },
+            "required": ["mode"]
+          }
+        },
+        "required": ["fork_provenance"]
+      },
+      "then": {
+        "properties": {
+          "fork_provenance": {
+            "properties": {
+              "source_turn_id": { "type": "null" },
+              "source_thread_id": { "type": "null" },
+              "last_confirmed_boundary": { "type": "null" }
+            }
+          }
+        }
+      }
     },
     {
       "if": {
@@ -316,12 +364,15 @@
     "fork_provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source_run_id", "source_turn_id", "source_thread_id", "last_confirmed_boundary"],
+      "required": ["source_run_id", "mode", "source_turn_id", "source_thread_id", "last_confirmed_boundary", "observed_source_lifecycle", "unresolved_turn_id"],
       "properties": {
         "source_run_id": { "$ref": "#/$defs/uuid_v7" },
-        "source_turn_id": { "type": "string", "minLength": 1 },
-        "source_thread_id": { "type": "string", "minLength": 1 },
-        "last_confirmed_boundary": { "type": "string", "minLength": 1 }
+        "mode": { "enum": ["history_copy", "fresh"] },
+        "source_turn_id": { "type": ["string", "null"], "minLength": 1 },
+        "source_thread_id": { "type": ["string", "null"], "minLength": 1 },
+        "last_confirmed_boundary": { "type": ["string", "null"], "minLength": 1 },
+        "observed_source_lifecycle": { "enum": ["idle", "running", "waiting_interaction", "reconciliation_required", "paused", "closed", "start_failed", "outcome_unknown"] },
+        "unresolved_turn_id": { "type": ["string", "null"], "minLength": 1 }
       }
     },
     "aggregate_binding": {

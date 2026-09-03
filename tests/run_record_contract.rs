@@ -10,9 +10,10 @@ use dolgorae::projection::RunStateProjection;
 use dolgorae::run::{
     AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind, AppServerFacts, AuditPolicy,
     CapabilityState, CompatibilityVerdict, ControllerBinding, DolgoraeBuild, ExecutableIdentity,
-    InstructionSnapshot, ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest,
-    RunStore, StartReservation, StartReservationStore, agent_configuration_digest,
-    controller_capability_digest, launch_contract_digest, runtime_profile_snapshot_digest,
+    ForkProvenance, InstructionSnapshot, ParentReference, ProfileCapabilitySnapshot,
+    ProfileSnapshot, RunManifest, RunStore, StartReservation, StartReservationStore,
+    WriteContinuationProvenance, agent_configuration_digest, controller_capability_digest,
+    launch_contract_digest, runtime_profile_snapshot_digest,
 };
 use dolgorae::workspace::{GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode};
 use serde_json::Value;
@@ -425,6 +426,113 @@ fn public_parent_metadata_survives_publication_only_within_its_bounds() {
     );
 }
 
+#[test]
+fn write_continuation_lineage_is_immutable_complete_and_dedicated() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let mut manifest = sample_manifest();
+    manifest.execution_lane = ExecutionLane::Dedicated;
+    manifest.agent_configuration.execution_lane = ExecutionLane::Dedicated;
+    manifest.write_continuation_provenance = Some(WriteContinuationProvenance {
+        source_run_id: Uuid::now_v7(),
+        source_turn_id: "turn-source".to_owned(),
+        source_thread_id: "thread-source".to_owned(),
+        creation_reason: "shared_readonly_source".to_owned(),
+        source_controller_kind: "human_cli".to_owned(),
+        destination_controller_kind: "human_cli".to_owned(),
+        handoff_summary_sha256: Some("a".repeat(64)),
+        artifact_refs: vec![Uuid::now_v7()],
+        workspace_baseline_sha256: "b".repeat(64),
+        created_at: "2026-09-03T00:00:00.000000Z".to_owned(),
+    });
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    store.publish(&manifest).unwrap();
+    assert_eq!(
+        store
+            .load_manifest(manifest.run_id)
+            .unwrap()
+            .write_continuation_provenance,
+        manifest.write_continuation_provenance
+    );
+
+    let mut invalid = manifest;
+    invalid.run_id = Uuid::now_v7();
+    invalid.execution_lane = ExecutionLane::SharedReadonly;
+    invalid.agent_configuration.execution_lane = ExecutionLane::SharedReadonly;
+    assert_eq!(
+        store.publish(&invalid).unwrap_err().code,
+        "RUN_STATE_INVARIANT_VIOLATION"
+    );
+}
+
+#[test]
+fn fork_lineage_requires_mode_specific_boundaries_and_a_distinct_source() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+
+    let mut history_copy = sample_manifest();
+    history_copy.fork_provenance = Some(ForkProvenance {
+        source_run_id: Uuid::now_v7(),
+        mode: "history_copy".to_owned(),
+        source_turn_id: Some("turn-source".to_owned()),
+        source_thread_id: Some("thread-source".to_owned()),
+        last_confirmed_boundary: Some("completed".to_owned()),
+        observed_source_lifecycle: "paused".to_owned(),
+        unresolved_turn_id: None,
+    });
+    store.publish(&history_copy).unwrap();
+
+    let mut fresh = sample_manifest();
+    fresh.run_id = Uuid::now_v7();
+    fresh.fork_provenance = Some(ForkProvenance {
+        source_run_id: Uuid::now_v7(),
+        mode: "fresh".to_owned(),
+        source_turn_id: None,
+        source_thread_id: None,
+        last_confirmed_boundary: None,
+        observed_source_lifecycle: "outcome_unknown".to_owned(),
+        unresolved_turn_id: Some("turn-unresolved".to_owned()),
+    });
+    store.publish(&fresh).unwrap();
+
+    let mut incomplete = sample_manifest();
+    incomplete.run_id = Uuid::now_v7();
+    incomplete.fork_provenance = Some(ForkProvenance {
+        source_run_id: Uuid::now_v7(),
+        mode: "history_copy".to_owned(),
+        source_turn_id: None,
+        source_thread_id: Some("thread-source".to_owned()),
+        last_confirmed_boundary: Some("completed".to_owned()),
+        observed_source_lifecycle: "paused".to_owned(),
+        unresolved_turn_id: None,
+    });
+    assert_eq!(
+        store.publish(&incomplete).unwrap_err().code,
+        "RUN_STATE_INVARIANT_VIOLATION"
+    );
+
+    let mut self_referential = sample_manifest();
+    self_referential.run_id = Uuid::now_v7();
+    self_referential.fork_provenance = Some(ForkProvenance {
+        source_run_id: self_referential.run_id,
+        mode: "fresh".to_owned(),
+        source_turn_id: None,
+        source_thread_id: None,
+        last_confirmed_boundary: None,
+        observed_source_lifecycle: "outcome_unknown".to_owned(),
+        unresolved_turn_id: None,
+    });
+    assert_eq!(
+        store.publish(&self_referential).unwrap_err().code,
+        "RUN_STATE_INVARIANT_VIOLATION"
+    );
+}
+
 fn sample_manifest() -> RunManifest {
     let mut environment = BTreeMap::new();
     environment.insert("LANG".to_owned(), "C".to_owned());
@@ -547,6 +655,7 @@ fn sample_manifest() -> RunManifest {
         required_capabilities: vec!["reader".to_owned()],
         thread_id: None,
         fork_provenance: None,
+        write_continuation_provenance: None,
         aggregate_binding: None,
         audit: AuditPolicy::default(),
         compatibility: CompatibilityVerdict::Accepted,

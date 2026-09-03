@@ -153,9 +153,27 @@ pub struct AggregateBinding {
 #[serde(deny_unknown_fields)]
 pub struct ForkProvenance {
     pub source_run_id: Uuid,
+    pub mode: String,
+    pub source_turn_id: Option<String>,
+    pub source_thread_id: Option<String>,
+    pub last_confirmed_boundary: Option<String>,
+    pub observed_source_lifecycle: String,
+    pub unresolved_turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteContinuationProvenance {
+    pub source_run_id: Uuid,
     pub source_turn_id: String,
     pub source_thread_id: String,
-    pub last_confirmed_boundary: String,
+    pub creation_reason: String,
+    pub source_controller_kind: String,
+    pub destination_controller_kind: String,
+    pub handoff_summary_sha256: Option<String>,
+    pub artifact_refs: Vec<Uuid>,
+    pub workspace_baseline_sha256: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -216,6 +234,8 @@ pub struct RunManifest {
     pub required_capabilities: Vec<String>,
     pub thread_id: Option<String>,
     pub fork_provenance: Option<ForkProvenance>,
+    #[serde(default)]
+    pub write_continuation_provenance: Option<WriteContinuationProvenance>,
     pub aggregate_binding: Option<AggregateBinding>,
     pub audit: AuditPolicy,
     pub compatibility: CompatibilityVerdict,
@@ -262,22 +282,31 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         }
     }
 
-    fn root(&self) -> PathBuf {
-        self.state_root.join("idempotency").join("run-start")
+    fn root(&self, operation: &str) -> PathBuf {
+        self.state_root.join("idempotency").join(operation)
     }
 
     /// The file one key is recorded in.
     ///
     /// Named by the key's digest, never by the key itself: an idempotency key
     /// is caller-supplied text and a pathname is not a safe place for it.
-    fn path(&self, idempotency_key: &str) -> PathBuf {
-        self.root()
+    fn path(&self, operation: &str, idempotency_key: &str) -> PathBuf {
+        self.root(operation)
             .join(format!("{}.json", sha256_hex(idempotency_key.as_bytes())))
     }
 
     /// The reservation this key already holds, if any.
     pub fn load(&self, idempotency_key: &str) -> Result<Option<StartReservation>, MachineError> {
-        let path = self.path(idempotency_key);
+        self.load_operation("run-start", "start_run", idempotency_key)
+    }
+
+    pub fn load_operation(
+        &self,
+        directory: &str,
+        operation: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<StartReservation>, MachineError> {
+        let path = self.path(directory, idempotency_key);
         if fs::symlink_metadata(&path).is_err() {
             return Ok(None);
         }
@@ -294,7 +323,7 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         let reservation: StartReservation = serde_json::from_slice(&canonical)
             .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
         if reservation.schema_version != 1
-            || reservation.operation != "start_run"
+            || reservation.operation != operation
             || reservation.idempotency_key != idempotency_key
             || !is_sha256(&reservation.normalized_identity_sha256)
             || reservation.run_id.get_version_num() != 7
@@ -317,7 +346,12 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
     ) -> Result<StartReservation, MachineError> {
         let uid = self.platform.current_uid();
         verify_secure_directory(&self.state_root, uid)?;
-        let root = self.root();
+        let directory = match reservation.operation.as_str() {
+            "start_run" => "run-start",
+            "fork_run" => "run-fork",
+            _ => return Err(reservation_invalid("reservation operation is invalid")),
+        };
+        let root = self.root(directory);
         for directory in [self.state_root.join("idempotency"), root.clone()] {
             match create_directory(&directory, 0o700) {
                 Ok(()) => {}
@@ -326,7 +360,7 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             }
             verify_secure_directory(&directory, uid)?;
         }
-        let path = self.path(&reservation.idempotency_key);
+        let path = self.path(directory, &reservation.idempotency_key);
         let mut bytes = canonicalize(
             &parse(
                 &serde_json::to_string(reservation)
@@ -339,7 +373,11 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         match atomic_create(&self.platform, &path, &bytes, 0o600) {
             Ok(()) => Ok(reservation.clone()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self
-                .load(&reservation.idempotency_key)?
+                .load_operation(
+                    directory,
+                    &reservation.operation,
+                    &reservation.idempotency_key,
+                )?
                 .ok_or_else(|| reservation_invalid("reservation vanished")),
             Err(error) => Err(run_path_error(&path, error.to_string())),
         }
@@ -904,7 +942,8 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
         ));
     }
     validate_controller_and_aggregate(manifest).map_err(invalid)?;
-    validate_fork_provenance(manifest.fork_provenance.as_ref()).map_err(invalid)?;
+    validate_fork_provenance(manifest).map_err(invalid)?;
+    validate_write_continuation(manifest).map_err(invalid)?;
     validate_bounded_metadata(manifest).map_err(invalid)
 }
 
@@ -1026,16 +1065,81 @@ fn sorted_unique(values: &[String]) -> bool {
         && !values.windows(2).any(|pair| pair[0] >= pair[1])
 }
 
-fn validate_fork_provenance(provenance: Option<&ForkProvenance>) -> Result<(), &'static str> {
-    let Some(provenance) = provenance else {
+fn validate_fork_provenance(manifest: &RunManifest) -> Result<(), &'static str> {
+    let Some(provenance) = manifest.fork_provenance.as_ref() else {
         return Ok(());
     };
-    if provenance.source_run_id.get_version_num() != 7
-        || !bounded_identity(&provenance.source_turn_id, 256)
-        || !bounded_identity(&provenance.source_thread_id, 256)
-        || !bounded_identity(&provenance.last_confirmed_boundary, 256)
+    let history_copy = provenance.mode == "history_copy";
+    let fresh = provenance.mode == "fresh";
+    if provenance.source_run_id == manifest.run_id
+        || provenance.source_run_id.get_version_num() != 7
+        || (!history_copy && !fresh)
+        || !bounded_identity(&provenance.observed_source_lifecycle, 64)
+        || history_copy
+            && (provenance
+                .source_turn_id
+                .as_deref()
+                .is_none_or(|value| !bounded_identity(value, 256))
+                || provenance
+                    .source_thread_id
+                    .as_deref()
+                    .is_none_or(|value| !bounded_identity(value, 256))
+                || provenance
+                    .last_confirmed_boundary
+                    .as_deref()
+                    .is_none_or(|value| !bounded_identity(value, 256)))
+        || fresh
+            && (provenance.source_turn_id.is_some()
+                || provenance.source_thread_id.is_some()
+                || provenance.last_confirmed_boundary.is_some())
+        || provenance
+            .unresolved_turn_id
+            .as_deref()
+            .is_some_and(|value| !bounded_identity(value, 256))
     {
         return Err("fork provenance is incomplete or invalid");
+    }
+    Ok(())
+}
+
+fn validate_write_continuation(manifest: &RunManifest) -> Result<(), &'static str> {
+    let Some(provenance) = &manifest.write_continuation_provenance else {
+        return Ok(());
+    };
+    if manifest.execution_lane != ExecutionLane::Dedicated
+        || manifest.fork_provenance.is_some()
+        || provenance.source_run_id == manifest.run_id
+        || provenance.source_run_id.get_version_num() != 7
+        || !bounded_identity(&provenance.source_turn_id, 256)
+        || !bounded_identity(&provenance.source_thread_id, 256)
+        || !matches!(
+            provenance.creation_reason.as_str(),
+            "shared_readonly_source"
+                | "access_transition_unavailable"
+                | "access_transition_unverified"
+        )
+        || !matches!(
+            provenance.source_controller_kind.as_str(),
+            "human_cli" | "interactive_client" | "workflow_orchestrator" | "automation"
+        )
+        || !matches!(
+            provenance.destination_controller_kind.as_str(),
+            "human_cli" | "interactive_client" | "workflow_orchestrator" | "automation"
+        )
+        || provenance.artifact_refs.len() > 64
+        || provenance
+            .artifact_refs
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || !is_sha256(&provenance.workspace_baseline_sha256)
+        || provenance
+            .handoff_summary_sha256
+            .as_deref()
+            .is_some_and(|digest| !is_sha256(digest))
+        || provenance.created_at.len() < 20
+        || !provenance.created_at.ends_with('Z')
+    {
+        return Err("write continuation provenance is incomplete or invalid");
     }
     Ok(())
 }

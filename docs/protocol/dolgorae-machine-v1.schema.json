@@ -2728,7 +2728,7 @@
               "data": {
                 "properties": {
                   "lineage": {
-                    "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/lineage"
+                    "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/write_continuation_lineage"
                   }
                 }
               }

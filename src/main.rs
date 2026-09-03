@@ -5,12 +5,13 @@ use dolgorae::cli::{
     Cli, Command, ControllerCommand, ControllerCredentialCommand, OperatorCommand,
     OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
     ProfileServerCommand, ProfileStateCommand, ReviewTargetCommand, RunCommand,
-    RunControllerCommand, RuntimeCommand, SpecialistCommand, WorkspaceCommand, option_path,
+    RunControllerCommand, RuntimeCommand, SpecialistCommand, WorkspaceCommand,
+    WorkspaceWriterCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{
     CoreSemanticService, RunVerb as SemanticRunVerb, SemanticCommand, SemanticResult,
-    SemanticService,
+    SemanticService, WorkspaceWriterVerb,
 };
 use dolgorae::workspace::WorkspaceMode;
 use serde::Serialize;
@@ -174,6 +175,27 @@ fn execute(cli: Cli) -> ExitCode {
             let _ = args;
             return ExitCode::from(6);
         }
+    }
+    if let Command::Run(run) = &cli.command
+        && let RunCommand::Interaction {
+            command: dolgorae::cli::RunInteractionCommand::Get(args),
+        } = &run.command
+    {
+        let arguments = run_arguments(run, &args.args);
+        return match dolgorae::semantic::interaction_get(&arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed interaction")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
     }
     if let Command::Run(run) = &cli.command
         && let RunCommand::Controller {
@@ -389,6 +411,38 @@ fn execute(cli: Cli) -> ExitCode {
             Err(error) => render_failure(cli.human, command_name, error),
         };
     }
+    if let Command::Workspace {
+        command: WorkspaceCommand::Writer { command },
+    } = &cli.command
+    {
+        let (operation, arguments) = match command {
+            WorkspaceWriterCommand::Status(args) => (WorkspaceWriterVerb::Status, &args.args),
+            WorkspaceWriterCommand::Reset(args) => (WorkspaceWriterVerb::Reset, &args.args),
+            WorkspaceWriterCommand::HandoffPrepare(args) => {
+                (WorkspaceWriterVerb::HandoffPrepare, &args.args)
+            }
+            WorkspaceWriterCommand::HandoffCommit(args) => {
+                (WorkspaceWriterVerb::HandoffCommit, &args.args)
+            }
+            WorkspaceWriterCommand::HandoffCancel(args) => {
+                (WorkspaceWriterVerb::HandoffCancel, &args.args)
+            }
+        };
+        return match dolgorae::semantic::workspace_writer(operation, arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed writer result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
     let semantic_command = match &cli.command {
         Command::Worker(_) => unreachable!("hidden worker handled before semantic dispatch"),
         Command::SpecialistReviewMcp(_) => {
@@ -421,6 +475,9 @@ fn execute(cli: Cli) -> ExitCode {
                 );
             }
         },
+        Command::Workspace {
+            command: WorkspaceCommand::Writer { .. },
+        } => unreachable!("workspace writer handled before semantic dispatch"),
         Command::Run(run) if run_verb(&run.command).is_some() => {
             let (verb, leaf) = run_verb(&run.command).expect("guard proves a supported run verb");
             SemanticCommand::Run {
@@ -477,8 +534,20 @@ fn run_verb(command: &RunCommand) -> Option<(SemanticRunVerb, &[OsString])> {
         RunCommand::Submit(leaf) => (SemanticRunVerb::Submit, leaf.args.as_slice()),
         RunCommand::Wait(leaf) => (SemanticRunVerb::Wait, leaf.args.as_slice()),
         RunCommand::Events(leaf) => (SemanticRunVerb::Events, leaf.args.as_slice()),
+        RunCommand::Pending(leaf) => (SemanticRunVerb::Pending, leaf.args.as_slice()),
         RunCommand::Respond(leaf) => (SemanticRunVerb::Respond, leaf.args.as_slice()),
         RunCommand::Interrupt(leaf) => (SemanticRunVerb::Interrupt, leaf.args.as_slice()),
+        RunCommand::Pause(leaf) => (SemanticRunVerb::Pause, leaf.args.as_slice()),
+        RunCommand::Resume(leaf) => (SemanticRunVerb::Resume, leaf.args.as_slice()),
+        RunCommand::Recover(leaf) => (SemanticRunVerb::Recover, leaf.args.as_slice()),
+        RunCommand::Reconcile(leaf) => (SemanticRunVerb::Reconcile, leaf.args.as_slice()),
+        RunCommand::Fork(leaf) => (SemanticRunVerb::Fork, leaf.args.as_slice()),
+        RunCommand::AcquireWrite(leaf) => (SemanticRunVerb::AcquireWrite, leaf.args.as_slice()),
+        RunCommand::ReleaseWrite(leaf) => (SemanticRunVerb::ReleaseWrite, leaf.args.as_slice()),
+        RunCommand::CreateWriteContinuation(leaf) => (
+            SemanticRunVerb::CreateWriteContinuation,
+            leaf.args.as_slice(),
+        ),
         RunCommand::Close(leaf) => (SemanticRunVerb::Close, leaf.args.as_slice()),
         _ => return None,
     })

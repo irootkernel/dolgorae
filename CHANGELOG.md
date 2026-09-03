@@ -17,6 +17,8 @@ development commits.
 - Reconnectable Controller-authorized command, file-change, and user-input
   interactions.
 - Conservative pause, resume, close, and terminal cleanup for persistent runs.
+- Outcome-unknown reconciliation and provenance-preserving run forks with an
+  explicit fresh escape.
 
 ### Changed
 
