@@ -2078,30 +2078,12 @@ fn reset_writer(
     let writer =
         crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
     let current = writer.load()?;
-    if let Some(holder) = &current.holder {
-        let path = crate::worker::runtime_record_path(
-            &crate::worker::runtime_root(state_root),
-            holder.run_id,
-        )
-        .map_err(|error| error.machine_error(holder.run_id, state_root))?;
-        if std::fs::symlink_metadata(&path).is_ok() {
-            let record = crate::worker::read_runtime_record(&path, DarwinSystem.current_uid())
-                .map_err(|error| error.machine_error(holder.run_id, &path))?;
-            if crate::worker::prove_worker_generation_absent(&record).is_err() {
-                authorization.release();
-                return Err(MachineError::new(
-                    "RECOVERY_REQUIRED",
-                    "the recorded writer worker and process group have not been proved absent",
-                    false,
-                    json!({
-                        "run_id": holder.run_id,
-                        "generation": holder.worker_generation,
-                        "identity_verdict": crate::worker::classify_worker_identity(&record).as_str(),
-                        "reason": "worker_or_group_absence_unverified",
-                    }),
-                ));
-            }
-        }
+    if let Some(holder) = &current.holder
+        && let Err(error) =
+            prove_recorded_writer_absent(state_root, holder, DarwinSystem.current_uid())
+    {
+        authorization.release();
+        return Err(error);
     }
     let (record, ()) = writer.transact(|record| {
         if !matches!(record.state, crate::writer::WriterAuthorityState::BlockedUnknown | crate::writer::WriterAuthorityState::None) {
@@ -2128,6 +2110,42 @@ fn reset_writer(
     authorization.release();
     let _ = record;
     writer.status_value()
+}
+
+fn prove_recorded_writer_absent(
+    state_root: &Path,
+    holder: &crate::writer::WriterHolder,
+    uid: u32,
+) -> Result<(), MachineError> {
+    let path =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), holder.run_id)
+            .map_err(|_| recorded_writer_absence_unverified(holder, "unverifiable"))?;
+    let record = crate::worker::read_runtime_record(&path, uid)
+        .map_err(|_| recorded_writer_absence_unverified(holder, "unverifiable"))?;
+    crate::worker::prove_worker_generation_absent(&record).map_err(|_| {
+        recorded_writer_absence_unverified(
+            holder,
+            crate::worker::classify_worker_identity(&record).as_str(),
+        )
+    })?;
+    Ok(())
+}
+
+fn recorded_writer_absence_unverified(
+    holder: &crate::writer::WriterHolder,
+    identity_verdict: &str,
+) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the recorded writer worker and process group have not been proved absent",
+        false,
+        json!({
+            "run_id": holder.run_id,
+            "generation": holder.worker_generation,
+            "identity_verdict": identity_verdict,
+            "reason": "worker_or_group_absence_unverified",
+        }),
+    )
 }
 
 fn prepare_writer_handoff(
@@ -5198,5 +5216,39 @@ mod tests {
             assert_eq!(error.details["destination_run_id"], destination.to_string());
             assert_eq!(error.details["blockers"], json!(expected_blockers));
         }
+    }
+
+    /// SPEC-007: missing runtime identity is not worker-absence evidence. A
+    /// reset must retain `blocked_unknown` until it can run the complete
+    /// recorded-generation identity and process census proof.
+    #[test]
+    fn writer_reset_rejects_missing_recorded_worker_evidence() {
+        let run_id = Uuid::now_v7();
+        let holder = crate::writer::WriterHolder {
+            run_id,
+            profile: "writer".to_owned(),
+            controller_id: Uuid::now_v7(),
+            controller_generation: 1,
+            run_generation: 1,
+            worker_generation: 1,
+            profile_server_key: "0".repeat(64),
+            profile_server_epoch: 1,
+            thread_id: None,
+            lifecycle: RunLifecycle::OutcomeUnknown,
+        };
+        let state_root = std::env::temp_dir().join(format!("dlg-reset-missing-{run_id}"));
+
+        let error = prove_recorded_writer_absent(&state_root, &holder, DarwinSystem.current_uid())
+            .unwrap_err();
+
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert!(!error.retryable);
+        assert_eq!(error.details["run_id"], run_id.to_string());
+        assert_eq!(error.details["generation"], 1);
+        assert_eq!(error.details["identity_verdict"], "unverifiable");
+        assert_eq!(
+            error.details["reason"],
+            "worker_or_group_absence_unverified"
+        );
     }
 }
