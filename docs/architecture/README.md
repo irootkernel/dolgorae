@@ -663,6 +663,12 @@ migration enumerate the shared lane plus every dedicated-lane record. Restart
 brings back the shared server and starts dedicated generations lazily on Run
 resume.
 
+The writer component owns the workspace-scoped revisioned authority record and
+its permanent writer and handoff lock identities. The workspace component
+creates that private layout, while the semantic composition layer coordinates
+short PREPARE and COMMIT mutations with Controller-authorized worker policy
+changes. No filesystem lock remains held while a worker or App Server answers.
+
 `control_mode` is independent of `purpose` and lane. Direct interactive Runs
 are controlled by a human CLI or interactive client. Managed Runs are
 controlled by an orchestrator, the internal Orchestration Broker, or automation.

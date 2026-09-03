@@ -58,7 +58,7 @@ or any safety limitation stated in its owning Epic.
 | Version | Classification | Required completion boundary | Cumulative product milestones |
 | --- | --- | --- | --- |
 | `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
-| `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; `TASK-017` remains `PLANNED` | `MILESTONE-SR1`, `MILESTONE-IR1` |
+| `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
 | `v0.1.3` | Milestone Preview | `EPIC-008` complete, including the preceding `EPIC-007` control-plane core | Through `MILESTONE-BH1` |
 | `v0.1.4` | Milestone Preview | `EPIC-009` complete | Through `MILESTONE-BC1` |
@@ -814,16 +814,23 @@ run a fresh Codex Reviewer without Orca objects. Completion unlocks
 
 ## EPIC-005: Access, Interaction, and Recovery Safety
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
-Detailed SOT: [EPIC-005 dossier](../todo/TODO-EPIC-005-access-interaction-recovery-safety.md)
+Canonical Outcomes: [access specification](../specs/README.md#spec-007-access-and-concurrency),
+[lifecycle and recovery specification](../specs/README.md#spec-008-run-lifecycle-recovery-and-forking),
+[interaction specification](../specs/README.md#spec-009-pending-requests-and-approvals),
+[recovery architecture](../architecture/README.md#recovery-and-reconciliation),
+[process-cleanup architecture](../architecture/README.md#process-cleanup),
+[writer implementation](../../src/writer.rs),
+[turn implementation](../../src/turn.rs), and
+[worker black-box tests](../../tests/e2e/test_worker_cli.py)
 
 Goal: Enforce Dolgorae's one-durable-writer-authority-per-worktree scope,
 Controller-authorized interaction, and conservative failure semantics.
 
 ### TASK-017: Durable Writer Authority and Cross-Profile Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Build on TASK-008's read-only Specialist and ordinary reader baseline.
 First establish canonical `~/.dolgorae` as the only per-user configuration and
@@ -887,7 +894,7 @@ state conflict. No task claims OS ownership of shared App Server descendants.
 
 ### TASK-018: Pending Requests and Approvals
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement discriminated normalized command/file approval and pinned experimental
 user-input interactions; generation- and server-epoch-qualified
@@ -915,7 +922,7 @@ methods.
 
 ### TASK-019: Pause, Close, and Lifecycle Shutdown
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement idle pause/resume, interrupting pause/close, immutable close,
 generation-level access instruction replacement, verified socket cleanup,
@@ -933,7 +940,7 @@ protocol-supported background absence; unverified execution remains blocked.
 
 ### TASK-020: Process Identity and Group Recovery
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement four-verdict worker and Dedicated Run Server process identity,
 boot-session proof, complete
@@ -958,7 +965,7 @@ signal; no unrelated signal under injected PID/PGID reuse.
 
 ### TASK-021: History Reconciliation, Outcome Unknown, and Fork
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement persisted thread-history reconciliation across a proved-absent old
 epoch and compatible new epoch, `outcome_unknown`,
