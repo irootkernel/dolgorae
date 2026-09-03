@@ -11,6 +11,52 @@ use std::time::Duration;
 
 const F_SETLKWTIMEOUT: libc::c_int = 10;
 const DARWIN_NSIG: libc::c_int = 32;
+const PROC_PIDTBSDINFO: libc::c_int = 3;
+const SZOMB: u32 = 5;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcBsdInfo {
+    flags: u32,
+    status: u32,
+    xstatus: u32,
+    pid: u32,
+    parent_pid: u32,
+    uid: u32,
+    gid: u32,
+    real_uid: u32,
+    real_gid: u32,
+    saved_uid: u32,
+    saved_gid: u32,
+    reserved: u32,
+    command: [libc::c_char; 16],
+    name: [libc::c_char; 32],
+    open_file_count: u32,
+    process_group_id: u32,
+    process_job_control_count: u32,
+    controlling_terminal_device: u32,
+    terminal_process_group_id: u32,
+    nice: i32,
+    start_tvsec: u64,
+    start_tvusec: u64,
+}
+
+#[link(name = "proc")]
+unsafe extern "C" {
+    fn proc_pidinfo(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        argument: u64,
+        buffer: *mut libc::c_void,
+        buffer_size: libc::c_int,
+    ) -> libc::c_int;
+    fn proc_listpgrppids(
+        process_group_id: libc::pid_t,
+        buffer: *mut libc::c_void,
+        buffer_size: libc::c_int,
+    ) -> libc::c_int;
+    fn proc_listallpids(buffer: *mut libc::c_void, buffer_size: libc::c_int) -> libc::c_int;
+}
 
 #[repr(C)]
 struct FlockTimeout {
@@ -32,6 +78,49 @@ pub struct LiveProcessIdentity {
     pub uid: u32,
     pub process_group_id: u32,
     pub fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BsdProcessIdentity {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub uid: u32,
+    pub process_group_id: u32,
+    pub session_id: u32,
+    pub start_tvsec: u64,
+    pub start_tvusec: u64,
+    pub zombie: bool,
+}
+
+#[derive(Debug)]
+pub struct ProcessExitWatch {
+    queue: OwnedFd,
+}
+
+impl ProcessExitWatch {
+    pub fn exited(&self) -> Result<bool, std::io::Error> {
+        let mut event = MaybeUninit::<libc::kevent>::zeroed();
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: the queue descriptor is live, the output points to one
+        // writable kevent, and the zero timeout is borrowed only for the call.
+        let count = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                event.as_mut_ptr(),
+                1,
+                &raw const timeout,
+            )
+        };
+        if count < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(count == 1)
+    }
 }
 
 /// The account and platform runtime fields a launched Runtime Profile needs,
@@ -56,6 +145,237 @@ pub struct AccountEnvironment {
 }
 
 impl DarwinSystem {
+    pub fn watch_process_exit(self, pid: u32) -> Result<ProcessExitWatch, std::io::Error> {
+        let pid = libc::pid_t::try_from(pid)
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: kqueue has no arguments and returns a new owned descriptor.
+        let raw = unsafe { libc::kqueue() };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: raw is the newly-created descriptor and ownership transfers
+        // exactly once into OwnedFd.
+        let queue = unsafe { OwnedFd::from_raw_fd(raw) };
+        let change = libc::kevent {
+            ident: pid as usize,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: the input points to one initialized kevent and no output or
+        // timeout is requested for this registration call.
+        let registered = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                &raw const change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if registered < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(ProcessExitWatch { queue })
+    }
+
+    pub fn boot_session_uuid(self) -> Result<String, std::io::Error> {
+        let name = c"kern.bootsessionuuid";
+        let mut length = 0_usize;
+        // SAFETY: the first sysctlbyname call has a null output buffer and only
+        // initializes `length` for a fixed kernel-owned scalar string.
+        if unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+            || !(2..=128).contains(&length)
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut bytes = vec![0_u8; length];
+        // SAFETY: `bytes` owns `length` writable bytes and sysctlbyname updates
+        // only that buffer and the live length scalar.
+        if unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                &raw mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+            || length == 0
+            || length > bytes.len()
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        bytes.truncate(length);
+        if bytes.last() == Some(&0) {
+            bytes.pop();
+        }
+        let value = String::from_utf8(bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "boot session UUID is not UTF-8",
+            )
+        })?;
+        uuid::Uuid::parse_str(&value).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "boot session UUID is invalid",
+            )
+        })?;
+        Ok(value)
+    }
+
+    pub fn bsd_process_identity(self, pid: u32) -> Result<BsdProcessIdentity, std::io::Error> {
+        let pid = libc::c_int::try_from(pid).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "process ID is invalid")
+        })?;
+        let mut info = MaybeUninit::<ProcBsdInfo>::zeroed();
+        let expected = libc::c_int::try_from(std::mem::size_of::<ProcBsdInfo>())
+            .expect("proc_bsdinfo size fits c_int");
+        // SAFETY: proc_pidinfo receives one correctly sized writable
+        // ProcBsdInfo buffer. A short result is rejected before assume_init.
+        let read =
+            unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), expected) };
+        if read != expected {
+            return Err(if read == 0 {
+                std::io::Error::from_raw_os_error(libc::ESRCH)
+            } else if read < 0 {
+                std::io::Error::last_os_error()
+            } else {
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "short BSD process identity",
+                )
+            });
+        }
+        // SAFETY: the exact structure size was initialized above.
+        let info = unsafe { info.assume_init() };
+        // SAFETY: getsid performs a read-only lookup and retains no pointer.
+        let session = unsafe { libc::getsid(pid) };
+        if session < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(BsdProcessIdentity {
+            pid: info.pid,
+            parent_pid: info.parent_pid,
+            uid: info.uid,
+            process_group_id: info.process_group_id,
+            session_id: u32::try_from(session).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid session ID")
+            })?,
+            start_tvsec: info.start_tvsec,
+            start_tvusec: info.start_tvusec,
+            zombie: info.status == SZOMB,
+        })
+    }
+
+    pub fn process_group_pids(self, process_group_id: u32) -> Result<Vec<u32>, std::io::Error> {
+        if process_group_id <= 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "process group must be greater than one",
+            ));
+        }
+        let process_group_id = libc::pid_t::try_from(process_group_id).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "process group is invalid")
+        })?;
+        let mut capacity = 32_usize;
+        loop {
+            let mut pids = vec![0 as libc::pid_t; capacity];
+            let byte_size = capacity
+                .checked_mul(std::mem::size_of::<libc::pid_t>())
+                .and_then(|value| libc::c_int::try_from(value).ok())
+                .ok_or_else(|| std::io::Error::other("process group census is too large"))?;
+            // SAFETY: `pids` owns `byte_size` writable bytes and the API
+            // returns a PID count, not a byte count.
+            let count =
+                unsafe { proc_listpgrppids(process_group_id, pids.as_mut_ptr().cast(), byte_size) };
+            if count < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let count = usize::try_from(count)
+                .map_err(|_| std::io::Error::other("invalid process group census count"))?;
+            if count > capacity {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "process group census overran its capacity",
+                ));
+            }
+            if count == capacity {
+                capacity = capacity
+                    .checked_mul(2)
+                    .filter(|value| *value <= 1_048_576)
+                    .ok_or_else(|| {
+                        std::io::Error::other("process group census did not converge")
+                    })?;
+                continue;
+            }
+            pids.truncate(count);
+            let mut result = Vec::with_capacity(count);
+            for pid in pids {
+                if pid > 0 {
+                    result.push(u32::try_from(pid).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid census PID")
+                    })?);
+                }
+            }
+            result.sort_unstable();
+            result.dedup();
+            return Ok(result);
+        }
+    }
+
+    pub fn all_process_identities(self) -> Result<Vec<BsdProcessIdentity>, std::io::Error> {
+        let mut capacity = 1_024_usize;
+        loop {
+            let mut pids = vec![0 as libc::pid_t; capacity];
+            let byte_size = capacity
+                .checked_mul(std::mem::size_of::<libc::pid_t>())
+                .and_then(|value| libc::c_int::try_from(value).ok())
+                .ok_or_else(|| std::io::Error::other("all-process census is too large"))?;
+            // SAFETY: `pids` owns `byte_size` writable bytes and libproc
+            // retains no pointer after returning.
+            let count = unsafe { proc_listallpids(pids.as_mut_ptr().cast(), byte_size) };
+            if count < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let count = usize::try_from(count)
+                .map_err(|_| std::io::Error::other("invalid all-process census count"))?;
+            if count >= capacity {
+                capacity = capacity
+                    .checked_mul(2)
+                    .filter(|value| *value <= 1_048_576)
+                    .ok_or_else(|| std::io::Error::other("all-process census did not converge"))?;
+                continue;
+            }
+            pids.truncate(count);
+            let mut identities = Vec::with_capacity(count);
+            for pid in pids {
+                if pid <= 0 {
+                    continue;
+                }
+                match self.bsd_process_identity(u32::try_from(pid).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid census PID")
+                })?) {
+                    Ok(identity) => identities.push(identity),
+                    Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(identities);
+        }
+    }
     pub fn duplicate_fd_cloexec(self, fd: RawFd) -> Result<OwnedFd, std::io::Error> {
         // SAFETY: fcntl borrows the caller's descriptor and returns a distinct
         // descriptor on success. Ownership of that new descriptor is transferred
@@ -550,6 +870,12 @@ impl DarwinSystem {
         pgid: u32,
         signal: libc::c_int,
     ) -> Result<(), std::io::Error> {
+        if pgid <= 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "process group is invalid",
+            ));
+        }
         let pgid = libc::pid_t::try_from(pgid).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "process group is invalid")
         })?;
@@ -1056,5 +1382,25 @@ mod tests {
         // Reading it twice is the same answer: it is a lookup, not a
         // snapshot of mutable process state.
         assert_eq!(DarwinSystem.account_environment().unwrap(), account);
+    }
+
+    #[test]
+    fn kernel_boot_identity_and_bsd_process_census_are_self_consistent() {
+        let boot = DarwinSystem.boot_session_uuid().unwrap();
+        assert!(!uuid::Uuid::parse_str(&boot).unwrap().is_nil());
+
+        let pid = std::process::id();
+        let identity = DarwinSystem.bsd_process_identity(pid).unwrap();
+        assert_eq!(identity.pid, pid);
+        assert_eq!(identity.uid, DarwinSystem.current_uid());
+        assert!(!identity.zombie);
+        assert!(identity.start_tvsec > 0);
+
+        let members = DarwinSystem
+            .process_group_pids(identity.process_group_id)
+            .unwrap();
+        assert!(members.binary_search(&pid).is_ok());
+        assert!(DarwinSystem.process_group_pids(1).is_err());
+        assert!(DarwinSystem.signal_process_group(1, 0).is_err());
     }
 }

@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "server_key", "lifecycle", "server_epoch", "epoch_id",
+    "schema_version", "server_key", "lifecycle", "server_epoch", "epoch_id", "boot_session_uuid",
     "pid", "pgid", "uid", "process_fingerprint", "drainer_pid", "drainer_pgid",
     "drainer_uid", "drainer_fingerprint", "socket_path", "socket_device",
     "socket_inode", "membership_revision", "default_model", "models",
@@ -17,6 +17,7 @@
     "lifecycle": { "enum": ["starting", "ready", "degraded", "stopping", "restarting", "migrating", "migration_blocked"] },
     "server_epoch": { "type": "integer", "minimum": 1 },
     "epoch_id": { "type": "string", "format": "uuid" },
+    "boot_session_uuid": { "type": "string", "format": "uuid" },
     "pid": { "type": "integer", "minimum": 1 },
     "pgid": { "type": "integer", "minimum": 1 },
     "uid": { "type": "integer", "minimum": 0 },

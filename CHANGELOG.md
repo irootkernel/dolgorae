@@ -22,6 +22,8 @@ development commits.
 
 - Changed `version`, `--version`, and `-V` to compact `dolgorae v<version>`
   output and added exact two-field JSON through `version --json`.
+- Run and profile recovery now require four-verdict Darwin process identity
+  before cleanup or live-socket repair.
 
 ## v0.1.1 - 2026-08-31
 

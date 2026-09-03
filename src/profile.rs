@@ -133,6 +133,7 @@ pub struct ServerState {
     pub lifecycle: String,
     pub server_epoch: u64,
     pub epoch_id: Uuid,
+    pub boot_session_uuid: Uuid,
     pub pid: u32,
     pub pgid: u32,
     pub uid: u32,
@@ -2813,8 +2814,13 @@ fn clear_stale_socket(
             json!(false),
         )
     })?;
-    let stale_still_alive =
-        process_identity_matches(stale.pid, stale.uid, stale.pgid, &stale.process_fingerprint);
+    let stale_still_alive = process_identity_matches_on_boot(
+        stale.boot_session_uuid,
+        stale.pid,
+        stale.uid,
+        stale.pgid,
+        &stale.process_fingerprint,
+    );
     if stale.server_key != snapshot.server_key
         || stale.socket_path != path_utf8(socket)?
         || stale.socket_device != metadata.dev()
@@ -3032,6 +3038,8 @@ fn commit_start(
         lifecycle: "ready".to_owned(),
         server_epoch: reservation.epoch,
         epoch_id: Uuid::now_v7(),
+        boot_session_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().map_err(internal)?)
+            .map_err(internal)?,
         pid: applied.pid,
         pgid: applied.pid,
         uid: applied.process_identity.uid,
@@ -3510,6 +3518,7 @@ fn live_member_evidence(index: &MembershipIndex) -> Vec<Value> {
 
 /// APPLY: signal the process group and wait for it to go. No lock held.
 fn apply_stop(state: &ServerState) -> Result<(), MachineError> {
+    verify_live_process_identity(state)?;
     DarwinSystem
         .signal_process_group(state.pgid, libc::SIGTERM)
         .map_err(transport)?;
@@ -3704,6 +3713,18 @@ fn restore_stopping_reservation(
 }
 
 fn verify_live_process_identity(state: &ServerState) -> Result<(), MachineError> {
+    let current_boot = DarwinSystem
+        .boot_session_uuid()
+        .ok()
+        .and_then(|value| Uuid::parse_str(&value).ok());
+    if current_boot != Some(state.boot_session_uuid) {
+        return Err(profile_mismatch(
+            &state.snapshot.profile_name,
+            "boot_session_uuid",
+            json!(state.boot_session_uuid),
+            json!(current_boot),
+        ));
+    }
     let expected = json!({
         "uid": state.uid,
         "process_group_id": state.pgid,
@@ -3818,7 +3839,13 @@ fn read_state_if_running(path: &Path) -> Result<Option<ServerState>, MachineErro
     let Some(state) = read_state(path)? else {
         return Ok(None);
     };
-    if process_identity_matches(state.pid, state.uid, state.pgid, &state.process_fingerprint) {
+    if process_identity_matches_on_boot(
+        state.boot_session_uuid,
+        state.pid,
+        state.uid,
+        state.pgid,
+        &state.process_fingerprint,
+    ) {
         Ok(Some(state))
     } else {
         Ok(None)
@@ -3856,6 +3883,21 @@ fn process_identity_matches(pid: u32, uid: u32, pgid: u32, fingerprint: &str) ->
         })
 }
 
+fn process_identity_matches_on_boot(
+    boot_session_uuid: Uuid,
+    pid: u32,
+    uid: u32,
+    pgid: u32,
+    fingerprint: &str,
+) -> bool {
+    DarwinSystem
+        .boot_session_uuid()
+        .ok()
+        .and_then(|value| Uuid::parse_str(&value).ok())
+        .is_some_and(|current| current == boot_session_uuid)
+        && process_identity_matches(pid, uid, pgid, fingerprint)
+}
+
 /// Proves a recorded server_key's process, drainer, and socket are all
 /// absent — the "recorded lifetime absent" proof crash-recovery repair
 /// (`profile state reset`, migration-fence repair) requires before acting.
@@ -3867,7 +3909,8 @@ fn server_lifetime_absent(context: &Context, server_key: &str) -> Result<bool, M
         return Ok(false);
     }
     if let Some(state) = read_state(&state_path)?
-        && (process_identity_matches(
+        && (process_identity_matches_on_boot(
+            state.boot_session_uuid,
             state.drainer_pid,
             state.drainer_uid,
             state.drainer_pgid,
@@ -6131,6 +6174,7 @@ mod tests {
             lifecycle: "ready".to_owned(),
             server_epoch: 1,
             epoch_id: Uuid::now_v7(),
+            boot_session_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap(),
             pid: 1,
             pgid: 1,
             uid: DarwinSystem.current_uid(),
