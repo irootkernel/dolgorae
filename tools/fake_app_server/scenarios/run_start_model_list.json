@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "run_start_model_list",
-  "description": "The whole model/list surface one `run start` walks: the profile probe's catalogue, the effort resolution that follows it, and a worker attach that is refused once so membership order is observable.",
+  "description": "The complete paginated model/list surface used by a profile probe, a lazy run start, and a fresh fork.",
   "codex_home": "/tmp/codex-home",
   "steps": [
     {
@@ -13,16 +13,6 @@
           "capabilities": {
             "experimentalApi": false
           }
-        }
-      }
-    },
-    {
-      "method": "initialize",
-      "occurrence": 3,
-      "respond": {
-        "error": {
-          "code": -32000,
-          "message": "this connection is refused so the worker never publishes"
         }
       }
     },

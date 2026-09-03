@@ -194,7 +194,8 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError("uninitialized start returned the wrong error")
 
         lock_root = state_root / "runtime" / "locks"
-        lock_root.rmdir()
+        displaced_lock_root = lock_root.with_name("locks-displaced")
+        lock_root.rename(displaced_lock_root)
         lock_root.mkdir(mode=0o700)
         replaced = run(
             binary,

@@ -708,6 +708,48 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         self.append_terminal_pair(evidence, seal)
     }
 
+    /// Pause an idle, unsealed Run without constructing a worker or touching
+    /// its app-server lane. This is the authority used by a threadless Run:
+    /// there is no external effect to interrupt or reconcile, but the
+    /// lifecycle transition still belongs in the conformant durable ledger.
+    pub fn pause_idle(&mut self, timestamp: &str) -> Result<ConformanceReport, ConformanceError> {
+        let report = self.verify()?;
+        if report.terminal_sealed || report.lifecycle != RunLifecycle::Idle {
+            return Err(ConformanceError::InvalidHistory(
+                "pause_idle requires an unsealed idle run".to_owned(),
+            ));
+        }
+        let transition = self.next_record(
+            timestamp,
+            AuditKind::LifecycleTransition,
+            transition_payload(RunLifecycle::Idle, RunLifecycle::Paused, false),
+        )?;
+        self.append(transition, AppendDurability::Required)?;
+        self.verify()
+    }
+
+    /// Publish a newly allocated public Run as idle without constructing a
+    /// worker or Codex thread. Lazy worker allocation must not leave a
+    /// successfully returned Run in the transient `starting` lifecycle.
+    pub fn mark_threadless_ready(
+        &mut self,
+        timestamp: &str,
+    ) -> Result<ConformanceReport, ConformanceError> {
+        let report = self.verify()?;
+        if report.terminal_sealed || report.lifecycle != RunLifecycle::Starting {
+            return Err(ConformanceError::InvalidHistory(
+                "threadless readiness requires an unsealed starting run".to_owned(),
+            ));
+        }
+        let transition = self.next_record(
+            timestamp,
+            AuditKind::LifecycleTransition,
+            transition_payload(RunLifecycle::Starting, RunLifecycle::Idle, false),
+        )?;
+        self.append(transition, AppendDurability::Required)?;
+        self.verify()
+    }
+
     #[allow(
         dead_code,
         reason = "TASK-004 interrupt owner will call this sealed boundary"

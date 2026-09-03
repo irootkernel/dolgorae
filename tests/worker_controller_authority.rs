@@ -99,7 +99,13 @@ fn worker_identity(run_id: Uuid) -> WorkerIdentity {
         boot_uuid: Uuid::parse_str("2e349290-1744-4fc3-bb62-9cbf9f5859c0").unwrap(),
         pid: std::process::id(),
         process_group_id: std::process::id(),
+        session_id: std::process::id(),
         uid: fs::metadata(".").unwrap().uid(),
+        start_tvsec: 1,
+        start_tvusec: 0,
+        executable_path: PathBuf::from("/usr/bin/true"),
+        executable_device: 1,
+        executable_inode: 1,
         executable_sha256: "2".repeat(64),
     }
 }
@@ -317,7 +323,8 @@ fn worker_revalidates_every_mutating_request_against_the_current_binding() {
             caller: None,
             expected: worker.identity.clone(),
             request_id: 7001,
-            response: serde_json::json!({"decision": "approved"}),
+            idempotency_key: "approval-7001".to_owned(),
+            response: serde_json::json!({"decision": "accept_once"}),
         },
         ControlRequestV1::Interrupt {
             caller: None,
@@ -795,6 +802,7 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         required_capabilities: vec!["reader".to_owned()],
         thread_id: None,
         fork_provenance: None,
+        write_continuation_provenance: None,
         aggregate_binding: None,
         audit: AuditPolicy::default(),
         compatibility: CompatibilityVerdict::Accepted,

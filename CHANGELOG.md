@@ -16,6 +16,7 @@ development commits.
   continuations, and safe cross-profile handoff.
 - Reconnectable Controller-authorized command, file-change, and user-input
   interactions.
+- Conservative pause, resume, close, and terminal cleanup for persistent runs.
 
 ### Changed
 

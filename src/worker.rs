@@ -26,7 +26,7 @@ use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, Write};
 use std::os::fd::RawFd;
@@ -36,8 +36,9 @@ use std::os::unix::fs::{
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 #[cfg(target_os = "macos")]
-use std::process::{Child, Command};
+use std::process::Command;
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -114,7 +115,13 @@ pub struct WorkerIdentity {
     pub boot_uuid: Uuid,
     pub pid: u32,
     pub process_group_id: u32,
+    pub session_id: u32,
     pub uid: u32,
+    pub start_tvsec: u64,
+    pub start_tvusec: u64,
+    pub executable_path: PathBuf,
+    pub executable_device: u64,
+    pub executable_inode: u64,
     pub executable_sha256: String,
 }
 
@@ -219,12 +226,61 @@ impl WorkerIdentity {
             || self.boot_uuid.is_nil()
             || self.pid == 0
             || self.process_group_id == 0
+            || self.session_id == 0
+            || self.start_tvsec == 0
+            || !self.executable_path.is_absolute()
+            || self.executable_device == 0
+            || self.executable_inode == 0
             || decode_sha256(&self.executable_sha256).is_none()
         {
             return Err(WorkerProtocolError::InvalidIdentity);
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn current_worker_identity(
+    bootstrap: &WorkerBootstrap,
+    process: crate::providers::ProcessIdentity,
+) -> Result<WorkerIdentity, WorkerProtocolError> {
+    let before = DarwinSystem
+        .bsd_process_identity(process.pid)
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if before.zombie
+        || before.pid != process.pid
+        || before.uid != process.uid
+        || before.process_group_id != process.process_group_id
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let executable_path = DarwinSystem
+        .realpath(&std::env::current_exe().map_err(|_| WorkerProtocolError::Io)?)
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    let metadata = fs::metadata(&executable_path).map_err(|_| WorkerProtocolError::Io)?;
+    let executable_sha256 = file_sha256(&executable_path)?;
+    let after = DarwinSystem
+        .bsd_process_identity(process.pid)
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if before != after || executable_sha256 != bootstrap.executable_sha256 {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    Ok(WorkerIdentity {
+        workspace_id: bootstrap.workspace_id.clone(),
+        run_id: bootstrap.run_id,
+        run_generation: bootstrap.run_generation,
+        boot_uuid: bootstrap.boot_uuid,
+        pid: process.pid,
+        process_group_id: process.process_group_id,
+        session_id: before.session_id,
+        uid: process.uid,
+        start_tvsec: before.start_tvsec,
+        start_tvusec: before.start_tvusec,
+        executable_path,
+        executable_device: metadata.dev(),
+        executable_inode: metadata.ino(),
+        executable_sha256,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -242,9 +298,427 @@ pub struct WorkerRuntimeRecord {
     pub socket_path: PathBuf,
     pub socket_identity: SocketIdentity,
     pub control_socket_epoch: u64,
+    #[serde(default)]
+    pub app_server_epoch: Option<u64>,
+    #[serde(default)]
+    pub dedicated_server_identity: Option<DedicatedServerIdentity>,
     pub dolgorae_version: String,
     pub mutation_protocol_version: u32,
     pub binary_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedServerIdentity {
+    pub pid: u32,
+    pub process_group_id: u32,
+    pub session_id: u32,
+    pub uid: u32,
+    pub start_tvsec: u64,
+    pub start_tvusec: u64,
+    pub executable_path: PathBuf,
+    pub executable_device: u64,
+    pub executable_inode: u64,
+    pub executable_sha256: String,
+}
+
+impl DedicatedServerIdentity {
+    fn validate(&self) -> Result<(), WorkerProtocolError> {
+        if self.pid == 0
+            || self.process_group_id == 0
+            || self.session_id == 0
+            || !self.executable_path.is_absolute()
+            || self.executable_device == 0
+            || self.executable_inode == 0
+            || decode_sha256(&self.executable_sha256).is_none()
+        {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessIdentityVerdict {
+    Absent,
+    Mismatch,
+    Match,
+    Unverifiable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackgroundAbsenceEvidence {
+    pub census_revision: u64,
+    pub consecutive_empty_samples: u8,
+}
+
+/// Prove that a live worker's process group has no workload descendants.
+///
+/// The worker itself is the sole allowed member. Every sample revalidates the
+/// full recorded identity before trusting the PGID, and any census error or
+/// additional member fails closed without signalling it.
+pub fn prove_worker_workload_absent(
+    record: &WorkerRuntimeRecord,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    prove_group_empty(record, true)
+}
+
+/// Prove that a recorded worker generation and its entire process group are
+/// absent. This is the stronger recovery/reset predicate: a matching live
+/// leader is not absence, while PID reuse or unreadable identity is never
+/// silently treated as safe.
+pub fn prove_worker_generation_absent(
+    record: &WorkerRuntimeRecord,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    prove_group_empty(record, false)
+}
+
+fn prove_group_empty(
+    record: &WorkerRuntimeRecord,
+    allow_recorded_worker: bool,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    let expected = if allow_recorded_worker {
+        ProcessIdentityVerdict::Match
+    } else {
+        ProcessIdentityVerdict::Absent
+    };
+    for sample in 0..5_u8 {
+        if classify_worker_identity(record) != expected {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        if let Some(server) = &record.dedicated_server_identity {
+            let expected_server = if allow_recorded_worker {
+                ProcessIdentityVerdict::Match
+            } else {
+                ProcessIdentityVerdict::Absent
+            };
+            if classify_dedicated_server_identity(server) != expected_server
+                || !dedicated_group_has_only_expected_leader(server, allow_recorded_worker)?
+            {
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
+        }
+        let mut members = DarwinSystem
+            .process_group_pids(record.identity.process_group_id)
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        if !allow_recorded_worker {
+            members.retain(|pid| *pid != record.identity.pid);
+        }
+        let census = DarwinSystem
+            .all_process_identities()
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        let mut enumerated_group = census
+            .iter()
+            .filter(|identity| {
+                identity.process_group_id == record.identity.process_group_id
+                    && (allow_recorded_worker || identity.pid != record.identity.pid)
+            })
+            .map(|identity| identity.pid)
+            .collect::<Vec<_>>();
+        enumerated_group.sort_unstable();
+        if enumerated_group != members {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        let by_pid = census
+            .iter()
+            .map(|identity| (identity.pid, identity.parent_pid))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let unexpected = census.iter().any(|identity| {
+            if allow_recorded_worker && identity.pid == record.identity.pid {
+                return false;
+            }
+            if record
+                .dedicated_server_identity
+                .as_ref()
+                .is_some_and(|server| identity.pid == server.pid)
+            {
+                return false;
+            }
+            if !allow_recorded_worker
+                && identity.zombie
+                && identity.pid == record.identity.pid
+                && identity.uid == record.identity.uid
+                && identity.process_group_id == record.identity.process_group_id
+                && identity.session_id == record.identity.session_id
+                && identity.start_tvsec == record.identity.start_tvsec
+                && identity.start_tvusec == record.identity.start_tvusec
+            {
+                return false;
+            }
+            let same_scope = process_is_in_scope(
+                identity,
+                record.identity.pid,
+                record.identity.process_group_id,
+                record.identity.session_id,
+                &by_pid,
+            );
+            same_scope || (!allow_recorded_worker && identity.pid == record.identity.pid)
+        });
+        if unexpected {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        if sample < 4 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(BackgroundAbsenceEvidence {
+        census_revision: record.control_socket_epoch,
+        consecutive_empty_samples: 5,
+    })
+}
+
+fn dedicated_group_has_only_expected_leader(
+    server: &DedicatedServerIdentity,
+    allow_leader: bool,
+) -> Result<bool, WorkerProtocolError> {
+    let mut members = DarwinSystem
+        .process_group_pids(server.process_group_id)
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if !allow_leader {
+        members.retain(|pid| *pid != server.pid);
+    }
+    let census = DarwinSystem
+        .all_process_identities()
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    let mut enumerated = census
+        .iter()
+        .filter(|identity| {
+            identity.process_group_id == server.process_group_id
+                && (allow_leader || identity.pid != server.pid)
+        })
+        .map(|identity| identity.pid)
+        .collect::<Vec<_>>();
+    enumerated.sort_unstable();
+    if enumerated != members {
+        return Ok(false);
+    }
+    let by_pid = census
+        .iter()
+        .map(|identity| (identity.pid, identity.parent_pid))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Ok(!census.iter().any(|identity| {
+        if allow_leader && identity.pid == server.pid {
+            return false;
+        }
+        if !allow_leader
+            && identity.zombie
+            && identity.pid == server.pid
+            && identity.uid == server.uid
+            && identity.process_group_id == server.process_group_id
+            && identity.session_id == server.session_id
+            && identity.start_tvsec == server.start_tvsec
+            && identity.start_tvusec == server.start_tvusec
+        {
+            return false;
+        }
+        process_is_in_scope(
+            identity,
+            server.pid,
+            server.process_group_id,
+            server.session_id,
+            &by_pid,
+        )
+    }))
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn classify_dedicated_server_identity(
+    identity: &DedicatedServerIdentity,
+) -> ProcessIdentityVerdict {
+    if identity.validate().is_err() {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
+    let watch = match DarwinSystem.watch_process_exit(identity.pid) {
+        Ok(watch) => watch,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return ProcessIdentityVerdict::Absent;
+        }
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let before = match DarwinSystem.bsd_process_identity(identity.pid) {
+        Ok(value) if value.zombie => return ProcessIdentityVerdict::Absent,
+        Ok(value) => value,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return ProcessIdentityVerdict::Absent;
+        }
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    if before.pid != identity.pid
+        || before.uid != identity.uid
+        || before.process_group_id != identity.process_group_id
+        || before.session_id != identity.session_id
+        || before.start_tvsec != identity.start_tvsec
+        || before.start_tvusec != identity.start_tvusec
+    {
+        return ProcessIdentityVerdict::Mismatch;
+    }
+    let mut executable = match File::open(&identity.executable_path) {
+        Ok(file) => file,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let metadata = match executable.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let digest = match file_sha256_reader(&mut executable) {
+        Ok(digest) => digest,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let after = match DarwinSystem.bsd_process_identity(identity.pid) {
+        Ok(value) => value,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return ProcessIdentityVerdict::Absent;
+        }
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    if after != before {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
+    match watch.exited() {
+        Ok(true) => return ProcessIdentityVerdict::Absent,
+        Ok(false) => {}
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    }
+    if metadata.dev() != identity.executable_device
+        || metadata.ino() != identity.executable_inode
+        || digest != identity.executable_sha256
+    {
+        ProcessIdentityVerdict::Mismatch
+    } else {
+        ProcessIdentityVerdict::Match
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn classify_dedicated_server_identity(
+    _identity: &DedicatedServerIdentity,
+) -> ProcessIdentityVerdict {
+    ProcessIdentityVerdict::Unverifiable
+}
+
+fn process_descends_from(
+    mut pid: u32,
+    ancestor: u32,
+    parents: &std::collections::BTreeMap<u32, u32>,
+) -> bool {
+    for _ in 0..256 {
+        let Some(parent) = parents.get(&pid).copied() else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        if parent <= 1 || parent == pid {
+            return false;
+        }
+        pid = parent;
+    }
+    false
+}
+
+fn process_is_in_scope(
+    identity: &crate::darwin::BsdProcessIdentity,
+    leader_pid: u32,
+    process_group_id: u32,
+    session_id: u32,
+    parents: &std::collections::BTreeMap<u32, u32>,
+) -> bool {
+    identity.process_group_id == process_group_id
+        || identity.session_id == session_id
+        || process_descends_from(identity.pid, leader_pid, parents)
+}
+
+impl ProcessIdentityVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Mismatch => "Mismatch",
+            Self::Match => "Match",
+            Self::Unverifiable => "Unverifiable",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentityVerdict {
+    if record.validate().is_err() {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
+    let current_boot = match DarwinSystem.boot_session_uuid() {
+        Ok(value) => value,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    if Uuid::parse_str(&current_boot).ok() != Some(record.identity.boot_uuid) {
+        return ProcessIdentityVerdict::Absent;
+    }
+    let exit_watch = match DarwinSystem.watch_process_exit(record.identity.pid) {
+        Ok(watch) => watch,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return ProcessIdentityVerdict::Absent;
+        }
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    match exit_watch.exited() {
+        Ok(true) => return ProcessIdentityVerdict::Absent,
+        Ok(false) => {}
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    }
+    let before = match DarwinSystem.bsd_process_identity(record.identity.pid) {
+        Ok(value) if value.zombie => return ProcessIdentityVerdict::Absent,
+        Ok(value) => value,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return ProcessIdentityVerdict::Absent;
+        }
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    if before.pid != record.identity.pid
+        || before.uid != record.identity.uid
+        || before.process_group_id != record.identity.process_group_id
+        || before.session_id != record.identity.session_id
+        || before.start_tvsec != record.identity.start_tvsec
+        || before.start_tvusec != record.identity.start_tvusec
+    {
+        return ProcessIdentityVerdict::Mismatch;
+    }
+    let mut executable = match File::open(&record.identity.executable_path) {
+        Ok(file) => file,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let metadata = match executable.metadata() {
+        Ok(value) => value,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let digest = match file_sha256_reader(&mut executable) {
+        Ok(value) => value,
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    let after = match DarwinSystem.bsd_process_identity(record.identity.pid) {
+        Ok(value) => value,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            return ProcessIdentityVerdict::Absent;
+        }
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    };
+    if after != before {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
+    match exit_watch.exited() {
+        Ok(true) => return ProcessIdentityVerdict::Absent,
+        Ok(false) => {}
+        Err(_) => return ProcessIdentityVerdict::Unverifiable,
+    }
+    if metadata.dev() != record.identity.executable_device
+        || metadata.ino() != record.identity.executable_inode
+        || digest != record.identity.executable_sha256
+    {
+        ProcessIdentityVerdict::Mismatch
+    } else {
+        ProcessIdentityVerdict::Match
+    }
 }
 
 #[derive(Debug)]
@@ -513,6 +987,7 @@ impl WorkerRuntimeRecord {
         self.identity.validate()?;
         if self.schema_version != 1
             || self.control_socket_epoch == 0
+            || self.app_server_epoch == Some(0)
             || self.socket_identity.device == 0
             || self.socket_identity.inode == 0
             || self.dolgorae_version.is_empty()
@@ -527,6 +1002,9 @@ impl WorkerRuntimeRecord {
                 )?
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        if let Some(identity) = &self.dedicated_server_identity {
+            identity.validate()?;
         }
         Ok(())
     }
@@ -711,6 +1189,7 @@ pub enum ControlRequestV1 {
         #[serde(default)]
         caller: Option<ExecutingBuild>,
         request_id: u64,
+        idempotency_key: String,
         response: Value,
     },
     Interrupt {
@@ -719,6 +1198,28 @@ pub enum ControlRequestV1 {
         /// does not share.
         #[serde(default)]
         caller: Option<ExecutingBuild>,
+    },
+    Pause {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        interrupt: bool,
+    },
+    Resume {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+    },
+    Reconcile {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+    },
+    SettleLifecycleTimeout {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        close: bool,
     },
     /// End the Run.  `interrupt` is the caller's explicit authorization to
     /// interrupt live work: docs/specs/README.md refuses a running or waiting Run without
@@ -730,6 +1231,14 @@ pub enum ControlRequestV1 {
         #[serde(default)]
         caller: Option<ExecutingBuild>,
         interrupt: bool,
+    },
+    SetWriterAccess {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        write: bool,
+        writer_generation: u64,
+        transaction_id: Uuid,
     },
     /// Report this Run's authoritative state to an operator controller reset
     /// that has already fenced it with a durable prepare.
@@ -766,7 +1275,12 @@ impl ControlRequestV1 {
             | Self::Events { expected, .. }
             | Self::Respond { expected, .. }
             | Self::Interrupt { expected, .. }
+            | Self::Pause { expected, .. }
+            | Self::Resume { expected, .. }
+            | Self::Reconcile { expected, .. }
+            | Self::SettleLifecycleTimeout { expected, .. }
             | Self::Close { expected, .. }
+            | Self::SetWriterAccess { expected, .. }
             | Self::ResetFence { expected, .. } => expected,
         }
     }
@@ -784,7 +1298,12 @@ impl ControlRequestV1 {
             | Self::Events { caller, .. }
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
+            | Self::Pause { caller, .. }
+            | Self::Resume { caller, .. }
+            | Self::Reconcile { caller, .. }
+            | Self::SettleLifecycleTimeout { caller, .. }
             | Self::Close { caller, .. }
+            | Self::SetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => caller.as_ref(),
         }
     }
@@ -804,7 +1323,12 @@ impl ControlRequestV1 {
             | Self::Events { caller, .. }
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
+            | Self::Pause { caller, .. }
+            | Self::Resume { caller, .. }
+            | Self::Reconcile { caller, .. }
+            | Self::SettleLifecycleTimeout { caller, .. }
             | Self::Close { caller, .. }
+            | Self::SetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => *caller = Some(build),
         }
     }
@@ -838,7 +1362,12 @@ impl ControlRequestV1 {
                 | Self::Submit { .. }
                 | Self::Respond { .. }
                 | Self::Interrupt { .. }
+                | Self::Pause { .. }
+                | Self::Resume { .. }
+                | Self::Reconcile { .. }
+                | Self::SettleLifecycleTimeout { .. }
                 | Self::Close { .. }
+                | Self::SetWriterAccess { .. }
         )
     }
 
@@ -871,7 +1400,14 @@ impl ControlRequestV1 {
             Self::Events { .. } => "run.events",
             Self::Respond { .. } => "run.respond",
             Self::Interrupt { .. } => "run.interrupt",
+            Self::Pause { .. } => "run.pause",
+            Self::Resume { .. } => "run.resume",
+            Self::Reconcile { .. } => "run.reconcile",
+            Self::SettleLifecycleTimeout { close: true, .. } => "run.close",
+            Self::SettleLifecycleTimeout { close: false, .. } => "run.pause",
             Self::Close { .. } => "run.close",
+            Self::SetWriterAccess { write: true, .. } => "run.acquire_write",
+            Self::SetWriterAccess { write: false, .. } => "run.release_write",
             Self::ResetFence { .. } => "run.controller.reset",
         }
     }
@@ -1040,6 +1576,7 @@ pub enum ControlResponseV1 {
     },
     Responded {
         request_id: u64,
+        resolution_receipt_id: Option<Uuid>,
     },
     Interrupted {
         thread_id: String,
@@ -1064,6 +1601,11 @@ pub enum ControlResponseV1 {
     },
     Closed {
         identity: WorkerIdentity,
+        thread_id: Option<String>,
+    },
+    WriterAccessChanged {
+        write: bool,
+        writer_generation: u64,
         thread_id: Option<String>,
     },
     /// A refusal the caller reads as a machine error.
@@ -1268,6 +1810,8 @@ pub struct WorkerSessionBootstrap {
     pub canonical_codex_home: String,
     pub server_key: String,
     pub server_epoch: u64,
+    pub controller_id: Uuid,
+    pub control_mode: String,
     pub fixed_model: String,
     pub default_effort: String,
     pub supported_efforts: Vec<String>,
@@ -1280,6 +1824,39 @@ pub struct WorkerSessionBootstrap {
     pub artifact_root: PathBuf,
     pub attach: SessionAttach,
     pub transport_timeout_seconds: u64,
+    #[serde(default)]
+    pub dedicated_server: Option<DedicatedServerBootstrap>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedServerBootstrap {
+    pub socket_path: PathBuf,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub environment: BTreeMap<String, String>,
+    pub log_path: PathBuf,
+    pub executable_device: u64,
+    pub executable_inode: u64,
+    pub executable_sha256: String,
+    pub server_epoch: u64,
+}
+
+impl DedicatedServerBootstrap {
+    fn validate(&self) -> Result<(), WorkerProtocolError> {
+        if !self.socket_path.is_absolute()
+            || self.argv.first().is_none_or(String::is_empty)
+            || !self.cwd.is_absolute()
+            || !self.log_path.is_absolute()
+            || self.executable_device == 0
+            || self.executable_inode == 0
+            || decode_sha256(&self.executable_sha256).is_none()
+            || self.server_epoch == 0
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1301,6 +1878,11 @@ impl WorkerSessionBootstrap {
             || !Path::new(&self.canonical_codex_home).is_absolute()
             || decode_sha256(&self.server_key).is_none()
             || self.server_epoch == 0
+            || self.controller_id.get_version_num() != 7
+            || !matches!(
+                self.control_mode.as_str(),
+                "direct_interactive" | "managed_agent"
+            )
             || self.fixed_model.is_empty()
             || self.default_effort.is_empty()
             || !self.supported_efforts.contains(&self.default_effort)
@@ -1317,6 +1899,14 @@ impl WorkerSessionBootstrap {
             && (self.sandbox != "read-only" || self.approval_policy != "never")
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        if let Some(dedicated) = &self.dedicated_server {
+            dedicated.validate()?;
+            if dedicated.socket_path != self.app_server_socket
+                || dedicated.server_epoch != self.server_epoch
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
         }
         Ok(())
     }
@@ -1406,11 +1996,25 @@ enum SessionCommand {
     },
     Respond {
         request_id: u64,
+        idempotency_key: String,
         response: Value,
     },
     Interrupt,
+    Pause {
+        interrupt: bool,
+    },
+    Resume,
+    Reconcile,
+    SettleLifecycleTimeout {
+        close: bool,
+    },
     Close {
         interrupt: bool,
+    },
+    SetWriterAccess {
+        write: bool,
+        writer_generation: u64,
+        transaction_id: Uuid,
     },
     /// Report the Run's authoritative state to a fenced controller reset.
     ResetFence {
@@ -2180,6 +2784,13 @@ impl AppServer for SessionServer {
         self.send(&serde_json::json!({"id": id, "result": result}))
     }
 
+    fn respond_sensitive_result(&mut self, id: u64, result: &mut Value) -> Result<(), TurnError> {
+        let mut envelope = serde_json::json!({"id": id, "result": result.take()});
+        let outcome = self.wire.send_sensitive(&envelope).map_err(TurnError::from);
+        crate::turn::zeroize_protected_json(&mut envelope);
+        outcome
+    }
+
     fn respond_error(&mut self, id: u64, code: i64, message: &str) -> Result<(), TurnError> {
         self.send(&serde_json::json!({"id": id, "error": {"code": code, "message": message}}))
     }
@@ -2228,6 +2839,20 @@ pub struct WorkerSession {
     /// The coordinator, until the drain thread takes ownership of it.
     coordinator: Mutex<Option<SessionCoordinator>>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    dedicated_server: Mutex<Option<OwnedDedicatedServer>>,
+}
+
+struct OwnedDedicatedServer {
+    child: Child,
+    identity: DedicatedServerIdentity,
+    socket_path: PathBuf,
+    socket_identity: SocketIdentity,
+}
+
+impl OwnedDedicatedServer {
+    fn identity(&self) -> &DedicatedServerIdentity {
+        &self.identity
+    }
 }
 
 /// One Turn as a control caller asks for it.
@@ -2269,14 +2894,22 @@ impl WorkerSession {
         let foreign_diagnostics = Box::new(ProfileForeignDiagnostics {
             profile_root: profile_diagnostics_root(state_root, &session.server_key)?,
         });
-        let wire = Arc::new(
-            DuplexConnection::connect(
-                &session.app_server_socket,
-                Duration::from_secs(session.transport_timeout_seconds),
-            )
-            .map_err(|_| WorkerProtocolError::AppServerUnavailable)?,
-        );
         let artifacts = FileArtifactStore::open(&session.artifact_root, uid)?;
+        let mut dedicated_server = session
+            .dedicated_server
+            .as_ref()
+            .map(start_dedicated_server)
+            .transpose()?;
+        let wire = match DuplexConnection::connect(
+            &session.app_server_socket,
+            Duration::from_secs(session.transport_timeout_seconds),
+        ) {
+            Ok(wire) => Arc::new(wire),
+            Err(_) => {
+                let _ = stop_dedicated_server(&mut dedicated_server);
+                return Err(WorkerProtocolError::AppServerUnavailable);
+            }
+        };
         let attach = match &session.attach {
             SessionAttach::Start => ThreadAttach::Start,
             SessionAttach::Resume { thread_id } => ThreadAttach::Resume {
@@ -2298,6 +2931,11 @@ impl WorkerSession {
             let mailbox = Arc::clone(&mailbox);
             move || read_app_server(&wire, &mailbox)
         });
+        let replayed = ledger
+            .lock()
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?
+            .projection()
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
         let coordinator = TurnCoordinator::initialize(
             SessionServer::new(
                 Arc::clone(&wire),
@@ -2320,18 +2958,28 @@ impl WorkerSession {
                 run_generation,
                 server_key: session.server_key.clone(),
                 server_epoch: session.server_epoch,
+                run_id: facts.run_id,
+                controller_id: session.controller_id,
+                control_mode: session.control_mode.clone(),
             },
             &session.canonical_codex_home,
         );
-        let coordinator = match coordinator {
+        let mut coordinator = match coordinator {
             Ok(coordinator) => coordinator,
             Err(_) => {
                 mailbox.stop();
                 wire.shutdown();
                 let _ = reader.join();
+                let _ = stop_dedicated_server(&mut dedicated_server);
                 return Err(WorkerProtocolError::AppServerUnavailable);
             }
         };
+        coordinator.restore_durable_state(
+            replayed.lifecycle,
+            replayed.thread_id,
+            replayed.active_turn_id,
+            replayed.latest_turn_id,
+        );
         let progress = Arc::new(SessionProgress::new(facts.clone()));
         progress.publish(
             coordinator_control_state(&coordinator, false),
@@ -2346,6 +2994,7 @@ impl WorkerSession {
             progress,
             coordinator: Mutex::new(Some(coordinator)),
             workers: Mutex::new(vec![reader]),
+            dedicated_server: Mutex::new(dedicated_server),
         })
     }
 
@@ -2394,6 +3043,14 @@ impl WorkerSession {
     #[must_use]
     pub fn thread_id(&self) -> Option<String> {
         self.progress.thread_id()
+    }
+
+    #[must_use]
+    pub fn dedicated_server_identity(&self) -> Option<DedicatedServerIdentity> {
+        self.dedicated_server
+            .lock()
+            .ok()
+            .and_then(|server| server.as_ref().map(|server| server.identity().clone()))
     }
 
     /// Start a Turn.  `Send` additionally waits on published Run state until
@@ -2548,6 +3205,7 @@ impl WorkerSession {
         operation: &'static str,
         credential: CredentialCarrier,
         request_id: u64,
+        idempotency_key: String,
         response: Value,
     ) -> ControlResponseV1 {
         self.dispatch(
@@ -2555,6 +3213,7 @@ impl WorkerSession {
             credential,
             SessionCommand::Respond {
                 request_id,
+                idempotency_key,
                 response,
             },
         )
@@ -2568,6 +3227,44 @@ impl WorkerSession {
         self.dispatch(operation, credential, SessionCommand::Interrupt)
     }
 
+    pub fn pause(
+        &self,
+        operation: &'static str,
+        credential: CredentialCarrier,
+        interrupt: bool,
+    ) -> ControlResponseV1 {
+        self.dispatch(operation, credential, SessionCommand::Pause { interrupt })
+    }
+
+    pub fn resume(
+        &self,
+        operation: &'static str,
+        credential: CredentialCarrier,
+    ) -> ControlResponseV1 {
+        self.dispatch(operation, credential, SessionCommand::Resume)
+    }
+
+    pub fn reconcile(
+        &self,
+        operation: &'static str,
+        credential: CredentialCarrier,
+    ) -> ControlResponseV1 {
+        self.dispatch(operation, credential, SessionCommand::Reconcile)
+    }
+
+    pub fn settle_lifecycle_timeout(
+        &self,
+        operation: &'static str,
+        credential: CredentialCarrier,
+        close: bool,
+    ) -> ControlResponseV1 {
+        self.dispatch(
+            operation,
+            credential,
+            SessionCommand::SettleLifecycleTimeout { close },
+        )
+    }
+
     pub fn close(
         &self,
         operation: &'static str,
@@ -2575,6 +3272,25 @@ impl WorkerSession {
         interrupt: bool,
     ) -> ControlResponseV1 {
         self.dispatch(operation, credential, SessionCommand::Close { interrupt })
+    }
+
+    pub fn set_writer_access(
+        &self,
+        operation: &'static str,
+        credential: CredentialCarrier,
+        write: bool,
+        writer_generation: u64,
+        transaction_id: Uuid,
+    ) -> ControlResponseV1 {
+        self.dispatch(
+            operation,
+            credential,
+            SessionCommand::SetWriterAccess {
+                write,
+                writer_generation,
+                transaction_id,
+            },
+        )
     }
 
     /// The last Turn this generation drained to a terminal, for `status`.
@@ -2652,7 +3368,248 @@ impl WorkerSession {
         for worker in workers {
             let _ = worker.join();
         }
+        if let Ok(mut owned) = self.dedicated_server.lock() {
+            let _ = stop_dedicated_server(&mut owned);
+        }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn start_dedicated_server(
+    config: &DedicatedServerBootstrap,
+) -> Result<OwnedDedicatedServer, WorkerProtocolError> {
+    config.validate()?;
+    let executable = Path::new(&config.argv[0]);
+    let executable_metadata =
+        fs::metadata(executable).map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if executable_metadata.dev() != config.executable_device
+        || executable_metadata.ino() != config.executable_inode
+        || file_sha256(executable)? != config.executable_sha256
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let socket_parent = config
+        .socket_path
+        .parent()
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    prepare_socket_root(DarwinSystem.current_uid(), socket_parent)?;
+    if fs::symlink_metadata(&config.socket_path).is_ok() {
+        return Err(WorkerProtocolError::SocketIdentityMismatch);
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&config.log_path)
+        .map_err(|_| WorkerProtocolError::Io)?;
+    let stderr = log.try_clone().map_err(|_| WorkerProtocolError::Io)?;
+    let mut command = Command::new(executable);
+    command
+        .args(&config.argv[1..])
+        .args(["app-server", "--listen"])
+        .arg(format!("unix://{}", config.socket_path.display()))
+        .current_dir(&config.cwd)
+        .env_clear()
+        .envs(&config.environment)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(stderr));
+    let mut child = DarwinSystem
+        .spawn_detached(&mut command)
+        .map_err(|_| WorkerProtocolError::WorkerStartFailed)?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .unwrap_or_else(Instant::now);
+    loop {
+        if let Ok(socket_metadata) = fs::symlink_metadata(&config.socket_path) {
+            if !socket_metadata.file_type().is_socket()
+                || socket_metadata.uid() != DarwinSystem.current_uid()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkerProtocolError::SocketIdentityMismatch);
+            }
+            if fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)).is_err()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkerProtocolError::Io);
+            }
+            let process = match DarwinSystem.bsd_process_identity(child.id()) {
+                Ok(process) => process,
+                Err(_) => {
+                    terminate_unpublished_child(&mut child);
+                    return Err(WorkerProtocolError::InvalidIdentity);
+                }
+            };
+            if process.zombie
+                || process.process_group_id != child.id()
+                || process.session_id != child.id()
+                || process.uid != DarwinSystem.current_uid()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
+            let executable_path = match DarwinSystem.realpath(executable) {
+                Ok(path) => path,
+                Err(_) => {
+                    terminate_unpublished_child(&mut child);
+                    return Err(WorkerProtocolError::InvalidIdentity);
+                }
+            };
+            return Ok(OwnedDedicatedServer {
+                child,
+                identity: DedicatedServerIdentity {
+                    pid: process.pid,
+                    process_group_id: process.process_group_id,
+                    session_id: process.session_id,
+                    uid: process.uid,
+                    start_tvsec: process.start_tvsec,
+                    start_tvusec: process.start_tvusec,
+                    executable_path,
+                    executable_device: executable_metadata.dev(),
+                    executable_inode: executable_metadata.ino(),
+                    executable_sha256: config.executable_sha256.clone(),
+                },
+                socket_path: config.socket_path.clone(),
+                socket_identity: SocketIdentity {
+                    device: socket_metadata.dev(),
+                    inode: socket_metadata.ino(),
+                },
+            });
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => return Err(WorkerProtocolError::WorkerStartFailed),
+            Err(_) => {
+                terminate_unpublished_child(&mut child);
+                return Err(WorkerProtocolError::Io);
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                terminate_unpublished_child(&mut child);
+                return Err(WorkerProtocolError::WorkerStartFailed);
+            }
+            Ok(None) => {}
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_dedicated_server(
+    _config: &DedicatedServerBootstrap,
+) -> Result<OwnedDedicatedServer, WorkerProtocolError> {
+    Err(WorkerProtocolError::WorkerStartFailed)
+}
+
+fn terminate_unpublished_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn stop_dedicated_server(
+    server: &mut Option<OwnedDedicatedServer>,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    let Some(mut server) = server.take() else {
+        return Ok(BackgroundAbsenceEvidence {
+            census_revision: 0,
+            consecutive_empty_samples: 5,
+        });
+    };
+    let controlled = classify_dedicated_server_identity(&server.identity)
+        == ProcessIdentityVerdict::Match
+        && dedicated_group_safe_to_signal(&server.identity);
+    if controlled {
+        let _ = DarwinSystem.signal_process_group(server.identity.process_group_id, libc::SIGTERM);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .unwrap_or_else(Instant::now);
+        while Instant::now() < deadline {
+            if DarwinSystem
+                .process_group_pids(server.identity.process_group_id)
+                .is_ok_and(|members| members.is_empty())
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if DarwinSystem
+            .process_group_pids(server.identity.process_group_id)
+            .is_ok_and(|members| !members.is_empty())
+            && dedicated_group_safe_to_signal(&server.identity)
+        {
+            let _ =
+                DarwinSystem.signal_process_group(server.identity.process_group_id, libc::SIGKILL);
+        }
+    }
+    if !controlled {
+        let _ = server.child.try_wait();
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let total_deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .unwrap_or_else(Instant::now);
+    while Instant::now() < total_deadline {
+        if server
+            .child
+            .try_wait()
+            .map_err(|_| WorkerProtocolError::Io)?
+            .is_some()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let mut empty_samples = 0_u8;
+    for sample in 0..5_u8 {
+        if !DarwinSystem
+            .process_group_pids(server.identity.process_group_id)
+            .is_ok_and(|members| members.is_empty())
+        {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        empty_samples += 1;
+        if sample < 4 {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&server.socket_path)
+        && metadata.file_type().is_socket()
+        && metadata.uid() == server.identity.uid
+        && metadata.dev() == server.socket_identity.device
+        && metadata.ino() == server.socket_identity.inode
+    {
+        fs::remove_file(&server.socket_path).map_err(|_| WorkerProtocolError::Io)?;
+    }
+    Ok(BackgroundAbsenceEvidence {
+        census_revision: server.identity.start_tvsec,
+        consecutive_empty_samples: empty_samples,
+    })
+}
+
+fn dedicated_group_safe_to_signal(identity: &DedicatedServerIdentity) -> bool {
+    let Ok(members) = DarwinSystem.process_group_pids(identity.process_group_id) else {
+        return false;
+    };
+    let Ok(census) = DarwinSystem.all_process_identities() else {
+        return false;
+    };
+    let by_pid = census
+        .iter()
+        .map(|process| (process.pid, process.parent_pid))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    members.iter().all(|pid| {
+        census
+            .iter()
+            .find(|process| process.pid == *pid)
+            .is_some_and(|process| {
+                process.uid == identity.uid
+                    && (process.pid == identity.pid
+                        || process.session_id == identity.session_id
+                        || process_descends_from(process.pid, identity.pid, &by_pid))
+            })
+    })
 }
 
 impl Drop for WorkerSession {
@@ -2869,12 +3826,85 @@ fn perform(
         }
         SessionCommand::Respond {
             request_id,
+            idempotency_key,
             response,
-        } => match coordinator.respond(request_id, response) {
-            Ok(()) => ControlResponseV1::Responded { request_id },
+        } => match coordinator.respond(request_id, idempotency_key, response) {
+            Ok(resolution_receipt_id) => ControlResponseV1::Responded {
+                request_id,
+                resolution_receipt_id,
+            },
             Err(error) => failed(&error, &context),
         },
         SessionCommand::Interrupt => interrupt_active(coordinator, &context),
+        SessionCommand::Pause { interrupt } => {
+            let live = coordinator.active_turn_id().is_some()
+                || !coordinator.pending_interactions().is_empty();
+            if live && !interrupt {
+                let state = coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
+                return run_state_conflict(
+                    &progress.facts,
+                    &state,
+                    "run.pause",
+                    format!("run.pause requires --interrupt while the run is {state}"),
+                );
+            }
+            if live {
+                return interrupt_active(coordinator, &context);
+            }
+            match coordinator.pause(false) {
+                Ok(()) => ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "paused".to_owned(),
+                    active_turn: None,
+                    last_terminal: progress.last_terminal(),
+                },
+                Err(error) => failed(&error, &context),
+            }
+        }
+        SessionCommand::Resume => match coordinator.resume() {
+            Ok(()) => ControlResponseV1::Status {
+                identity: identity.clone(),
+                lifecycle: "idle".to_owned(),
+                active_turn: None,
+                last_terminal: progress.last_terminal(),
+            },
+            Err(error) => failed(&error, &context),
+        },
+        SessionCommand::Reconcile => match coordinator.reconcile_history() {
+            Ok(_) => ControlResponseV1::Status {
+                identity: identity.clone(),
+                lifecycle: coordinator_control_state(coordinator, false).lifecycle,
+                active_turn: None,
+                last_terminal: progress.last_terminal(),
+            },
+            Err(error) => failed(&error, &context),
+        },
+        SessionCommand::SettleLifecycleTimeout { close } => {
+            remember_lost(coordinator, progress);
+            if let Err(error) = coordinator.abandon() {
+                return failed(&error, &context);
+            }
+            if close {
+                if let Err(error) = coordinator.seal_closed(false) {
+                    return failed(&error, &context);
+                }
+                progress.mark_closed();
+                ControlResponseV1::Closed {
+                    identity: identity.clone(),
+                    thread_id: coordinator.thread_id().map(str::to_owned),
+                }
+            } else {
+                match coordinator.pause(false) {
+                    Ok(()) => ControlResponseV1::Status {
+                        identity: identity.clone(),
+                        lifecycle: "paused".to_owned(),
+                        active_turn: None,
+                        last_terminal: progress.last_terminal(),
+                    },
+                    Err(error) => failed(&error, &context),
+                }
+            }
+        }
         SessionCommand::Close { interrupt } => {
             let thread_id = coordinator.thread_id().map(str::to_owned);
             let live = coordinator.active_turn_id().is_some()
@@ -2892,9 +3922,10 @@ fn perform(
                     format!("run.close requires --interrupt while the run is {state}"),
                 );
             }
-            if coordinator.active_turn_id().is_some()
-                && let Err(error) = coordinator.interrupt()
-            {
+            if live {
+                return interrupt_active(coordinator, &context);
+            }
+            if let Err(error) = coordinator.seal_closed(false) {
                 return failed(&error, &context);
             }
             progress.mark_closed();
@@ -2903,6 +3934,18 @@ fn perform(
                 thread_id,
             }
         }
+        SessionCommand::SetWriterAccess {
+            write,
+            writer_generation,
+            transaction_id,
+        } => match coordinator.set_writer_access(write, writer_generation, transaction_id) {
+            Ok(()) => ControlResponseV1::WriterAccessChanged {
+                write,
+                writer_generation,
+                thread_id: coordinator.thread_id().map(str::to_owned),
+            },
+            Err(error) => failed(&error, &context),
+        },
         // Answered above, before any Controller revalidation.
         SessionCommand::ResetFence { .. }
         | SessionCommand::ShutdownInterrupt
@@ -3005,6 +4048,7 @@ fn coordinator_control_state(coordinator: &SessionCoordinator, closed: bool) -> 
     } else {
         match coordinator.state() {
             CoordinatorState::Threadless | CoordinatorState::Idle => "idle",
+            CoordinatorState::Paused => "paused",
             CoordinatorState::Running => "running",
             CoordinatorState::WaitingInteraction => "waiting_interaction",
             CoordinatorState::OutcomeUnknown => "outcome_unknown",
@@ -3293,6 +4337,23 @@ pub fn worker_socket_path(
     Ok(PathBuf::from(format!("/tmp/dolgorae-{uid}/s/{name}.sock")))
 }
 
+pub fn dedicated_server_socket_path(
+    uid: u32,
+    run_id: Uuid,
+    generation: u64,
+) -> Result<PathBuf, WorkerProtocolError> {
+    if run_id.get_version_num() != 7 || generation == 0 {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"dolgorae-dedicated-server-socket-v1\0");
+    hasher.update(run_id.as_bytes());
+    hasher.update(generation.to_be_bytes());
+    let digest = hasher.finalize();
+    let name = BASE32_NOPAD.encode(&digest[..20]);
+    Ok(PathBuf::from(format!("/tmp/dolgorae-{uid}/c/{name}.sock")))
+}
+
 pub fn bind_worker_socket(
     identity: &WorkerIdentity,
     stale: Option<VerifiedStaleSocket>,
@@ -3485,16 +4546,7 @@ pub fn spawn_hidden_worker(
     let process = DarwinSystem
         .current_process()
         .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
-    let election_identity = WorkerIdentity {
-        workspace_id: bootstrap.workspace_id.clone(),
-        run_id: bootstrap.run_id,
-        run_generation: bootstrap.run_generation,
-        boot_uuid: bootstrap.boot_uuid,
-        pid: process.pid,
-        process_group_id: process.process_group_id,
-        uid: process.uid,
-        executable_sha256: bootstrap.executable_sha256.clone(),
-    };
+    let election_identity = current_worker_identity(&bootstrap, process)?;
     let startup_lock = StartupLockFile::open(&bootstrap.startup_lock_path, uid)?;
     let election = startup_lock.claim(
         &StartupOwnerRecord {
@@ -3533,7 +4585,14 @@ pub fn spawn_hidden_worker(
         });
     }
     let ready = read_ready_handoff(&mut reader)?;
-    if bound != ready
+    if bound.identity != ready.identity
+        || bound.socket_path != ready.socket_path
+        || bound.socket_identity != ready.socket_identity
+        || bound.control_socket_epoch != ready.control_socket_epoch
+        || bound.app_server_epoch != ready.app_server_epoch
+        || bound.dolgorae_version != ready.dolgorae_version
+        || bound.mutation_protocol_version != ready.mutation_protocol_version
+        || bound.binary_sha256 != ready.binary_sha256
         || ready.identity.pid != child.id()
         || ready.identity.process_group_id != child.id()
     {
@@ -3568,16 +4627,7 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
     let process = DarwinSystem
         .current_process()
         .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
-    let identity = WorkerIdentity {
-        workspace_id: bootstrap.workspace_id.clone(),
-        run_id: bootstrap.run_id,
-        run_generation: bootstrap.run_generation,
-        boot_uuid: bootstrap.boot_uuid,
-        pid: process.pid,
-        process_group_id: process.process_group_id,
-        uid: process.uid,
-        executable_sha256: bootstrap.executable_sha256.clone(),
-    };
+    let identity = current_worker_identity(&bootstrap, process)?;
     identity.validate()?;
     if identity.pid != identity.process_group_id {
         return Err(WorkerProtocolError::InvalidIdentity);
@@ -3591,12 +4641,17 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
     };
     let owner_guard = startup_lock.claim(&owner, Duration::ZERO)?;
     let lease = bind_worker_socket(&identity, None)?;
-    let record = WorkerRuntimeRecord {
+    let mut record = WorkerRuntimeRecord {
         schema_version: 1,
         identity: identity.clone(),
         socket_path: lease.path().to_owned(),
         socket_identity: lease.identity().clone(),
         control_socket_epoch: bootstrap.control_socket_epoch,
+        app_server_epoch: bootstrap
+            .session
+            .as_ref()
+            .map(|session| session.server_epoch),
+        dedicated_server_identity: None,
         dolgorae_version: bootstrap.dolgorae_version,
         mutation_protocol_version: bootstrap.mutation_protocol_version,
         binary_sha256: bootstrap.executable_sha256,
@@ -3670,6 +4725,8 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
                     uid,
                     &bootstrap.state_root,
                 )?;
+                record.dedicated_server_identity = owned.dedicated_server_identity();
+                write_runtime_record(&bootstrap.runtime_record_path, &record)?;
                 control.replace_state(owned.control_state())?;
                 control.attach_run(Arc::new(owned), Arc::clone(&ledger))?;
             } else {
@@ -3832,52 +4889,19 @@ pub struct StartedRun {
     pub pid: u32,
 }
 
-/// A per-boot identity for worker records.
+/// The kernel-owned boot-session identity qualifying every worker record.
 ///
-/// The socket root is recreated with the rest of `/tmp/dolgorae-<uid>` and this
-/// marker lives beside the sockets it qualifies, so a record that names a boot
-/// this machine is no longer in is recognisably stale.  A first-class
-/// TASK-020 owns the first-class `kern.bootsessionuuid` Darwin provider; until
-/// that recovery task lands, this private marker is the checked TASK-004
-/// worker-record identity.
+/// This deliberately does not derive identity from Dolgorae's mutable runtime
+/// tree: deleting or recreating `/tmp/dolgorae-<uid>` cannot make a record from
+/// another boot appear current.
 pub fn boot_session_uuid(uid: u32) -> Result<Uuid, WorkerProtocolError> {
-    let root = PathBuf::from(format!("/tmp/dolgorae-{uid}"));
-    prepare_socket_root(uid, &root.join("s"))?;
-    let marker = root.join("boot.uuid");
-    if let Ok(metadata) = fs::symlink_metadata(&marker) {
-        if !metadata.file_type().is_file()
-            || metadata.uid() != uid
-            || metadata.mode() & 0o777 != 0o600
-        {
-            return Err(WorkerProtocolError::InvalidRuntimeRecord);
-        }
-        let text = fs::read_to_string(&marker).map_err(|_| WorkerProtocolError::Io)?;
-        return Uuid::parse_str(text.trim()).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord);
+    if DarwinSystem.current_uid() != uid {
+        return Err(WorkerProtocolError::InvalidIdentity);
     }
-    let minted = Uuid::now_v7();
-    let temporary = root.join(format!(".boot-{minted}"));
-    let write = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&temporary)?;
-        file.write_all(minted.to_string().as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()
-    })();
-    if write.is_err() {
-        let _ = fs::remove_file(&temporary);
-        return Err(WorkerProtocolError::Io);
-    }
-    if fs::rename(&temporary, &marker).is_err() {
-        let _ = fs::remove_file(&temporary);
-        // Another process minted the marker first; its value is authoritative.
-        let text = fs::read_to_string(&marker).map_err(|_| WorkerProtocolError::Io)?;
-        return Uuid::parse_str(text.trim()).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord);
-    }
-    Ok(minted)
+    let value = DarwinSystem
+        .boot_session_uuid()
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    Uuid::parse_str(&value).map_err(|_| WorkerProtocolError::InvalidIdentity)
 }
 
 /// Publish the worker bootstrap and start the hidden worker for one Run.
@@ -4006,11 +5030,15 @@ pub fn write_control_request(
 
 fn file_sha256(path: &Path) -> Result<String, WorkerProtocolError> {
     let mut file = File::open(path).map_err(|_| WorkerProtocolError::Io)?;
+    file_sha256_reader(&mut file)
+}
+
+fn file_sha256_reader(file: &mut File) -> Result<String, WorkerProtocolError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read =
-            std::io::Read::read(&mut file, &mut buffer).map_err(|_| WorkerProtocolError::Io)?;
+            std::io::Read::read(&mut *file, &mut buffer).map_err(|_| WorkerProtocolError::Io)?;
         if read == 0 {
             break;
         }
@@ -4077,6 +5105,47 @@ pub fn read_runtime_record(
         serde_json::from_slice(&bytes).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
     record.validate()?;
     Ok(record)
+}
+
+/// Remove one stale worker locator only after the recorded generation and its
+/// complete process scope are proved absent and the socket pathname still
+/// names the exact recorded inode. A mismatch leaves every pathname intact.
+pub fn remove_verified_absent_runtime(
+    runtime_record: &Path,
+    uid: u32,
+) -> Result<(), WorkerProtocolError> {
+    let record = read_runtime_record(runtime_record, uid)?;
+    prove_worker_generation_absent(&record)?;
+    match fs::symlink_metadata(&record.socket_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != uid
+                || metadata.dev() != record.socket_identity.device
+                || metadata.ino() != record.socket_identity.inode
+            {
+                return Err(WorkerProtocolError::SocketIdentityMismatch);
+            }
+            fs::remove_file(&record.socket_path).map_err(|_| WorkerProtocolError::Io)?;
+            File::open(
+                record
+                    .socket_path
+                    .parent()
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+            )
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| WorkerProtocolError::Io)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(WorkerProtocolError::SocketIdentityMismatch),
+    }
+    fs::remove_file(runtime_record).map_err(|_| WorkerProtocolError::Io)?;
+    File::open(
+        runtime_record
+            .parent()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+    )
+    .and_then(|directory| directory.sync_all())
+    .map_err(|_| WorkerProtocolError::Io)
 }
 
 pub fn write_frame<W: Write, T: Serialize>(
@@ -4184,7 +5253,7 @@ fn decode_sha256(value: &str) -> Option<[u8; 32]> {
 
 fn prepare_socket_root(uid: u32, socket_parent: &Path) -> Result<(), WorkerProtocolError> {
     let expected_root = PathBuf::from(format!("/tmp/dolgorae-{uid}"));
-    if socket_parent != expected_root.join("s") {
+    if socket_parent != expected_root.join("s") && socket_parent != expected_root.join("c") {
         return Err(WorkerProtocolError::InvalidIdentity);
     }
     for directory in [&expected_root, socket_parent] {
@@ -4618,13 +5687,34 @@ fn serve_run_operation(
         }
         ControlRequestV1::Respond {
             request_id,
+            idempotency_key,
             response,
             ..
-        } => session.respond(operation, credential, request_id, response),
+        } => session.respond(operation, credential, request_id, idempotency_key, response),
         ControlRequestV1::Interrupt { .. } => session.interrupt(operation, credential),
+        ControlRequestV1::Pause { interrupt, .. } => {
+            session.pause(operation, credential, interrupt)
+        }
+        ControlRequestV1::Resume { .. } => session.resume(operation, credential),
+        ControlRequestV1::Reconcile { .. } => session.reconcile(operation, credential),
+        ControlRequestV1::SettleLifecycleTimeout { close, .. } => {
+            session.settle_lifecycle_timeout(operation, credential, close)
+        }
         ControlRequestV1::Close { interrupt, .. } => {
             session.close(operation, credential, interrupt)
         }
+        ControlRequestV1::SetWriterAccess {
+            write,
+            writer_generation,
+            transaction_id,
+            ..
+        } => session.set_writer_access(
+            operation,
+            credential,
+            write,
+            writer_generation,
+            transaction_id,
+        ),
         ControlRequestV1::Hello { .. }
         | ControlRequestV1::Status { .. }
         | ControlRequestV1::RunStatus { .. }
@@ -4657,9 +5747,204 @@ mod tests {
             boot_uuid: Uuid::parse_str("2e349290-1744-4fc3-bb62-9cbf9f5859c0").unwrap(),
             pid: 42,
             process_group_id: 42,
+            session_id: 42,
             uid: 501,
+            start_tvsec: 1,
+            start_tvusec: 0,
+            executable_path: PathBuf::from("/usr/bin/true"),
+            executable_device: 1,
+            executable_inode: 1,
             executable_sha256: "22".repeat(32),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn four_verdict_identity_matches_current_and_rejects_recorded_reuse() {
+        let process = DarwinSystem.current_process().unwrap();
+        let sample = DarwinSystem.bsd_process_identity(process.pid).unwrap();
+        let executable_path = DarwinSystem
+            .realpath(&std::env::current_exe().unwrap())
+            .unwrap();
+        let metadata = fs::metadata(&executable_path).unwrap();
+        let identity = WorkerIdentity {
+            workspace_id: "11".repeat(32),
+            run_id: Uuid::now_v7(),
+            run_generation: 1,
+            boot_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap(),
+            pid: process.pid,
+            process_group_id: process.process_group_id,
+            session_id: sample.session_id,
+            uid: process.uid,
+            start_tvsec: sample.start_tvsec,
+            start_tvusec: sample.start_tvusec,
+            executable_path: executable_path.clone(),
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256: file_sha256(&std::env::current_exe().unwrap()).unwrap(),
+        };
+        let mut record = WorkerRuntimeRecord {
+            schema_version: 1,
+            socket_path: worker_socket_path(identity.uid, &identity.workspace_id, identity.run_id)
+                .unwrap(),
+            identity,
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: None,
+            dedicated_server_identity: None,
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
+        };
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Match
+        );
+        record.identity.start_tvusec = record.identity.start_tvusec.saturating_add(1);
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Mismatch
+        );
+        record.identity.start_tvusec = sample.start_tvusec;
+        record.identity.executable_path = PathBuf::from("/missing/dolgorae-worker");
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Unverifiable
+        );
+        record.identity.executable_path = executable_path;
+        record.identity.boot_uuid = Uuid::now_v7();
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Absent
+        );
+    }
+
+    #[test]
+    fn process_scope_does_not_trust_effective_uid_changes() {
+        let identity = crate::darwin::BsdProcessIdentity {
+            pid: 44,
+            parent_pid: 43,
+            uid: 0,
+            process_group_id: 42,
+            session_id: 42,
+            start_tvsec: 1,
+            start_tvusec: 0,
+            zombie: false,
+        };
+        let parents = [(44, 43), (43, 42)].into_iter().collect();
+        assert!(process_is_in_scope(&identity, 42, 42, 42, &parents));
+
+        let detached = crate::darwin::BsdProcessIdentity {
+            process_group_id: 99,
+            session_id: 99,
+            parent_pid: 1,
+            ..identity
+        };
+        assert!(!process_is_in_scope(
+            &detached,
+            42,
+            42,
+            42,
+            &[(44, 1)].into_iter().collect()
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dedicated_server_does_not_hide_worker_group_workload() {
+        fn executable_identity(path: &Path) -> (PathBuf, u64, u64, String) {
+            let path = DarwinSystem.realpath(path).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            let digest = file_sha256(&path).unwrap();
+            (path, metadata.dev(), metadata.ino(), digest)
+        }
+
+        let mut worker_command = Command::new("/bin/sh");
+        worker_command
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut worker = DarwinSystem.spawn_detached(&mut worker_command).unwrap();
+        let mut server_command = Command::new("/bin/sleep");
+        server_command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut server = DarwinSystem.spawn_detached(&mut server_command).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let worker_process = DarwinSystem.bsd_process_identity(worker.id()).unwrap();
+        let server_process = DarwinSystem.bsd_process_identity(server.id()).unwrap();
+        let (worker_path, worker_device, worker_inode, worker_digest) =
+            executable_identity(Path::new("/bin/sh"));
+        let (server_path, server_device, server_inode, server_digest) =
+            executable_identity(Path::new("/bin/sleep"));
+        let identity = WorkerIdentity {
+            workspace_id: "11".repeat(32),
+            run_id: Uuid::now_v7(),
+            run_generation: 1,
+            boot_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap(),
+            pid: worker_process.pid,
+            process_group_id: worker_process.process_group_id,
+            session_id: worker_process.session_id,
+            uid: worker_process.uid,
+            start_tvsec: worker_process.start_tvsec,
+            start_tvusec: worker_process.start_tvusec,
+            executable_path: worker_path,
+            executable_device: worker_device,
+            executable_inode: worker_inode,
+            executable_sha256: worker_digest,
+        };
+        let record = WorkerRuntimeRecord {
+            schema_version: 1,
+            socket_path: worker_socket_path(identity.uid, &identity.workspace_id, identity.run_id)
+                .unwrap(),
+            identity,
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            dedicated_server_identity: Some(DedicatedServerIdentity {
+                pid: server_process.pid,
+                process_group_id: server_process.process_group_id,
+                session_id: server_process.session_id,
+                uid: server_process.uid,
+                start_tvsec: server_process.start_tvsec,
+                start_tvusec: server_process.start_tvusec,
+                executable_path: server_path,
+                executable_device: server_device,
+                executable_inode: server_inode,
+                executable_sha256: server_digest,
+            }),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
+        };
+
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Match
+        );
+        assert_eq!(
+            classify_dedicated_server_identity(record.dedicated_server_identity.as_ref().unwrap()),
+            ProcessIdentityVerdict::Match
+        );
+        assert_eq!(
+            prove_worker_workload_absent(&record),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
+        let _ = DarwinSystem.signal_process_group(server.id(), libc::SIGKILL);
+        let _ = worker.wait();
+        let _ = server.wait();
     }
 
     fn reviewer_bootstrap() -> WorkerSessionBootstrap {
@@ -4668,6 +5953,8 @@ mod tests {
             canonical_codex_home: "/tmp/codex-home".to_owned(),
             server_key: "a".repeat(64),
             server_epoch: 1,
+            controller_id: Uuid::now_v7(),
+            control_mode: "direct_interactive".to_owned(),
             fixed_model: "gpt-5".to_owned(),
             default_effort: "high".to_owned(),
             supported_efforts: vec!["high".to_owned()],
@@ -4679,6 +5966,7 @@ mod tests {
             artifact_root: PathBuf::from("/tmp/artifacts"),
             attach: SessionAttach::Start,
             transport_timeout_seconds: 60,
+            dedicated_server: None,
         }
     }
 
@@ -4718,6 +6006,8 @@ mod tests {
                 inode: 2,
             },
             control_socket_epoch: 1,
+            app_server_epoch: None,
+            dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,
             binary_sha256: "22".repeat(32),
@@ -4917,6 +6207,7 @@ mod tests {
                 caller: None,
                 expected: expected.clone(),
                 request_id: 1,
+                idempotency_key: "response-1".to_owned(),
                 response: Value::Null,
             },
             ControlRequestV1::Interrupt {
@@ -5036,6 +6327,8 @@ mod tests {
                 inode: 2,
             },
             control_socket_epoch: base.control_socket_epoch,
+            app_server_epoch: None,
+            dedicated_server_identity: None,
             dolgorae_version: base.dolgorae_version.clone(),
             mutation_protocol_version: base.mutation_protocol_version,
             binary_sha256: base.binary_sha256.clone(),
@@ -5226,6 +6519,8 @@ mod tests {
             socket_path: path.clone(),
             socket_identity: stale_identity.clone(),
             control_socket_epoch: 1,
+            app_server_epoch: None,
+            dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,
             binary_sha256: "33".repeat(32),

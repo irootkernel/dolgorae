@@ -156,6 +156,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "semantic",
             &[
                 "app_server",
+                "audit",
                 "cli",
                 "conformance",
                 "controller",
@@ -174,6 +175,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "turn",
                 "worker",
                 "workspace",
+                "writer",
             ][..],
         ),
         (
@@ -185,6 +187,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "app_server",
                 "audit",
+                "domain",
                 "fault",
                 "jcs",
                 "ledger",
@@ -192,7 +195,14 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
-        ("workspace", &["darwin", "jcs", "machine", "paths"][..]),
+        (
+            "workspace",
+            &["darwin", "jcs", "machine", "paths", "writer"][..],
+        ),
+        (
+            "writer",
+            &["darwin", "domain", "machine", "run", "workspace"][..],
+        ),
         // `worker` names `controller` because ADR-016 makes the hidden worker
         // the authoritative consumer of a Controller credential: it rereads
         // the descriptor it received over SCM_RIGHTS and revalidates it under
@@ -218,6 +228,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "ledger",
                 "machine",
                 "profile",
+                "providers",
                 "turn",
             ][..],
         ),

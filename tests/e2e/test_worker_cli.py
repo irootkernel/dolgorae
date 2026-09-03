@@ -23,7 +23,12 @@ import native_codex
 from schema_support import assert_valid, validator
 
 RUN_ID = "018f22e2-79b0-7cc3-a24c-78c48f28bbcf"
-BOOT_UUID = "2e349290-1744-4fc3-bb62-9cbf9f5859c0"
+BOOT_UUID = subprocess.run(
+    ["sysctl", "-n", "kern.bootsessionuuid"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 FAKE_APP_SERVER = REPOSITORY / "tools" / "fake_app_server"
 
@@ -219,6 +224,7 @@ def run_manifest(run_id: str, controller: dict[str, object]) -> dict[str, object
         "required_capabilities": ["reader"],
         "thread_id": None,
         "fork_provenance": None,
+        "write_continuation_provenance": None,
         "aggregate_binding": None,
         "audit": {
             "hash_scheme": "sha256-jcs-v1",
@@ -274,7 +280,7 @@ def prepare(
         "run_id": run_id,
         "run_generation": 1,
         "boot_uuid": BOOT_UUID,
-        "executable_sha256": "22" * 32,
+        "executable_sha256": binary_sha256(binary),
         "executable_path_sha256": "33" * 32,
         "dolgorae_version": "0.1.0",
         "mutation_protocol_version": 1,
@@ -288,6 +294,9 @@ def prepare(
         "startup_lock_path": str(startup / f"{run_id}.lock"),
     }
     if session is not None:
+        session = dict(session)
+        session.setdefault("controller_id", controller["identity"]["controller_id"])
+        session.setdefault("control_mode", "managed_agent")
         document["session"] = session
     bootstrap.write_text(
         json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8"
@@ -554,12 +563,9 @@ def validate_session(binary: pathlib.Path) -> None:
         )
         try:
             run_id = fresh_run_id()
-            bootstrap, credential = prepare(
-                root,
-                binary,
-                run_id,
-                session_document(socket_path, codex_home, workspace),
-            )
+            session = session_document(socket_path, codex_home, workspace)
+            session["approval_policy"] = "on-request"
+            bootstrap, credential = prepare(root, binary, run_id, session)
             # A second, well-formed credential this Run was never bound to.
             stranger = root / "stranger.json"
             mint_controller(binary, stranger)
@@ -671,7 +677,8 @@ def validate_session(binary: pathlib.Path) -> None:
                 identity,
                 credential_fd=stranger_fd,
                 request_id=7001,
-                response={"decision": "approved"},
+                idempotency_key="approval-foreign",
+                response={"decision": "accept_once"},
             )
             if denied["result"] != "failed" or denied["code"] != "CONTROLLER_MISMATCH":
                 raise AssertionError(
@@ -683,7 +690,8 @@ def validate_session(binary: pathlib.Path) -> None:
                 identity,
                 credential_fd=owner_fd,
                 request_id=7001,
-                response={"decision": "approved"},
+                idempotency_key="approval-owner",
+                response={"decision": "accept_once"},
             )
             if answered["result"] != "responded":
                 raise AssertionError(f"interaction response failed: {answered!r}")
@@ -1197,9 +1205,9 @@ def publish_run_for_cli(
         "run_id": run_id,
         "run_generation": 1,
         "boot_uuid": BOOT_UUID,
-        # The record the CLI compares itself against, so it has to describe
-        # this binary unless the case is deliberately proving skew.
-        "executable_sha256": "77" * 32 if build_skew else binary_sha256(binary),
+        # Startup always binds the actual executable. A skew fixture changes
+        # only the advertised build version after that identity proof.
+        "executable_sha256": binary_sha256(binary),
         "executable_path_sha256": "33" * 32,
         "dolgorae_version": "0.0.0-other" if build_skew else binary_version(binary),
         "mutation_protocol_version": 1,
@@ -1211,6 +1219,9 @@ def publish_run_for_cli(
         "startup_lock_path": str(startup / f"{run_id}.lock"),
     }
     if session is not None:
+        session = dict(session)
+        session.setdefault("controller_id", controller["identity"]["controller_id"])
+        session.setdefault("control_mode", "managed_agent")
         document["session"] = session
     bootstrap.write_text(
         json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8"
@@ -1250,12 +1261,14 @@ def validate_run_cli(binary: pathlib.Path) -> None:
         )
         try:
             run_id = fresh_run_id()
+            session = session_document(socket_path, codex_home, workspace)
+            session["approval_policy"] = "on-request"
             bootstrap, credential = publish_run_for_cli(
                 binary,
                 state_root,
                 workspace_id,
                 run_id,
-                session_document(socket_path, codex_home, workspace),
+                session,
                 build_skew=False,
             )
             stranger = root / "stranger.json"
@@ -1357,8 +1370,13 @@ def validate_run_cli(binary: pathlib.Path) -> None:
             if len(piped) != 1:
                 raise AssertionError(f"the piped message never reached turn/start: {sent!r}")
 
+            pending = data([*observed, "pending", run_id, *owned])
+            if len(pending["items"]) != 1:  # type: ignore[arg-type]
+                raise AssertionError(f"the pending interaction was not projected: {pending!r}")
+            request_id = pending["items"][0]["request_id"]  # type: ignore[index]
+
             answer = root / "approval.json"
-            answer.write_text(json.dumps({"decision": "approved"}), encoding="utf-8")
+            answer.write_text(json.dumps({"decision": "accept_once"}), encoding="utf-8")
             answer_fd = os.open(str(answer), os.O_RDONLY)
             os.set_inheritable(answer_fd, True)
             try:
@@ -1369,7 +1387,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
                         run_id,
                         *owned,
                         "--request-id",
-                        "7001",
+                        str(request_id),
                         "--idempotency-key",
                         "cli-approval-one",
                         "--response-fd",
@@ -1393,12 +1411,12 @@ def validate_run_cli(binary: pathlib.Path) -> None:
                     run_id,
                     *owned,
                     "--request-id",
-                    "9999",
+                    fresh_run_id(),
                     "--idempotency-key",
                     "cli-approval-stdin",
                 ],
                 expect=3,
-                stdin=json.dumps({"decision": "approved"}),
+                stdin=json.dumps({"decision": "accept_once"}),
             )
             error = piped[0]["error"]  # type: ignore[index]
             if error["code"] != "INTERACTION_NOT_FOUND":  # type: ignore[index]
@@ -1762,11 +1780,9 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
     whose contents are not checked into the tree. That is setup — it answers no
     protocol call, and the case fails closed when it is absent.
 
-    The Run's membership is proved in the same pass. `run start` registers the
-    Run as a live member *before* it publishes a worker, so a start whose worker
-    never publishes still leaves the registration and its release behind; a
-    start that succeeds leaves a live member that `profile server stop` refuses
-    to interrupt until `run close` removes it.
+    Run membership is proved in the same pass. Lazy `run start` and `run fork
+    --fresh` register live members without publishing workers; `profile server
+    stop` refuses them until their threadless close releases both memberships.
     """
     machine_schema = validator(REPOSITORY / "docs" / "protocol", "dolgorae-machine-v1.schema.json")
     schema_source = native_codex.installed_codex()
@@ -1925,32 +1941,6 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 "implementation",
             ]
 
-            # The fixture refuses this Run's worker connection, so the start
-            # fails after it has already published the Run and registered its
-            # membership. Two run-scoped records on top of the server's own
-            # therefore say the registration happened *before* the worker was
-            # published — had it happened after, a worker that never published
-            # would have left none.
-            refused = failure(
-                [
-                    *start,
-                    "--instructions",
-                    "Answer briefly.",
-                    "--idempotency-key",
-                    "runstart-refused-worker",
-                ],
-                expect=6,
-            )
-            if refused["code"] != "TRANSPORT_FAILURE":
-                raise AssertionError(f"a refused worker session was misreported: {refused!r}")
-            if refused["details"]["stage"] != "connect":  # type: ignore[index]
-                raise AssertionError(f"the refusal did not name its stage: {refused!r}")
-            if membership_records() != 3:
-                raise AssertionError(
-                    "a start whose worker never published did not leave its "
-                    "registration and release behind"
-                )
-
             accepted = data(
                 [
                     *start,
@@ -1967,12 +1957,37 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             # once the duplicate `medium` is folded away.
             if accepted["model"] != "gpt-5.6" or accepted["effort"] != "medium":
                 raise AssertionError(f"model resolution ignored the walk: {accepted!r}")
-            if accepted["profile"] != "default" or accepted["identity_verdict"] != "Match":
+            if accepted["profile"] != "default" or accepted["identity_verdict"] != "Absent":
                 raise AssertionError(f"the started Run lost its identity: {accepted!r}")
             if accepted["execution_lane"] != "shared_readonly" or accepted["thread_id"] is not None:
                 raise AssertionError(f"a freshly started Run claimed a Thread: {accepted!r}")
-            if membership_records() != 4:
+            if membership_records() != 2:
                 raise AssertionError("the started Run was not registered as a member")
+
+            forked = data(
+                [
+                    "run",
+                    "--controller-file",
+                    str(credential),
+                    "fork",
+                    "--from",
+                    started[0],
+                    *owned,
+                    "--fresh",
+                    "--idempotency-key",
+                    "runstart-fresh-fork",
+                ]
+            )
+            started.append(str(forked["run_id"]))
+            if (
+                forked["thread_id"] is not None
+                or forked["state"] != "idle"
+                or forked["lineage"]["mode"] != "fresh"  # type: ignore[index]
+                or forked["lineage"]["source_run_id"] != started[0]  # type: ignore[index]
+            ):
+                raise AssertionError(f"fresh fork copied source history: {forked!r}")
+            if membership_records() != 3:
+                raise AssertionError("the fresh fork was not registered as a member")
 
             stop = [
                 "profile",
@@ -1986,17 +2001,27 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             gated = failure(stop, expect=4)
             if gated["code"] != "PROFILE_MEMBERSHIP_INCOMPLETE":
                 raise AssertionError(f"a live member did not gate the stop: {gated!r}")
-            if "1 live run member(s)" not in str(gated["details"]["reason"]):  # type: ignore[index]
+            if "2 live run member(s)" not in str(gated["details"]["reason"]):  # type: ignore[index]
                 raise AssertionError(f"the stop gate did not count its members: {gated!r}")
 
+            runtime_record = state_root / "runtime" / "runs" / f"{started[0]}.json"
+            if runtime_record.exists():
+                raise AssertionError(
+                    f"lazy start unexpectedly published a worker record: "
+                    f"{runtime_record.read_text(encoding='utf-8')!r}"
+                )
             closed = data(
                 ["run", "--controller-file", str(credential), "close", started[0], *owned]
             )
-            # A `Match` verdict is the worker's own answer: the close reached
-            # the Run that `run start` published rather than being decided from
-            # durable state alone.
-            if closed["run_id"] != started[0] or closed["identity_verdict"] != "Match":
-                raise AssertionError(f"run close did not reach the Run's worker: {closed!r}")
+            # A threadless lazy Run closes entirely from durable state and
+            # never fabricates a worker generation merely to retire it.
+            if closed["run_id"] != started[0] or closed["identity_verdict"] != "Absent":
+                raise AssertionError(f"threadless run close fabricated a worker: {closed!r}")
+            fork_closed = data(
+                ["run", "--controller-file", str(credential), "close", started[1], *owned]
+            )
+            if fork_closed["state"] != "closed" or fork_closed["thread_id"] is not None:
+                raise AssertionError(f"threadless fork close was not durable: {fork_closed!r}")
             if membership_records() != 5:
                 raise AssertionError("a successful close did not release the membership")
             # The same stop, unchanged, now that the member is gone.
@@ -2013,20 +2038,18 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 if line.strip()
             ]
             pages = [message for message in sent if message.get("method") == "model/list"]
-            # Three walks — the probe's, and one effort resolution per start —
-            # each exhausting the same three-page catalogue.
+            # Three walks — the probe's, the accepted Run's effort resolution,
+            # and the fresh fork's inherited-model validation — each exhaust
+            # the same three-page catalogue.
             if [message["params"] for message in pages] != [
                 {"cursor": None, "limit": 100},
                 {"cursor": "page-2", "limit": 100},
                 {"cursor": "page-3", "limit": 100},
             ] * 3:
                 raise AssertionError(f"model/list was not walked as pinned: {pages!r}")
-            # One `initialize` per connection the fixture served: the probe's,
-            # an effort resolution and a worker attach for each of the two
-            # starts. That accounting is what puts the refused attach on the
-            # worker's connection rather than on a resolution that would have
-            # failed before the Run was ever published.
-            if sum(1 for message in sent if message.get("method") == "initialize") != 5:
+            # Lazy start and fresh fork open no worker connection: only the
+            # probe and their two effort-resolution connections initialize.
+            if sum(1 for message in sent if message.get("method") == "initialize") != 3:
                 raise AssertionError(f"the fixture served unexpected connections: {sent!r}")
             if sum(1 for message in sent if message.get("method") == "account/read") != 1:
                 raise AssertionError(f"the probe's account read is not once-only: {sent!r}")
