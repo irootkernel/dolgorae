@@ -149,6 +149,11 @@ pub struct AggregateBinding {
     pub agent_configuration_sha256: Option<String>,
 }
 
+#[must_use]
+pub(crate) fn run_root(state_root: &Path, run_id: Uuid) -> PathBuf {
+    state_root.join("runs").join(run_id.to_string())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkProvenance {
@@ -528,6 +533,24 @@ impl<P: WorkspacePlatform> RunStore<P> {
     /// Resolve whether a Codex thread belongs to a durable external Reviewer
     /// Run without exposing the Run store's private directory layout.
     pub fn reviewer_thread_registered(&self, thread_id: &str) -> Result<bool, MachineError> {
+        self.external_specialist_thread_matches(thread_id, true)
+    }
+
+    /// Resolve whether a Codex thread belongs to any durable External
+    /// Specialist Engagement member. Facade entry points use this to deny
+    /// nested first-class hiring independently of profile aliases.
+    pub fn external_specialist_thread_registered(
+        &self,
+        thread_id: &str,
+    ) -> Result<bool, MachineError> {
+        self.external_specialist_thread_matches(thread_id, false)
+    }
+
+    fn external_specialist_thread_matches(
+        &self,
+        thread_id: &str,
+        reviewer_only: bool,
+    ) -> Result<bool, MachineError> {
         if thread_id.is_empty() || thread_id.len() > 256 || thread_id.chars().any(char::is_control)
         {
             return Ok(false);
@@ -554,8 +577,9 @@ impl<P: WorkspacePlatform> RunStore<P> {
             }
             let manifest = self.load_manifest(run_id)?;
             let external_reviewer = manifest.control_mode == ControlMode::ManagedAgent
-                && manifest.purpose.kind == PurposeKind::Review
-                && manifest.execution_lane == ExecutionLane::SharedReadonly
+                && (!reviewer_only
+                    || (manifest.purpose.kind == PurposeKind::Review
+                        && manifest.execution_lane == ExecutionLane::SharedReadonly))
                 && manifest.aggregate_binding.as_ref().is_some_and(|binding| {
                     binding.aggregate_kind == AggregateKind::ExternalSpecialistEngagement
                         && binding.member_kind == AggregateMemberKind::Specialist

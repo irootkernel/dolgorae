@@ -275,7 +275,49 @@ fn run_store_owns_external_reviewer_thread_lookup() {
     fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
 
     assert!(store.reviewer_thread_registered("thread-reviewer").unwrap());
+    assert!(
+        store
+            .external_specialist_thread_registered("thread-reviewer")
+            .unwrap()
+    );
     assert!(!store.reviewer_thread_registered("thread-parent").unwrap());
+
+    let mut researcher = manifest.clone();
+    researcher.run_id = Uuid::now_v7();
+    researcher.purpose = Purpose {
+        kind: PurposeKind::Research,
+        external_label: None,
+    };
+    researcher.agent_configuration.purpose = researcher.purpose.clone();
+    researcher.agent_configuration.role_reference = Some("researcher".to_owned());
+    researcher.aggregate_binding.as_mut().unwrap().operation_id = Uuid::now_v7();
+    researcher
+        .aggregate_binding
+        .as_mut()
+        .unwrap()
+        .role_reference = researcher.agent_configuration.role_reference.clone();
+    researcher
+        .aggregate_binding
+        .as_mut()
+        .unwrap()
+        .agent_configuration_sha256 =
+        Some(agent_configuration_digest(&researcher.agent_configuration).unwrap());
+    let directory = store.publish(&researcher).unwrap();
+    let mut projection = RunStateProjection::starting(researcher.run_id);
+    projection.thread_id = Some("thread-researcher".to_owned());
+    let state = directory.root.join("state.json");
+    fs::write(&state, serde_json::to_vec(&projection).unwrap()).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        store
+            .external_specialist_thread_registered("thread-researcher")
+            .unwrap()
+    );
+    assert!(
+        !store
+            .reviewer_thread_registered("thread-researcher")
+            .unwrap()
+    );
 }
 
 #[test]

@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Reusable externally planned Specialist Engagements with multiple durable
+  members, sequential tasks, reconnect-safe idempotency, result redelivery,
+  isolated-change artifacts, and Writer-authorized canonical work.
 - Added the optional source-distributed `use-dolgorae` agent skill for
   capability-aware workspace, profile, immutable-target, and one-shot review
   workflows.
@@ -29,6 +32,8 @@ development commits.
 - Writer transitions now fail closed after uncertain worker outcomes, orphaned
   dedicated servers are retired only after identity-proven worker absence, and
   interaction-response receipts survive worker restart.
+- Immutable worktree-target capture now rejects symlinks in every path
+  component and bounds Git object output before buffering it.
 
 ## v0.1.1 - 2026-08-31
 

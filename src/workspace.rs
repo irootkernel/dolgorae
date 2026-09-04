@@ -6,7 +6,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -213,6 +213,171 @@ impl WorkspacePlatform for SystemWorkspacePlatform {
 
 pub trait GitRunner: Send + Sync {
     fn output(&self, arguments: &[OsString]) -> Result<Output, std::io::Error>;
+}
+
+/// Creates one detached Git worktree for a caller-owned isolated workspace.
+/// Process invocation remains inside the workspace boundary; the caller owns
+/// the destination policy and lifecycle.
+pub(crate) fn add_detached_git_worktree(canonical: &Path, root: &Path) -> std::io::Result<()> {
+    let status = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(canonical)
+        .args(["worktree", "add", "--detach"])
+        .arg(root)
+        .arg("HEAD")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "detached Git worktree creation failed",
+        ))
+    }
+}
+
+#[must_use]
+pub(crate) fn isolated_specialist_root(
+    state_root: &Path,
+    engagement_id: uuid::Uuid,
+    run_id: uuid::Uuid,
+) -> PathBuf {
+    state_root
+        .join("orchestration")
+        .join("isolated")
+        .join(engagement_id.to_string())
+        .join(run_id.to_string())
+}
+
+pub(crate) fn is_registered_git_worktree(canonical: &Path, root: &Path) -> bool {
+    fn identity(root: &Path, argument: &str) -> Option<PathBuf> {
+        let mut child = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", argument])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .ok()?;
+        let mut output = Vec::new();
+        if child
+            .stdout
+            .take()?
+            .take(16 * 1024 + 1)
+            .read_to_end(&mut output)
+            .is_err()
+            || output.len() > 16 * 1024
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        if !child.wait().ok()?.success() {
+            return None;
+        }
+        let value = std::str::from_utf8(&output).ok()?.trim();
+        let path = PathBuf::from(value);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        path.canonicalize().ok()
+    }
+
+    let Some(canonical_root) = root.canonicalize().ok() else {
+        return false;
+    };
+    identity(root, "--show-toplevel").is_some_and(|path| path == canonical_root)
+        && identity(root, "--git-common-dir") == identity(canonical, "--git-common-dir")
+}
+
+pub(crate) fn open_relative_nofollow(
+    directory: &File,
+    name: &OsStr,
+    require_directory: bool,
+) -> std::io::Result<File> {
+    #[cfg(target_os = "macos")]
+    {
+        DarwinSystem.openat_nofollow(directory, name, require_directory)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (directory, name, require_directory);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "descriptor-relative worktree capture is supported on macOS only",
+        ))
+    }
+}
+
+pub(crate) fn remove_git_worktree(canonical: &Path, root: &Path) -> std::io::Result<()> {
+    let status = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(canonical)
+        .args(["worktree", "remove", "--force"])
+        .arg(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("Git worktree removal failed"))
+    }
+}
+
+pub(crate) fn capture_git_worktree_patch(
+    root: &Path,
+    maximum_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let intent = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(root)
+        .args(["add", "--intent-to-add", "--all", "--"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !intent.success() {
+        return Err(std::io::Error::other("Git worktree intent-to-add failed"));
+    }
+    let mut child = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--binary", "--no-ext-diff", "HEAD", "--"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut patch = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .expect("piped Git stdout")
+        .take(u64::try_from(maximum_bytes).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut patch);
+    if let Err(error) = read {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if patch.len() > maximum_bytes {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other(
+            "Git worktree patch exceeds its bound",
+        ));
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(std::io::Error::other("Git worktree patch is unavailable"));
+    }
+    Ok(patch)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1449,6 +1614,45 @@ mod tests {
             workspace_id(Path::new("/tmp/example")),
             workspace_id(Path::new("/tmp/Example"))
         );
+    }
+
+    #[test]
+    fn registered_worktree_identity_accepts_a_symlinked_parent_spelling() {
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-worktree-identity-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let canonical = root.join("repository");
+        let actual_parent = root.join("actual");
+        fs::create_dir_all(&canonical).unwrap();
+        fs::create_dir(&actual_parent).unwrap();
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("/usr/bin/git")
+                    .arg("-C")
+                    .arg(&canonical)
+                    .args(arguments)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@dolgorae.local"]);
+        git(&["config", "user.name", "Dolgorae Test"]);
+        fs::write(canonical.join("tracked.txt"), "baseline\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        let actual_worktree = actual_parent.join("worktree");
+        add_detached_git_worktree(&canonical, &actual_worktree).unwrap();
+        let alias_parent = root.join("alias");
+        std::os::unix::fs::symlink(&actual_parent, &alias_parent).unwrap();
+        assert!(is_registered_git_worktree(
+            &canonical,
+            &alias_parent.join("worktree")
+        ));
+        remove_git_worktree(&canonical, &actual_worktree).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

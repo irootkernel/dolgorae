@@ -1,8 +1,11 @@
-//! Durable one-shot External Specialist Engagement authority.
+//! Durable External Specialist Engagement authority.
 
+use crate::controller::{CredentialCarrier, authorize_controller};
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
-use crate::run::{AggregateBinding, agent_configuration_digest};
+use crate::run::{
+    AgentConfigurationSnapshot, AggregateBinding, ControllerBinding, agent_configuration_digest,
+};
 use crate::specialist::{ReviewerRuntimePlan, validate_reviewer_output};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -14,7 +17,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EngagementBarrier {
@@ -102,6 +105,67 @@ pub struct CollectedReview {
     pub output: Value,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalMemberSnapshot {
+    pub specialist_run_id: Uuid,
+    pub role_ref: String,
+    pub membership_state: String,
+    pub actor_residency: String,
+    pub pending_task_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEngagementSnapshot {
+    pub engagement_id: Uuid,
+    pub state: String,
+    pub external_controller_ref: Value,
+    pub revision: u64,
+    pub specialists: Vec<ExternalMemberSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalHireReservation {
+    pub engagement_id: Uuid,
+    pub hire_operation_id: Uuid,
+    pub specialist_run_id: Uuid,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalTaskSnapshot {
+    pub task_id: Uuid,
+    pub specialist_run_id: Uuid,
+    pub state: String,
+    pub turn_id: Option<String>,
+    pub result_artifact_ref: Option<Uuid>,
+    pub result: Option<Value>,
+    pub safe_error_code: Option<String>,
+}
+
+pub struct ExternalTaskRequest<'a> {
+    pub request_value: &'a Value,
+    pub objective: &'a str,
+    pub external_request_ref: &'a Value,
+    pub execution_intent: &'a str,
+    pub deadline_seconds: u64,
+    pub idempotency_key: &'a str,
+}
+
+type ExternalOwnerAuthorityRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
 pub struct EngagementStore {
     connection: Connection,
     faults: Arc<dyn EngagementFaultInjector>,
@@ -149,39 +213,68 @@ impl EngagementStore {
                    task_id TEXT,
                    result_sha256 TEXT,
                    result_json TEXT,
-                   revision INTEGER NOT NULL
+                   revision INTEGER NOT NULL,
+                   bootstrap_operation_id TEXT,
+                   external_controller_ref_json TEXT,
+                   external_controller_ref_sha256 TEXT,
+                   label TEXT,
+                   controller_binding_json TEXT,
+                   created_at_ms INTEGER,
+                   updated_at_ms INTEGER,
+                   authority_kind TEXT NOT NULL DEFAULT 'legacy_one_shot'
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS operations(
+                   scope_id TEXT NOT NULL DEFAULT 'legacy',
                    operation TEXT NOT NULL,
                    idempotency_key TEXT NOT NULL,
                    request_sha256 TEXT NOT NULL,
                    response_json TEXT NOT NULL,
-                   PRIMARY KEY(operation,idempotency_key)
+                   PRIMARY KEY(scope_id,operation,idempotency_key)
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS members(
                    specialist_run_id TEXT PRIMARY KEY,
-                   engagement_id TEXT NOT NULL UNIQUE,
+                   engagement_id TEXT NOT NULL,
                    hire_operation_id TEXT NOT NULL UNIQUE,
                    configuration_sha256 TEXT NOT NULL,
                    state TEXT NOT NULL,
+                   role_ref TEXT,
+                   configuration_json TEXT,
+                   objective_sha256 TEXT,
+                   requested_access TEXT,
+                   actor_residency TEXT,
+                   created_at_ms INTEGER,
+                   updated_at_ms INTEGER,
                    FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS tasks(
                    task_id TEXT PRIMARY KEY,
-                   engagement_id TEXT NOT NULL UNIQUE,
+                   engagement_id TEXT NOT NULL,
                    specialist_run_id TEXT NOT NULL,
                    objective_sha256 TEXT NOT NULL,
                    state TEXT NOT NULL,
                    result_sha256 TEXT,
+                   external_request_ref_json TEXT,
+                   request_json TEXT,
+                   execution_intent TEXT,
+                   deadline_seconds INTEGER,
+                   turn_id TEXT,
+                   artifact_id TEXT,
+                   safe_error_code TEXT,
+                   created_at_ms INTEGER,
+                   updated_at_ms INTEGER,
                    FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id),
                    FOREIGN KEY(specialist_run_id) REFERENCES members(specialist_run_id)
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS artifacts(
                    artifact_id TEXT PRIMARY KEY,
-                   engagement_id TEXT NOT NULL UNIQUE,
+                   engagement_id TEXT NOT NULL,
+                   task_id TEXT UNIQUE,
+                   specialist_run_id TEXT,
                    result_sha256 TEXT NOT NULL,
                    canonical_json TEXT NOT NULL,
-                   FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+                   FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id),
+                   FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                   FOREIGN KEY(specialist_run_id) REFERENCES members(specialist_run_id)
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS delivery_receipts(
                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,7 +380,7 @@ impl EngagementStore {
             connection
                 .execute_batch("PRAGMA foreign_keys=ON;")
                 .map_err(internal)?;
-        } else if observed != SCHEMA_VERSION.to_string() {
+        } else if observed != "2" && observed != SCHEMA_VERSION.to_string() {
             return Err(MachineError::new(
                 "ORCHESTRATION_SCHEMA_UNSUPPORTED",
                 "orchestration schema is not supported",
@@ -295,6 +388,23 @@ impl EngagementStore {
                 serde_json::json!({"observed":observed}),
             ));
         }
+        let observed: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if observed == "2" {
+            migrate_v2_to_v3(&mut connection)?;
+        }
+        connection
+            .execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_active_external_task_per_member
+                   ON tasks(specialist_run_id)
+                   WHERE state IN ('accepted','queued','claimed','dispatching','running');",
+            )
+            .map_err(internal)?;
         Ok(Self { connection, faults })
     }
 
@@ -330,7 +440,10 @@ impl EngagementStore {
         let transaction = self.transaction()?;
         transaction
             .execute(
-                "INSERT INTO engagements VALUES(?1,?2,?3,'open',NULL,NULL,NULL,NULL,1)",
+                "INSERT INTO engagements(
+                   engagement_id,workspace_id,controller_sha256,state,
+                   specialist_run_id,task_id,result_sha256,result_json,revision
+                 ) VALUES(?1,?2,?3,'open',NULL,NULL,NULL,NULL,1)",
                 params![engagement_id.to_string(), workspace_id, controller_sha256],
             )
             .map_err(internal)?;
@@ -433,7 +546,10 @@ impl EngagementStore {
                 .map_err(internal)?;
             transaction
                 .execute(
-                    "INSERT INTO members VALUES(?1,?2,?3,?4,'provisioning')",
+                    "INSERT INTO members(
+                       specialist_run_id,engagement_id,hire_operation_id,
+                       configuration_sha256,state
+                     ) VALUES(?1,?2,?3,?4,'provisioning')",
                     params![
                         specialist_run_id.to_string(),
                         engagement_id.to_string(),
@@ -484,7 +600,7 @@ impl EngagementStore {
     where
         F: FnOnce(&TaskReservation, &str) -> (RuntimeOutcome, Option<Value>),
     {
-        checked(objective, 65_536, "objective")?;
+        checked_text(objective, 65_536, "objective")?;
         let objective_sha256 = sha256_hex(objective.as_bytes());
         self.assign(
             engagement_id,
@@ -573,7 +689,10 @@ impl EngagementStore {
                 .map_err(internal)?;
             transaction
                 .execute(
-                    "INSERT INTO tasks VALUES(?1,?2,?3,?4,'accepted',NULL)",
+                    "INSERT INTO tasks(
+                       task_id,engagement_id,specialist_run_id,
+                       objective_sha256,state,result_sha256
+                     ) VALUES(?1,?2,?3,?4,'accepted',NULL)",
                     params![
                         task_id.to_string(),
                         engagement_id.to_string(),
@@ -609,7 +728,9 @@ impl EngagementStore {
                     .map_err(internal)?;
                 transaction
                     .execute(
-                        "INSERT INTO artifacts VALUES(?1,?2,?3,?4)",
+                        "INSERT INTO artifacts(
+                           artifact_id,engagement_id,result_sha256,canonical_json
+                         ) VALUES(?1,?2,?3,?4)",
                         params![
                             artifact_id.to_string(),
                             engagement_id.to_string(),
@@ -827,6 +948,1395 @@ impl EngagementStore {
         snapshot_in(&self.connection, engagement_id)
     }
 
+    pub fn open_external_engagement(
+        &mut self,
+        workspace_id: &str,
+        binding: &ControllerBinding,
+        external_controller_ref: &Value,
+        label: Option<&str>,
+        idempotency_key: &str,
+    ) -> Result<ExternalEngagementSnapshot, MachineError> {
+        checked(workspace_id, 512, "workspace_id")?;
+        checked(idempotency_key, 256, "idempotency_key")?;
+        if binding.identity.generation != 1
+            || !matches!(
+                binding.identity.kind.as_str(),
+                "workflow_orchestrator" | "automation"
+            )
+        {
+            return Err(invalid(
+                "controller",
+                "engagement owner must be a generation-1 workflow_orchestrator or automation Controller",
+            ));
+        }
+        if let Some(label) = label {
+            checked(label, 256, "label")?;
+        }
+        let external_json = canonical_string(external_controller_ref)?;
+        let external_sha256 = sha256_hex(external_json.as_bytes());
+        let binding_json = canonical_string(&serde_json::to_value(binding).map_err(internal)?)?;
+        let request = digest_value(&serde_json::json!({
+            "workspace_id": workspace_id,
+            "controller_binding": binding,
+            "external_controller_ref": external_controller_ref,
+            "label": label,
+        }))?;
+        let scope = format!("workspace:{workspace_id}");
+        if let Some(replay) = scoped_replay::<ExternalEngagementSnapshot>(
+            &self.connection,
+            &scope,
+            "open_external_engagement",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        let engagement_id = Uuid::now_v7();
+        let bootstrap_operation_id = Uuid::now_v7();
+        let now = unix_time_ms()?;
+        let transaction = self.transaction()?;
+        if let Some(replay) = scoped_replay::<ExternalEngagementSnapshot>(
+            &transaction,
+            &scope,
+            "open_external_engagement",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        transaction
+            .execute(
+                "INSERT INTO engagements(
+               engagement_id,workspace_id,controller_sha256,state,revision,
+               bootstrap_operation_id,external_controller_ref_json,
+               external_controller_ref_sha256,label,controller_binding_json,
+               created_at_ms,updated_at_ms,authority_kind
+             ) VALUES(?1,?2,?3,'active',1,?4,?5,?6,?7,?8,?9,?9,'external_v1')",
+                params![
+                    engagement_id.to_string(),
+                    workspace_id,
+                    sha256_hex(binding_json.as_bytes()),
+                    bootstrap_operation_id.to_string(),
+                    external_json,
+                    external_sha256,
+                    label,
+                    binding_json,
+                    now,
+                ],
+            )
+            .map_err(internal)?;
+        let bootstrap_payload = format!(
+            "{bootstrap_operation_id}\0{external_sha256}\0{}",
+            sha256_hex(binding_json.as_bytes())
+        );
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_engagement_opened",
+            &bootstrap_payload,
+        )?;
+        let result = ExternalEngagementSnapshot {
+            engagement_id,
+            state: "active".to_owned(),
+            external_controller_ref: external_controller_ref.clone(),
+            revision: 1,
+            specialists: Vec::new(),
+        };
+        scoped_record(
+            &transaction,
+            &scope,
+            "open_external_engagement",
+            idempotency_key,
+            &request,
+            &result,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn authorize_external_owner(
+        &self,
+        workspace_id: &str,
+        engagement_id: Uuid,
+        operation: &str,
+        carrier: &CredentialCarrier,
+    ) -> Result<ControllerBinding, MachineError> {
+        let (
+            recorded_workspace,
+            binding_json,
+            external_json,
+            external_sha256,
+            bootstrap,
+            label,
+            recorded_binding_sha256,
+            kind,
+        ): ExternalOwnerAuthorityRow = self
+            .connection
+            .query_row(
+                "SELECT workspace_id,controller_binding_json,external_controller_ref_json,
+                    external_controller_ref_sha256,bootstrap_operation_id,label,
+                    controller_sha256,authority_kind
+             FROM engagements WHERE engagement_id=?1",
+                [engagement_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(not_found)?;
+        if kind != "external_v1" || recorded_workspace != workspace_id {
+            return Err(not_found());
+        }
+        let binding_json = binding_json.ok_or_else(|| integrity("owner binding is missing"))?;
+        let binding: ControllerBinding = serde_json::from_str(&binding_json)
+            .map_err(|_| integrity("owner binding is invalid"))?;
+        if recorded_binding_sha256 != sha256_hex(binding_json.as_bytes()) {
+            return Err(integrity("owner binding digest does not match"));
+        }
+        let external_json =
+            external_json.ok_or_else(|| integrity("external provenance is missing"))?;
+        let external_sha256 =
+            external_sha256.ok_or_else(|| integrity("external provenance digest is missing"))?;
+        if external_sha256 != sha256_hex(external_json.as_bytes()) {
+            return Err(integrity("external provenance digest does not match"));
+        }
+        let bootstrap = bootstrap.ok_or_else(|| integrity("bootstrap operation is missing"))?;
+        let bootstrap_payload = format!(
+            "{bootstrap}\0{}\0{recorded_binding_sha256}",
+            external_sha256
+        );
+        let event_rows = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*),MIN(previous_hash),MIN(event_hash) FROM events
+                 WHERE engagement_id=?1 AND kind='external_engagement_opened'
+                   AND payload_sha256=?2",
+                params![
+                    engagement_id.to_string(),
+                    sha256_hex(bootstrap_payload.as_bytes())
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .map_err(internal)?;
+        let (1, Some(previous_hash), Some(event_hash)) = event_rows else {
+            return Err(integrity("external engagement bootstrap event is missing"));
+        };
+        let expected_event_hash = event_digest(
+            &previous_hash,
+            engagement_id,
+            "external_engagement_opened",
+            &sha256_hex(bootstrap_payload.as_bytes()),
+        );
+        if event_hash != expected_event_hash {
+            return Err(integrity(
+                "external engagement bootstrap event digest does not match",
+            ));
+        }
+        let open_request = digest_value(&serde_json::json!({
+            "workspace_id": recorded_workspace,
+            "controller_binding": binding,
+            "external_controller_ref": serde_json::from_str::<Value>(&external_json)
+                .map_err(|_| integrity("external provenance is invalid"))?,
+            "label": label,
+        }))?;
+        let receipts: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM operations WHERE scope_id=?1
+             AND operation='open_external_engagement' AND request_sha256=?2
+             AND json_extract(response_json,'$.engagement_id')=?3",
+                params![
+                    format!("workspace:{workspace_id}"),
+                    open_request,
+                    engagement_id.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if receipts != 1 {
+            return Err(integrity(
+                "bootstrap operation receipt is missing or ambiguous",
+            ));
+        }
+        authorize_controller(engagement_id, operation, &binding, carrier)?;
+        Ok(binding)
+    }
+
+    pub fn external_snapshot(
+        &self,
+        engagement_id: Uuid,
+    ) -> Result<ExternalEngagementSnapshot, MachineError> {
+        let (state, external, revision, kind): (String, Option<String>, i64, String) = self
+            .connection
+            .query_row(
+                "SELECT state,external_controller_ref_json,revision,authority_kind
+                 FROM engagements WHERE engagement_id=?1",
+                [engagement_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(not_found)?;
+        if kind != "external_v1" {
+            return Err(not_found());
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT m.specialist_run_id,m.role_ref,m.state,m.actor_residency,
+                    COUNT(t.task_id)
+             FROM members m LEFT JOIN tasks t ON t.specialist_run_id=m.specialist_run_id
+               AND t.state IN ('accepted','queued','claimed','dispatching','running')
+             WHERE m.engagement_id=?1
+             GROUP BY m.specialist_run_id,m.role_ref,m.state,m.actor_residency
+             ORDER BY m.rowid",
+            )
+            .map_err(internal)?;
+        let specialists = statement
+            .query_map([engagement_id.to_string()], |row| {
+                let id: String = row.get(0)?;
+                Ok(ExternalMemberSnapshot {
+                    specialist_run_id: id.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    role_ref: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    membership_state: row.get(2)?,
+                    actor_residency: row
+                        .get::<_, Option<String>>(3)?
+                        .unwrap_or_else(|| "unavailable".to_owned()),
+                    pending_task_count: row.get::<_, i64>(4)?.try_into().unwrap_or(0),
+                })
+            })
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        Ok(ExternalEngagementSnapshot {
+            engagement_id,
+            state,
+            external_controller_ref: serde_json::from_str(
+                external
+                    .as_deref()
+                    .ok_or_else(|| integrity("external provenance is missing"))?,
+            )
+            .map_err(internal)?,
+            revision: revision.try_into().map_err(internal)?,
+            specialists,
+        })
+    }
+
+    pub fn reserve_external_hire(
+        &mut self,
+        engagement_id: Uuid,
+        role_ref: &str,
+        configuration: &AgentConfigurationSnapshot,
+        objective: &str,
+        requested_access: &str,
+        idempotency_key: &str,
+    ) -> Result<ExternalHireReservation, MachineError> {
+        checked(role_ref, 64, "role_ref")?;
+        checked_text(objective, 65_536, "objective")?;
+        checked(idempotency_key, 256, "idempotency_key")?;
+        if !matches!(
+            requested_access,
+            "read_only" | "isolated_write" | "canonical_workspace_write"
+        ) {
+            return Err(invalid("requested_access", "unsupported Specialist access"));
+        }
+        let configuration_json =
+            canonical_string(&serde_json::to_value(configuration).map_err(internal)?)?;
+        let configuration_sha256 = agent_configuration_digest(configuration).map_err(internal)?;
+        let objective_sha256 = sha256_hex(objective.as_bytes());
+        let request = digest_value(&serde_json::json!({
+            "engagement_id": engagement_id, "role_ref": role_ref,
+            "agent_configuration": configuration, "objective_sha256": objective_sha256,
+            "requested_access": requested_access,
+        }))?;
+        let scope = engagement_id.to_string();
+        if let Some(replay) = scoped_replay(
+            &self.connection,
+            &scope,
+            "hire_external_specialist",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        let hire_operation_id = Uuid::now_v7();
+        let specialist_run_id = Uuid::now_v7();
+        let now = unix_time_ms()?;
+        let transaction = self.transaction()?;
+        if let Some(replay) = scoped_replay(
+            &transaction,
+            &scope,
+            "hire_external_specialist",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        require_current(
+            &transaction,
+            engagement_id,
+            &["active", "degraded", "recovering"],
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO members(
+               specialist_run_id,engagement_id,hire_operation_id,
+               configuration_sha256,state,role_ref,configuration_json,
+               objective_sha256,requested_access,actor_residency,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,'provisioning',?5,?6,?7,?8,'unstarted',?9,?9)",
+                params![
+                    specialist_run_id.to_string(),
+                    engagement_id.to_string(),
+                    hire_operation_id.to_string(),
+                    configuration_sha256,
+                    role_ref,
+                    configuration_json,
+                    objective_sha256,
+                    requested_access,
+                    now
+                ],
+            )
+            .map_err(internal)?;
+        transaction.execute(
+            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+            params![engagement_id.to_string(), now],
+        ).map_err(internal)?;
+        let result = ExternalHireReservation {
+            engagement_id,
+            hire_operation_id,
+            specialist_run_id,
+            state: "provisioning".to_owned(),
+        };
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_hire_reserved",
+            &request,
+        )?;
+        scoped_record(
+            &transaction,
+            &scope,
+            "hire_external_specialist",
+            idempotency_key,
+            &request,
+            &result,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn finish_external_hire(
+        &mut self,
+        reservation: &ExternalHireReservation,
+        outcome: RuntimeOutcome,
+        idempotency_key: &str,
+    ) -> Result<ExternalHireReservation, MachineError> {
+        let state = match outcome {
+            RuntimeOutcome::Accepted => "active",
+            RuntimeOutcome::Rejected => "degraded",
+            RuntimeOutcome::Unknown => "degraded",
+        };
+        let response_state = match outcome {
+            RuntimeOutcome::Accepted => "ready",
+            RuntimeOutcome::Rejected | RuntimeOutcome::Unknown => "recovery_required",
+        };
+        let now = unix_time_ms()?;
+        let result = ExternalHireReservation {
+            state: response_state.to_owned(),
+            ..reservation.clone()
+        };
+        let transaction = self.transaction()?;
+        let changed = transaction
+            .execute(
+                "UPDATE members SET state=?2,actor_residency=?3,updated_at_ms=?4
+             WHERE specialist_run_id=?1 AND state='provisioning'",
+                params![
+                    reservation.specialist_run_id.to_string(),
+                    state,
+                    if outcome == RuntimeOutcome::Accepted {
+                        "unstarted"
+                    } else if outcome == RuntimeOutcome::Unknown {
+                        "recovering"
+                    } else {
+                        "unavailable"
+                    },
+                    now
+                ],
+            )
+            .map_err(internal)?;
+        if changed != 1 {
+            let matching_receipt: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operations
+                     WHERE scope_id=?1 AND operation='hire_external_specialist'
+                       AND idempotency_key=?2
+                       AND json_extract(response_json,'$.specialist_run_id')=?3)",
+                    params![
+                        reservation.engagement_id.to_string(),
+                        idempotency_key,
+                        reservation.specialist_run_id.to_string()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if !matching_receipt {
+                return Err(MachineError::new(
+                    "IDEMPOTENCY_CONFLICT",
+                    "hire settlement key does not match its durable reservation",
+                    false,
+                    serde_json::json!({"required_action":"use_original_input_or_new_key"}),
+                ));
+            }
+            let recorded_state: String = transaction
+                .query_row(
+                    "SELECT state FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
+                    params![
+                        reservation.engagement_id.to_string(),
+                        reservation.specialist_run_id.to_string()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(internal)?
+                .ok_or_else(|| specialist_not_member(reservation.specialist_run_id))?;
+            return Ok(ExternalHireReservation {
+                state: if recorded_state == "active" {
+                    "ready".to_owned()
+                } else {
+                    "recovery_required".to_owned()
+                },
+                ..reservation.clone()
+            });
+        }
+        if outcome != RuntimeOutcome::Accepted {
+            transaction.execute(
+                "UPDATE engagements SET state='degraded',revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+                params![reservation.engagement_id.to_string(), now],
+            ).map_err(internal)?;
+        }
+        scoped_update_response(
+            &transaction,
+            &reservation.engagement_id.to_string(),
+            "hire_external_specialist",
+            idempotency_key,
+            &result,
+        )?;
+        append_event(
+            &transaction,
+            reservation.engagement_id,
+            "external_hire_outcome",
+            response_state,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn mark_external_member_resident(
+        &mut self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<(), MachineError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE members SET actor_residency='resident',updated_at_ms=?3
+                 WHERE engagement_id=?1 AND specialist_run_id=?2
+                   AND state IN ('active','degraded')",
+                params![
+                    engagement_id.to_string(),
+                    specialist_run_id.to_string(),
+                    unix_time_ms()?
+                ],
+            )
+            .map_err(internal)?;
+        if changed != 1 {
+            return Err(specialist_not_member(specialist_run_id));
+        }
+        Ok(())
+    }
+
+    pub fn external_member_configuration(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<(AgentConfigurationSnapshot, String, String), MachineError> {
+        let row: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT configuration_json,requested_access,state FROM members
+             WHERE engagement_id=?1 AND specialist_run_id=?2",
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let (configuration, access, state) =
+            row.ok_or_else(|| specialist_not_member(specialist_run_id))?;
+        Ok((
+            serde_json::from_str(&configuration).map_err(internal)?,
+            access,
+            state,
+        ))
+    }
+
+    pub fn external_member_actor_residency(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<String, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT actor_residency FROM members
+                 WHERE engagement_id=?1 AND specialist_run_id=?2",
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?
+            .flatten()
+            .ok_or_else(|| specialist_not_member(specialist_run_id))
+    }
+
+    pub fn stale_external_hires(
+        &self,
+        engagement_id: Uuid,
+        grace: Duration,
+    ) -> Result<Vec<(ExternalHireReservation, String)>, MachineError> {
+        let cutoff =
+            unix_time_ms()?.saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT m.hire_operation_id,m.specialist_run_id,o.idempotency_key
+                 FROM members m JOIN operations o
+                   ON o.scope_id=m.engagement_id
+                  AND o.operation='hire_external_specialist'
+                  AND json_extract(o.response_json,'$.specialist_run_id')=m.specialist_run_id
+                 WHERE m.engagement_id=?1 AND m.state='provisioning'
+                   AND m.updated_at_ms<=?2
+                 ORDER BY m.created_at_ms,m.specialist_run_id",
+            )
+            .map_err(internal)?;
+        statement
+            .query_map(params![engagement_id.to_string(), cutoff], |row| {
+                let hire_operation_id: String = row.get(0)?;
+                let specialist_run_id: String = row.get(1)?;
+                Ok((
+                    ExternalHireReservation {
+                        engagement_id,
+                        hire_operation_id: hire_operation_id
+                            .parse()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        specialist_run_id: specialist_run_id
+                            .parse()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        state: "provisioning".to_owned(),
+                    },
+                    row.get(2)?,
+                ))
+            })
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)
+    }
+
+    pub fn external_canonical_members_without_active_tasks(
+        &self,
+        engagement_id: Uuid,
+    ) -> Result<Vec<Uuid>, MachineError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT m.specialist_run_id FROM members m
+                 WHERE m.engagement_id=?1
+                   AND m.state IN ('active','degraded')
+                   AND m.requested_access='canonical_workspace_write'
+                   AND NOT EXISTS(
+                     SELECT 1 FROM tasks t
+                     WHERE t.engagement_id=m.engagement_id
+                       AND t.specialist_run_id=m.specialist_run_id
+                       AND t.state IN ('accepted','queued','claimed','dispatching','running')
+                   )
+                 ORDER BY m.specialist_run_id",
+            )
+            .map_err(internal)?;
+        statement
+            .query_map([engagement_id.to_string()], |row| {
+                let run_id: String = row.get(0)?;
+                run_id.parse().map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)
+    }
+
+    pub fn reserve_external_task(
+        &mut self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+        request: ExternalTaskRequest<'_>,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        let ExternalTaskRequest {
+            request_value,
+            objective,
+            external_request_ref,
+            execution_intent,
+            deadline_seconds,
+            idempotency_key,
+        } = request;
+        checked_text(objective, 65_536, "objective")?;
+        checked(idempotency_key, 256, "idempotency_key")?;
+        if !(1..=86_400).contains(&deadline_seconds) {
+            return Err(invalid(
+                "deadline_seconds",
+                "deadline must be between 1 and 86400 seconds",
+            ));
+        }
+        let request_json = canonical_string(request_value)?;
+        let request_sha256 = sha256_hex(request_json.as_bytes());
+        let external_json = canonical_string(external_request_ref)?;
+        let scope = engagement_id.to_string();
+        if let Some(replay) = scoped_replay::<ExternalTaskSnapshot>(
+            &self.connection,
+            &scope,
+            "assign_external_specialist_task",
+            idempotency_key,
+            &request_sha256,
+        )? {
+            return self.external_task(engagement_id, replay.task_id);
+        }
+        let task_id = Uuid::now_v7();
+        let now = unix_time_ms()?;
+        let transaction = self.transaction()?;
+        if let Some(replay) = scoped_replay::<ExternalTaskSnapshot>(
+            &transaction,
+            &scope,
+            "assign_external_specialist_task",
+            idempotency_key,
+            &request_sha256,
+        )? {
+            return external_task_in(&transaction, engagement_id, replay.task_id);
+        }
+        require_current(
+            &transaction,
+            engagement_id,
+            &["active", "degraded", "recovering"],
+        )?;
+        let (member_state, requested_access): (String, Option<String>) = transaction.query_row(
+            "SELECT state,requested_access FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
+            params![engagement_id.to_string(), specialist_run_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(internal)?.ok_or_else(|| specialist_not_member(specialist_run_id))?;
+        if member_state != "active" {
+            return Err(conflict("Specialist membership is not active"));
+        }
+        if !access_allows(
+            requested_access.as_deref().unwrap_or("read_only"),
+            execution_intent,
+        ) {
+            return Err(policy_denied(
+                "task execution intent exceeds the hired access",
+            ));
+        }
+        let inserted = transaction.execute(
+            "INSERT INTO tasks(
+               task_id,engagement_id,specialist_run_id,objective_sha256,state,
+               external_request_ref_json,request_json,execution_intent,
+               deadline_seconds,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,'accepted',?5,?6,?7,?8,?9,?9)",
+            params![
+                task_id.to_string(),
+                engagement_id.to_string(),
+                specialist_run_id.to_string(),
+                sha256_hex(objective.as_bytes()),
+                external_json,
+                request_json,
+                execution_intent,
+                i64::try_from(deadline_seconds).map_err(internal)?,
+                now
+            ],
+        );
+        if let Err(error) = inserted {
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tasks
+                     WHERE specialist_run_id=?1
+                       AND state IN ('accepted','queued','claimed','dispatching','running'))",
+                    [specialist_run_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if active {
+                return Err(conflict("Specialist already has an active task"));
+            }
+            return Err(internal(error));
+        }
+        let result = ExternalTaskSnapshot {
+            task_id,
+            specialist_run_id,
+            state: "accepted".to_owned(),
+            turn_id: None,
+            result_artifact_ref: None,
+            result: None,
+            safe_error_code: None,
+        };
+        transaction.execute(
+            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+            params![engagement_id.to_string(),now],
+        ).map_err(internal)?;
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_task_reserved",
+            &request_sha256,
+        )?;
+        scoped_record(
+            &transaction,
+            &scope,
+            "assign_external_specialist_task",
+            idempotency_key,
+            &request_sha256,
+            &result,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn mark_external_task_running(
+        &mut self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+        turn_id: &str,
+        idempotency_key: &str,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        checked(turn_id, 256, "turn_id")?;
+        let current = self.external_task(engagement_id, task_id)?;
+        if current.state == "running" && current.turn_id.as_deref() == Some(turn_id) {
+            return Ok(current);
+        }
+        let now = unix_time_ms()?;
+        let transaction = self.transaction()?;
+        let changed = transaction
+            .execute(
+                "UPDATE tasks SET state='running',turn_id=?3,updated_at_ms=?4
+             WHERE engagement_id=?1 AND task_id=?2 AND state='dispatching'",
+                params![engagement_id.to_string(), task_id.to_string(), turn_id, now],
+            )
+            .map_err(internal)?;
+        if changed != 1 {
+            return Err(conflict("task is not at the accepted dispatch boundary"));
+        }
+        let result = external_task_in(&transaction, engagement_id, task_id)?;
+        scoped_update_response(
+            &transaction,
+            &engagement_id.to_string(),
+            "assign_external_specialist_task",
+            idempotency_key,
+            &result,
+        )?;
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_task_running",
+            turn_id,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn mark_external_task_dispatching(
+        &mut self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        let transaction = self.transaction()?;
+        let changed = transaction
+            .execute(
+                "UPDATE tasks SET state='dispatching',updated_at_ms=?3
+             WHERE engagement_id=?1 AND task_id=?2 AND state='accepted'",
+                params![
+                    engagement_id.to_string(),
+                    task_id.to_string(),
+                    unix_time_ms()?
+                ],
+            )
+            .map_err(internal)?;
+        if changed != 1 {
+            let current = external_task_in(&transaction, engagement_id, task_id)?;
+            if current.state == "dispatching" {
+                return Ok(current);
+            }
+            return Err(conflict("task is not at the accepted dispatch boundary"));
+        }
+        let result = external_task_in(&transaction, engagement_id, task_id)?;
+        scoped_update_response(
+            &transaction,
+            &engagement_id.to_string(),
+            "assign_external_specialist_task",
+            idempotency_key,
+            &result,
+        )?;
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_task_dispatching",
+            &task_id.to_string(),
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn finish_external_task(
+        &mut self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+        output: Option<&Value>,
+        state: &str,
+        safe_error_code: Option<&str>,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        if !matches!(
+            state,
+            "completed_not_delivered" | "failed" | "interrupted_unknown" | "cancelled" | "expired"
+        ) {
+            return Err(invalid("state", "task outcome is not terminal"));
+        }
+        let now = unix_time_ms()?;
+        let transaction = self.transaction()?;
+        let current = external_task_in(&transaction, engagement_id, task_id)?;
+        if !matches!(
+            current.state.as_str(),
+            "accepted" | "queued" | "claimed" | "dispatching" | "running"
+        ) {
+            return Ok(current);
+        }
+        let (artifact_id, result_sha256) = if state == "completed_not_delivered" {
+            let output = output.ok_or_else(|| conflict("completed task has no result"))?;
+            let canonical = canonical_string(output)?;
+            let digest = sha256_hex(canonical.as_bytes());
+            let artifact_id = Uuid::now_v7();
+            let specialist: String = transaction
+                .query_row(
+                    "SELECT specialist_run_id FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                    params![engagement_id.to_string(), task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            transaction.execute(
+                "INSERT INTO artifacts(artifact_id,engagement_id,task_id,specialist_run_id,result_sha256,canonical_json)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![artifact_id.to_string(),engagement_id.to_string(),task_id.to_string(),specialist,digest,canonical],
+            ).map_err(internal)?;
+            (Some(artifact_id), Some(digest))
+        } else {
+            (None, None)
+        };
+        let changed = transaction.execute(
+            "UPDATE tasks SET state=?3,result_sha256=?4,artifact_id=?5,safe_error_code=?6,updated_at_ms=?7
+             WHERE engagement_id=?1 AND task_id=?2 AND state IN ('accepted','queued','claimed','dispatching','running')",
+            params![engagement_id.to_string(),task_id.to_string(),state,result_sha256,
+                artifact_id.map(|value| value.to_string()),safe_error_code,now],
+        ).map_err(internal)?;
+        if changed != 1 {
+            return external_task_in(&transaction, engagement_id, task_id);
+        }
+        append_event(&transaction, engagement_id, "external_task_terminal", state)?;
+        let result = external_task_in(&transaction, engagement_id, task_id)?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn cancel_external_task(
+        &mut self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+        terminal_state: &str,
+        reason: &str,
+        idempotency_key: &str,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        if !matches!(terminal_state, "cancelled" | "interrupted_unknown") {
+            return Err(invalid("state", "cancellation outcome is invalid"));
+        }
+        checked(idempotency_key, 256, "idempotency_key")?;
+        checked_text(reason, 1024, "reason")?;
+        let request = digest_value(&serde_json::json!({
+            "engagement_id": engagement_id,
+            "task_id": task_id,
+            "reason": reason,
+        }))?;
+        let scope = engagement_id.to_string();
+        if let Some(replay) = scoped_replay(
+            &self.connection,
+            &scope,
+            "cancel_external_specialist_task",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        let transaction = self.transaction()?;
+        if let Some(replay) = scoped_replay(
+            &transaction,
+            &scope,
+            "cancel_external_specialist_task",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        let current = external_task_in(&transaction, engagement_id, task_id)?;
+        let result = if matches!(
+            current.state.as_str(),
+            "completed_not_delivered"
+                | "delivered"
+                | "failed"
+                | "interrupted_unknown"
+                | "cancelled"
+                | "expired"
+        ) {
+            current
+        } else {
+            transaction
+                .execute(
+                    "UPDATE tasks SET state=?3,safe_error_code=?4,updated_at_ms=?5
+                 WHERE engagement_id=?1 AND task_id=?2",
+                    params![
+                        engagement_id.to_string(),
+                        task_id.to_string(),
+                        terminal_state,
+                        if terminal_state == "interrupted_unknown" {
+                            Some("INTERRUPTED_UNKNOWN")
+                        } else {
+                            None
+                        },
+                        unix_time_ms()?
+                    ],
+                )
+                .map_err(internal)?;
+            append_event(
+                &transaction,
+                engagement_id,
+                "external_task_cancelled",
+                terminal_state,
+            )?;
+            external_task_in(&transaction, engagement_id, task_id)?
+        };
+        scoped_record(
+            &transaction,
+            &scope,
+            "cancel_external_specialist_task",
+            idempotency_key,
+            &request,
+            &result,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn external_task(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        external_task_in(&self.connection, engagement_id, task_id)
+    }
+
+    pub fn external_task_execution_intent(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<String, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT execution_intent FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| {
+                MachineError::new(
+                    "SPECIALIST_TASK_NOT_FOUND",
+                    "Specialist task was not found",
+                    false,
+                    serde_json::json!({"task_id":task_id}),
+                )
+            })
+    }
+
+    pub fn external_task_deadline_expired(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<bool, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT created_at_ms + deadline_seconds * 1000 <= ?3 FROM tasks
+             WHERE engagement_id=?1 AND task_id=?2",
+                params![
+                    engagement_id.to_string(),
+                    task_id.to_string(),
+                    unix_time_ms()?
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| {
+                MachineError::new(
+                    "SPECIALIST_TASK_NOT_FOUND",
+                    "Specialist task was not found",
+                    false,
+                    serde_json::json!({"task_id":task_id}),
+                )
+            })
+    }
+
+    pub fn external_tasks(
+        &self,
+        engagement_id: Uuid,
+        task_ids: &[Uuid],
+    ) -> Result<Vec<ExternalTaskSnapshot>, MachineError> {
+        task_ids
+            .iter()
+            .map(|task_id| self.external_task(engagement_id, *task_id))
+            .collect()
+    }
+
+    pub fn external_active_tasks(
+        &self,
+        engagement_id: Uuid,
+    ) -> Result<Vec<ExternalTaskSnapshot>, MachineError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT task_id FROM tasks WHERE engagement_id=?1
+             AND state IN ('accepted','queued','claimed','dispatching','running')
+             ORDER BY created_at_ms,task_id",
+            )
+            .map_err(internal)?;
+        let ids = statement
+            .query_map([engagement_id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        ids.into_iter()
+            .map(|id| {
+                let task_id = id.parse().map_err(internal)?;
+                self.external_task(engagement_id, task_id)
+            })
+            .collect()
+    }
+
+    pub fn collect_external_results(
+        &mut self,
+        engagement_id: Uuid,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<(Vec<ExternalTaskSnapshot>, u64), MachineError> {
+        if limit == 0 || limit > 100 {
+            return Err(invalid("limit", "limit must be between 1 and 100"));
+        }
+        let transaction = self.transaction()?;
+        let existing_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM (
+                   SELECT 1 FROM delivery_receipts d JOIN tasks t ON t.task_id=d.task_id
+                   WHERE t.engagement_id=?1 AND d.sequence>?2
+                   LIMIT ?3
+                 )",
+                params![
+                    engagement_id.to_string(),
+                    i64::try_from(after_sequence).map_err(internal)?,
+                    i64::try_from(limit).map_err(internal)?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        let remaining = i64::try_from(limit)
+            .map_err(internal)?
+            .saturating_sub(existing_count);
+        let mut pending = transaction
+            .prepare(
+                "SELECT task_id,artifact_id FROM tasks WHERE engagement_id=?1
+             AND state='completed_not_delivered' ORDER BY created_at_ms,task_id LIMIT ?2",
+            )
+            .map_err(internal)?;
+        let rows = pending
+            .query_map(params![engagement_id.to_string(), remaining], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        drop(pending);
+        for (task_id, artifact_id) in rows {
+            transaction.execute(
+                "INSERT OR IGNORE INTO delivery_receipts(task_id,artifact_id,delivered_at_ms) VALUES(?1,?2,?3)",
+                params![task_id,artifact_id,unix_time_ms()?],
+            ).map_err(internal)?;
+            transaction
+                .execute(
+                    "UPDATE tasks SET state='delivered' WHERE task_id=?1",
+                    [&task_id],
+                )
+                .map_err(internal)?;
+        }
+        let mut statement = transaction.prepare(
+            "SELECT d.sequence,t.task_id FROM delivery_receipts d JOIN tasks t ON t.task_id=d.task_id
+             WHERE t.engagement_id=?1 AND d.sequence>?2 ORDER BY d.sequence LIMIT ?3",
+        ).map_err(internal)?;
+        let selected = statement
+            .query_map(
+                params![
+                    engagement_id.to_string(),
+                    i64::try_from(after_sequence).map_err(internal)?,
+                    i64::try_from(limit).map_err(internal)?
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        drop(statement);
+        let mut tasks = Vec::with_capacity(selected.len());
+        let mut next = after_sequence;
+        for (sequence, task_id) in selected {
+            next = sequence.try_into().map_err(internal)?;
+            tasks.push(external_task_in(
+                &transaction,
+                engagement_id,
+                task_id.parse().map_err(internal)?,
+            )?);
+        }
+        transaction.commit().map_err(internal)?;
+        Ok((tasks, next))
+    }
+
+    pub fn release_external_member(
+        &mut self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+        reason: &str,
+        idempotency_key: &str,
+    ) -> Result<String, MachineError> {
+        checked(idempotency_key, 256, "idempotency_key")?;
+        checked_text(reason, 1024, "reason")?;
+        let request = digest_value(
+            &serde_json::json!({"engagement_id":engagement_id,"specialist_run_id":specialist_run_id,"reason":reason}),
+        )?;
+        let scope = engagement_id.to_string();
+        if let Some(value) = scoped_replay(
+            &self.connection,
+            &scope,
+            "release_external_specialist",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(value);
+        }
+        let transaction = self.transaction()?;
+        if let Some(value) = scoped_replay(
+            &transaction,
+            &scope,
+            "release_external_specialist",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(value);
+        }
+        let active: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE engagement_id=?1 AND specialist_run_id=?2
+             AND state IN ('accepted','queued','claimed','dispatching','running'))",
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if active {
+            return Err(conflict("Specialist has an active task"));
+        }
+        let changed = transaction.execute(
+            "UPDATE members SET state='released',actor_residency='terminal',updated_at_ms=?3
+             WHERE engagement_id=?1 AND specialist_run_id=?2 AND state IN ('active','degraded','releasing')",
+            params![engagement_id.to_string(),specialist_run_id.to_string(),unix_time_ms()?],
+        ).map_err(internal)?;
+        if changed == 0 {
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT state FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
+                    params![engagement_id.to_string(), specialist_run_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(internal)?;
+            if existing.as_deref() != Some("released") {
+                return Err(specialist_not_member(specialist_run_id));
+            }
+        }
+        let result = "released".to_owned();
+        scoped_record(
+            &transaction,
+            &scope,
+            "release_external_specialist",
+            idempotency_key,
+            &request,
+            &result,
+        )?;
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_member_released",
+            &specialist_run_id.to_string(),
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn close_external_engagement(
+        &mut self,
+        engagement_id: Uuid,
+        mode: &str,
+        reason: &str,
+        idempotency_key: &str,
+    ) -> Result<String, MachineError> {
+        if !matches!(mode, "complete" | "abort") {
+            return Err(invalid("mode", "close mode is invalid"));
+        }
+        checked(idempotency_key, 256, "idempotency_key")?;
+        checked_text(reason, 1024, "reason")?;
+        let request = digest_value(
+            &serde_json::json!({"engagement_id":engagement_id,"mode":mode,"reason":reason}),
+        )?;
+        let scope = engagement_id.to_string();
+        if let Some(value) = scoped_replay(
+            &self.connection,
+            &scope,
+            "close_external_engagement",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(value);
+        }
+        let transaction = self.transaction()?;
+        if let Some(value) = scoped_replay(
+            &transaction,
+            &scope,
+            "close_external_engagement",
+            idempotency_key,
+            &request,
+        )? {
+            return Ok(value);
+        }
+        let active: bool=transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE engagement_id=?1 AND state IN ('accepted','queued','claimed','dispatching','running'))",
+            [engagement_id.to_string()],|row| row.get(0),
+        ).map_err(internal)?;
+        if active {
+            return Err(conflict("engagement has active tasks"));
+        }
+        let unreleased: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM members WHERE engagement_id=?1 AND state!='released')",
+                [engagement_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if unreleased {
+            return Err(conflict("all Specialists must be released before closing"));
+        }
+        let result = if mode == "complete" {
+            "completed"
+        } else {
+            "aborted"
+        }
+        .to_owned();
+        let changed=transaction.execute(
+            "UPDATE engagements SET state=?2,revision=revision+1,updated_at_ms=?3
+             WHERE engagement_id=?1 AND authority_kind='external_v1' AND state NOT IN ('completed','aborted')",
+            params![engagement_id.to_string(),result,unix_time_ms()?],
+        ).map_err(internal)?;
+        if changed == 0 {
+            return Err(conflict("engagement is already terminal"));
+        }
+        scoped_record(
+            &transaction,
+            &scope,
+            "close_external_engagement",
+            idempotency_key,
+            &request,
+            &result,
+        )?;
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_engagement_closed",
+            &result,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok(result)
+    }
+
+    pub fn external_member_is_active(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<bool, MachineError> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM members m JOIN engagements e ON e.engagement_id=m.engagement_id
+             WHERE m.engagement_id=?1 AND m.specialist_run_id=?2 AND m.state='active'
+             AND e.authority_kind='external_v1' AND e.state IN ('active','degraded','recovering','aborting'))",
+            params![engagement_id.to_string(),specialist_run_id.to_string()],|row| row.get(0),
+        ).map_err(internal)
+    }
+
+    pub fn validate_external_member_binding(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+        binding: &AggregateBinding,
+    ) -> Result<(), MachineError> {
+        let row: Option<(String, Option<String>, String)> = self
+            .connection
+            .query_row(
+                "SELECT hire_operation_id,role_ref,configuration_sha256 FROM members
+             WHERE engagement_id=?1 AND specialist_run_id=?2",
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let (operation, role, configuration) =
+            row.ok_or_else(|| specialist_not_member(specialist_run_id))?;
+        if binding.operation_id.to_string() != operation
+            || binding.role_reference != role
+            || binding.role_snapshot_sha256
+                != role.as_ref().map(|value| sha256_hex(value.as_bytes()))
+            || binding.agent_configuration_sha256.as_deref() != Some(configuration.as_str())
+        {
+            return Err(integrity(
+                "specialist Run binding does not match its member record",
+            ));
+        }
+        Ok(())
+    }
+
     fn transaction(&mut self) -> Result<Transaction<'_>, MachineError> {
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -928,6 +2438,167 @@ impl EngagementStore {
     }
 }
 
+fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(internal)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let observed: String = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if observed == "2" {
+        transaction
+            .execute_batch(
+                "DROP INDEX IF EXISTS one_active_external_task_per_member;
+             ALTER TABLE engagements RENAME TO engagements_v2;
+             ALTER TABLE operations RENAME TO operations_v2;
+             ALTER TABLE members RENAME TO members_v2;
+             ALTER TABLE tasks RENAME TO tasks_v2;
+             ALTER TABLE artifacts RENAME TO artifacts_v2;
+             ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v2;
+             ALTER TABLE events RENAME TO events_v2;
+
+             CREATE TABLE engagements(
+               engagement_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+               controller_sha256 TEXT NOT NULL, state TEXT NOT NULL,
+               specialist_run_id TEXT, task_id TEXT, result_sha256 TEXT,
+               result_json TEXT, revision INTEGER NOT NULL,
+               bootstrap_operation_id TEXT, external_controller_ref_json TEXT,
+               external_controller_ref_sha256 TEXT, label TEXT,
+               controller_binding_json TEXT, created_at_ms INTEGER,
+               updated_at_ms INTEGER,
+               authority_kind TEXT NOT NULL DEFAULT 'legacy_one_shot'
+             ) STRICT;
+             INSERT INTO engagements(
+               engagement_id,workspace_id,controller_sha256,state,
+               specialist_run_id,task_id,result_sha256,result_json,revision
+             ) SELECT engagement_id,workspace_id,controller_sha256,
+               CASE state WHEN 'executing' THEN 'interrupted_unknown'
+                 WHEN 'result_ready' THEN 'result_ready' ELSE state END,
+               specialist_run_id,task_id,result_sha256,result_json,revision
+             FROM engagements_v2;
+
+             CREATE TABLE operations(
+               scope_id TEXT NOT NULL DEFAULT 'legacy', operation TEXT NOT NULL,
+               idempotency_key TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+               response_json TEXT NOT NULL,
+               PRIMARY KEY(scope_id,operation,idempotency_key)
+             ) STRICT;
+             INSERT INTO operations SELECT 'legacy',operation,idempotency_key,
+               request_sha256,response_json FROM operations_v2;
+
+             CREATE TABLE members(
+               specialist_run_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL,
+               hire_operation_id TEXT NOT NULL UNIQUE,
+               configuration_sha256 TEXT NOT NULL, state TEXT NOT NULL,
+               role_ref TEXT, configuration_json TEXT, objective_sha256 TEXT,
+               requested_access TEXT, actor_residency TEXT,
+               created_at_ms INTEGER, updated_at_ms INTEGER,
+               FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+             ) STRICT;
+             INSERT INTO members(
+               specialist_run_id,engagement_id,hire_operation_id,
+               configuration_sha256,state
+             ) SELECT specialist_run_id,engagement_id,hire_operation_id,
+               configuration_sha256,state FROM members_v2;
+
+             CREATE TABLE tasks(
+               task_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL,
+               specialist_run_id TEXT NOT NULL, objective_sha256 TEXT NOT NULL,
+               state TEXT NOT NULL, result_sha256 TEXT,
+               external_request_ref_json TEXT, request_json TEXT,
+               execution_intent TEXT, deadline_seconds INTEGER, turn_id TEXT,
+               artifact_id TEXT, safe_error_code TEXT,
+               created_at_ms INTEGER, updated_at_ms INTEGER,
+               FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id),
+               FOREIGN KEY(specialist_run_id) REFERENCES members(specialist_run_id)
+             ) STRICT;
+             INSERT INTO tasks(
+               task_id,engagement_id,specialist_run_id,objective_sha256,state,
+               result_sha256
+             ) SELECT task_id,engagement_id,specialist_run_id,objective_sha256,
+               CASE state WHEN 'accepted' THEN 'interrupted_unknown'
+                 WHEN 'result_ready' THEN 'completed_not_delivered' ELSE state END,
+               result_sha256 FROM tasks_v2;
+
+             CREATE TABLE artifacts(
+               artifact_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL,
+               task_id TEXT UNIQUE, specialist_run_id TEXT,
+               result_sha256 TEXT NOT NULL, canonical_json TEXT NOT NULL,
+               FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id),
+               FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+               FOREIGN KEY(specialist_run_id) REFERENCES members(specialist_run_id)
+             ) STRICT;
+             INSERT INTO artifacts(
+               artifact_id,engagement_id,result_sha256,canonical_json
+             ) SELECT artifact_id,engagement_id,result_sha256,canonical_json
+             FROM artifacts_v2;
+             UPDATE tasks SET artifact_id=(SELECT artifact_id FROM artifacts
+               WHERE artifacts.engagement_id=tasks.engagement_id LIMIT 1)
+               WHERE state='completed_not_delivered';
+
+             CREATE TABLE delivery_receipts(
+               sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+               task_id TEXT NOT NULL UNIQUE, artifact_id TEXT NOT NULL,
+               delivered_at_ms INTEGER NOT NULL,
+               FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+               FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+             ) STRICT;
+             INSERT INTO delivery_receipts SELECT sequence,task_id,artifact_id,
+               delivered_at_ms FROM delivery_receipts_v2;
+
+             CREATE TABLE events(
+               sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+               engagement_id TEXT NOT NULL, kind TEXT NOT NULL,
+               payload_sha256 TEXT NOT NULL, previous_hash TEXT NOT NULL,
+               event_hash TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
+               FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+             ) STRICT;
+             INSERT INTO events SELECT * FROM events_v2;
+             CREATE UNIQUE INDEX one_active_external_task_per_member
+               ON tasks(specialist_run_id)
+               WHERE state IN ('accepted','queued','claimed','dispatching','running');
+
+             DROP TABLE delivery_receipts_v2;
+             DROP TABLE artifacts_v2;
+             DROP TABLE tasks_v2;
+             DROP TABLE members_v2;
+             DROP TABLE operations_v2;
+             DROP TABLE events_v2;
+             DROP TABLE engagements_v2;
+             UPDATE metadata SET value='3' WHERE key='schema_version';",
+            )
+            .map_err(internal)?;
+        let violations: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(internal)?;
+        if violations != 0 {
+            return Err(internal(
+                "orchestration v2 migration violated a foreign key",
+            ));
+        }
+    } else if observed != SCHEMA_VERSION.to_string() {
+        return Err(MachineError::new(
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+            "orchestration schema is not supported",
+            false,
+            serde_json::json!({"observed":observed}),
+        ));
+    }
+    transaction.commit().map_err(internal)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(internal)
+}
+
 fn commit_with(
     faults: &Arc<dyn EngagementFaultInjector>,
     transaction: Transaction<'_>,
@@ -947,7 +2618,7 @@ fn replay<T: for<'de> Deserialize<'de>>(
 ) -> Result<Option<T>, MachineError> {
     let existing: Option<(String, String)> = connection
         .query_row(
-            "SELECT request_sha256,response_json FROM operations WHERE operation=?1 AND idempotency_key=?2",
+            "SELECT request_sha256,response_json FROM operations WHERE scope_id='legacy' AND operation=?1 AND idempotency_key=?2",
             params![operation, key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -967,6 +2638,69 @@ fn replay<T: for<'de> Deserialize<'de>>(
     serde_json::from_str(&response).map(Some).map_err(internal)
 }
 
+fn scoped_replay<T: for<'de> Deserialize<'de>>(
+    connection: &Connection,
+    scope: &str,
+    operation: &str,
+    key: &str,
+    request_sha256: &str,
+) -> Result<Option<T>, MachineError> {
+    let existing: Option<(String, String)> = connection
+        .query_row(
+            "SELECT request_sha256,response_json FROM operations
+             WHERE scope_id=?1 AND operation=?2 AND idempotency_key=?3",
+            params![scope, operation, key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((recorded, response)) = existing else {
+        return Ok(None);
+    };
+    if recorded != request_sha256 {
+        return Err(MachineError::new(
+            "IDEMPOTENCY_CONFLICT",
+            "idempotency key was already used with different input in this engagement scope",
+            false,
+            serde_json::json!({"required_action":"use_original_input_or_new_key"}),
+        ));
+    }
+    serde_json::from_str(&response).map(Some).map_err(internal)
+}
+
+fn scoped_record<T: Serialize>(
+    transaction: &Transaction<'_>,
+    scope: &str,
+    operation: &str,
+    key: &str,
+    request: &str,
+    response: &T,
+) -> Result<(), MachineError> {
+    transaction.execute(
+        "INSERT INTO operations(scope_id,operation,idempotency_key,request_sha256,response_json)
+         VALUES(?1,?2,?3,?4,?5)",
+        params![scope,operation,key,request,serde_json::to_string(response).map_err(internal)?],
+    ).map_err(internal)?;
+    Ok(())
+}
+
+fn scoped_update_response<T: Serialize>(
+    transaction: &Transaction<'_>,
+    scope: &str,
+    operation: &str,
+    key: &str,
+    response: &T,
+) -> Result<(), MachineError> {
+    let changed=transaction.execute(
+        "UPDATE operations SET response_json=?4 WHERE scope_id=?1 AND operation=?2 AND idempotency_key=?3",
+        params![scope,operation,key,serde_json::to_string(response).map_err(internal)?],
+    ).map_err(internal)?;
+    if changed != 1 {
+        return Err(conflict("operation receipt is missing"));
+    }
+    Ok(())
+}
+
 fn record<T: Serialize>(
     transaction: &Transaction<'_>,
     operation: &str,
@@ -976,7 +2710,7 @@ fn record<T: Serialize>(
 ) -> Result<(), MachineError> {
     transaction
         .execute(
-            "INSERT INTO operations VALUES(?1,?2,?3,?4)",
+            "INSERT INTO operations(scope_id,operation,idempotency_key,request_sha256,response_json) VALUES('legacy',?1,?2,?3,?4)",
             params![
                 operation,
                 key,
@@ -996,7 +2730,7 @@ fn update_response<T: Serialize>(
 ) -> Result<(), MachineError> {
     let changed = transaction
         .execute(
-            "UPDATE operations SET response_json=?3 WHERE operation=?1 AND idempotency_key=?2",
+            "UPDATE operations SET response_json=?3 WHERE scope_id='legacy' AND operation=?1 AND idempotency_key=?2",
             params![
                 operation,
                 key,
@@ -1026,14 +2760,17 @@ fn append_event(
         .map_err(internal)?;
     let previous = previous.unwrap_or_else(|| "0".repeat(64));
     let payload_sha256 = sha256_hex(payload.as_bytes());
-    let event_hash =
-        sha256_hex(format!("{previous}\0{}\0{kind}\0{payload_sha256}", engagement_id).as_bytes());
+    let event_hash = event_digest(&previous, engagement_id, kind, &payload_sha256);
     let created_at_ms = unix_time_ms()?;
     transaction.execute(
         "INSERT INTO events(engagement_id,kind,payload_sha256,previous_hash,event_hash,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6)",
         params![engagement_id.to_string(), kind, payload_sha256, previous, event_hash, created_at_ms],
     ).map_err(internal)?;
     Ok(())
+}
+
+fn event_digest(previous: &str, engagement_id: Uuid, kind: &str, payload_sha256: &str) -> String {
+    sha256_hex(format!("{previous}\0{engagement_id}\0{kind}\0{payload_sha256}").as_bytes())
 }
 
 fn unix_time_ms() -> Result<i64, MachineError> {
@@ -1091,6 +2828,56 @@ fn snapshot_in(
         .ok_or_else(not_found)
 }
 
+fn external_task_in(
+    connection: &Connection,
+    engagement_id: Uuid,
+    task_id: Uuid,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    connection
+        .query_row(
+            "SELECT t.specialist_run_id,t.state,t.turn_id,t.artifact_id,
+                    t.safe_error_code,a.canonical_json
+             FROM tasks t LEFT JOIN artifacts a ON a.artifact_id=t.artifact_id
+             WHERE t.engagement_id=?1 AND t.task_id=?2",
+            params![engagement_id.to_string(), task_id.to_string()],
+            |row| {
+                let specialist: String = row.get(0)?;
+                let artifact: Option<String> = row.get(3)?;
+                Ok(ExternalTaskSnapshot {
+                    task_id,
+                    specialist_run_id: specialist
+                        .parse()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    state: row.get(1)?,
+                    turn_id: row.get(2)?,
+                    result_artifact_ref: artifact.and_then(|value| value.parse().ok()),
+                    result: row
+                        .get::<_, Option<String>>(5)?
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                    safe_error_code: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(internal)?
+        .ok_or_else(|| {
+            MachineError::new(
+                "SPECIALIST_TASK_NOT_FOUND",
+                "Specialist task was not found",
+                false,
+                serde_json::json!({"task_id":task_id}),
+            )
+        })
+}
+
 fn digest_value(value: &Value) -> Result<String, MachineError> {
     Ok(sha256_hex(&canonical_json(value)?))
 }
@@ -1098,6 +2885,22 @@ fn digest_value(value: &Value) -> Result<String, MachineError> {
 fn canonical_json(value: &Value) -> Result<Vec<u8>, MachineError> {
     let text = serde_json::to_string(value).map_err(internal)?;
     canonicalize(&parse(&text).map_err(internal)?).map_err(internal)
+}
+
+fn canonical_string(value: &Value) -> Result<String, MachineError> {
+    String::from_utf8(canonical_json(value)?).map_err(internal)
+}
+
+fn access_allows(hired: &str, requested: &str) -> bool {
+    matches!(
+        (hired, requested),
+        ("read_only", "read_only")
+            | ("isolated_write", "read_only" | "isolated_write")
+            | (
+                "canonical_workspace_write",
+                "read_only" | "canonical_workspace_write"
+            )
+    )
 }
 
 fn optional_uuid(value: Option<String>) -> Option<Uuid> {
@@ -1110,6 +2913,13 @@ fn checked(value: &str, maximum: usize, argument: &str) -> Result<(), MachineErr
             argument,
             "value must be nonempty, bounded, and printable",
         ));
+    }
+    Ok(())
+}
+
+fn checked_text(value: &str, maximum: usize, argument: &str) -> Result<(), MachineError> {
+    if value.is_empty() || value.len() > maximum || value.contains('\0') {
+        return Err(invalid(argument, "value must be nonempty and bounded"));
     }
     Ok(())
 }
@@ -1141,6 +2951,33 @@ fn conflict(reason: &str) -> MachineError {
     )
 }
 
+fn policy_denied(reason: &str) -> MachineError {
+    MachineError::new(
+        "SPECIALIST_POLICY_DENIED",
+        reason,
+        false,
+        serde_json::json!({"required_action":"change_specialist_or_access"}),
+    )
+}
+
+fn specialist_not_member(run_id: Uuid) -> MachineError {
+    MachineError::new(
+        "SPECIALIST_NOT_MEMBER",
+        "Run is not an active member of this engagement",
+        false,
+        serde_json::json!({"specialist_run_id":run_id}),
+    )
+}
+
+fn integrity(reason: &str) -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        "external engagement integrity check failed",
+        false,
+        serde_json::json!({"invariant":reason}),
+    )
+}
+
 fn not_found() -> MachineError {
     MachineError::new(
         "ENGAGEMENT_NOT_FOUND",
@@ -1162,7 +2999,8 @@ fn internal(reason: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AggregateKind, ExecutionLane};
+    use crate::controller::{binding_from_carrier, create_controller_credential};
+    use crate::domain::{AggregateKind, ControllerIdentity, ControllerKind, ExecutionLane};
     use crate::run::{AggregateMemberKind, ExecutableIdentity, ProfileSnapshot};
     use crate::specialist::{REVIEWER_ROLE_REFERENCE, ReviewerRuntimeRequest};
     use crate::workspace::LosslessPath;
@@ -1235,6 +3073,930 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn owner_binding() -> ControllerBinding {
+        ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: Uuid::now_v7(),
+                kind: ControllerKind::Automation,
+                instance_id: "test-host".to_owned(),
+                subject_id: Some("test-principal".to_owned()),
+                generation: 1,
+            },
+            capability_sha256: "e".repeat(64),
+        }
+    }
+
+    #[test]
+    fn external_owner_integrity_corruption_fails_closed() {
+        let (mut store, root) = store();
+        let credential_path = root.join("owner.json");
+        create_controller_credential(
+            &credential_path,
+            ControllerKind::Automation,
+            "integrity-owner".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let carrier = CredentialCarrier::open_path(&credential_path).unwrap();
+        let binding = binding_from_carrier(&carrier, 1).unwrap();
+        let opened = store
+            .open_external_engagement(
+                "workspace",
+                &binding,
+                &serde_json::json!({"namespace":"test","kind":"workflow","id":"integrity"}),
+                None,
+                "open-integrity",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE engagements SET controller_binding_json='{}',controller_sha256=?2
+                 WHERE engagement_id=?1",
+                params![opened.engagement_id.to_string(), sha256_hex(b"{}")],
+            )
+            .unwrap();
+
+        let error = store
+            .authorize_external_owner(
+                "workspace",
+                opened.engagement_id,
+                "get_external_engagement",
+                &carrier,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(error.message, "external engagement integrity check failed");
+        assert_eq!(
+            store.external_snapshot(opened.engagement_id).unwrap().state,
+            "active"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reusable_engagement_supports_multiple_members_and_sequential_tasks() {
+        let (mut store, root) = store();
+        let binding = owner_binding();
+        let opened = store
+            .open_external_engagement(
+                "workspace",
+                &binding,
+                &serde_json::json!({"namespace":"test","kind":"workflow","id":"one"}),
+                Some("test engagement"),
+                "open",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .open_external_engagement(
+                    "workspace",
+                    &binding,
+                    &serde_json::json!({"namespace":"test","kind":"workflow","id":"one"}),
+                    Some("test engagement"),
+                    "open",
+                )
+                .unwrap()
+                .engagement_id,
+            opened.engagement_id,
+        );
+        let plan = reviewer_plan("review");
+        let mut members = Vec::new();
+        for number in 0..2 {
+            let reserved = store
+                .reserve_external_hire(
+                    opened.engagement_id,
+                    &format!("reviewer-{number}"),
+                    &plan.agent_configuration,
+                    "review",
+                    "read_only",
+                    &format!("hire-{number}"),
+                )
+                .unwrap();
+            let ready = store
+                .finish_external_hire(
+                    &reserved,
+                    RuntimeOutcome::Accepted,
+                    &format!("hire-{number}"),
+                )
+                .unwrap();
+            assert_eq!(ready.state, "ready");
+            members.push(ready.specialist_run_id);
+        }
+        let snapshot = store.external_snapshot(opened.engagement_id).unwrap();
+        assert_eq!(snapshot.specialists.len(), 2);
+        assert!(
+            snapshot
+                .specialists
+                .iter()
+                .all(|member| member.actor_residency == "unstarted")
+        );
+        store
+            .mark_external_member_resident(opened.engagement_id, members[0])
+            .unwrap();
+
+        for number in 0..2 {
+            let request = serde_json::json!({"task":number});
+            let external_ref =
+                serde_json::json!({"namespace":"test","kind":"request","id":format!("{number}")});
+            let task = store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    members[0],
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "inspect",
+                        external_request_ref: &external_ref,
+                        execution_intent: "read_only",
+                        deadline_seconds: 60,
+                        idempotency_key: &format!("assign-{number}"),
+                    },
+                )
+                .unwrap();
+            store
+                .mark_external_task_dispatching(
+                    opened.engagement_id,
+                    task.task_id,
+                    &format!("assign-{number}"),
+                )
+                .unwrap();
+            let running = store
+                .mark_external_task_running(
+                    opened.engagement_id,
+                    task.task_id,
+                    &format!("turn-{number}"),
+                    &format!("assign-{number}"),
+                )
+                .unwrap();
+            assert_eq!(running.state, "running");
+            let completed = store
+                .finish_external_task(
+                    opened.engagement_id,
+                    task.task_id,
+                    Some(&serde_json::json!({"summary":format!("result-{number}")})),
+                    "completed_not_delivered",
+                    None,
+                )
+                .unwrap();
+            assert!(completed.result_artifact_ref.is_some());
+            assert_eq!(
+                completed.result,
+                Some(serde_json::json!({"summary":format!("result-{number}")}))
+            );
+        }
+        let expiring = store
+            .reserve_external_task(
+                opened.engagement_id,
+                members[0],
+                ExternalTaskRequest {
+                    request_value: &serde_json::json!({"task":"deadline"}),
+                    objective: "inspect deadline",
+                    external_request_ref: &serde_json::json!({"kind":"deadline"}),
+                    execution_intent: "read_only",
+                    deadline_seconds: 1,
+                    idempotency_key: "assign-deadline",
+                },
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE tasks SET created_at_ms=0 WHERE task_id=?1",
+                [expiring.task_id.to_string()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .external_task_deadline_expired(opened.engagement_id, expiring.task_id)
+                .unwrap()
+        );
+        store
+            .finish_external_task(
+                opened.engagement_id,
+                expiring.task_id,
+                None,
+                "expired",
+                Some("OPERATION_TIMEOUT"),
+            )
+            .unwrap();
+        drop(store);
+        let mut store = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        assert_eq!(
+            store
+                .external_snapshot(opened.engagement_id)
+                .unwrap()
+                .specialists
+                .len(),
+            2
+        );
+        let (first_page, first_cursor) = store
+            .collect_external_results(opened.engagement_id, 0, 1)
+            .unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].state, "delivered");
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE engagement_id=?1 AND state='completed_not_delivered'",
+                    [opened.engagement_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let (second_page, cursor) = store
+            .collect_external_results(opened.engagement_id, first_cursor, 1)
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].state, "delivered");
+        let (redelivered, same_cursor) = store
+            .collect_external_results(opened.engagement_id, 0, 100)
+            .unwrap();
+        assert_eq!(redelivered.len(), 2);
+        assert!(redelivered.iter().all(|task| task.result.is_some()));
+        assert_eq!(same_cursor, cursor);
+        let (none, _) = store
+            .collect_external_results(opened.engagement_id, cursor, 100)
+            .unwrap();
+        assert!(none.is_empty());
+
+        for (number, member) in members.into_iter().enumerate() {
+            assert_eq!(
+                store
+                    .release_external_member(
+                        opened.engagement_id,
+                        member,
+                        "task complete",
+                        &format!("release-{number}")
+                    )
+                    .unwrap(),
+                "released"
+            );
+            assert_eq!(
+                store
+                    .release_external_member(
+                        opened.engagement_id,
+                        member,
+                        "changed reason",
+                        &format!("release-{number}")
+                    )
+                    .unwrap_err()
+                    .code,
+                "IDEMPOTENCY_CONFLICT"
+            );
+        }
+        assert_eq!(
+            store
+                .close_external_engagement(
+                    opened.engagement_id,
+                    "complete",
+                    "all members released",
+                    "close",
+                )
+                .unwrap(),
+            "completed"
+        );
+        assert_eq!(
+            store
+                .close_external_engagement(
+                    opened.engagement_id,
+                    "complete",
+                    "changed reason",
+                    "close",
+                )
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reusable_engagement_enforces_scoped_idempotency_and_one_active_task() {
+        let (mut store, root) = store();
+        let binding = owner_binding();
+        let open = |store: &mut EngagementStore, id: &str| {
+            store
+                .open_external_engagement(
+                    "workspace",
+                    &binding,
+                    &serde_json::json!({"namespace":"test","kind":"workflow","id":id}),
+                    None,
+                    id,
+                )
+                .unwrap()
+        };
+        let first = open(&mut store, "first");
+        let second = open(&mut store, "second");
+        let plan = reviewer_plan("review");
+        let mut member_ids = Vec::new();
+        for engagement in [first.engagement_id, second.engagement_id] {
+            let member = store
+                .reserve_external_hire(
+                    engagement,
+                    "reviewer",
+                    &plan.agent_configuration,
+                    "review",
+                    "read_only",
+                    "same-key",
+                )
+                .unwrap();
+            store
+                .finish_external_hire(&member, RuntimeOutcome::Accepted, "same-key")
+                .unwrap();
+            member_ids.push(member.specialist_run_id);
+        }
+        let request = serde_json::json!({"same":true});
+        let first_ref = serde_json::json!({"namespace":"test","kind":"request","id":"one"});
+        let task = store
+            .reserve_external_task(
+                first.engagement_id,
+                member_ids[0],
+                ExternalTaskRequest {
+                    request_value: &request,
+                    objective: "one",
+                    external_request_ref: &first_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task",
+                },
+            )
+            .unwrap();
+        let conflicting_request = serde_json::json!({"same":false});
+        let conflicting_ref = serde_json::json!({"namespace":"test","kind":"request","id":"two"});
+        let conflict = store
+            .reserve_external_task(
+                first.engagement_id,
+                member_ids[0],
+                ExternalTaskRequest {
+                    request_value: &conflicting_request,
+                    objective: "two",
+                    external_request_ref: &conflicting_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "other-task",
+                },
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "STATE_CONFLICT");
+        assert_eq!(
+            store
+                .reserve_external_task(
+                    first.engagement_id,
+                    member_ids[0],
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "one",
+                        external_request_ref: &first_ref,
+                        execution_intent: "read_only",
+                        deadline_seconds: 60,
+                        idempotency_key: "task",
+                    },
+                )
+                .unwrap()
+                .task_id,
+            task.task_id
+        );
+        assert_eq!(
+            store
+                .reserve_external_hire(
+                    first.engagement_id,
+                    "different",
+                    &plan.agent_configuration,
+                    "review",
+                    "read_only",
+                    "same-key",
+                )
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let cancelled = store
+            .cancel_external_task(
+                first.engagement_id,
+                task.task_id,
+                "interrupted_unknown",
+                "stop requested",
+                "cancel-task",
+            )
+            .unwrap();
+        assert_eq!(cancelled.state, "interrupted_unknown");
+        assert_eq!(
+            store
+                .cancel_external_task(
+                    first.engagement_id,
+                    task.task_id,
+                    "interrupted_unknown",
+                    "different reason",
+                    "cancel-task",
+                )
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_exact_open_replay_publishes_one_engagement() {
+        let (initial, root) = store();
+        drop(initial);
+        let database = root.join("orchestration.sqlite3");
+        let binding = owner_binding();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let database = database.clone();
+            let binding = binding.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut store = EngagementStore::open(&database).unwrap();
+                barrier.wait();
+                store
+                    .open_external_engagement(
+                        "workspace",
+                        &binding,
+                        &serde_json::json!({"namespace":"test","kind":"workflow","id":"same"}),
+                        None,
+                        "concurrent-open",
+                    )
+                    .unwrap()
+            }));
+        }
+        barrier.wait();
+        let first = handles.remove(0).join().unwrap();
+        let second = handles.remove(0).join().unwrap();
+        assert_eq!(first.engagement_id, second.engagement_id);
+        let mut reopened = EngagementStore::open(&database).unwrap();
+        let plan = reviewer_plan("concurrent review");
+        let member = reopened
+            .reserve_external_hire(
+                first.engagement_id,
+                "reviewer",
+                &plan.agent_configuration,
+                "concurrent review",
+                "read_only",
+                "concurrent-hire",
+            )
+            .unwrap();
+        reopened
+            .finish_external_hire(&member, RuntimeOutcome::Accepted, "concurrent-hire")
+            .unwrap();
+        drop(reopened);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let database = database.clone();
+            let barrier = Arc::clone(&barrier);
+            let engagement_id = first.engagement_id;
+            let specialist_run_id = member.specialist_run_id;
+            handles.push(std::thread::spawn(move || {
+                let mut store = EngagementStore::open(&database).unwrap();
+                let request = serde_json::json!({"task":"same"});
+                let external_ref = serde_json::json!({"kind":"request","id":"same"});
+                barrier.wait();
+                store
+                    .reserve_external_task(
+                        engagement_id,
+                        specialist_run_id,
+                        ExternalTaskRequest {
+                            request_value: &request,
+                            objective: "same task",
+                            external_request_ref: &external_ref,
+                            execution_intent: "read_only",
+                            deadline_seconds: 60,
+                            idempotency_key: "concurrent-task",
+                        },
+                    )
+                    .unwrap()
+            }));
+        }
+        barrier.wait();
+        let first_task = handles.remove(0).join().unwrap();
+        let second_task = handles.remove(0).join().unwrap();
+        assert_eq!(first_task.task_id, second_task.task_id);
+
+        let reopened = EngagementStore::open(&database).unwrap();
+        let counts: (i64, i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM engagements),
+                        (SELECT COUNT(*) FROM operations
+                         WHERE operation='open_external_engagement'),
+                        (SELECT COUNT(*) FROM tasks)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1));
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_hire_recovery_and_duplicate_settlement_are_durable() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_external_engagement(
+                "workspace",
+                &owner_binding(),
+                &serde_json::json!({"namespace":"test","kind":"workflow","id":"hire-recovery"}),
+                None,
+                "open-hire-recovery",
+            )
+            .unwrap();
+        let plan = reviewer_plan("recover hire");
+        let settled = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "settled",
+                &plan.agent_configuration,
+                "settle once",
+                "read_only",
+                "settled-hire",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .finish_external_hire(&settled, RuntimeOutcome::Accepted, "settled-hire")
+                .unwrap()
+                .state,
+            "ready"
+        );
+        assert_eq!(
+            store
+                .finish_external_hire(&settled, RuntimeOutcome::Rejected, "settled-hire")
+                .unwrap()
+                .state,
+            "ready"
+        );
+        assert_eq!(
+            store
+                .finish_external_hire(&settled, RuntimeOutcome::Accepted, "wrong-settlement-key")
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            store.external_snapshot(opened.engagement_id).unwrap().state,
+            "active"
+        );
+
+        let stale = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "stale",
+                &plan.agent_configuration,
+                "recover stale",
+                "read_only",
+                "stale-hire",
+            )
+            .unwrap();
+        assert!(
+            store
+                .stale_external_hires(opened.engagement_id, Duration::from_secs(300))
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE members SET updated_at_ms=0 WHERE specialist_run_id=?1",
+                [stale.specialist_run_id.to_string()],
+            )
+            .unwrap();
+        let recoverable = store
+            .stale_external_hires(opened.engagement_id, Duration::from_secs(300))
+            .unwrap();
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].0.specialist_run_id, stale.specialist_run_id);
+        assert_eq!(recoverable[0].1, "stale-hire");
+        store
+            .finish_external_hire(&stale, RuntimeOutcome::Rejected, "stale-hire")
+            .unwrap();
+        assert_eq!(
+            store
+                .external_member_actor_residency(opened.engagement_id, stale.specialist_run_id)
+                .unwrap(),
+            "unavailable"
+        );
+        assert_eq!(
+            store
+                .release_external_member(
+                    opened.engagement_id,
+                    stale.specialist_run_id,
+                    "recovered stale reservation",
+                    "release-stale-hire",
+                )
+                .unwrap(),
+            "released"
+        );
+
+        let recovering = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "recovering",
+                &plan.agent_configuration,
+                "preserve uncertain publication",
+                "read_only",
+                "recovering-hire",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .finish_external_hire(&recovering, RuntimeOutcome::Unknown, "recovering-hire",)
+                .unwrap()
+                .state,
+            "recovery_required"
+        );
+        assert_eq!(
+            store
+                .external_member_actor_residency(
+                    opened.engagement_id,
+                    recovering.specialist_run_id,
+                )
+                .unwrap(),
+            "recovering"
+        );
+        assert_eq!(
+            store.external_snapshot(opened.engagement_id).unwrap().state,
+            "degraded"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_guards_preserve_fresh_work_and_writer_eligibility() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_external_engagement(
+                "workspace",
+                &owner_binding(),
+                &serde_json::json!({"namespace":"test","kind":"workflow","id":"guards"}),
+                None,
+                "open-guards",
+            )
+            .unwrap();
+        let plan = reviewer_plan("guard task transitions");
+        let canonical = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "writer",
+                &plan.agent_configuration,
+                "write",
+                "canonical_workspace_write",
+                "hire-writer",
+            )
+            .unwrap();
+        store
+            .finish_external_hire(&canonical, RuntimeOutcome::Accepted, "hire-writer")
+            .unwrap();
+        assert_eq!(
+            store
+                .external_canonical_members_without_active_tasks(opened.engagement_id)
+                .unwrap(),
+            vec![canonical.specialist_run_id]
+        );
+        let request = serde_json::json!({"task":"write"});
+        let external_ref = serde_json::json!({"kind":"request","id":"write"});
+        assert_eq!(
+            store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    canonical.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "wrong workspace policy",
+                        external_request_ref: &external_ref,
+                        execution_intent: "isolated_write",
+                        deadline_seconds: 60,
+                        idempotency_key: "isolated-on-canonical",
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "SPECIALIST_POLICY_DENIED"
+        );
+        assert_eq!(
+            store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    canonical.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "write",
+                        external_request_ref: &external_ref,
+                        execution_intent: "canonical_workspace_write",
+                        deadline_seconds: 0,
+                        idempotency_key: "invalid-deadline",
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        let task = store
+            .reserve_external_task(
+                opened.engagement_id,
+                canonical.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &request,
+                    objective: "write",
+                    external_request_ref: &external_ref,
+                    execution_intent: "canonical_workspace_write",
+                    deadline_seconds: 60,
+                    idempotency_key: "valid-task",
+                },
+            )
+            .unwrap();
+        assert!(
+            !store
+                .external_task_deadline_expired(opened.engagement_id, task.task_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .external_canonical_members_without_active_tasks(opened.engagement_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .mark_external_task_running(
+                    opened.engagement_id,
+                    task.task_id,
+                    "turn-before-dispatch",
+                    "valid-task",
+                )
+                .unwrap_err()
+                .code,
+            "STATE_CONFLICT"
+        );
+        store
+            .finish_external_task(
+                opened.engagement_id,
+                task.task_id,
+                None,
+                "failed",
+                Some("TEST_TERMINAL"),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .external_canonical_members_without_active_tasks(opened.engagement_id)
+                .unwrap(),
+            vec![canonical.specialist_run_id]
+        );
+
+        let reader = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "reader",
+                &plan.agent_configuration,
+                "read",
+                "read_only",
+                "hire-reader",
+            )
+            .unwrap();
+        store
+            .finish_external_hire(&reader, RuntimeOutcome::Accepted, "hire-reader")
+            .unwrap();
+        assert_eq!(
+            store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    reader.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "escalate",
+                        external_request_ref: &external_ref,
+                        execution_intent: "isolated_write",
+                        deadline_seconds: 60,
+                        idempotency_key: "excess-access",
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "SPECIALIST_POLICY_DENIED"
+        );
+        store
+            .release_external_member(
+                opened.engagement_id,
+                reader.specialist_run_id,
+                "done",
+                "release-reader",
+            )
+            .unwrap();
+        let isolated = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "isolated writer",
+                &plan.agent_configuration,
+                "isolated",
+                "isolated_write",
+                "hire-isolated-writer",
+            )
+            .unwrap();
+        store
+            .finish_external_hire(&isolated, RuntimeOutcome::Accepted, "hire-isolated-writer")
+            .unwrap();
+        assert_eq!(
+            store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    isolated.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "wrong canonical policy",
+                        external_request_ref: &external_ref,
+                        execution_intent: "canonical_workspace_write",
+                        deadline_seconds: 60,
+                        idempotency_key: "canonical-on-isolated",
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "SPECIALIST_POLICY_DENIED"
+        );
+        assert_eq!(
+            store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    reader.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &request,
+                        objective: "after release",
+                        external_request_ref: &external_ref,
+                        execution_intent: "read_only",
+                        deadline_seconds: 60,
+                        idempotency_key: "released-member-task",
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "STATE_CONFLICT"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fresh_schema_keeps_artifact_foreign_keys_and_event_digest_detects_tampering() {
+        let (mut store, root) = store();
+        let mut statement = store
+            .connection
+            .prepare("PRAGMA foreign_key_list(artifacts)")
+            .unwrap();
+        let mut targets = statement
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        targets.sort();
+        assert_eq!(targets, ["engagements", "members", "tasks"]);
+        drop(statement);
+
+        let binding = owner_binding();
+        let opened = store
+            .open_external_engagement(
+                "workspace",
+                &binding,
+                &serde_json::json!({"namespace":"test","kind":"workflow","id":"tamper"}),
+                None,
+                "tamper-open",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE events SET event_hash=?2 WHERE engagement_id=?1",
+                params![opened.engagement_id.to_string(), "f".repeat(64)],
+            )
+            .unwrap();
+        let event: (String, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT kind,payload_sha256,previous_hash,event_hash FROM events
+                 WHERE engagement_id=?1",
+                [opened.engagement_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_ne!(
+            event.3,
+            event_digest(&event.2, opened.engagement_id, &event.0, &event.1)
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1331,6 +4093,30 @@ mod tests {
 
     #[test]
     fn v1_artifact_uniqueness_is_migrated_without_losing_rows() {
+        fn table_shape(
+            connection: &Connection,
+            table: &str,
+        ) -> Vec<(String, String, i64, Option<String>, i64)> {
+            let mut statement = connection
+                .prepare(
+                    "SELECT name,type,\"notnull\",dflt_value,pk FROM pragma_table_info(?1) ORDER BY cid",
+                )
+                .unwrap();
+            statement
+                .query_map([table], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        }
+
         let (store, root) = store();
         drop(store);
         let database = root.join("orchestration.sqlite3");
@@ -1401,6 +4187,32 @@ mod tests {
                    7, '01900000-0000-7000-8000-000000000003',
                    '01900000-0000-7000-8000-000000000005', 123456
                  );
+                 INSERT INTO engagements(
+                   engagement_id, workspace_id, controller_sha256, state, revision
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000008', 'workspace',
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   'executing', 2
+                 );
+                 INSERT INTO members(
+                   specialist_run_id, engagement_id, hire_operation_id,
+                   configuration_sha256, state
+                 ) VALUES(
+                   '01900000-0000-7000-8000-000000000009',
+                   '01900000-0000-7000-8000-000000000008',
+                   '01900000-0000-7000-8000-00000000000a',
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                   'ready'
+                 );
+                 INSERT INTO tasks(
+                   task_id, engagement_id, specialist_run_id, objective_sha256, state
+                 ) VALUES(
+                   '01900000-0000-7000-8000-00000000000b',
+                   '01900000-0000-7000-8000-000000000008',
+                   '01900000-0000-7000-8000-000000000009',
+                   'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                   'accepted'
+                 );
                  UPDATE metadata SET value='1' WHERE key='schema_version';"#,
             )
             .unwrap();
@@ -1414,7 +4226,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
         let artifact: (String, String, String, String) = migrated
             .connection
             .query_row(
@@ -1439,6 +4251,30 @@ mod tests {
         assert_eq!(receipt.1, "01900000-0000-7000-8000-000000000003");
         assert_eq!(receipt.2, "01900000-0000-7000-8000-000000000005");
         assert_eq!(receipt.3, 123456);
+        let migrated_result_state: String = migrated
+            .connection
+            .query_row(
+                "SELECT state FROM tasks WHERE task_id='01900000-0000-7000-8000-000000000003'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_result_state, "completed_not_delivered");
+        let migrated_unknown: (String, String) = migrated
+            .connection
+            .query_row(
+                "SELECT e.state,t.state FROM engagements e JOIN tasks t USING(engagement_id) WHERE e.engagement_id='01900000-0000-7000-8000-000000000008'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            migrated_unknown,
+            (
+                "interrupted_unknown".to_owned(),
+                "interrupted_unknown".to_owned()
+            )
+        );
         migrated
             .connection
             .execute_batch(
@@ -1466,6 +4302,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(violations, 0);
+        let fresh = EngagementStore::open(&root.join("fresh.sqlite3")).unwrap();
+        for table in [
+            "engagements",
+            "members",
+            "tasks",
+            "artifacts",
+            "delivery_receipts",
+            "operations",
+            "events",
+        ] {
+            assert_eq!(
+                table_shape(&migrated.connection, table),
+                table_shape(&fresh.connection, table),
+                "migrated {table} schema diverges from a fresh v3 store"
+            );
+        }
+        drop(fresh);
         drop(migrated);
         let reopened = EngagementStore::open(&database).unwrap();
         let artifacts: i64 = reopened

@@ -2,10 +2,10 @@
 
 use clap::{CommandFactory, Parser};
 use dolgorae::cli::{
-    Cli, Command, ControllerCommand, ControllerCredentialCommand, OperatorCommand,
-    OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand, ProfileMembershipCommand,
-    ProfileServerCommand, ProfileStateCommand, ReviewTargetCommand, RunCommand,
-    RunControllerCommand, RuntimeCommand, SpecialistCommand, WorkspaceCommand,
+    Cli, Command, ControllerCommand, ControllerCredentialCommand, EngagementCommand,
+    OperatorCommand, OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand,
+    ProfileMembershipCommand, ProfileServerCommand, ProfileStateCommand, ReviewTargetCommand,
+    RunCommand, RunControllerCommand, RuntimeCommand, SpecialistCommand, WorkspaceCommand,
     WorkspaceWriterCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
@@ -149,6 +149,25 @@ fn execute(cli: Cli) -> ExitCode {
                 eprintln!("dolgorae MCP startup failed: {}", error.code);
                 ExitCode::from(error.exit_status())
             }
+        };
+    }
+    if let Command::Engagement {
+        command: EngagementCommand::Call(args),
+    } = &cli.command
+    {
+        return match dolgorae::external_engagement::execute_cli(&args.args) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed engagement result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
         };
     }
     if let Command::Worker(args) = &cli.command {

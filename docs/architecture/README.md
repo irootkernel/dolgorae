@@ -180,7 +180,14 @@ Controller credential established by `open_external_engagement`. The facade
 validates the canonical workspace and compares Controller ID, kind, normalized
 principal, and capability digest against the immutable Aggregate Controller
 Binding before any observation or mutation. External-controller provenance is
-also checked but grants no authority. `hire_external_specialist` additionally
+checked against its bootstrap digest and event linkage but is not resubmitted
+and grants no authority. For member mutations, the Worker accepts a typed
+private-facade delegation only after independently matching the presented owner
+credential, the Run's immutable External Specialist aggregate binding, and the
+current active SQLite membership at its serialization point. The ordinary Run
+control path still accepts only the member Run's Controller credential, and no
+child credential or recoverable equivalent is persisted.
+`hire_external_specialist` additionally
 requires a fresh per-Run Controller credential carrier supplied outside
 model-visible payloads. The facade resolves the requested Agent Configuration
 and access against trusted integration policy, then invokes the ordinary Run
@@ -188,6 +195,41 @@ core through a write-ahead hire operation. Raw
 `StartRun`, reserved `parent_ref`, or later Run listing cannot be used to infer,
 attach, or regroup engagement membership. Existing generic Runs are not attached
 in place.
+
+An accepted hire initially publishes only a logical, threadless Run and records
+the member as `unstarted`. Assignment reconstructs a missing Worker from the Run
+manifest plus the durable member configuration. The launch root and fixed
+session sandbox derive from the requested access: canonical writes reserve the
+workspace Writer before startup, isolated writes use the deterministic separate
+Git worktree, and read-only work cannot acquire write access. The two write
+modes are distinct policies: a task cannot switch a member between isolated and
+canonical workspace residency. Successful startup
+marks the member `resident`; an absent failed publication is `unavailable`, while
+any partially published Run is retained as `recovering`.
+The provisioning record acts as a five-minute lease: ordinary concurrent
+observation leaves it untouched, while reconciliation after expiry classifies
+an absent Run root as unavailable and any partial publication as recovering.
+
+Task dispatch has explicit pre-effect `accepted`, uncertain `dispatching`, and
+Turn-bound `running` states under a partial unique index that permits only one
+active task per member. The aggregate operation receipt is updated in the same
+SQLite transactions as these transitions. A permanent per-engagement operation
+lock serializes facade effects across processes, including the engagement-store
+eligibility check and the cross-authority Writer repair or acquisition that
+follows it. Reconciliation joins task state to
+the authoritative Run projection: it redelivers immutable terminal artifacts,
+interrupts overdue or unsupported-interaction work, and maps any unproved
+effect boundary to an active outcome-unknown refusal until Run evidence proves
+quiescence; it never releases Writer authority after a transient control
+failure. Isolated terminal output captures a
+bounded binary Git patch into the result artifact before worktree cleanup.
+Canonical Writer release is completed before terminal lifecycle cleanup can be
+reported. Because task and Writer commits cross authorities, every facade
+reconciliation also checks the actual Writer holder and releases it when that
+canonical member has no active task. Result collection inserts delivery receipts
+only for the bounded cursor page selected in its SQLite transaction. Abort
+records task and member settlement one member at a time, so a
+restart can continue after an already closed Run without repeating its work.
 
 ### One-Shot Specialist Review Coordinator
 
@@ -305,9 +347,12 @@ The Coordinator keeps source-workspace authority and Runtime Profile ownership
 on the engagement while overriding only the managed Reviewer's launch working
 directory with the immutable capture root. It verifies the pinned executable
 identity immediately before that source-bearing launch. Engagement storage
-schema v2 removes the incorrect global uniqueness of a result-content digest;
-the v1-to-v2 migration rebuilds the artifact and delivery-receipt tables in one
-transaction so distinct engagements may retain identical checked verdicts.
+schema v3 retains the v2 removal of incorrect global result-content uniqueness
+and normalizes members, tasks, scoped operations, artifacts, and delivery
+receipts for reusable engagements. The v2-to-v3 migration maps uncertain
+executing or accepted work to `interrupted_unknown` and preserves a ready
+result as `completed_not_delivered`; both migration steps rebuild their tables
+transactionally without losing rows.
 
 ### Orchestration Broker
 

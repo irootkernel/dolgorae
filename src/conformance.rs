@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+const BOOTSTRAP_IDEMPOTENCY_RECORD_INDEX: usize = 1;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdempotencyOperation {
@@ -37,6 +39,19 @@ pub struct IdempotencyIntent {
     pub idempotency_key: String,
     pub normalized_identity_sha256: String,
     pub run_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeOperationIntent {
+    operation_id: Uuid,
+    idempotency_key: String,
+    request_sha256: String,
+    run_generation: u64,
+    server_key: String,
+    server_epoch: u64,
+    #[serde(rename = "provisional_thread")]
+    _provisional_thread: bool,
 }
 
 impl IdempotencyIntent {
@@ -437,7 +452,7 @@ struct ConformanceState {
     previous_kind: Option<AuditKind>,
     active_turn: Option<String>,
     pending: BTreeSet<String>,
-    accepted_intents: BTreeMap<(IdempotencyOperation, String), (String, Uuid)>,
+    runtime_intents: BTreeMap<String, String>,
 }
 
 impl ConformantLedger<SystemLedgerClock, NoFaults> {
@@ -884,15 +899,11 @@ impl ConformanceState {
         let report = verify_ledger_records_with_check(run_id, records, &mut check_budget)?;
         let mut active_turn = None;
         let mut pending = BTreeSet::new();
-        let mut accepted_intents = BTreeMap::new();
-        for record in records {
+        let mut runtime_intents = BTreeMap::new();
+        for (index, record) in records.iter().enumerate() {
             match record.kind() {
                 AuditKind::IdempotencyReserved => {
-                    let intent = intent_from_payload(record.payload())?;
-                    accepted_intents.insert(
-                        (intent.operation, intent.idempotency_key),
-                        (intent.normalized_identity_sha256, intent.run_id),
-                    );
+                    record_idempotency_intent(index, record, &mut runtime_intents)?;
                 }
                 AuditKind::TurnStarted => {
                     active_turn = Some(required_string(record.payload(), "turn_id")?);
@@ -915,7 +926,7 @@ impl ConformanceState {
             previous_kind: records.last().map(AuditRecord::kind),
             active_turn,
             pending,
-            accepted_intents,
+            runtime_intents,
         })
     }
 
@@ -967,23 +978,7 @@ impl ConformanceState {
         }
         match record.kind() {
             AuditKind::IdempotencyReserved => {
-                let intent = intent_from_payload(record.payload())?;
-                if intent.run_id != self.report.run_id {
-                    return Err(ConformanceError::InvalidHistory(
-                        "idempotency intent targets another run".to_owned(),
-                    ));
-                }
-                let key = (intent.operation, intent.idempotency_key.clone());
-                let identity = (intent.normalized_identity_sha256, intent.run_id);
-                if self
-                    .accepted_intents
-                    .insert(key, identity.clone())
-                    .is_some_and(|existing| existing != identity)
-                {
-                    return Err(ConformanceError::InvalidHistory(
-                        "idempotency key conflicts with durable operation identity".to_owned(),
-                    ));
-                }
+                record_runtime_operation_intent(&mut self.runtime_intents, record)?;
             }
             AuditKind::TurnStarted => {
                 let turn_id = required_string(record.payload(), "turn_id")?;
@@ -1257,7 +1252,7 @@ fn verify_ledger_records_with_check(
     let mut previous_generation = 0;
     let mut active_turn: Option<String> = None;
     let mut pending = BTreeSet::new();
-    let mut accepted_intents = BTreeMap::new();
+    let mut runtime_intents = BTreeMap::new();
     for (index, record) in records.iter().enumerate() {
         let expected_sequence = u64::try_from(index).unwrap_or(u64::MAX) + 1;
         if record.sequence() != expected_sequence
@@ -1313,25 +1308,7 @@ fn verify_ledger_records_with_check(
         }
         match record.kind() {
             AuditKind::IdempotencyReserved => {
-                let later_intent = intent_from_payload(record.payload())?;
-                if later_intent.run_id != run_id {
-                    return Err(ConformanceError::InvalidHistory(
-                        "idempotency intent targets another run".to_owned(),
-                    ));
-                }
-                let key = (later_intent.operation, later_intent.idempotency_key.clone());
-                let identity = (
-                    later_intent.normalized_identity_sha256.clone(),
-                    later_intent.run_id,
-                );
-                if accepted_intents
-                    .insert(key, identity.clone())
-                    .is_some_and(|existing| existing != identity)
-                {
-                    return Err(ConformanceError::InvalidHistory(
-                        "idempotency key conflicts with durable operation identity".to_owned(),
-                    ));
-                }
+                record_idempotency_intent(index, record, &mut runtime_intents)?;
             }
             AuditKind::TurnStarted => {
                 let turn_id = required_string(record.payload(), "turn_id")?;
@@ -1785,6 +1762,60 @@ fn intent_from_payload(payload: &LosslessJson) -> Result<IdempotencyIntent, Conf
     Ok(intent)
 }
 
+fn runtime_operation_intent(
+    record: &AuditRecord,
+) -> Result<RuntimeOperationIntent, ConformanceError> {
+    let bytes = canonicalize(record.payload())
+        .map_err(|error| ConformanceError::InvalidHistory(error.to_string()))?;
+    let intent: RuntimeOperationIntent = serde_json::from_slice(&bytes).map_err(|_| {
+        ConformanceError::InvalidHistory(
+            "runtime idempotency intent violates its closed shape".to_owned(),
+        )
+    })?;
+    if intent.operation_id.get_version_num() != 7
+        || !utf8_bounded(&intent.idempotency_key, 256)
+        || !is_sha256(&intent.request_sha256)
+        || intent.run_generation == 0
+        || intent.run_generation != record.run_generation()
+        || !is_sha256(&intent.server_key)
+        || intent.server_epoch == 0
+    {
+        return Err(ConformanceError::InvalidHistory(
+            "runtime idempotency intent violates the checked shape".to_owned(),
+        ));
+    }
+    Ok(intent)
+}
+
+fn record_runtime_operation_intent(
+    intents: &mut BTreeMap<String, String>,
+    record: &AuditRecord,
+) -> Result<(), ConformanceError> {
+    let intent = runtime_operation_intent(record)?;
+    if intents
+        .insert(intent.idempotency_key, intent.request_sha256.clone())
+        .is_some_and(|existing| existing != intent.request_sha256)
+    {
+        return Err(ConformanceError::InvalidHistory(
+            "runtime idempotency key conflicts with durable request identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn record_idempotency_intent(
+    index: usize,
+    record: &AuditRecord,
+    runtime_intents: &mut BTreeMap<String, String>,
+) -> Result<(), ConformanceError> {
+    if index == BOOTSTRAP_IDEMPOTENCY_RECORD_INDEX {
+        intent_from_payload(record.payload())?;
+        Ok(())
+    } else {
+        record_runtime_operation_intent(runtime_intents, record)
+    }
+}
+
 fn parse_lifecycle(value: &str) -> Result<RunLifecycle, ConformanceError> {
     serde_json::from_value(serde_json::Value::String(value.to_owned()))
         .map_err(|_| ConformanceError::InvalidHistory("unknown lifecycle value".to_owned()))
@@ -1927,6 +1958,92 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
     const TIMESTAMP: &str = "2026-08-21T12:34:56.123456Z";
+
+    #[test]
+    fn runtime_turn_intent_reopens_as_runtime_evidence() {
+        let run_id = Uuid::now_v7();
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-runtime-intent-conformance-{}",
+            Uuid::now_v7()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let mut ledger = ConformantLedger::open(&root, run_id).unwrap();
+        ledger
+            .bootstrap(&BootstrapRequest {
+                timestamp: TIMESTAMP.to_owned(),
+                workspace_id: "a".repeat(64),
+                intent: IdempotencyIntent {
+                    schema_version: 1,
+                    operation: IdempotencyOperation::StartRun,
+                    idempotency_key: "start".to_owned(),
+                    normalized_identity_sha256: "b".repeat(64),
+                    run_id,
+                },
+                record_kind: BootstrapRecordKind::RunCreated,
+                initial_access: "read".to_owned(),
+                default_effort: Some("medium".to_owned()),
+            })
+            .unwrap();
+        drop(ledger);
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        ledger
+            .append_required_payload(
+                AuditKind::IdempotencyReserved,
+                &serde_json::json!({
+                    "operation_id": Uuid::now_v7(),
+                    "idempotency_key": "task-one",
+                    "request_sha256": "c".repeat(64),
+                    "run_generation": 1,
+                    "server_key": "d".repeat(64),
+                    "server_epoch": 1,
+                    "provisional_thread": true,
+                }),
+                1,
+            )
+            .unwrap();
+        drop(ledger);
+        assert_eq!(
+            ConformantLedger::open(&root, run_id)
+                .unwrap()
+                .verify()
+                .unwrap()
+                .record_count,
+            4
+        );
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        ledger
+            .append_required_payload(
+                AuditKind::IdempotencyReserved,
+                &serde_json::json!({
+                    "operation_id": Uuid::now_v7(),
+                    "idempotency_key": "task-one",
+                    "request_sha256": "e".repeat(64),
+                    "run_generation": 1,
+                    "server_key": "d".repeat(64),
+                    "server_epoch": 1,
+                    "provisional_thread": false,
+                }),
+                1,
+            )
+            .unwrap();
+        drop(ledger);
+        assert!(matches!(
+            ConformantLedger::open(&root, run_id),
+            Err(ConformanceError::InvalidHistory(message))
+                if message == "runtime idempotency key conflicts with durable request identity"
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn confirmed_interrupt_capability_authors_direct_close() {

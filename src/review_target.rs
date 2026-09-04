@@ -2,7 +2,7 @@
 
 use crate::machine::{MachineError, new_uuid_v7};
 use crate::paths::DolgoraeHome;
-use crate::workspace::{WorkspaceService, workspace_id};
+use crate::workspace::{WorkspaceService, open_relative_nofollow, workspace_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -12,11 +12,17 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MAX_FILES: usize = 10_000;
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GIT_IDENTITY_BYTES: u64 = 16 * 1024;
+const MAX_GIT_LIST_BYTES: u64 = 16 * 1024 * 1024;
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 pub enum Operation {
@@ -697,19 +703,9 @@ fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
         if is_private_tool_path(&path) {
             continue;
         }
-        let full = safe_join(root, &path)?;
-        let metadata = match fs::symlink_metadata(&full) {
-            Ok(value) => value,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(io_error(error)),
+        let Some((metadata, bytes)) = read_worktree_file(root, &path)? else {
+            continue;
         };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(target_error(
-                "REVIEW_TARGET_UNSAFE_FILE",
-                "links and special files are unsupported",
-            ));
-        }
-        let bytes = read_bounded(&full, MAX_FILE_BYTES)?;
         let mode = if metadata.permissions().mode() & 0o111 != 0 {
             0o555
         } else {
@@ -720,6 +716,59 @@ fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
     result.sort_by(|a, b| a.path.cmp(&b.path));
     result.dedup_by(|a, b| a.path == b.path);
     Ok(result)
+}
+
+fn read_worktree_file(
+    root: &Path,
+    relative: &str,
+) -> Result<Option<(fs::Metadata, Vec<u8>)>, MachineError> {
+    let _ = safe_join(root, relative)?;
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)
+        .map_err(io_error)?;
+    let components = Path::new(relative)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((file_name, parents)) = components.split_last() else {
+        return Err(target_error(
+            "REVIEW_TARGET_UNSAFE_PATH",
+            "empty paths are unsupported",
+        ));
+    };
+    let mut directory = root;
+    for component in parents {
+        directory = match open_relative_nofollow(&directory, component, true) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(unsafe_worktree_file(error)),
+        };
+    }
+    let file = match open_relative_nofollow(&directory, file_name, false) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(unsafe_worktree_file(error)),
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() {
+        return Err(target_error(
+            "REVIEW_TARGET_UNSAFE_FILE",
+            "links and special files are unsupported",
+        ));
+    }
+    Ok(Some((metadata, read_bounded_file(file, MAX_FILE_BYTES)?)))
+}
+
+fn unsafe_worktree_file(_error: std::io::Error) -> MachineError {
+    target_error(
+        "REVIEW_TARGET_UNSAFE_FILE",
+        "worktree path cannot be opened without link traversal",
+    )
 }
 
 fn index_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
@@ -823,7 +872,12 @@ fn head(root: &Path) -> Result<Option<String>, MachineError> {
 fn resolve_commit(root: &Path, value: &str) -> Result<String, MachineError> {
     git_status(
         root,
-        &["rev-parse", "--verify", &format!("{value}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{value}^{{commit}}"),
+        ],
     )?
     .map(|v| line(&v))
     .transpose()?
@@ -878,15 +932,97 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, MachineError> {
 }
 
 fn git_status(root: &Path, arguments: &[&str]) -> Result<Option<Vec<u8>>, MachineError> {
-    let output = Command::new("/usr/bin/git")
+    let limit = git_output_limit(arguments)?;
+    let mut child = Command::new("/usr/bin/git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-C"])
         .arg(root)
         .args(arguments)
         .stdin(Stdio::null())
-        .output()
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
         .map_err(|error| io_context("launch Git", error))?;
-    Ok(output.status.success().then_some(output.stdout))
+    let output = read_git_output_bounded(&mut child, limit, GIT_TIMEOUT)?;
+    let status = child
+        .wait()
+        .map_err(|error| io_context("wait for Git", error))?;
+    Ok(status.success().then_some(output))
+}
+
+fn read_git_output_bounded(
+    child: &mut std::process::Child,
+    limit: u64,
+    timeout: Duration,
+) -> Result<Vec<u8>, MachineError> {
+    let stdout = child.stdout.take().expect("piped Git stdout");
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout.take(limit + 1).read_to_end(&mut output);
+        let _ = sender.send(result.map(|_| output));
+    });
+    let deadline = Instant::now() + timeout;
+    let mut output = None;
+    loop {
+        match receiver.try_recv() {
+            Ok(Ok(bytes)) => output = Some(bytes),
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(io_context("read Git output", error));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if output.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err(internal("Git output reader stopped unexpectedly"));
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if output
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() as u64 > limit)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(target_error(
+                "REVIEW_TARGET_LIMIT_EXCEEDED",
+                "Git output exceeds its byte limit",
+            ));
+        }
+        let exited = child
+            .try_wait()
+            .map_err(|error| io_context("wait for Git", error))?
+            .is_some();
+        if exited && let Some(output) = output.take() {
+            let _ = reader.join();
+            return Ok(output);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(target_error(
+                "REVIEW_TARGET_TIMEOUT",
+                "Git command exceeded its wall-clock limit",
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn git_output_limit(arguments: &[&str]) -> Result<u64, MachineError> {
+    match arguments.first().copied() {
+        Some("cat-file") => Ok(MAX_FILE_BYTES),
+        Some("ls-files" | "ls-tree" | "status") => Ok(MAX_GIT_LIST_BYTES),
+        Some("rev-parse" | "rev-list" | "merge-base") => Ok(MAX_GIT_IDENTITY_BYTES),
+        _ => Err(internal("Git command has no declared output bound")),
+    }
 }
 
 fn line(bytes: &[u8]) -> Result<String, MachineError> {
@@ -1059,6 +1195,10 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, MachineError> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(io_error)?;
+    read_bounded_file(file, limit)
+}
+
+fn read_bounded_file(file: File, limit: u64) -> Result<Vec<u8>, MachineError> {
     let mut bytes = Vec::new();
     file.take(limit + 1)
         .read_to_end(&mut bytes)
@@ -1086,10 +1226,18 @@ fn parse_kind(value: &str) -> Result<TargetKind, MachineError> {
 
 fn validate_revision(kind: TargetKind, revision: Option<&str>) -> Result<(), MachineError> {
     match (kind, revision) {
-        (TargetKind::Commit | TargetKind::Range, Some(value))
-            if !value.is_empty() && value.len() <= 4096 =>
-        {
-            Ok(())
+        (TargetKind::Commit, Some(value)) if valid_revision_atom(value) => Ok(()),
+        (TargetKind::Range, Some(value)) if value.len() <= 4096 => {
+            split_range(value).and_then(|(left, right, _)| {
+                if valid_revision_atom(left) && valid_revision_atom(right) {
+                    Ok(())
+                } else {
+                    Err(invalid(
+                        "--revision",
+                        "range endpoints must not begin with '-' or contain control characters",
+                    ))
+                }
+            })
         }
         (TargetKind::Commit | TargetKind::Range, _) => {
             Err(invalid("--revision", "commit and range require a revision"))
@@ -1097,6 +1245,13 @@ fn validate_revision(kind: TargetKind, revision: Option<&str>) -> Result<(), Mac
         (_, None) => Ok(()),
         _ => Err(invalid("--revision", "this target kind rejects a revision")),
     }
+}
+
+fn valid_revision_atom(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.starts_with('-')
+        && !value.chars().any(char::is_control)
 }
 
 fn bounded_token(value: &str, field: &str) -> Result<String, MachineError> {
@@ -1230,6 +1385,9 @@ mod tests {
         assert!(validate_revision(TargetKind::Workspace, None).is_ok());
         assert!(validate_revision(TargetKind::Workspace, Some("HEAD")).is_err());
         assert!(validate_revision(TargetKind::Commit, Some("HEAD")).is_ok());
+        assert!(validate_revision(TargetKind::Commit, Some("--help")).is_err());
+        assert!(validate_revision(TargetKind::Range, Some("--help..HEAD")).is_err());
+        assert!(validate_revision(TargetKind::Range, Some("HEAD..--help")).is_err());
         assert!(validate_revision(TargetKind::Range, None).is_err());
     }
 
@@ -1247,6 +1405,47 @@ mod tests {
         assert!(screen(b"token=sk-proj-example").is_err());
         assert!(screen(b"token=glpat-example").is_err());
         assert!(screen(b"ordinary source").is_ok());
+    }
+
+    #[test]
+    fn git_output_reader_stops_and_reaps_an_oversized_child() {
+        let mut child = Command::new("/usr/bin/yes")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let error = read_git_output_bounded(&mut child, 64, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.code, "REVIEW_TARGET_LIMIT_EXCEEDED");
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn git_output_reader_times_out_and_reaps_a_silent_child() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let error = read_git_output_bounded(&mut child, 64, Duration::from_millis(25)).unwrap_err();
+        assert_eq!(error.code, "REVIEW_TARGET_TIMEOUT");
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn git_output_reader_keeps_complete_output_until_the_child_exits() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf complete; exec 1>&-; sleep 0.05"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = read_git_output_bounded(&mut child, 64, Duration::from_secs(1)).unwrap();
+        assert_eq!(output, b"complete");
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]

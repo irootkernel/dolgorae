@@ -14,9 +14,10 @@ rollback, and escalation path are verified against the implementation.
 
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,
-configuration, immutable-target, and one-shot review surfaces. It is not an
-operator runbook or a semantic authority, and loading it never authorizes a
-mutation, external review, installation, or recovery action.
+configuration, immutable-target, one-shot review, and externally planned
+reusable Specialist Engagement surfaces. It is not an operator runbook or a
+semantic authority, and loading it never authorizes a mutation, external
+review, engagement lifecycle change, installation, or recovery action.
 
 Development, testing, and release-engineering guidance belongs in the
 [implementation tips](../implementation-tips/README.md), not this operations

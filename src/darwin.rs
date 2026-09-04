@@ -1,5 +1,6 @@
 use crate::providers::{MonotonicClock, ProcessIdentity, ProviderError};
-use std::ffi::{CStr, CString, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
+use std::fs::File;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -145,6 +146,29 @@ pub struct AccountEnvironment {
 }
 
 impl DarwinSystem {
+    pub fn openat_nofollow(
+        self,
+        directory: &File,
+        name: &OsStr,
+        require_directory: bool,
+    ) -> Result<File, std::io::Error> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        if require_directory {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: directory is a live descriptor, name is a NUL-terminated
+        // component, and a successful result transfers one new descriptor.
+        let raw = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: raw is the newly-created descriptor and ownership transfers
+        // exactly once into File.
+        Ok(unsafe { File::from_raw_fd(raw) })
+    }
+
     pub fn watch_process_exit(self, pid: u32) -> Result<ProcessExitWatch, std::io::Error> {
         let pid = libc::pid_t::try_from(pid)
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;

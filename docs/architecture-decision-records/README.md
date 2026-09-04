@@ -2144,3 +2144,53 @@ remains 1, and there are no Run or aggregate method or field changes.
   platform policy in the durable-authority locator and complicates recovery.
 - Automatically move earlier development state: rejected because migration and
   compatibility are outside the v0.1.1 contract.
+
+## ADR-034: Delegate External Member Control Through the Aggregate Owner
+
+Status: Accepted
+
+### Context
+
+An External Specialist Engagement must survive facade-process and host
+restarts. Hiring receives a fresh Controller credential for the member Run, but
+later facade calls deliberately carry only the aggregate-owner credential.
+Persisting or reconstructing the child secret would contradict the Controller
+carrier boundary, while requiring it again would break the checked facade v1
+transport and make aggregate recovery depend on per-member secret routing.
+
+The opaque external provenance is supplied only when the engagement is opened.
+Later requests therefore cannot compare a caller-supplied copy without changing
+the checked payload contract.
+
+### Decision
+
+Add one typed internal authorization path for private-facade member mutations.
+At the Worker serialization point, require the presented aggregate-owner
+credential to match the engagement binding, the Run manifest to carry the same
+External Specialist aggregate identity, and SQLite to record that Run as a
+current active member. A mismatch fails before the Run effect. Keep every
+ordinary `run` mutation authorized only by the member Run's own Controller.
+Never persist, escrow, derive, or expose the child Controller credential.
+
+Treat external provenance as immutable bootstrap integrity rather than a
+repeated authorization input. Validate its stored canonical value and digest
+against the bootstrap operation and hash-chained event whenever the engagement
+is loaded; later facade requests do not resubmit it.
+
+### Consequences
+
+- A trusted external facade can reconnect and control durable member Runs with
+  one aggregate-owner credential while direct Run control remains isolated.
+- Worker authorization depends on both Run and SQLite aggregate authorities;
+  either mismatch fails closed and cannot be repaired from presentation data.
+- The facade v1 request schema remains unchanged and no recoverable child
+  secret enters durable state.
+
+### Rejected alternatives
+
+- Persist an encrypted child credential: rejected because it creates a durable
+  secret escrow and recovery/key-management boundary absent from the product.
+- Require child credentials on later facade calls: rejected because it changes
+  the checked v1 transport and complicates multi-member await and abort.
+- Let the aggregate owner use ordinary `run` commands: rejected because it
+  would erase the member Controller boundary outside the trusted facade.

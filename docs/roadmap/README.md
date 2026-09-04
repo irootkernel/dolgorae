@@ -996,7 +996,7 @@ semantic control plane.
 
 ### TASK-022: Reusable External Specialist Engagements
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-021` and builds directly on `EPIC-003`. Remove the preview's
 one-shot lifecycle restriction while preserving its trusted facade and

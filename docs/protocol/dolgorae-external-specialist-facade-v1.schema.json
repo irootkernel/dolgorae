@@ -280,7 +280,13 @@
             "queued",
             "claimed",
             "dispatching",
-            "running"
+            "running",
+            "completed_not_delivered",
+            "delivered",
+            "failed",
+            "interrupted_unknown",
+            "cancelled",
+            "expired"
           ]
         }
       }
@@ -292,6 +298,7 @@
         "task_id",
         "state",
         "result_artifact_ref",
+        "result",
         "safe_error_code"
       ],
       "properties": {
@@ -321,6 +328,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "result": {
+          "description": "The immutable terminal result. It is the FinalResponse projection for read-only or canonical-write work, and a FinalResponse plus an isolated-change artifact whose git_diff_binary_base64 format carries the bounded patch in patch_base64 for isolated-write work. It is null until a completed result exists and is replayed with the same delivery receipt.",
+          "type": [
+            "object",
+            "null"
           ]
         },
         "safe_error_code": {
@@ -658,7 +672,7 @@
           "enum": [
             "ENGAGEMENT_NOT_FOUND",
             "ENGAGEMENT_TERMINAL",
-            "ENGAGEMENT_IDEMPOTENCY_CONFLICT",
+            "IDEMPOTENCY_CONFLICT",
             "CONTROLLER_PRINCIPAL_MISMATCH",
             "EXTERNAL_PROVENANCE_MISMATCH",
             "SPECIALIST_ROLE_UNAVAILABLE",
@@ -860,7 +874,20 @@
     "open replay with the same canonical workspace, aggregate-owner Controller binding, external provenance, idempotency key, and request digest returns the original engagement identity",
     "hire_external_specialist never creates an engagement and reserves the hire operation, member, and child Run identity before process creation",
     "all calls require the same aggregate-owner Controller credential binding established by open; external_controller_ref never grants authority",
+    "later calls validate the stored external_controller_ref against the immutable bootstrap operation and event linkage rather than accepting it again from the caller",
+    "facade-mediated member mutations additionally require the Worker to match the Run aggregate binding and current active SQLite membership at the serialization point",
+    "aggregate-owner delegation is private to this facade and never authorizes an ordinary Run command or persists a child Controller credential",
     "a fresh per-Run Controller credential carrier is additionally required only when a new Specialist Run is hired",
+    "an accepted hire publishes a logical threadless member; a Worker is started or reconstructed from durable state only when assignment, release, or abort requires it",
+    "a provisioning hire is left unchanged during its five-minute lease and is reconciled afterward to unavailable when no Run root exists or recovering when publication state survives",
+    "task accepted is pre-effect, dispatching is an uncertain transport boundary, and running is bound to one returned Turn identifier; at most one active task exists per Specialist",
+    "the task deadline begins at durable reservation; overdue or unsupported-interaction work is interrupted and becomes a proved terminal state or interrupted_unknown",
+    "completed task results and delivery receipts are immutable and cursor replay never replays the target Turn",
+    "isolated_write and canonical_workspace_write are distinct member policies; a task cannot switch a member between their workspace residencies",
+    "isolated_write captures a bounded Git binary patch into the durable result as standard-base64 patch_base64 under format git_diff_binary_base64 before worktree cleanup",
+    "canonical_workspace_write reserves exclusive Writer authority before Worker startup and releases it after terminal settlement",
+    "reconciliation releases a canonical Writer still held by a member that has no active task, including after a crash between task settlement and Writer release",
+    "abort persists terminal task and released-member progress before the aggregate becomes aborted, and an already closed Run is accepted as terminal evidence after restart",
     "the external host retains semantic planning and never receives another Run credential or lifecycle authority",
     "External Specialist Engagements cannot use Brokered Specialist Collaboration in v1",
     "v1 does not support in-place aggregate-owner Controller transfer or rotation"

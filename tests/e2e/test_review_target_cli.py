@@ -230,6 +230,11 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if completed.returncode == 0 or invalid_revision["error"]["code"] != "REVIEW_TARGET_REVISION_INVALID":
             raise AssertionError(f"invalid revision was accepted: {invalid_revision}")
 
+        option_owner = root / "option-revision-owner"
+        completed, option_revision = capture(binary, home, repository, "commit", option_owner, "--help")
+        if completed.returncode == 0 or option_revision["error"]["code"] != "INVALID_ARGUMENT":
+            raise AssertionError(f"option-like revision was accepted: {option_revision}")
+
         oversized = repository / "oversized.bin"
         with oversized.open("wb") as output:
             output.truncate(8 * 1024 * 1024 + 1)
@@ -256,6 +261,46 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if completed.returncode == 0 or envelope["error"]["code"] != "REVIEW_TARGET_UNSAFE_FILE":
             raise AssertionError(f"escaping link did not fail closed: {envelope}")
         unsafe.unlink()
+
+        nested = repository / "linked-parent"
+        nested.mkdir()
+        (nested / "tracked.txt").write_text("repository bytes\n", encoding="utf-8")
+        git(repository, "add", "linked-parent/tracked.txt")
+        git(repository, "commit", "-m", "nested symlink fixture")
+        retained_nested = repository / "linked-parent-retained"
+        nested.rename(retained_nested)
+        outside = root / "outside-parent"
+        outside.mkdir()
+        canary = "outside descriptor traversal canary"
+        (outside / "tracked.txt").write_text(canary, encoding="utf-8")
+        nested.symlink_to(outside, target_is_directory=True)
+        for kind in ("workspace", "dirty"):
+            owner = root / f"nested-symlink-{kind}-owner"
+            completed, envelope = capture(binary, home, repository, kind, owner)
+            if completed.returncode == 0 or envelope["error"]["code"] != "REVIEW_TARGET_UNSAFE_FILE":
+                raise AssertionError(f"intermediate symlink was accepted for {kind}: {envelope}")
+            if owner.exists() or canary in completed.stdout:
+                raise AssertionError(f"intermediate symlink leaked bytes or owner for {kind}")
+        for kind in ("head", "staged"):
+            owner = root / f"nested-object-{kind}-owner"
+            completed, envelope = capture(binary, home, repository, kind, owner)
+            if completed.returncode != 0:
+                raise AssertionError(f"Git-object contrast capture failed for {kind}: {envelope}")
+        nested.unlink()
+        retained_nested.rename(nested)
+
+        oversized_committed = repository / "oversized-committed.bin"
+        oversized_committed.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+        git(repository, "add", "oversized-committed.bin")
+        git(repository, "commit", "-m", "oversized committed fixture")
+        for kind in ("head", "staged"):
+            owner = root / f"oversized-{kind}-owner"
+            completed, envelope = capture(binary, home, repository, kind, owner)
+            if completed.returncode == 0 or envelope["error"]["code"] != "REVIEW_TARGET_LIMIT_EXCEEDED":
+                raise AssertionError(f"oversized Git blob was accepted for {kind}: {envelope}")
+            if owner.exists():
+                raise AssertionError(f"oversized Git blob created an owner for {kind}")
+        git(repository, "reset", "--hard", "HEAD^")
 
         git(repository, "rm", "renamed.txt")
         (repository / "renamed.txt").write_text("recreated\n", encoding="utf-8")

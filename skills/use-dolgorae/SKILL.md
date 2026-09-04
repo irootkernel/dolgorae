@@ -1,13 +1,14 @@
 ---
 name: use-dolgorae
-description: "Use Dolgorae safely through its local Machine CLI or an actually exposed one-shot review tool when asked to inspect, initialize, configure, review, diagnose, or recover Dolgorae state. Ground every action in the exact binary and advertised runtime capabilities; do not activate it for generic code review or merely because a repository contains Dolgorae files."
+description: "Use Dolgorae safely through its local Machine CLI or an actually exposed checked tool when asked to inspect, initialize, configure, review, operate an External Specialist Engagement, diagnose, or recover Dolgorae state. Ground every action in the exact binary and advertised runtime capabilities; do not activate it for generic code review or merely because a repository contains Dolgorae files."
 ---
 
 # Use Dolgorae
 
 Dolgorae is a local durable control layer for Codex runs. This revision of the
 skill covers workspace and profile readiness, immutable review targets, and
-one-shot Specialist Review. It does not provide a general orchestration,
+one-shot Specialist Review and externally planned reusable Specialist
+Engagements. It does not provide a Dolgorae-owned orchestration, general
 persistent-Run, or Specialist Policy workflow.
 
 ## Establish current authority
@@ -108,6 +109,45 @@ conversation memory. Follow its current tool schema and preserve the host-bound
 request identity. When the tool is absent, use the Machine CLI. Never start or
 invoke the hidden adapter entrypoint from the shell to make the tool appear.
 
+## Operate an External Specialist Engagement
+
+Use this mode only when the user explicitly asks an external AI host to open,
+inspect, hire into, assign, wait for, collect from, cancel, release, complete,
+abort, or recover one engagement. The external host remains the semantic
+planner; do not infer a task graph, retry unknown work, attach an existing Run,
+or let a Specialist hire or contact another Specialist.
+
+1. Read the checked
+   `docs/protocol/dolgorae-external-specialist-facade-v1.schema.json` contract
+   from the exact version-matched source or package. Construct exactly one
+   request variant and pass it through a protected regular non-TTY descriptor:
+
+   ```sh
+   dolgorae engagement call \
+     --workspace <path> \
+     --controller-fd <aggregate-owner-fd> \
+     --request-fd <request-fd>
+   ```
+
+2. The aggregate owner must be a generation-1 `workflow_orchestrator` or
+   `automation` Controller. Preserve its carrier across reconnects; an
+   engagement ID or opaque external reference is never authority. Add one
+   distinct `--new-controller-fd <member-controller-fd>` only for
+   `hire_external_specialist`. Never persist or expose either credential.
+3. Reuse the exact operation-scoped idempotency key only with byte-equivalent
+   semantic input. A host disconnect or transport wait expiry does not cancel
+   accepted work. Reconnect with `get_external_engagement`, then wait or collect;
+   never resubmit a task whose acceptance or outcome is unknown.
+4. Treat `completed_not_delivered` as a durable result awaiting collection and
+   preserve `next_after_sequence` only after consuming the returned immutable
+   result. Treat `interrupted_unknown` as terminal uncertainty requiring an
+   external planning decision, never automatic retry.
+5. `isolated_write` confines model writes to a separate Git worktree.
+   `canonical_workspace_write` is an assertion that the external host has
+   quiesced its own writer; Dolgorae still rejects a competing Dolgorae writer.
+   Use explicit cancellation, release, complete, or abort authority immediately
+   before those lifecycle operations.
+
 ## Preserve authorization and state boundaries
 
 - Require explicit user intent for `init`, profile changes, launch probes,
@@ -124,8 +164,8 @@ invoke the hidden adapter entrypoint from the shell to make the tool appear.
   only what the new envelope proves. A successful review, profile check, or
   lifecycle command never authorizes Git commit, push, release, installation,
   or another mutation.
-- This skill does not operate general `run`, `engagement`, workspace-writer,
-  Specialist Policy, or Dolgorae-orchestrated session flows. If one is
+- This skill does not operate general `run`, workspace-writer, Specialist
+  Policy, or Dolgorae-orchestrated session flows. If one is
   requested, inspect current capabilities and repository authority, report that
   it is outside this skill's present workflow, and do not improvise from
   planned command grammar.

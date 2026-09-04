@@ -40,9 +40,9 @@ cargo build --locked
 The source tree distributes the optional complete
 [`use-dolgorae` skill](skills/use-dolgorae/SKILL.md) for AI coding agents that
 operate Dolgorae's currently advertised workspace, profile, immutable-target,
-and one-shot Specialist Review surfaces. It is guidance, not a deployed runtime
-artifact: installing the Dolgorae binary does not install or activate the
-skill.
+one-shot Specialist Review, and externally planned reusable Specialist
+Engagement surfaces. It is guidance, not a deployed runtime artifact:
+installing the Dolgorae binary does not install or activate the skill.
 
 For Codex, run the following command from the repository root of a checkout of
 the exact stable tag that contains the skill. It installs the directory under

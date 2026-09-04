@@ -10,8 +10,10 @@ use crate::controller::{
 };
 use crate::darwin::DarwinSystem;
 use crate::domain::{
-    Access, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind, RunLifecycle,
+    Access, AggregateKind, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind,
+    RunLifecycle,
 };
+use crate::engagement::EngagementStore;
 use crate::event::EventProjection;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{LedgerClock, SystemLedgerClock};
@@ -22,8 +24,8 @@ use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, AppServerFacts, AuditPolicy,
     CompatibilityVerdict, DolgoraeBuild, ExecutableIdentity, ForkProvenance, InstructionSnapshot,
     ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore,
-    StartReservation, StartReservationStore, WriteContinuationProvenance, launch_contract_digest,
-    runtime_profile_snapshot_digest,
+    StartReservation, StartReservationStore, WriteContinuationProvenance,
+    agent_configuration_digest, launch_contract_digest, run_root, runtime_profile_snapshot_digest,
 };
 use crate::runtime::{RuntimeCapabilities, capabilities};
 use crate::specialist::ReviewerRuntimePlan;
@@ -35,8 +37,9 @@ use crate::worker::{
 };
 use crate::workspace::{
     GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode, WorkspaceService,
-    WorkspaceView,
+    WorkspaceView, isolated_specialist_root, verify_secure_directory,
 };
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
@@ -369,6 +372,205 @@ pub(crate) struct PreparedReviewer {
     pub profile_snapshot: crate::profile::ProfileSnapshot,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalAgentConfigurationInput {
+    pub schema_version: u32,
+    pub runtime_profile: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub model: Option<String>,
+    pub default_effort: String,
+    pub purpose: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub purpose_label: Option<String>,
+    pub required_capabilities: Vec<String>,
+    pub instructions: String,
+    pub execution_lane: String,
+    pub required_assurance: String,
+    pub native_subagent_policy: String,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+pub(crate) struct PreparedExternalSpecialist {
+    pub view: WorkspaceView,
+    pub agent_configuration: AgentConfigurationSnapshot,
+}
+
+pub(crate) fn prepare_external_specialist(
+    workspace: Option<&Path>,
+    role_ref: &str,
+    input: ExternalAgentConfigurationInput,
+) -> Result<PreparedExternalSpecialist, MachineError> {
+    if input.schema_version != 1
+        || input.required_assurance != "best_effort_personal_alpha"
+        || input.native_subagent_policy != "enabled"
+    {
+        return Err(MachineError::invalid_argument(
+            "agent_configuration",
+            "unsupported Agent Configuration contract",
+        ));
+    }
+    let view = WorkspaceService::system()?.discover(workspace)?;
+    if input.runtime_profile.is_empty()
+        || input.runtime_profile.len() > 128
+        || !input
+            .runtime_profile
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+            })
+    {
+        return Err(MachineError::invalid_argument(
+            "runtime_profile",
+            "runtime profile does not match the checked pattern",
+        ));
+    }
+    let state = profile_server_state(&view, &input.runtime_profile)?;
+    let model = input.model.unwrap_or_else(|| state.default_model.clone());
+    if !state.models.contains(&model) {
+        return Err(compatibility_rejected(
+            &input.runtime_profile,
+            "model",
+            json!(state.models),
+            json!(model),
+            "requested model is not advertised by the profile server",
+        ));
+    }
+    let efforts = advertised_efforts(&state, &input.runtime_profile, &model)?;
+    if !efforts.contains(&input.default_effort) {
+        return Err(compatibility_rejected(
+            &input.runtime_profile,
+            "reasoning_effort",
+            json!(efforts),
+            json!(input.default_effort),
+            "requested reasoning effort is not advertised for the model",
+        ));
+    }
+    let purpose_kind = parse_purpose(&input.purpose)?;
+    if (purpose_kind == PurposeKind::Other) != input.purpose_label.is_some() {
+        return Err(MachineError::invalid_argument(
+            "purpose_label",
+            "purpose_label is required only when purpose is other",
+        ));
+    }
+    if input
+        .purpose_label
+        .as_ref()
+        .is_some_and(|label| label.is_empty() || label.len() > 256 || label.contains('\0'))
+    {
+        return Err(MachineError::invalid_argument(
+            "purpose_label",
+            "purpose label is outside the checked bound",
+        ));
+    }
+    if input.instructions.is_empty()
+        || input.instructions.len() > 65_536
+        || input.instructions.contains('\0')
+    {
+        return Err(MachineError::invalid_argument(
+            "agent_configuration",
+            "instructions must be nonempty, NUL-free, and at most 65536 bytes",
+        ));
+    }
+    if role_ref.is_empty()
+        || role_ref.len() > 64
+        || !role_ref.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        })
+    {
+        return Err(MachineError::invalid_argument(
+            "role_ref",
+            "role reference must match ^[a-z0-9][a-z0-9._-]{0,63}$",
+        ));
+    }
+    if input
+        .required_capabilities
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != input.required_capabilities.len()
+    {
+        return Err(MachineError::invalid_argument(
+            "required_capabilities",
+            "required capabilities must be unique",
+        ));
+    }
+    let mut capabilities = input.required_capabilities;
+    capabilities.sort();
+    capabilities.dedup();
+    if capabilities.len() > 64 {
+        return Err(MachineError::invalid_argument(
+            "required_capabilities",
+            "at most 64 unique capabilities are allowed",
+        ));
+    }
+    for capability in &capabilities {
+        if capability.is_empty() || capability.len() > 128 || capability.contains('\0') {
+            return Err(MachineError::invalid_argument(
+                "required_capabilities",
+                "capability name is outside the checked bound",
+            ));
+        }
+        if !matches!(
+            state.capabilities.get(capability),
+            Some(crate::profile::ProfileCapabilityState::Supported)
+        ) {
+            return Err(compatibility_rejected(
+                &input.runtime_profile,
+                "required_capability",
+                json!("supported"),
+                json!(capability),
+                "required capability is not supported by the profile",
+            ));
+        }
+    }
+    let execution_lane = parse_execution_lane(&input.execution_lane)?;
+    let instructions = InstructionSnapshot {
+        schema: "dolgorae.instructions/v1".to_owned(),
+        common_prefix_version: 1,
+        mode_prefix_version: 1,
+        purpose_prefix_version: 1,
+        normalized_byte_length: input.instructions.len() as u64,
+        normalized_sha256: sha256_hex(input.instructions.as_bytes()),
+    };
+    let profile = run_profile_snapshot(&state.snapshot)?;
+    let agent_configuration = AgentConfigurationSnapshot {
+        schema_version: 1,
+        runtime_profile: input.runtime_profile,
+        runtime_profile_snapshot_sha256: runtime_profile_snapshot_digest(&profile)
+            .map_err(internal)?,
+        model,
+        default_effort: input.default_effort,
+        purpose: Purpose {
+            kind: purpose_kind,
+            external_label: input.purpose_label,
+        },
+        required_capabilities: capabilities,
+        role_reference: Some(role_ref.to_owned()),
+        normalized_instructions: input.instructions,
+        instructions,
+        execution_lane,
+        required_assurance: Assurance::BestEffortPersonalAlpha,
+        native_subagent_policy: "enabled".to_owned(),
+    };
+    Ok(PreparedExternalSpecialist {
+        view,
+        agent_configuration,
+    })
+}
+
 pub(crate) fn prepare_reviewer(
     workspace: Option<&Path>,
     profile_name: &str,
@@ -448,7 +650,7 @@ impl SemanticService for CoreSemanticService {
 /// Start a Run: pin the Runtime Profile, publish the run record, bootstrap the
 /// durable ledger, and hand the hidden worker the app-server session it will own.
 fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
-    run_start_with_context(args, None, None, None)
+    run_start_with_context(args, None, None, None, None)
 }
 
 fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineError> {
@@ -662,6 +864,7 @@ fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineErro
             provenance: &provenance,
         }),
         None,
+        None,
     )
 }
 
@@ -824,6 +1027,7 @@ fn run_fork(args: &[OsString]) -> Result<Value, MachineError> {
         Some(&ForkStartContext {
             provenance: &provenance,
         }),
+        None,
     )
 }
 
@@ -1019,7 +1223,51 @@ pub(crate) fn start_reviewer_run(
     args: &[OsString],
     context: ReviewerStartContext<'_>,
 ) -> Result<Value, MachineError> {
-    run_start_with_context(args, Some(&context), None, None)
+    run_start_with_context(args, Some(&context), None, None, None)
+}
+
+pub(crate) struct ExternalSpecialistStartContext<'a> {
+    pub reserved_run_id: Uuid,
+    pub aggregate_binding: &'a AggregateBinding,
+    pub agent_configuration: &'a AgentConfigurationSnapshot,
+    pub launch_cwd: Option<&'a Path>,
+    pub sandbox: &'a str,
+}
+
+pub(crate) fn start_external_specialist_run(
+    args: &[OsString],
+    context: ExternalSpecialistStartContext<'_>,
+) -> Result<Value, MachineError> {
+    run_start_with_context(args, None, None, None, Some(&context))
+}
+
+fn validate_external_specialist_manifest(
+    manifest: &RunManifest,
+    configuration: &AgentConfigurationSnapshot,
+) -> Result<(), MachineError> {
+    let binding = manifest.aggregate_binding.as_ref().ok_or_else(|| {
+        MachineError::invalid_argument(
+            "aggregate_binding",
+            "an external Specialist requires an aggregate binding",
+        )
+    })?;
+    if manifest.control_mode != ControlMode::ManagedAgent
+        || binding.aggregate_kind != crate::domain::AggregateKind::ExternalSpecialistEngagement
+        || binding.member_kind != crate::run::AggregateMemberKind::Specialist
+        || manifest.profile.profile_name != configuration.runtime_profile
+        || manifest.model != configuration.model
+        || manifest.default_reasoning_effort != configuration.default_effort
+        || manifest.execution_lane != configuration.execution_lane
+        || manifest.requested_assurance != configuration.required_assurance
+        || manifest.purpose != configuration.purpose
+        || manifest.agent_configuration != *configuration
+    {
+        return Err(MachineError::invalid_argument(
+            "agent_configuration",
+            "external Specialist Run does not match its immutable configuration",
+        ));
+    }
+    Ok(())
 }
 
 struct ContinuationStartContext<'a> {
@@ -1035,6 +1283,7 @@ fn run_start_with_context(
     reviewer: Option<&ReviewerStartContext<'_>>,
     continuation: Option<&ContinuationStartContext<'_>>,
     fork: Option<&ForkStartContext<'_>>,
+    external: Option<&ExternalSpecialistStartContext<'_>>,
 ) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(args, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
@@ -1045,7 +1294,7 @@ fn run_start_with_context(
     let assurance = parse_assurance(&required(args, "--required-assurance")?)?;
     let purpose = Purpose {
         kind: parse_purpose(&required(args, "--purpose")?)?,
-        external_label: bounded_option(args, "--purpose-label", 128)?,
+        external_label: bounded_option(args, "--purpose-label", 256)?,
     };
     let parent_ref = parent_reference(args, control_mode)?;
     // Checked before the reservation, not after it: a key this command would
@@ -1137,6 +1386,17 @@ fn run_start_with_context(
             .as_bytes(),
         );
     }
+    if let Some(context) = external {
+        normalized_identity_sha256 = sha256_hex(
+            format!(
+                "external-specialist-v1\0{normalized_identity_sha256}\0{}\0{}",
+                serde_json::to_string(context.aggregate_binding)
+                    .map_err(|error| internal(error.to_string()))?,
+                agent_configuration_digest(context.agent_configuration).map_err(internal)?
+            )
+            .as_bytes(),
+        );
+    }
     if let Some(context) = continuation {
         normalized_identity_sha256 = sha256_hex(
             format!(
@@ -1174,7 +1434,10 @@ fn run_start_with_context(
             operation: reservation_operation.to_owned(),
             idempotency_key: idempotency_key.clone(),
             normalized_identity_sha256: normalized_identity_sha256.clone(),
-            run_id: reviewer.map_or_else(Uuid::now_v7, |context| context.reserved_run_id),
+            run_id: reviewer.map_or_else(
+                || external.map_or_else(Uuid::now_v7, |context| context.reserved_run_id),
+                |context| context.reserved_run_id,
+            ),
         })?,
     };
     if reservation.normalized_identity_sha256 != normalized_identity_sha256 {
@@ -1185,6 +1448,15 @@ fn run_start_with_context(
         ));
     }
     if let Some(context) = reviewer
+        && reservation.run_id != context.reserved_run_id
+    {
+        return Err(crate::run::idempotency_conflict(
+            reservation.run_id,
+            &reservation.normalized_identity_sha256,
+            &normalized_identity_sha256,
+        ));
+    }
+    if let Some(context) = external
         && reservation.run_id != context.reserved_run_id
     {
         return Err(crate::run::idempotency_conflict(
@@ -1231,6 +1503,11 @@ fn run_start_with_context(
         manifest.agent_configuration = context.plan.agent_configuration.clone();
         manifest.aggregate_binding = Some(context.aggregate_binding.clone());
         context.plan.validate_manifest(&manifest)?;
+    }
+    if let Some(context) = external {
+        manifest.agent_configuration = context.agent_configuration.clone();
+        manifest.aggregate_binding = Some(context.aggregate_binding.clone());
+        validate_external_specialist_manifest(&manifest, context.agent_configuration)?;
     }
     if let Some(context) = continuation {
         manifest.write_continuation_provenance = Some(context.provenance.clone());
@@ -1294,7 +1571,10 @@ fn run_start_with_context(
         fixed_model: model.clone(),
         default_effort: effort.clone(),
         supported_efforts: efforts,
-        cwd: match reviewer.and_then(|context| context.review_cwd) {
+        cwd: match reviewer
+            .and_then(|context| context.review_cwd)
+            .or_else(|| external.and_then(|context| context.launch_cwd))
+        {
             Some(path) => path.to_path_buf(),
             None => view
                 .canonical_path
@@ -1302,7 +1582,9 @@ fn run_start_with_context(
                 .map_err(|_| internal("workspace path is not representable"))?,
         },
         developer_instructions: instructions_text,
-        sandbox: "read-only".to_owned(),
+        sandbox: external
+            .map_or("read-only", |context| context.sandbox)
+            .to_owned(),
         approval_policy: "never".to_owned(),
         safety_policy: reviewer.map_or(crate::turn::SessionSafetyPolicy::Standard, |context| {
             context.plan.safety_policy
@@ -1760,6 +2042,27 @@ fn acquire_writer(
     carrier: &CredentialCarrier,
     allow_threadless: bool,
 ) -> Result<(), MachineError> {
+    acquire_writer_authorized(view, state_root, run_id, carrier, allow_threadless, None)
+}
+
+pub(crate) fn acquire_external_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    engagement_id: Uuid,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    acquire_writer_authorized(view, state_root, run_id, carrier, true, Some(engagement_id))
+}
+
+fn acquire_writer_authorized(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    allow_threadless: bool,
+    external_engagement: Option<Uuid>,
+) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
@@ -1783,7 +2086,9 @@ fn acquire_writer(
         ));
     }
     let binding = store.load_controller_binding(run_id)?;
-    authorize_controller(run_id, "run.acquire_write", &binding, carrier)?;
+    if external_engagement.is_none() {
+        authorize_controller(run_id, "run.acquire_write", &binding, carrier)?;
+    }
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
     let transaction_id = Uuid::now_v7();
     let holder = crate::writer::WriterStore::holder(
@@ -1858,12 +2163,24 @@ fn acquire_writer(
         run_id,
         uid,
         Some(carrier.raw_fd()),
-        |expected| ControlRequestV1::SetWriterAccess {
-            expected,
-            caller: None,
-            write: true,
-            writer_generation: next_generation,
-            transaction_id,
+        |expected| {
+            external_engagement.map_or(
+                ControlRequestV1::SetWriterAccess {
+                    expected: expected.clone(),
+                    caller: None,
+                    write: true,
+                    writer_generation: next_generation,
+                    transaction_id,
+                },
+                |engagement_id| ControlRequestV1::ExternalSetWriterAccess {
+                    expected,
+                    caller: None,
+                    engagement_id,
+                    write: true,
+                    writer_generation: next_generation,
+                    transaction_id,
+                },
+            )
         },
     );
     match response {
@@ -1919,6 +2236,26 @@ fn release_writer(
     run_id: Uuid,
     carrier: &CredentialCarrier,
 ) -> Result<(), MachineError> {
+    release_writer_authorized(view, state_root, run_id, carrier, None)
+}
+
+pub(crate) fn release_external_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    engagement_id: Uuid,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    release_writer_authorized(view, state_root, run_id, carrier, Some(engagement_id))
+}
+
+fn release_writer_authorized(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    external_engagement: Option<Uuid>,
+) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
@@ -1933,7 +2270,9 @@ fn release_writer(
         ));
     }
     let binding = store.load_controller_binding(run_id)?;
-    authorize_controller(run_id, "run.release_write", &binding, carrier)?;
+    if external_engagement.is_none() {
+        authorize_controller(run_id, "run.release_write", &binding, carrier)?;
+    }
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
     let transaction_id = Uuid::now_v7();
     let (_, generation) =
@@ -1972,12 +2311,24 @@ fn release_writer(
         run_id,
         uid,
         Some(carrier.raw_fd()),
-        |expected| ControlRequestV1::SetWriterAccess {
-            expected,
-            caller: None,
-            write: false,
-            writer_generation: generation,
-            transaction_id,
+        |expected| {
+            external_engagement.map_or(
+                ControlRequestV1::SetWriterAccess {
+                    expected: expected.clone(),
+                    caller: None,
+                    write: false,
+                    writer_generation: generation,
+                    transaction_id,
+                },
+                |engagement_id| ControlRequestV1::ExternalSetWriterAccess {
+                    expected,
+                    caller: None,
+                    engagement_id,
+                    write: false,
+                    writer_generation: generation,
+                    transaction_id,
+                },
+            )
         },
     );
     match response {
@@ -4125,6 +4476,42 @@ fn ensure_run_worker(
     let server_epoch = dedicated_server
         .as_ref()
         .map_or(state.server_epoch, |server| server.server_epoch);
+    let mut session_cwd = workspace_path;
+    let mut isolated_write = false;
+    if let Some(binding) = manifest.aggregate_binding.as_ref()
+        && binding.aggregate_kind == AggregateKind::ExternalSpecialistEngagement
+    {
+        let engagement = EngagementStore::open(
+            &state_root
+                .join("orchestration")
+                .join("orchestration.sqlite3"),
+        )?;
+        let (_, access, member_state) =
+            engagement.external_member_configuration(binding.aggregate_id, run_id)?;
+        if !matches!(
+            member_state.as_str(),
+            "provisioning" | "active" | "degraded"
+        ) {
+            return Err(MachineError::new(
+                "ENGAGEMENT_STATE_CONFLICT",
+                "external Specialist membership is not recoverable",
+                false,
+                json!({"run_id":run_id,"membership_state":member_state}),
+            ));
+        }
+        if access == "isolated_write" {
+            session_cwd = isolated_specialist_root(state_root, binding.aggregate_id, run_id);
+            if verify_secure_directory(&session_cwd, uid).is_err() {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the isolated Specialist worktree is unavailable",
+                    false,
+                    json!({"run_id":run_id,"required_action":"restore_isolated_worktree"}),
+                ));
+            }
+            isolated_write = true;
+        }
+    }
     let session = WorkerSessionBootstrap {
         app_server_socket,
         canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
@@ -4138,20 +4525,22 @@ fn ensure_run_worker(
             .clone()
             .unwrap_or_else(|| manifest.default_reasoning_effort.clone()),
         supported_efforts: efforts,
-        cwd: workspace_path,
+        cwd: session_cwd,
         developer_instructions: manifest.agent_configuration.normalized_instructions.clone(),
-        sandbox: if owns_write {
+        sandbox: if owns_write || isolated_write {
             "workspace-write"
         } else {
             "read-only"
         }
         .to_owned(),
-        approval_policy: if owns_write { "on-request" } else { "never" }.to_owned(),
+        approval_policy: if owns_write || isolated_write {
+            "on-request"
+        } else {
+            "never"
+        }
+        .to_owned(),
         safety_policy: crate::turn::SessionSafetyPolicy::Standard,
-        artifact_root: state_root
-            .join("runs")
-            .join(run_id.to_string())
-            .join("artifacts"),
+        artifact_root: run_root(state_root, run_id).join("artifacts"),
         attach: match &manifest.fork_provenance {
             Some(provenance) if provenance.mode == "history_copy" => SessionAttach::Fork {
                 source_thread_id: provenance
@@ -4204,6 +4593,14 @@ fn ensure_run_worker(
         return Err(error);
     }
     Ok(control_socket_epoch)
+}
+
+pub(crate) fn ensure_external_specialist_worker(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<u64, MachineError> {
+    ensure_run_worker(view, state_root, run_id)
 }
 
 #[cfg(not(target_os = "macos"))]

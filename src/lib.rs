@@ -8,6 +8,7 @@ pub mod controller;
 pub mod domain;
 pub mod engagement;
 pub mod event;
+pub mod external_engagement;
 pub mod fault;
 pub mod jcs;
 pub mod ledger;

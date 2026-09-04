@@ -8,14 +8,15 @@
 
 use dolgorae::controller::{CredentialCarrier, create_controller_credential};
 use dolgorae::domain::{
-    Access, Assurance, ControlMode, ControllerIdentity, ControllerKind, ExecutionLane, Purpose,
-    PurposeKind,
+    Access, AggregateKind, Assurance, ControlMode, ControllerIdentity, ControllerKind,
+    ExecutionLane, Purpose, PurposeKind,
 };
+use dolgorae::engagement::{EngagementStore, RuntimeOutcome};
 use dolgorae::run::{
-    AgentConfigurationSnapshot, AppServerFacts, AuditPolicy, CapabilityState, CompatibilityVerdict,
-    ControllerBinding, DolgoraeBuild, ExecutableIdentity, InstructionSnapshot,
-    ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore, launch_contract_digest,
-    runtime_profile_snapshot_digest,
+    AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind, AppServerFacts, AuditPolicy,
+    CapabilityState, CompatibilityVerdict, ControllerBinding, DolgoraeBuild, ExecutableIdentity,
+    InstructionSnapshot, ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest,
+    RunStore, agent_configuration_digest, launch_contract_digest, runtime_profile_snapshot_digest,
 };
 use dolgorae::worker::{
     ControlRequestV1, ControlResponseV1, ExecutingBuild, RunControllerAuthority, RunFacts,
@@ -74,14 +75,16 @@ fn make_dir(path: &Path) {
 /// Mint a fresh Controller credential and return its already-open carrier
 /// alongside the binding a Run published for it would carry.
 fn mint(path: &Path, instance: &str) -> (CredentialCarrier, ControllerBinding) {
-    let created = create_controller_credential(
-        path,
-        ControllerKind::HumanCli,
-        instance.to_owned(),
-        None,
-        None,
-    )
-    .unwrap();
+    mint_kind(path, instance, ControllerKind::HumanCli)
+}
+
+fn mint_kind(
+    path: &Path,
+    instance: &str,
+    kind: ControllerKind,
+) -> (CredentialCarrier, ControllerBinding) {
+    let created =
+        create_controller_credential(path, kind, instance.to_owned(), None, None).unwrap();
     let carrier = CredentialCarrier::open_path(path).unwrap();
     let binding = dolgorae::controller::binding_from_carrier(&carrier, 1).unwrap();
     assert_eq!(
@@ -89,6 +92,138 @@ fn mint(path: &Path, instance: &str) -> (CredentialCarrier, ControllerBinding) {
         created.credential.controller_id
     );
     (carrier, binding)
+}
+
+#[test]
+fn aggregate_owner_delegation_requires_binding_and_active_membership() {
+    let tree = Tree::new();
+    let state_root = tree.state_root();
+    let (owner, owner_binding) = mint_kind(
+        &tree.credential("aggregate-owner.json"),
+        "host",
+        ControllerKind::WorkflowOrchestrator,
+    );
+    let (stranger, _) = mint_kind(
+        &tree.credential("stranger-owner.json"),
+        "other-host",
+        ControllerKind::WorkflowOrchestrator,
+    );
+    let (_child, child_binding) = mint_kind(
+        &tree.credential("child.json"),
+        "specialist",
+        ControllerKind::WorkflowOrchestrator,
+    );
+    let database = state_root.join("orchestration/orchestration.sqlite3");
+    let mut engagements = EngagementStore::open(&database).unwrap();
+    let opened = engagements
+        .open_external_engagement(
+            &"1".repeat(64),
+            &owner_binding,
+            &serde_json::json!({"namespace":"test","kind":"host","id":"one"}),
+            None,
+            "open",
+        )
+        .unwrap();
+    let mut run_manifest = manifest(Uuid::now_v7(), child_binding);
+    run_manifest.control_mode = ControlMode::ManagedAgent;
+    run_manifest.parent_ref = Some(ParentReference {
+        namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
+        kind: "specialist".to_owned(),
+        id: opened.engagement_id.to_string(),
+    });
+    run_manifest.agent_configuration.role_reference = Some("researcher".to_owned());
+    let hired = engagements
+        .reserve_external_hire(
+            opened.engagement_id,
+            "researcher",
+            &run_manifest.agent_configuration,
+            "inspect authority",
+            "read_only",
+            "hire",
+        )
+        .unwrap();
+    run_manifest.run_id = hired.specialist_run_id;
+    run_manifest.aggregate_binding = Some(AggregateBinding {
+        aggregate_kind: AggregateKind::ExternalSpecialistEngagement,
+        aggregate_id: opened.engagement_id,
+        operation_id: hired.hire_operation_id,
+        member_kind: AggregateMemberKind::Specialist,
+        policy_sha256: None,
+        role_reference: Some("researcher".to_owned()),
+        role_snapshot_sha256: Some(dolgorae::jcs::sha256_hex(b"researcher")),
+        agent_configuration_sha256: Some(
+            agent_configuration_digest(&run_manifest.agent_configuration).unwrap(),
+        ),
+    });
+    engagements
+        .finish_external_hire(&hired, RuntimeOutcome::Accepted, "hire")
+        .unwrap();
+    publish_manifest(&state_root, &run_manifest);
+    let worker = Worker::start(&state_root, hired.specialist_run_id);
+    let external_requests = [
+        ControlRequestV1::ExternalSubmit {
+            expected: worker.identity.clone(),
+            caller: None,
+            engagement_id: opened.engagement_id,
+            request: dolgorae::worker::TurnControlRequest {
+                message: "delegated submit".to_owned(),
+                idempotency_key: "delegated-submit".to_owned(),
+                effort: None,
+                images: Vec::new(),
+            },
+        },
+        ControlRequestV1::ExternalInterrupt {
+            expected: worker.identity.clone(),
+            caller: None,
+            engagement_id: opened.engagement_id,
+        },
+        ControlRequestV1::ExternalClose {
+            expected: worker.identity.clone(),
+            caller: None,
+            engagement_id: opened.engagement_id,
+            interrupt: false,
+        },
+        ControlRequestV1::ExternalSetWriterAccess {
+            expected: worker.identity.clone(),
+            caller: None,
+            engagement_id: opened.engagement_id,
+            write: true,
+            writer_generation: 1,
+            transaction_id: Uuid::now_v7(),
+        },
+    ];
+
+    for request in &external_requests {
+        assert_eq!(
+            failure_code(&worker.call(request, Some(&stranger))),
+            "CONTROLLER_MISMATCH"
+        );
+        authorized(&worker.call(request, Some(&owner)));
+    }
+    assert_eq!(
+        failure_code(&worker.call(
+            &ControlRequestV1::Interrupt {
+                expected: worker.identity.clone(),
+                caller: None,
+            },
+            Some(&owner),
+        )),
+        "CONTROLLER_MISMATCH",
+        "aggregate-owner delegation must not authorize ordinary Run mutations"
+    );
+
+    engagements
+        .release_external_member(
+            opened.engagement_id,
+            hired.specialist_run_id,
+            "authority test complete",
+            "release",
+        )
+        .unwrap();
+    assert_eq!(
+        failure_code(&worker.call(&external_requests[1], Some(&owner))),
+        "ENGAGEMENT_STATE_CONFLICT"
+    );
 }
 
 fn worker_identity(run_id: Uuid) -> WorkerIdentity {
@@ -695,8 +830,12 @@ fn write_binding(state_root: &Path, run_id: Uuid, binding: &ControllerBinding) {
 }
 
 fn publish(state_root: &Path, run_id: Uuid, controller: ControllerBinding) {
+    publish_manifest(state_root, &manifest(run_id, controller));
+}
+
+fn publish_manifest(state_root: &Path, manifest: &RunManifest) {
     RunStore::new(SystemWorkspacePlatform, state_root)
-        .publish(&manifest(run_id, controller))
+        .publish(manifest)
         .unwrap();
 }
 

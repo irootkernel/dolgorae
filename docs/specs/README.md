@@ -254,7 +254,15 @@ same engagement. Same-key drift is `IDEMPOTENCY_CONFLICT`. Every later facade
 call MUST name that engagement ID and present the same aggregate-owner
 Controller credential. Dolgorae reopens and validates the protected carrier at
 the serialization point and compares Controller ID, kind, normalized principal,
-and capability digest against the stored binding. A
+and capability digest against the stored binding. For a facade-mediated member
+mutation, the Worker additionally validates the Run's immutable External
+Specialist aggregate binding and the current active SQLite membership before
+accepting the effect. This typed aggregate-owner delegation is available only
+through the private facade; ordinary `run` commands remain authorized solely by
+the member Run's own Controller credential. No child credential or recoverable
+equivalent is persisted. The immutable external provenance is revalidated
+against its bootstrap-operation digest and event linkage; later requests do not
+resubmit it. A
 `hire_external_specialist` call additionally supplies a fresh per-Run
 Controller credential carrier outside model-visible payloads. Dolgorae preallocates the hire-operation ID and child Run
 ID and commits the write-ahead hire operation, member, and child Run reservation
@@ -1027,7 +1035,9 @@ Controller credential. `open_external_engagement` accepts only
 `workflow_orchestrator` or `automation` and snapshots generation 1 into the
 Aggregate Controller Binding. Every later operation revalidates the same
 Controller ID, kind, normalized principal, and capability digest before any
-observation or mutation. `--new-controller-file` or `--new-controller-fd` is
+observation or mutation. Member mutations also require the Run aggregate
+binding and active durable membership to match at the Worker serialization
+point. `--new-controller-file` or `--new-controller-fd` is
 required only for `hire_external_specialist`, is forbidden for every other
 operation, and carries the fresh Controller credential for the new Specialist
 Run. The owner carrier and new-Run carrier are distinct protected inputs.
@@ -3016,6 +3026,15 @@ binding differs. Hiring additionally creates a member Run through a write-ahead
 hire operation and a separately supplied per-Run Controller carrier. Raw managed
 Run creation never infers or joins an engagement.
 
+The private facade is the only aggregate-owner delegation boundary. For a
+facade-mediated member mutation, the Worker validates the presented owner
+credential, immutable Run aggregate binding, and current SQLite membership at
+the serialization point. This does not authorize the owner credential on the
+ordinary `run` surface, does not expose one member's credential to another, and
+does not persist a child credential. The stored external provenance is checked
+against its immutable bootstrap digest and event linkage rather than being
+resubmitted on later requests.
+
 The checked facade operations are `open_external_engagement`,
 `get_external_engagement`, `hire_external_specialist`,
 `assign_external_specialist_task`, `await_external_specialist_tasks`,
@@ -3024,6 +3043,18 @@ The checked facade operations are `open_external_engagement`,
 only the empty durable aggregate; `get` exposes only safe operational membership
 and task counts. Cancellation follows the ordinary fail-closed Turn-acceptance
 boundary, and close applies explicit complete or abort semantics.
+Await and collect return the immutable terminal result with its result artifact
+reference. A collection transaction creates receipts and marks `delivered` only
+for the cursor page returned by that call; later pages remain
+`completed_not_delivered` until selected. Read-only and canonical-write results contain the FinalResponse
+projection; isolated-write results contain that projection together with the
+captured Git patch. Collection records a durable delivery receipt, and a later
+cursor replay returns the same result bytes without replaying the Turn.
+Facade v1 has no interaction-response operation and never transfers the member
+Controller credential. If a Specialist requests an interaction, reconciliation
+interrupts it and records `SPECIALIST_INTERACTION_UNSUPPORTED` after terminal
+proof, or `interrupted_unknown` when that proof is unavailable; it never leaves
+an unanswerable request pending or bypasses Controller authority.
 
 The external AI decides the objective, task
 graph, role selection, dependencies, retries, replacement, and semantic
@@ -3042,7 +3073,58 @@ hires and coordinates additional roles directly.
 External Specialists default to read-only analysis or isolated change
 production. Direct writes to the canonical workspace are safe only when the
 external integration quiesces its own writer and participates in Dolgorae's
-writer protocol. Writes by external tools remain outside Dolgorae serialization.
+writer protocol. Requesting `canonical_workspace_write` is the trusted host's
+explicit assertion that this quiescence already holds; Dolgorae then acquires
+the same exclusive writer authority used by every other Run and releases it
+after terminal reconciliation, cancellation, or abort. Writes by external
+tools remain outside Dolgorae serialization.
+For `isolated_write`, terminal reconciliation captures the separate worktree as
+a bounded immutable binary Git patch inside the durable task result before the
+worktree may be removed. Result collection therefore preserves both the model's
+FinalResponse and the isolated change artifact across host or Dolgorae restart.
+Write access modes are distinct execution policies rather than an ordered
+capability lattice: an isolated-write task requires an `isolated_write` member,
+and a canonical-write task requires a `canonical_workspace_write` member.
+
+Hiring publishes a logical, threadless `unstarted` member Run without starting a Worker.
+The first assigned task starts or reconstructs its Worker from the immutable Run
+manifest and durable member configuration. Read-only work starts with a
+read-only sandbox; isolated work starts in the member's deterministic separate
+worktree; canonical work reserves Writer authority before Worker startup so the
+fixed session sandbox and writer record agree. A failed hire with no published
+Run is terminally `unavailable`. If any Run publication state exists, the member
+is retained as `recovering` with a `recovery_required` hire result, and its
+isolated root is not discarded.
+The `provisioning` reservation carries a five-minute lease. A concurrent
+observer does not settle it while that lease is current. After the lease,
+reconciliation maps an absent Run root to `unavailable` and any surviving Run
+publication state to `recovering`; an explicit launch-root failure is settled
+immediately.
+
+Task reservation is the pre-effect `accepted` state. Immediately before the
+Worker call it becomes `dispatching`; after a restart or transport failure at
+that boundary, it becomes terminal `interrupted_unknown` only when authoritative
+Run evidence proves that no Turn can still be executing. Otherwise it remains
+active and reconciliation reports outcome uncertainty without releasing Writer
+authority. A returned Turn ID becomes `running`. At most one of
+these states may exist per member. The task deadline is a total budget beginning
+at durable reservation; reconciliation interrupts overdue running work and
+requires terminal proof before recording `expired`, otherwise it records
+`interrupted_unknown`. Complete close requires all tasks terminal and all
+members released. Abort makes per-member terminal and release progress durable,
+accepts an already closed Run as terminal proof, and closes the aggregate only
+after every member is settled.
+Facade operations for one engagement share a permanent private `flock(2)`
+serializer. This keeps task reservation and Writer acquisition from racing the
+idle-Writer repair decision while allowing different engagements to proceed
+independently. Concurrent observation never terminalizes a live `accepted` or `dispatching`
+task before its deadline. Once the deadline expires, a dispatching task is
+quiesced through authoritative Run status and, when necessary, an authorized
+interrupt before it becomes `interrupted_unknown`. Reconciliation also checks
+for a canonical Writer still held by a member with no active task and completes
+the pending release, covering a crash after terminal task commit. A transient
+status or interrupt transport failure leaves a running task and its Writer
+active; terminal settlement requires authoritative quiescence evidence.
 
 ### One-Shot Specialist Review Adapter
 
@@ -3241,9 +3323,12 @@ verdict MUST be reported separately from engagement, Run, and settlement state.
 Cancellation requires explicit user authority, and active or unknown work MUST
 NOT be replayed or cleaned up as if terminal.
 
-The private engagement authority schema is version 2. Opening a version 1 store
-MUST migrate the artifacts and delivery-receipt tables transactionally without
-losing rows. Result content digests are not globally unique: independent
+The private engagement authority schema is version 3. Opening an older supported
+store MUST migrate transactionally without losing rows. The version 1 to 2 step
+removes global result-content uniqueness; the version 2 to 3 step normalizes
+engagement membership and tasks for reuse, maps an executing operation or
+accepted task to `interrupted_unknown`, and preserves an undelivered result as
+`completed_not_delivered`. Result content digests are not globally unique: independent
 engagements MAY legitimately publish byte-identical checked verdicts, while
 artifact and engagement identities remain distinct.
 

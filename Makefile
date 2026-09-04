@@ -109,6 +109,7 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_specialist_review_acceptance.py
 	@echo "[test-e2e] completed"

@@ -11,10 +11,13 @@ use crate::controller::{
     CredentialCarrier, authorize_controller, load_reconciled_controller_binding,
 };
 use crate::darwin::DarwinSystem;
+use crate::domain::AggregateKind;
+use crate::engagement::EngagementStore;
 use crate::event::{EventDelivery, EventProjection};
 use crate::fault::{FaultInjector, NoFaults};
 use crate::ledger::{Ledger, LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
+use crate::run::{AggregateMemberKind, RunStore};
 use crate::turn::{
     AcceptedTurn, AppServer, CoordinatorConfig, CoordinatorState, DeliveryMode, DeliveryResult,
     ForeignDiagnostics, ForeignLane, IgnoredForeignRequest, ImageDetail, ImageSnapshot,
@@ -22,6 +25,7 @@ use crate::turn::{
     TerminalTurn, ThreadAttach, TransportStage, TurnCoordinator, TurnError, TurnFailureContext,
     TurnRequest, recorded_terminal,
 };
+use crate::workspace::SystemWorkspacePlatform;
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -1158,6 +1162,15 @@ pub enum ControlRequestV1 {
         caller: Option<ExecutingBuild>,
         request: TurnControlRequest,
     },
+    /// Facade-private submit authorized by the owning External Specialist
+    /// Engagement rather than by disclosure of the member Run credential.
+    ExternalSubmit {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        engagement_id: Uuid,
+        request: TurnControlRequest,
+    },
     /// Rejoin one addressed Turn; a reconnecting caller uses this after a
     /// Submit.
     ///
@@ -1203,6 +1216,12 @@ pub enum ControlRequestV1 {
         #[serde(default)]
         caller: Option<ExecutingBuild>,
     },
+    ExternalInterrupt {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        engagement_id: Uuid,
+    },
     Pause {
         expected: WorkerIdentity,
         #[serde(default)]
@@ -1236,10 +1255,26 @@ pub enum ControlRequestV1 {
         caller: Option<ExecutingBuild>,
         interrupt: bool,
     },
+    ExternalClose {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        engagement_id: Uuid,
+        interrupt: bool,
+    },
     SetWriterAccess {
         expected: WorkerIdentity,
         #[serde(default)]
         caller: Option<ExecutingBuild>,
+        write: bool,
+        writer_generation: u64,
+        transaction_id: Uuid,
+    },
+    ExternalSetWriterAccess {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        engagement_id: Uuid,
         write: bool,
         writer_generation: u64,
         transaction_id: Uuid,
@@ -1275,16 +1310,20 @@ impl ControlRequestV1 {
             | Self::RunStatus { expected, .. }
             | Self::Send { expected, .. }
             | Self::Submit { expected, .. }
+            | Self::ExternalSubmit { expected, .. }
             | Self::Wait { expected, .. }
             | Self::Events { expected, .. }
             | Self::Respond { expected, .. }
             | Self::Interrupt { expected, .. }
+            | Self::ExternalInterrupt { expected, .. }
             | Self::Pause { expected, .. }
             | Self::Resume { expected, .. }
             | Self::Reconcile { expected, .. }
             | Self::SettleLifecycleTimeout { expected, .. }
             | Self::Close { expected, .. }
+            | Self::ExternalClose { expected, .. }
             | Self::SetWriterAccess { expected, .. }
+            | Self::ExternalSetWriterAccess { expected, .. }
             | Self::ResetFence { expected, .. } => expected,
         }
     }
@@ -1298,16 +1337,20 @@ impl ControlRequestV1 {
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
             | Self::Submit { caller, .. }
+            | Self::ExternalSubmit { caller, .. }
             | Self::Wait { caller, .. }
             | Self::Events { caller, .. }
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
+            | Self::ExternalInterrupt { caller, .. }
             | Self::Pause { caller, .. }
             | Self::Resume { caller, .. }
             | Self::Reconcile { caller, .. }
             | Self::SettleLifecycleTimeout { caller, .. }
             | Self::Close { caller, .. }
+            | Self::ExternalClose { caller, .. }
             | Self::SetWriterAccess { caller, .. }
+            | Self::ExternalSetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => caller.as_ref(),
         }
     }
@@ -1323,16 +1366,20 @@ impl ControlRequestV1 {
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
             | Self::Submit { caller, .. }
+            | Self::ExternalSubmit { caller, .. }
             | Self::Wait { caller, .. }
             | Self::Events { caller, .. }
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
+            | Self::ExternalInterrupt { caller, .. }
             | Self::Pause { caller, .. }
             | Self::Resume { caller, .. }
             | Self::Reconcile { caller, .. }
             | Self::SettleLifecycleTimeout { caller, .. }
             | Self::Close { caller, .. }
+            | Self::ExternalClose { caller, .. }
             | Self::SetWriterAccess { caller, .. }
+            | Self::ExternalSetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => *caller = Some(build),
         }
     }
@@ -1364,14 +1411,18 @@ impl ControlRequestV1 {
             self,
             Self::Send { .. }
                 | Self::Submit { .. }
+                | Self::ExternalSubmit { .. }
                 | Self::Respond { .. }
                 | Self::Interrupt { .. }
+                | Self::ExternalInterrupt { .. }
                 | Self::Pause { .. }
                 | Self::Resume { .. }
                 | Self::Reconcile { .. }
                 | Self::SettleLifecycleTimeout { .. }
                 | Self::Close { .. }
+                | Self::ExternalClose { .. }
                 | Self::SetWriterAccess { .. }
+                | Self::ExternalSetWriterAccess { .. }
         )
     }
 
@@ -1400,19 +1451,35 @@ impl ControlRequestV1 {
             Self::RunStatus { .. } => "run.status",
             Self::Send { .. } => "run.send",
             Self::Submit { .. } => "run.submit",
+            Self::ExternalSubmit { .. } => "engagement.assign",
             Self::Wait { .. } => "run.wait",
             Self::Events { .. } => "run.events",
             Self::Respond { .. } => "run.respond",
             Self::Interrupt { .. } => "run.interrupt",
+            Self::ExternalInterrupt { .. } => "engagement.cancel",
             Self::Pause { .. } => "run.pause",
             Self::Resume { .. } => "run.resume",
             Self::Reconcile { .. } => "run.reconcile",
             Self::SettleLifecycleTimeout { close: true, .. } => "run.close",
             Self::SettleLifecycleTimeout { close: false, .. } => "run.pause",
             Self::Close { .. } => "run.close",
+            Self::ExternalClose { .. } => "engagement.release",
             Self::SetWriterAccess { write: true, .. } => "run.acquire_write",
             Self::SetWriterAccess { write: false, .. } => "run.release_write",
+            Self::ExternalSetWriterAccess { write: true, .. } => "engagement.acquire_write",
+            Self::ExternalSetWriterAccess { write: false, .. } => "engagement.release_write",
             Self::ResetFence { .. } => "run.controller.reset",
+        }
+    }
+
+    #[must_use]
+    pub const fn external_engagement(&self) -> Option<Uuid> {
+        match self {
+            Self::ExternalSubmit { engagement_id, .. }
+            | Self::ExternalInterrupt { engagement_id, .. }
+            | Self::ExternalClose { engagement_id, .. }
+            | Self::ExternalSetWriterAccess { engagement_id, .. } => Some(*engagement_id),
+            _ => None,
         }
     }
 }
@@ -1488,6 +1555,80 @@ impl RunControllerAuthority {
     ) -> Result<(), MachineError> {
         let binding = load_reconciled_controller_binding(&self.state_root, self.run_id)?;
         authorize_controller(self.run_id, operation, &binding, carrier).map(|_| ())
+    }
+
+    /// Authorize a facade-owned mutation without exposing or deriving the
+    /// member Run's Controller secret. This check executes on the drain while
+    /// the mutation is serialized, and binds all three durable authorities:
+    /// the engagement owner, the Run manifest, and active membership.
+    pub fn authorize_external(
+        &self,
+        engagement_id: Uuid,
+        operation: &str,
+        carrier: &CredentialCarrier,
+    ) -> Result<(), MachineError> {
+        let runs = RunStore::new(SystemWorkspacePlatform, &self.state_root);
+        let manifest = runs.load_manifest(self.run_id)?;
+        let binding = manifest.aggregate_binding.ok_or_else(|| {
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "external engagement integrity check failed",
+                false,
+                serde_json::json!({"invariant":"specialist Run has no aggregate binding","run_id": self.run_id}),
+            )
+        })?;
+        if binding.aggregate_kind != AggregateKind::ExternalSpecialistEngagement
+            || binding.aggregate_id != engagement_id
+            || binding.member_kind != AggregateMemberKind::Specialist
+        {
+            return Err(MachineError::new(
+                "INTERNAL_ERROR",
+                "external engagement integrity check failed",
+                false,
+                serde_json::json!({"invariant":"specialist Run aggregate binding does not match the engagement","run_id": self.run_id, "engagement_id": engagement_id}),
+            ));
+        }
+        let database = self
+            .state_root
+            .join("orchestration")
+            .join("orchestration.sqlite3");
+        let store = EngagementStore::open(&database)?;
+        store.authorize_external_owner(
+            &manifest.workspace_id,
+            engagement_id,
+            operation,
+            carrier,
+        )?;
+        store.validate_external_member_binding(engagement_id, self.run_id, &binding)?;
+        if !store.external_member_is_active(engagement_id, self.run_id)? {
+            return Err(MachineError::new(
+                "ENGAGEMENT_STATE_CONFLICT",
+                "specialist Run is not an active engagement member",
+                false,
+                serde_json::json!({"run_id": self.run_id, "engagement_id": engagement_id}),
+            ));
+        }
+        Ok(())
+    }
+
+    fn authorize_mutation(
+        &self,
+        operation: &str,
+        credential: Option<&CredentialCarrier>,
+        external_engagement: Option<Uuid>,
+    ) -> Result<(), MachineError> {
+        let carrier = credential.ok_or_else(|| {
+            MachineError::new(
+                "CONTROLLER_MISMATCH",
+                format!("controller credential does not authorize {operation}"),
+                false,
+                serde_json::json!({"run_id":self.run_id,"operation":operation}),
+            )
+        })?;
+        external_engagement.map_or_else(
+            || self.authorize(operation, carrier),
+            |engagement_id| self.authorize_external(engagement_id, operation, carrier),
+        )
     }
 
     /// Prove that an operator has already fenced this Run with a durable,
@@ -2059,6 +2200,8 @@ struct SessionMutation {
     /// Absent only for work whose authority is not a Controller credential:
     /// today that is the operator's fenced controller reset.
     credential: Option<CredentialCarrier>,
+    /// Present only for facade-private aggregate-owner delegation.
+    external_engagement: Option<Uuid>,
     command: SessionCommand,
     outcome: Arc<MutationOutcome>,
 }
@@ -3100,6 +3243,23 @@ impl WorkerSession {
         }
     }
 
+    pub fn external_submit(
+        &self,
+        credential: CredentialCarrier,
+        engagement_id: Uuid,
+        request: TurnControlRequest,
+    ) -> ControlResponseV1 {
+        self.dispatch_external(
+            "engagement.assign",
+            credential,
+            engagement_id,
+            SessionCommand::Accept {
+                request,
+                delivery: DeliveryMode::Submit,
+            },
+        )
+    }
+
     /// Rejoin the named Turn.  Open to same-uid observers: it starts,
     /// answers, interrupts, and ends nothing.
     pub fn wait(&self, turn_id: &str, caller_budget: Option<Duration>) -> ControlResponseV1 {
@@ -3134,6 +3294,7 @@ impl WorkerSession {
             .submit(SessionMutation {
                 operation: "run.shutdown",
                 credential: None,
+                external_engagement: None,
                 command: SessionCommand::ShutdownInterrupt,
                 outcome: Arc::clone(&outcome),
             })
@@ -3241,6 +3402,19 @@ impl WorkerSession {
         self.dispatch(operation, credential, SessionCommand::Interrupt)
     }
 
+    pub fn external_interrupt(
+        &self,
+        credential: CredentialCarrier,
+        engagement_id: Uuid,
+    ) -> ControlResponseV1 {
+        self.dispatch_external(
+            "engagement.cancel",
+            credential,
+            engagement_id,
+            SessionCommand::Interrupt,
+        )
+    }
+
     pub fn pause(
         &self,
         operation: &'static str,
@@ -3288,6 +3462,20 @@ impl WorkerSession {
         self.dispatch(operation, credential, SessionCommand::Close { interrupt })
     }
 
+    pub fn external_close(
+        &self,
+        credential: CredentialCarrier,
+        engagement_id: Uuid,
+        interrupt: bool,
+    ) -> ControlResponseV1 {
+        self.dispatch_external(
+            "engagement.release",
+            credential,
+            engagement_id,
+            SessionCommand::Close { interrupt },
+        )
+    }
+
     pub fn set_writer_access(
         &self,
         operation: &'static str,
@@ -3299,6 +3487,30 @@ impl WorkerSession {
         self.dispatch(
             operation,
             credential,
+            SessionCommand::SetWriterAccess {
+                write,
+                writer_generation,
+                transaction_id,
+            },
+        )
+    }
+
+    pub fn external_set_writer_access(
+        &self,
+        credential: CredentialCarrier,
+        engagement_id: Uuid,
+        write: bool,
+        writer_generation: u64,
+        transaction_id: Uuid,
+    ) -> ControlResponseV1 {
+        self.dispatch_external(
+            if write {
+                "engagement.acquire_write"
+            } else {
+                "engagement.release_write"
+            },
+            credential,
+            engagement_id,
             SessionCommand::SetWriterAccess {
                 write,
                 writer_generation,
@@ -3336,6 +3548,34 @@ impl WorkerSession {
         self.dispatch_with(operation, Some(credential), command, CONTROL_CALL_TIMEOUT)
     }
 
+    fn dispatch_external(
+        &self,
+        operation: &'static str,
+        credential: CredentialCarrier,
+        engagement_id: Uuid,
+        command: SessionCommand,
+    ) -> ControlResponseV1 {
+        let outcome = Arc::new(MutationOutcome::default());
+        if let Some(refusal) = self.mailbox.submit(SessionMutation {
+            operation,
+            credential: Some(credential),
+            external_engagement: Some(engagement_id),
+            command,
+            outcome: Arc::clone(&outcome),
+        }) {
+            return refusal;
+        }
+        outcome
+            .await_settled(CONTROL_CALL_TIMEOUT)
+            .unwrap_or_else(|| {
+                run_busy(
+                    &self.facts,
+                    "turn",
+                    "run did not reach the mutation within the control call budget",
+                )
+            })
+    }
+
     fn dispatch_with(
         &self,
         operation: &'static str,
@@ -3347,6 +3587,7 @@ impl WorkerSession {
         if let Some(refusal) = self.mailbox.submit(SessionMutation {
             operation,
             credential,
+            external_engagement: None,
             command,
             outcome: Arc::clone(&outcome),
         }) {
@@ -3790,10 +4031,13 @@ fn perform(
             _ => interrupt_active(coordinator, &context),
         };
     }
-    if let Some(refusal) =
-        revalidate_controller(authority, mutation.operation, mutation.credential.as_ref())
-    {
-        return refusal;
+    let authorization = authority.authorize_mutation(
+        mutation.operation,
+        mutation.credential.as_ref(),
+        mutation.external_engagement,
+    );
+    if let Err(error) = authorization {
+        return refusal_from(error);
     }
     let operation = mutation.operation;
     let context = progress.facts.context(
@@ -4527,7 +4771,7 @@ pub fn read_bound_handoff(
     let mut reader = std::io::BufReader::new(startup);
     let bound = match read_startup_handoff(&mut reader)? {
         StartupHandoff::Bound { record } => record,
-        StartupHandoff::Failed { .. } => return Err(WorkerProtocolError::WorkerStartFailed),
+        StartupHandoff::Failed { code } => return Err(startup_handoff_error(&code)),
         StartupHandoff::Ready { .. } => return Err(WorkerProtocolError::MalformedFrame),
     };
     reader
@@ -4542,8 +4786,16 @@ pub fn read_ready_handoff(
 ) -> Result<WorkerRuntimeRecord, WorkerProtocolError> {
     match read_startup_handoff(reader)? {
         StartupHandoff::Ready { record } => Ok(record),
-        StartupHandoff::Failed { .. } => Err(WorkerProtocolError::WorkerStartFailed),
+        StartupHandoff::Failed { code } => Err(startup_handoff_error(&code)),
         StartupHandoff::Bound { .. } => Err(WorkerProtocolError::MalformedFrame),
+    }
+}
+
+fn startup_handoff_error(code: &str) -> WorkerProtocolError {
+    match code {
+        "AUDIT_INTEGRITY_FAILURE" => WorkerProtocolError::LedgerReplay,
+        "RUNTIME_PATH_COLLISION" => WorkerProtocolError::InvalidRuntimeRecord,
+        _ => WorkerProtocolError::WorkerStartFailed,
     }
 }
 
@@ -5535,27 +5787,16 @@ fn controller_refused(run_id: Uuid, operation: &str) -> ControlResponseV1 {
     }
 }
 
-/// Authoritative Controller revalidation for one mutating request, returning
-/// the refusal to send when it fails and `None` when the effect may proceed.
-///
-/// A credential failure is always the uniform `CONTROLLER_MISMATCH`. A durable
-/// authority failure — an unresolved reset prepare, an unreadable binding — is
-/// reported under its own code instead, because it names a recovery condition
-/// the caller must act on rather than a fact about the credential. Run state is
-/// not a secret from a same-uid caller: ADR-016 lets any of them read the
-/// client-safe projection without a capability.
+#[cfg(test)]
 fn revalidate_controller(
     authority: &RunControllerAuthority,
     operation: &str,
     credential: Option<&CredentialCarrier>,
 ) -> Option<ControlResponseV1> {
-    let Some(carrier) = credential else {
-        return Some(controller_refused(authority.run_id(), operation));
-    };
-    match authority.authorize(operation, carrier) {
-        Ok(()) => None,
-        Err(error) => Some(refusal_from(error)),
-    }
+    authority
+        .authorize_mutation(operation, credential, None)
+        .err()
+        .map(refusal_from)
 }
 
 /// The durable authority already produced a contract-shaped machine error, so
@@ -5700,14 +5941,17 @@ fn serve_run_operation(
 ) -> Result<ControlResponseV1, WorkerProtocolError> {
     let operation = request.operation_name();
     let mutating = request.requires_controller();
+    let external_engagement = request.external_engagement();
     let Some(session) = run.session().map(Arc::clone) else {
         // A Run with no session still proves authority first, so an
         // unauthorized caller never gets a cheaper answer than an authorized
         // one for the same request.
-        if mutating
-            && let Some(refusal) = revalidate_controller(authority, operation, credential.as_ref())
-        {
-            return Ok(refusal);
+        if mutating {
+            let authorization =
+                authority.authorize_mutation(operation, credential.as_ref(), external_engagement);
+            if let Err(error) = authorization {
+                return Ok(refusal_from(error));
+            }
         }
         // A reset fence answered from here would be a guess: the worker is
         // still replaying and has no authoritative Turn state yet.  The
@@ -5758,6 +6002,11 @@ fn serve_run_operation(
         ControlRequestV1::Submit { request, .. } => {
             session.submit(operation, credential, request, DeliveryMode::Submit, None)
         }
+        ControlRequestV1::ExternalSubmit {
+            engagement_id,
+            request,
+            ..
+        } => session.external_submit(credential, engagement_id, request),
         ControlRequestV1::Respond {
             request_id,
             idempotency_key,
@@ -5765,6 +6014,9 @@ fn serve_run_operation(
             ..
         } => session.respond(operation, credential, request_id, idempotency_key, response),
         ControlRequestV1::Interrupt { .. } => session.interrupt(operation, credential),
+        ControlRequestV1::ExternalInterrupt { engagement_id, .. } => {
+            session.external_interrupt(credential, engagement_id)
+        }
         ControlRequestV1::Pause { interrupt, .. } => {
             session.pause(operation, credential, interrupt)
         }
@@ -5776,6 +6028,11 @@ fn serve_run_operation(
         ControlRequestV1::Close { interrupt, .. } => {
             session.close(operation, credential, interrupt)
         }
+        ControlRequestV1::ExternalClose {
+            engagement_id,
+            interrupt,
+            ..
+        } => session.external_close(credential, engagement_id, interrupt),
         ControlRequestV1::SetWriterAccess {
             write,
             writer_generation,
@@ -5784,6 +6041,19 @@ fn serve_run_operation(
         } => session.set_writer_access(
             operation,
             credential,
+            write,
+            writer_generation,
+            transaction_id,
+        ),
+        ControlRequestV1::ExternalSetWriterAccess {
+            engagement_id,
+            write,
+            writer_generation,
+            transaction_id,
+            ..
+        } => session.external_set_writer_access(
+            credential,
+            engagement_id,
             write,
             writer_generation,
             transaction_id,
