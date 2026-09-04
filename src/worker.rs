@@ -1588,10 +1588,7 @@ impl RunControllerAuthority {
                 serde_json::json!({"invariant":"specialist Run aggregate binding does not match the engagement","run_id": self.run_id, "engagement_id": engagement_id}),
             ));
         }
-        let database = self
-            .state_root
-            .join("orchestration")
-            .join("orchestration.sqlite3");
+        let database = EngagementStore::workspace_database_path(&self.state_root);
         let store = EngagementStore::open(&database)?;
         store.authorize_external_owner(
             &manifest.workspace_id,

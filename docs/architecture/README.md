@@ -230,6 +230,13 @@ canonical member has no active task. Result collection inserts delivery receipts
 only for the bounded cursor page selected in its SQLite transaction. Abort
 records task and member settlement one member at a time, so a
 restart can continue after an already closed Run without repeating its work.
+Writer census failure before any sandbox mutation rolls the prepared authority
+record back to its known prior state so the caller can explicitly retry; only
+uncertainty after a policy effect can enter `blocked_unknown`. Reconciliation
+never respawns a worker for a durable closed Run. If member close already
+removed its runtime record after exact generation-absence proof, reconciliation
+may commit the otherwise stranded Writer release directly from that durable
+closed Run.
 
 ### One-Shot Specialist Review Coordinator
 

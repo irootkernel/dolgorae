@@ -2145,11 +2145,14 @@ fn acquire_writer_authorized(
         })?;
         return Err(error);
     }
-    if crate::worker::prove_worker_workload_absent(&worker_record).is_err() {
-        writer.transact(|record| {
-            record.block_unknown(transaction_id);
-            Ok(())
-        })?;
+    if prove_writer_pre_effect_absence(
+        &writer,
+        transaction_id,
+        WriterPreEffectTransition::Acquire,
+        || crate::worker::prove_worker_workload_absent(&worker_record),
+    )?
+    .is_err()
+    {
         return Err(background_execution_unverified(
             run_id,
             &projection,
@@ -2230,6 +2233,44 @@ const fn writer_acquire_lifecycle_allowed(lifecycle: RunLifecycle) -> bool {
     matches!(lifecycle, RunLifecycle::Idle | RunLifecycle::Paused)
 }
 
+fn ensure_worker_spawn_lifecycle(
+    run_id: Uuid,
+    lifecycle: RunLifecycle,
+) -> Result<(), MachineError> {
+    match lifecycle {
+        RunLifecycle::Closed => Err(run_state_conflict_error(
+            run_id,
+            lifecycle,
+            "run.ensure_worker",
+        )),
+        RunLifecycle::Starting
+        | RunLifecycle::Idle
+        | RunLifecycle::Running
+        | RunLifecycle::WaitingInteraction
+        | RunLifecycle::ReconciliationRequired
+        | RunLifecycle::Paused
+        | RunLifecycle::StartFailed
+        | RunLifecycle::OutcomeUnknown => Ok(()),
+    }
+}
+
+const fn external_writer_release_can_bypass_lifecycle(
+    lifecycle: RunLifecycle,
+    has_external_engagement: bool,
+) -> bool {
+    match lifecycle {
+        RunLifecycle::Closed => has_external_engagement,
+        RunLifecycle::Starting
+        | RunLifecycle::Idle
+        | RunLifecycle::Running
+        | RunLifecycle::WaitingInteraction
+        | RunLifecycle::ReconciliationRequired
+        | RunLifecycle::Paused
+        | RunLifecycle::StartFailed
+        | RunLifecycle::OutcomeUnknown => false,
+    }
+}
+
 fn release_writer(
     view: &WorkspaceView,
     state_root: &Path,
@@ -2259,10 +2300,15 @@ fn release_writer_authorized(
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
+    let externally_closed = external_writer_release_can_bypass_lifecycle(
+        projection.lifecycle,
+        external_engagement.is_some(),
+    );
     if !matches!(
         projection.lifecycle,
         RunLifecycle::Idle | RunLifecycle::Paused
-    ) {
+    ) && !externally_closed
+    {
         return Err(run_state_conflict_error(
             run_id,
             projection.lifecycle,
@@ -2283,6 +2329,14 @@ fn release_writer_authorized(
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
+    if commit_external_closed_writer_release_if_runtime_absent(
+        &writer,
+        transaction_id,
+        &runtime_record,
+        externally_closed,
+    )? {
+        return Ok(());
+    }
     let worker_record = match crate::worker::read_runtime_record(&runtime_record, uid) {
         Ok(record) => record,
         Err(error) => {
@@ -2293,11 +2347,14 @@ fn release_writer_authorized(
             return Err(error.machine_error(run_id, &runtime_record));
         }
     };
-    if crate::worker::prove_worker_workload_absent(&worker_record).is_err() {
-        writer.transact(|record| {
-            record.block_unknown(transaction_id);
-            Ok(())
-        })?;
+    if prove_writer_pre_effect_absence(
+        &writer,
+        transaction_id,
+        WriterPreEffectTransition::Release,
+        || crate::worker::prove_worker_workload_absent(&worker_record),
+    )?
+    .is_err()
+    {
         return Err(background_execution_unverified(
             run_id,
             &projection,
@@ -2404,6 +2461,72 @@ fn background_execution_unverified(
             "required_action": required_action,
         }),
     )
+}
+
+#[derive(Clone, Copy)]
+enum WriterPreEffectTransition {
+    Acquire,
+    Release,
+}
+
+fn prove_writer_pre_effect_absence<F>(
+    writer: &crate::writer::WriterStore,
+    transaction_id: Uuid,
+    transition: WriterPreEffectTransition,
+    prove: F,
+) -> Result<
+    Result<crate::worker::BackgroundAbsenceEvidence, crate::worker::WorkerProtocolError>,
+    MachineError,
+>
+where
+    F: FnOnce() -> Result<
+        crate::worker::BackgroundAbsenceEvidence,
+        crate::worker::WorkerProtocolError,
+    >,
+{
+    let proof = prove();
+    if proof.is_err() {
+        let rollback = writer.transact(|record| {
+            match transition {
+                WriterPreEffectTransition::Acquire => record.cancel_acquire(transaction_id),
+                WriterPreEffectTransition::Release => record.rollback_release(transaction_id),
+            }
+            Ok(())
+        });
+        if let Err(error) = rollback {
+            // A failed rollback makes the persisted transition uncertain. Try
+            // to fence it explicitly rather than leaving a reusable-looking
+            // reservation behind; if storage is unavailable, the original
+            // persistence error remains the most precise result.
+            let _ = writer.transact(|record| {
+                record.block_unknown(transaction_id);
+                Ok(())
+            });
+            return Err(error);
+        }
+    }
+    Ok(proof)
+}
+
+fn commit_external_closed_writer_release_if_runtime_absent(
+    writer: &crate::writer::WriterStore,
+    transaction_id: Uuid,
+    runtime_record: &Path,
+    externally_closed: bool,
+) -> Result<bool, MachineError> {
+    if !externally_closed {
+        return Ok(false);
+    }
+    // This check-to-commit sequence is safe only while every worker creation
+    // path refuses a durable Closed lifecycle. `ensure_run_worker` enforces
+    // that invariant immediately before spawning a missing generation.
+    match std::fs::symlink_metadata(runtime_record) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            writer.transact(|record| record.commit_release(transaction_id))?;
+            Ok(true)
+        }
+        Ok(_) | Err(_) => Ok(false),
+    }
 }
 
 fn parse_uuid_flag(args: &[OsString], flag: &str) -> Result<Uuid, MachineError> {
@@ -4415,6 +4538,7 @@ fn ensure_run_worker(
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
     let projection = store.load_state_projection(run_id)?;
+    ensure_worker_spawn_lifecycle(run_id, projection.lifecycle)?;
     let state = profile_server_state(view, &manifest.profile.profile_name)?;
     if state.snapshot.server_key != manifest.profile.initial_server_key {
         return Err(MachineError::new(
@@ -4481,11 +4605,8 @@ fn ensure_run_worker(
     if let Some(binding) = manifest.aggregate_binding.as_ref()
         && binding.aggregate_kind == AggregateKind::ExternalSpecialistEngagement
     {
-        let engagement = EngagementStore::open(
-            &state_root
-                .join("orchestration")
-                .join("orchestration.sqlite3"),
-        )?;
+        let engagement =
+            EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
         let (_, access, member_state) =
             engagement.external_member_configuration(binding.aggregate_id, run_id)?;
         if !matches!(
@@ -5199,6 +5320,53 @@ impl RunMutationLock for RunStartupLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn writer_test_store(label: &str) -> (PathBuf, crate::writer::WriterStore) {
+        let root = std::env::temp_dir().join(format!("dlg-writer-{label}-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::create_dir(root.join("runtime/locks")).unwrap();
+        std::fs::set_permissions(
+            root.join("runtime/locks"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let workspace_id = "9".repeat(64);
+        let uid = DarwinSystem.current_uid();
+        crate::writer::WriterStore::initialize_layout(&root, &workspace_id, uid).unwrap();
+        let store = crate::writer::WriterStore::new(&root, workspace_id, uid);
+        (root, store)
+    }
+
+    fn writer_test_holder(run_id: Uuid) -> crate::writer::WriterHolder {
+        crate::writer::WriterHolder {
+            run_id,
+            profile: "writer".to_owned(),
+            controller_id: Uuid::now_v7(),
+            controller_generation: 1,
+            run_generation: 1,
+            worker_generation: 1,
+            profile_server_key: "0".repeat(64),
+            profile_server_epoch: 1,
+            thread_id: Some("thread".to_owned()),
+            lifecycle: RunLifecycle::Idle,
+        }
+    }
+
+    fn activate_test_writer(store: &crate::writer::WriterStore, run_id: Uuid) {
+        let transaction_id = Uuid::now_v7();
+        store
+            .transact(|record| {
+                let (_, generation) =
+                    record.prepare_acquire(run_id, writer_test_holder(run_id), transaction_id)?;
+                record.commit_acquire(transaction_id, generation)
+            })
+            .unwrap();
+    }
 
     /// The shared fake app-server, running one manifest-validated scenario.
     ///
@@ -5663,6 +5831,159 @@ mod tests {
     }
 
     #[test]
+    fn pre_effect_census_failure_restores_writer_states_for_explicit_retry() {
+        let (acquire_root, acquire_store) = writer_test_store("acquire-rollback");
+        let acquire_run = Uuid::now_v7();
+        let acquire_transaction = Uuid::now_v7();
+        acquire_store
+            .transact(|record| {
+                record
+                    .prepare_acquire(
+                        acquire_run,
+                        writer_test_holder(acquire_run),
+                        acquire_transaction,
+                    )
+                    .map(|_| ())
+            })
+            .unwrap();
+        let proof = prove_writer_pre_effect_absence(
+            &acquire_store,
+            acquire_transaction,
+            WriterPreEffectTransition::Acquire,
+            || Err(crate::worker::WorkerProtocolError::InvalidIdentity),
+        )
+        .unwrap();
+        assert!(proof.is_err());
+        assert_eq!(
+            acquire_store.load().unwrap().state,
+            crate::writer::WriterAuthorityState::None
+        );
+        acquire_store
+            .transact(|record| {
+                record
+                    .prepare_acquire(acquire_run, writer_test_holder(acquire_run), Uuid::now_v7())
+                    .map(|_| ())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(acquire_root).unwrap();
+
+        let (release_root, release_store) = writer_test_store("release-rollback");
+        let release_run = Uuid::now_v7();
+        activate_test_writer(&release_store, release_run);
+        let release_transaction = Uuid::now_v7();
+        release_store
+            .transact(|record| {
+                record
+                    .prepare_release(release_run, release_transaction)
+                    .map(|_| ())
+            })
+            .unwrap();
+        let proof = prove_writer_pre_effect_absence(
+            &release_store,
+            release_transaction,
+            WriterPreEffectTransition::Release,
+            || Err(crate::worker::WorkerProtocolError::InvalidIdentity),
+        )
+        .unwrap();
+        assert!(proof.is_err());
+        assert_eq!(
+            release_store.load().unwrap().state,
+            crate::writer::WriterAuthorityState::Active
+        );
+        release_store
+            .transact(|record| {
+                record
+                    .prepare_release(release_run, Uuid::now_v7())
+                    .map(|_| ())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(release_root).unwrap();
+    }
+
+    #[test]
+    fn only_external_closed_run_with_absent_runtime_can_release_directly() {
+        let (closed_root, closed_store) = writer_test_store("closed-release");
+        let closed_run = Uuid::now_v7();
+        activate_test_writer(&closed_store, closed_run);
+        let closed_transaction = Uuid::now_v7();
+        closed_store
+            .transact(|record| {
+                record
+                    .prepare_release(closed_run, closed_transaction)
+                    .map(|_| ())
+            })
+            .unwrap();
+        assert!(
+            commit_external_closed_writer_release_if_runtime_absent(
+                &closed_store,
+                closed_transaction,
+                &closed_root.join("missing-runtime-record"),
+                true,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            closed_store.load().unwrap().state,
+            crate::writer::WriterAuthorityState::None
+        );
+        std::fs::remove_dir_all(closed_root).unwrap();
+
+        let (ordinary_root, ordinary_store) = writer_test_store("ordinary-release");
+        let ordinary_run = Uuid::now_v7();
+        activate_test_writer(&ordinary_store, ordinary_run);
+        let ordinary_transaction = Uuid::now_v7();
+        ordinary_store
+            .transact(|record| {
+                record
+                    .prepare_release(ordinary_run, ordinary_transaction)
+                    .map(|_| ())
+            })
+            .unwrap();
+        assert!(
+            !commit_external_closed_writer_release_if_runtime_absent(
+                &ordinary_store,
+                ordinary_transaction,
+                &ordinary_root.join("missing-runtime-record"),
+                false,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            ordinary_store.load().unwrap().state,
+            crate::writer::WriterAuthorityState::Releasing
+        );
+        std::fs::remove_dir_all(ordinary_root).unwrap();
+
+        let (present_root, present_store) = writer_test_store("present-release");
+        let present_run = Uuid::now_v7();
+        activate_test_writer(&present_store, present_run);
+        let present_transaction = Uuid::now_v7();
+        present_store
+            .transact(|record| {
+                record
+                    .prepare_release(present_run, present_transaction)
+                    .map(|_| ())
+            })
+            .unwrap();
+        let present_record = present_root.join("present-runtime-record");
+        std::fs::write(&present_record, b"occupied").unwrap();
+        assert!(
+            !commit_external_closed_writer_release_if_runtime_absent(
+                &present_store,
+                present_transaction,
+                &present_record,
+                true,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            present_store.load().unwrap().state,
+            crate::writer::WriterAuthorityState::Releasing
+        );
+        std::fs::remove_dir_all(present_root).unwrap();
+    }
+
+    #[test]
     fn resume_and_writer_acquire_refuse_uncertain_or_terminal_lifecycles() {
         assert!(resume_lifecycle_allowed(RunLifecycle::Paused));
         assert!(!resume_lifecycle_allowed(RunLifecycle::Idle));
@@ -5681,5 +6002,24 @@ mod tests {
         ] {
             assert!(!writer_acquire_lifecycle_allowed(lifecycle));
         }
+    }
+
+    #[test]
+    fn closed_run_is_refused_at_the_worker_spawn_boundary() {
+        let run_id = Uuid::now_v7();
+        let error = ensure_worker_spawn_lifecycle(run_id, RunLifecycle::Closed).unwrap_err();
+        assert_eq!(error.code, "RUN_STATE_CONFLICT");
+        assert_eq!(error.details["run_id"], run_id.to_string());
+        assert_eq!(error.details["state"], "closed");
+        assert_eq!(error.details["operation"], "run.ensure_worker");
+
+        assert!(external_writer_release_can_bypass_lifecycle(
+            RunLifecycle::Closed,
+            true
+        ));
+        assert!(!external_writer_release_can_bypass_lifecycle(
+            RunLifecycle::Closed,
+            false
+        ));
     }
 }

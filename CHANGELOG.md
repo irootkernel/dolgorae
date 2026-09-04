@@ -32,6 +32,8 @@ development commits.
 - Writer transitions now fail closed after uncertain worker outcomes, orphaned
   dedicated servers are retired only after identity-proven worker absence, and
   interaction-response receipts survive worker restart.
+- Writer recovery now preserves known pre-effect state and releases closed
+  engagement Writers without respawning workers.
 - Immutable worktree-target capture now rejects symlinks in every path
   component and bounds Git object output before buffering it.
 

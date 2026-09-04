@@ -1873,10 +1873,15 @@ Foreground command observation and terminal completion are recorded separately
 and never imply background-process absence. Writer release/handoff/close first
 fences new work and completes the Dedicated Lane workload cleanup protocol. A complete
 five-sample empty workload census proves
-`background_execution:verified_absent`; any live member is `active`. Timeout,
-identity drift, PID reuse, truncated/unreadable census, unregistered survivor,
-or detected process-group/session escape is `unverified`, persists
-`blocked_unknown`, and returns `BACKGROUND_EXECUTION_UNVERIFIED`. Prompt
+`background_execution:verified_absent`; any live member is `active`. Before a
+sandbox-policy request is sent, a transient incomplete census is a known
+pre-effect failure: release rolls `releasing` back to `active`, acquire cancels
+its reservation to `none`, and the known state permits an explicit retry after
+the non-retryable `BACKGROUND_EXECUTION_UNVERIFIED` result. Once
+policy application may have started, timeout, identity drift, PID reuse,
+truncated/unreadable census, an unregistered survivor, or detected
+process-group/session escape is `unverified`, persists `blocked_unknown`, and
+returns `BACKGROUND_EXECUTION_UNVERIFIED`. Prompt
 instructions, connection close, and leader or kernel-lock loss are never
 absence proof. A native Codex terminal API, when present and live-tested, is
 additional `hybrid` evidence only; Dolgorae process census remains authoritative.
@@ -1886,6 +1891,13 @@ that needs exact-incumbent recovery, or `operator_repair` when identity or
 journal integrity prevents automated reconciliation. Its details include the
 run/thread/server identities, nullable lane identity/epoch, census revision,
 and a bounded reason.
+
+External-engagement reconciliation may also finish a pending Writer release
+for a durably `closed` member Run and must not respawn a worker for that Run. A
+surviving runtime generation must still pass the ordinary census and
+reader-policy transition. An absent runtime record is sufficient only because
+lifecycle close removes that record after exact generation-absence proof; no
+other missing or unreadable record authorizes a release.
 
 Writer transfer uses explicit prepare, apply, commit, and cancel operations. PREPARE
 requires one controller capability that owns both runs and persists a single

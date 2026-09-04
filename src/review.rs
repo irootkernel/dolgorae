@@ -333,10 +333,7 @@ pub fn execute(
     let aggregate_carrier = CredentialCarrier::open_path(&carriers.aggregate)?;
     let aggregate_binding = binding_from_carrier(&aggregate_carrier, 1)?;
     drop(aggregate_carrier);
-    let database = prepared
-        .state_root
-        .join("orchestration")
-        .join("orchestration.sqlite3");
+    let database = EngagementStore::workspace_database_path(&prepared.state_root);
     let mut store = EngagementStore::open(&database)?;
     let key = |operation: &str| format!("specialist-review:{request_ref}:{operation}");
     let opened = store.open_engagement(
@@ -574,10 +571,7 @@ pub fn execute_scoped(
     let aggregate_carrier = CredentialCarrier::open_path(&carriers.aggregate)?;
     let aggregate_binding = binding_from_carrier(&aggregate_carrier, 1)?;
     drop(aggregate_carrier);
-    let database = prepared
-        .state_root
-        .join("orchestration")
-        .join("orchestration.sqlite3");
+    let database = EngagementStore::workspace_database_path(&prepared.state_root);
     let mut store = EngagementStore::open(&database)?;
     let key = |operation: &str| format!("scoped-specialist-review:{request_ref}:{operation}");
     let opened = store.open_engagement(

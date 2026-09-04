@@ -337,9 +337,7 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
         ));
     }
     let owner = carrier_from_options(arguments, "--controller-file", "--controller-fd")?;
-    let database = state_root
-        .join("orchestration")
-        .join("orchestration.sqlite3");
+    let database = EngagementStore::workspace_database_path(&state_root);
     let mut store = EngagementStore::open(&database)?;
     let _operation_lock = request
         .engagement_id()
@@ -1786,9 +1784,26 @@ fn release_external_writer_safely(
     {
         return Ok(());
     }
-    ensure_external_specialist_worker(view, state_root, run_id)?;
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+    if external_worker_ensure_required(projection.lifecycle) {
+        ensure_external_specialist_worker(view, state_root, run_id)?;
+    }
     release_external_writer(view, state_root, run_id, engagement_id, owner)
         .map_err(map_writer_conflict)
+}
+
+const fn external_worker_ensure_required(lifecycle: RunLifecycle) -> bool {
+    match lifecycle {
+        RunLifecycle::Idle | RunLifecycle::Paused => true,
+        RunLifecycle::Starting
+        | RunLifecycle::Running
+        | RunLifecycle::WaitingInteraction
+        | RunLifecycle::ReconciliationRequired
+        | RunLifecycle::Closed
+        | RunLifecycle::StartFailed
+        | RunLifecycle::OutcomeUnknown => false,
+    }
 }
 
 fn reconcile_idle_canonical_writer(
@@ -2374,5 +2389,23 @@ mod tests {
         assert!(patch.contains(&0xff));
         assert!(capture_git_worktree_patch(&root, 64).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn closed_external_member_never_respawns_a_worker_before_writer_release() {
+        for lifecycle in [RunLifecycle::Idle, RunLifecycle::Paused] {
+            assert!(external_worker_ensure_required(lifecycle));
+        }
+        for lifecycle in [
+            RunLifecycle::Starting,
+            RunLifecycle::Running,
+            RunLifecycle::WaitingInteraction,
+            RunLifecycle::ReconciliationRequired,
+            RunLifecycle::Closed,
+            RunLifecycle::StartFailed,
+            RunLifecycle::OutcomeUnknown,
+        ] {
+            assert!(!external_worker_ensure_required(lifecycle));
+        }
     }
 }

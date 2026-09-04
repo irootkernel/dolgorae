@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,6 +35,30 @@ pub enum EngagementBarrier {
     AfterDeliveryCommit,
     BeforeLifecycleCommit,
     AfterLifecycleCommit,
+    BeforeExternalOpenCommit,
+    AfterExternalOpenCommit,
+    BeforeExternalHireReservationCommit,
+    AfterExternalHireReservationCommit,
+    BeforeExternalHireOutcomeCommit,
+    AfterExternalHireOutcomeCommit,
+    BeforeExternalMemberResidencyCommit,
+    AfterExternalMemberResidencyCommit,
+    BeforeExternalTaskReservationCommit,
+    AfterExternalTaskReservationCommit,
+    BeforeExternalTaskDispatchCommit,
+    AfterExternalTaskDispatchCommit,
+    BeforeExternalTaskRunningCommit,
+    AfterExternalTaskRunningCommit,
+    BeforeExternalTaskTerminalCommit,
+    AfterExternalTaskTerminalCommit,
+    BeforeExternalTaskCancelCommit,
+    AfterExternalTaskCancelCommit,
+    BeforeExternalDeliveryCommit,
+    AfterExternalDeliveryCommit,
+    BeforeExternalMemberReleaseCommit,
+    AfterExternalMemberReleaseCommit,
+    BeforeExternalCloseCommit,
+    AfterExternalCloseCommit,
 }
 
 pub trait EngagementFaultInjector: Send + Sync {
@@ -172,6 +196,13 @@ pub struct EngagementStore {
 }
 
 impl EngagementStore {
+    #[must_use]
+    pub fn workspace_database_path(state_root: &Path) -> PathBuf {
+        state_root
+            .join("orchestration")
+            .join("orchestration.sqlite3")
+    }
+
     pub fn open(path: &Path) -> Result<Self, MachineError> {
         Self::open_with_faults(path, Arc::new(NoEngagementFaults))
     }
@@ -994,6 +1025,7 @@ impl EngagementStore {
         let engagement_id = Uuid::now_v7();
         let bootstrap_operation_id = Uuid::now_v7();
         let now = unix_time_ms()?;
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         if let Some(replay) = scoped_replay::<ExternalEngagementSnapshot>(
             &transaction,
@@ -1050,7 +1082,12 @@ impl EngagementStore {
             &request,
             &result,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalOpenCommit,
+            EngagementBarrier::AfterExternalOpenCommit,
+        )?;
         Ok(result)
     }
 
@@ -1278,6 +1315,7 @@ impl EngagementStore {
         let hire_operation_id = Uuid::now_v7();
         let specialist_run_id = Uuid::now_v7();
         let now = unix_time_ms()?;
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         if let Some(replay) = scoped_replay(
             &transaction,
@@ -1337,7 +1375,12 @@ impl EngagementStore {
             &request,
             &result,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalHireReservationCommit,
+            EngagementBarrier::AfterExternalHireReservationCommit,
+        )?;
         Ok(result)
     }
 
@@ -1361,6 +1404,7 @@ impl EngagementStore {
             state: response_state.to_owned(),
             ..reservation.clone()
         };
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -1443,7 +1487,12 @@ impl EngagementStore {
             "external_hire_outcome",
             response_state,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalHireOutcomeCommit,
+            EngagementBarrier::AfterExternalHireOutcomeCommit,
+        )?;
         Ok(result)
     }
 
@@ -1452,8 +1501,9 @@ impl EngagementStore {
         engagement_id: Uuid,
         specialist_run_id: Uuid,
     ) -> Result<(), MachineError> {
-        let changed = self
-            .connection
+        let faults = Arc::clone(&self.faults);
+        let transaction = self.transaction()?;
+        let changed = transaction
             .execute(
                 "UPDATE members SET actor_residency='resident',updated_at_ms=?3
                  WHERE engagement_id=?1 AND specialist_run_id=?2
@@ -1468,6 +1518,12 @@ impl EngagementStore {
         if changed != 1 {
             return Err(specialist_not_member(specialist_run_id));
         }
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalMemberResidencyCommit,
+            EngagementBarrier::AfterExternalMemberResidencyCommit,
+        )?;
         Ok(())
     }
 
@@ -1623,6 +1679,7 @@ impl EngagementStore {
         }
         let task_id = Uuid::now_v7();
         let now = unix_time_ms()?;
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         if let Some(replay) = scoped_replay::<ExternalTaskSnapshot>(
             &transaction,
@@ -1714,7 +1771,12 @@ impl EngagementStore {
             &request_sha256,
             &result,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalTaskReservationCommit,
+            EngagementBarrier::AfterExternalTaskReservationCommit,
+        )?;
         Ok(result)
     }
 
@@ -1731,6 +1793,7 @@ impl EngagementStore {
             return Ok(current);
         }
         let now = unix_time_ms()?;
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -1756,7 +1819,12 @@ impl EngagementStore {
             "external_task_running",
             turn_id,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalTaskRunningCommit,
+            EngagementBarrier::AfterExternalTaskRunningCommit,
+        )?;
         Ok(result)
     }
 
@@ -1766,6 +1834,7 @@ impl EngagementStore {
         task_id: Uuid,
         idempotency_key: &str,
     ) -> Result<ExternalTaskSnapshot, MachineError> {
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -1799,7 +1868,12 @@ impl EngagementStore {
             "external_task_dispatching",
             &task_id.to_string(),
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalTaskDispatchCommit,
+            EngagementBarrier::AfterExternalTaskDispatchCommit,
+        )?;
         Ok(result)
     }
 
@@ -1818,6 +1892,7 @@ impl EngagementStore {
             return Err(invalid("state", "task outcome is not terminal"));
         }
         let now = unix_time_ms()?;
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         let current = external_task_in(&transaction, engagement_id, task_id)?;
         if !matches!(
@@ -1858,7 +1933,12 @@ impl EngagementStore {
         }
         append_event(&transaction, engagement_id, "external_task_terminal", state)?;
         let result = external_task_in(&transaction, engagement_id, task_id)?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalTaskTerminalCommit,
+            EngagementBarrier::AfterExternalTaskTerminalCommit,
+        )?;
         Ok(result)
     }
 
@@ -1890,6 +1970,7 @@ impl EngagementStore {
         )? {
             return Ok(replay);
         }
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         if let Some(replay) = scoped_replay(
             &transaction,
@@ -1945,7 +2026,12 @@ impl EngagementStore {
             &request,
             &result,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalTaskCancelCommit,
+            EngagementBarrier::AfterExternalTaskCancelCommit,
+        )?;
         Ok(result)
     }
 
@@ -2053,6 +2139,7 @@ impl EngagementStore {
         if limit == 0 || limit > 100 {
             return Err(invalid("limit", "limit must be between 1 and 100"));
         }
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         let existing_count: i64 = transaction
             .query_row(
@@ -2125,7 +2212,12 @@ impl EngagementStore {
                 task_id.parse().map_err(internal)?,
             )?);
         }
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalDeliveryCommit,
+            EngagementBarrier::AfterExternalDeliveryCommit,
+        )?;
         Ok((tasks, next))
     }
 
@@ -2151,6 +2243,7 @@ impl EngagementStore {
         )? {
             return Ok(value);
         }
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         if let Some(value) = scoped_replay(
             &transaction,
@@ -2205,7 +2298,12 @@ impl EngagementStore {
             "external_member_released",
             &specialist_run_id.to_string(),
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalMemberReleaseCommit,
+            EngagementBarrier::AfterExternalMemberReleaseCommit,
+        )?;
         Ok(result)
     }
 
@@ -2234,6 +2332,7 @@ impl EngagementStore {
         )? {
             return Ok(value);
         }
+        let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
         if let Some(value) = scoped_replay(
             &transaction,
@@ -2289,7 +2388,12 @@ impl EngagementStore {
             "external_engagement_closed",
             &result,
         )?;
-        transaction.commit().map_err(internal)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalCloseCommit,
+            EngagementBarrier::AfterExternalCloseCommit,
+        )?;
         Ok(result)
     }
 
@@ -3085,6 +3189,613 @@ mod tests {
                 generation: 1,
             },
             capability_sha256: "e".repeat(64),
+        }
+    }
+
+    fn external_open(store: &mut EngagementStore) -> ExternalEngagementSnapshot {
+        store
+            .open_external_engagement(
+                "workspace",
+                &owner_binding(),
+                &serde_json::json!({"namespace":"test","kind":"workflow","id":"faults"}),
+                Some("fault matrix"),
+                "open-external",
+            )
+            .unwrap()
+    }
+
+    fn external_ready_member(
+        store: &mut EngagementStore,
+        engagement_id: Uuid,
+    ) -> ExternalHireReservation {
+        let plan = reviewer_plan("fault matrix");
+        let reservation = store
+            .reserve_external_hire(
+                engagement_id,
+                "reviewer",
+                &plan.agent_configuration,
+                "fault matrix",
+                "read_only",
+                "hire-external",
+            )
+            .unwrap();
+        store
+            .finish_external_hire(&reservation, RuntimeOutcome::Accepted, "hire-external")
+            .unwrap()
+    }
+
+    fn external_task_reservation(
+        store: &mut EngagementStore,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> ExternalTaskSnapshot {
+        store
+            .reserve_external_task(
+                engagement_id,
+                specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &serde_json::json!({"task":"fault matrix"}),
+                    objective: "exercise restart boundary",
+                    external_request_ref: &serde_json::json!({"kind":"fault"}),
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-external",
+                },
+            )
+            .unwrap()
+    }
+
+    fn reopen(root: &Path) -> EngagementStore {
+        EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap()
+    }
+
+    #[test]
+    fn external_open_commit_faults_are_atomic_and_exactly_replayable() {
+        for barrier in [
+            EngagementBarrier::BeforeExternalOpenCommit,
+            EngagementBarrier::AfterExternalOpenCommit,
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("dolgorae-external-open-fault-{}", Uuid::now_v7()));
+            let binding = owner_binding();
+            let reference = serde_json::json!({"namespace":"test","kind":"workflow","id":"open"});
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .open_external_engagement(
+                        "workspace",
+                        &binding,
+                        &reference,
+                        None,
+                        "open-fault",
+                    )
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            let opened = recovered
+                .open_external_engagement("workspace", &binding, &reference, None, "open-fault")
+                .unwrap();
+            assert_eq!(
+                recovered
+                    .open_external_engagement(
+                        "workspace",
+                        &binding,
+                        &reference,
+                        None,
+                        "open-fault",
+                    )
+                    .unwrap(),
+                opened
+            );
+            let count: i64 = recovered
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM engagements WHERE authority_kind='external_v1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn external_hire_commit_faults_recover_each_durable_boundary() {
+        for barrier in [
+            EngagementBarrier::BeforeExternalHireReservationCommit,
+            EngagementBarrier::AfterExternalHireReservationCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let plan = reviewer_plan("fault matrix");
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .reserve_external_hire(
+                        opened.engagement_id,
+                        "reviewer",
+                        &plan.agent_configuration,
+                        "fault matrix",
+                        "read_only",
+                        "hire-fault",
+                    )
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            let reservation = recovered
+                .reserve_external_hire(
+                    opened.engagement_id,
+                    "reviewer",
+                    &plan.agent_configuration,
+                    "fault matrix",
+                    "read_only",
+                    "hire-fault",
+                )
+                .unwrap();
+            assert_eq!(
+                recovered
+                    .reserve_external_hire(
+                        opened.engagement_id,
+                        "reviewer",
+                        &plan.agent_configuration,
+                        "fault matrix",
+                        "read_only",
+                        "hire-fault",
+                    )
+                    .unwrap(),
+                reservation
+            );
+            assert_eq!(
+                recovered
+                    .external_snapshot(opened.engagement_id)
+                    .unwrap()
+                    .specialists
+                    .len(),
+                1
+            );
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        for barrier in [
+            EngagementBarrier::BeforeExternalHireOutcomeCommit,
+            EngagementBarrier::AfterExternalHireOutcomeCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let plan = reviewer_plan("fault matrix");
+            let reservation = initial
+                .reserve_external_hire(
+                    opened.engagement_id,
+                    "reviewer",
+                    &plan.agent_configuration,
+                    "fault matrix",
+                    "read_only",
+                    "hire-fault",
+                )
+                .unwrap();
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .finish_external_hire(&reservation, RuntimeOutcome::Accepted, "hire-fault",)
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            assert_eq!(
+                recovered
+                    .finish_external_hire(&reservation, RuntimeOutcome::Accepted, "hire-fault",)
+                    .unwrap()
+                    .state,
+                "ready"
+            );
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        for barrier in [
+            EngagementBarrier::BeforeExternalMemberResidencyCommit,
+            EngagementBarrier::AfterExternalMemberResidencyCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let member = external_ready_member(&mut initial, opened.engagement_id);
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .mark_external_member_resident(opened.engagement_id, member.specialist_run_id)
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            recovered
+                .mark_external_member_resident(opened.engagement_id, member.specialist_run_id)
+                .unwrap();
+            assert_eq!(
+                recovered
+                    .external_member_actor_residency(
+                        opened.engagement_id,
+                        member.specialist_run_id,
+                    )
+                    .unwrap(),
+                "resident"
+            );
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn external_task_commit_faults_recover_each_durable_boundary() {
+        for barrier in [
+            EngagementBarrier::BeforeExternalTaskReservationCommit,
+            EngagementBarrier::AfterExternalTaskReservationCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let member = external_ready_member(&mut initial, opened.engagement_id);
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .reserve_external_task(
+                        opened.engagement_id,
+                        member.specialist_run_id,
+                        ExternalTaskRequest {
+                            request_value: &serde_json::json!({"task":"fault"}),
+                            objective: "fault",
+                            external_request_ref: &serde_json::json!({"kind":"fault"}),
+                            execution_intent: "read_only",
+                            deadline_seconds: 60,
+                            idempotency_key: "task-fault",
+                        },
+                    )
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            let task = recovered
+                .reserve_external_task(
+                    opened.engagement_id,
+                    member.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &serde_json::json!({"task":"fault"}),
+                        objective: "fault",
+                        external_request_ref: &serde_json::json!({"kind":"fault"}),
+                        execution_intent: "read_only",
+                        deadline_seconds: 60,
+                        idempotency_key: "task-fault",
+                    },
+                )
+                .unwrap();
+            assert_eq!(task.state, "accepted");
+            assert_eq!(
+                recovered
+                    .external_active_tasks(opened.engagement_id)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        for barrier in [
+            EngagementBarrier::BeforeExternalTaskDispatchCommit,
+            EngagementBarrier::AfterExternalTaskDispatchCommit,
+            EngagementBarrier::BeforeExternalTaskRunningCommit,
+            EngagementBarrier::AfterExternalTaskRunningCommit,
+            EngagementBarrier::BeforeExternalTaskTerminalCommit,
+            EngagementBarrier::AfterExternalTaskTerminalCommit,
+            EngagementBarrier::BeforeExternalTaskCancelCommit,
+            EngagementBarrier::AfterExternalTaskCancelCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let member = external_ready_member(&mut initial, opened.engagement_id);
+            let task = external_task_reservation(
+                &mut initial,
+                opened.engagement_id,
+                member.specialist_run_id,
+            );
+            let dispatch_boundary = matches!(
+                barrier,
+                EngagementBarrier::BeforeExternalTaskDispatchCommit
+                    | EngagementBarrier::AfterExternalTaskDispatchCommit
+            );
+            let running_boundary = matches!(
+                barrier,
+                EngagementBarrier::BeforeExternalTaskRunningCommit
+                    | EngagementBarrier::AfterExternalTaskRunningCommit
+            );
+            let terminal_boundary = matches!(
+                barrier,
+                EngagementBarrier::BeforeExternalTaskTerminalCommit
+                    | EngagementBarrier::AfterExternalTaskTerminalCommit
+            );
+            if !dispatch_boundary
+                && !matches!(
+                    barrier,
+                    EngagementBarrier::BeforeExternalTaskCancelCommit
+                        | EngagementBarrier::AfterExternalTaskCancelCommit
+                )
+            {
+                initial
+                    .mark_external_task_dispatching(
+                        opened.engagement_id,
+                        task.task_id,
+                        "task-external",
+                    )
+                    .unwrap();
+            }
+            if terminal_boundary {
+                initial
+                    .mark_external_task_running(
+                        opened.engagement_id,
+                        task.task_id,
+                        "turn-fault",
+                        "task-external",
+                    )
+                    .unwrap();
+            }
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            let error = if dispatch_boundary {
+                faulted
+                    .mark_external_task_dispatching(
+                        opened.engagement_id,
+                        task.task_id,
+                        "task-external",
+                    )
+                    .unwrap_err()
+            } else if running_boundary {
+                faulted
+                    .mark_external_task_running(
+                        opened.engagement_id,
+                        task.task_id,
+                        "turn-fault",
+                        "task-external",
+                    )
+                    .unwrap_err()
+            } else if terminal_boundary {
+                faulted
+                    .finish_external_task(
+                        opened.engagement_id,
+                        task.task_id,
+                        Some(&serde_json::json!({"summary":"fault result"})),
+                        "completed_not_delivered",
+                        None,
+                    )
+                    .unwrap_err()
+            } else {
+                faulted
+                    .cancel_external_task(
+                        opened.engagement_id,
+                        task.task_id,
+                        "cancelled",
+                        "fault",
+                        "cancel-fault",
+                    )
+                    .unwrap_err()
+            };
+            assert_eq!(error.code, "INTERNAL_ERROR");
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            let recovered_task = if dispatch_boundary {
+                recovered
+                    .mark_external_task_dispatching(
+                        opened.engagement_id,
+                        task.task_id,
+                        "task-external",
+                    )
+                    .unwrap()
+            } else if running_boundary {
+                recovered
+                    .mark_external_task_running(
+                        opened.engagement_id,
+                        task.task_id,
+                        "turn-fault",
+                        "task-external",
+                    )
+                    .unwrap()
+            } else if terminal_boundary {
+                recovered
+                    .finish_external_task(
+                        opened.engagement_id,
+                        task.task_id,
+                        Some(&serde_json::json!({"summary":"fault result"})),
+                        "completed_not_delivered",
+                        None,
+                    )
+                    .unwrap()
+            } else {
+                recovered
+                    .cancel_external_task(
+                        opened.engagement_id,
+                        task.task_id,
+                        "cancelled",
+                        "fault",
+                        "cancel-fault",
+                    )
+                    .unwrap()
+            };
+            assert_eq!(
+                recovered_task.state,
+                if dispatch_boundary {
+                    "dispatching"
+                } else if running_boundary {
+                    "running"
+                } else if terminal_boundary {
+                    "completed_not_delivered"
+                } else {
+                    "cancelled"
+                }
+            );
+            if terminal_boundary {
+                let artifacts: i64 = recovered
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM artifacts WHERE task_id=?1",
+                        [task.task_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(artifacts, 1);
+            }
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn external_delivery_and_close_commit_faults_are_exactly_replayable() {
+        for barrier in [
+            EngagementBarrier::BeforeExternalDeliveryCommit,
+            EngagementBarrier::AfterExternalDeliveryCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let member = external_ready_member(&mut initial, opened.engagement_id);
+            let task = external_task_reservation(
+                &mut initial,
+                opened.engagement_id,
+                member.specialist_run_id,
+            );
+            initial
+                .finish_external_task(
+                    opened.engagement_id,
+                    task.task_id,
+                    Some(&serde_json::json!({"summary":"deliver"})),
+                    "completed_not_delivered",
+                    None,
+                )
+                .unwrap();
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .collect_external_results(opened.engagement_id, 0, 8)
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            let (tasks, _) = recovered
+                .collect_external_results(opened.engagement_id, 0, 8)
+                .unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].state, "delivered");
+            let receipts: i64 = recovered
+                .connection
+                .query_row("SELECT COUNT(*) FROM delivery_receipts", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(receipts, 1);
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        for barrier in [
+            EngagementBarrier::BeforeExternalMemberReleaseCommit,
+            EngagementBarrier::AfterExternalMemberReleaseCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let member = external_ready_member(&mut initial, opened.engagement_id);
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .release_external_member(
+                        opened.engagement_id,
+                        member.specialist_run_id,
+                        "fault",
+                        "release-fault",
+                    )
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            assert_eq!(
+                recovered
+                    .release_external_member(
+                        opened.engagement_id,
+                        member.specialist_run_id,
+                        "fault",
+                        "release-fault",
+                    )
+                    .unwrap(),
+                "released"
+            );
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        for barrier in [
+            EngagementBarrier::BeforeExternalCloseCommit,
+            EngagementBarrier::AfterExternalCloseCommit,
+        ] {
+            let (mut initial, root) = store();
+            let opened = external_open(&mut initial);
+            let member = external_ready_member(&mut initial, opened.engagement_id);
+            initial
+                .release_external_member(
+                    opened.engagement_id,
+                    member.specialist_run_id,
+                    "complete",
+                    "release-complete",
+                )
+                .unwrap();
+            drop(initial);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .close_external_engagement(
+                        opened.engagement_id,
+                        "complete",
+                        "fault",
+                        "close-fault",
+                    )
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut recovered = reopen(&root);
+            assert_eq!(
+                recovered
+                    .close_external_engagement(
+                        opened.engagement_id,
+                        "complete",
+                        "fault",
+                        "close-fault",
+                    )
+                    .unwrap(),
+                "completed"
+            );
+            drop(recovered);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 

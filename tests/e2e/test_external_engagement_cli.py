@@ -157,15 +157,19 @@ def validate(binary: pathlib.Path) -> None:
         workspace = root / "workspace"
         codex_home = root / "codex-home"
         isolated_codex_home = root / "isolated-codex-home"
+        interaction_codex_home = root / "interaction-codex-home"
         bin_root = root / "bin"
         isolated_bin_root = root / "isolated-bin"
+        interaction_bin_root = root / "interaction-bin"
         for directory in (
             home,
             workspace,
             codex_home,
             isolated_codex_home,
+            interaction_codex_home,
             bin_root,
             isolated_bin_root,
+            interaction_bin_root,
         ):
             directory.mkdir(mode=0o700)
         subprocess.run(["git", "-C", str(workspace), "init", "-b", "main"], check=True, capture_output=True)
@@ -186,6 +190,7 @@ def validate(binary: pathlib.Path) -> None:
         nested_child = root / "nested-child.json"
         isolated_child = root / "isolated-child.json"
         canonical_child = root / "canonical-child.json"
+        interaction_child = root / "interaction-child.json"
         operator = root / "operator.json"
         credential(binary, home, owner, "external-host")
         credential(binary, home, child, "external-specialist")
@@ -193,6 +198,7 @@ def validate(binary: pathlib.Path) -> None:
         credential(binary, home, nested_child, "nested-specialist")
         credential(binary, home, isolated_child, "isolated-specialist")
         credential(binary, home, canonical_child, "canonical-specialist")
+        credential(binary, home, interaction_child, "interaction-specialist")
         initialized_operator, operator_envelope = invoke(
             binary,
             home,
@@ -265,6 +271,36 @@ def validate(binary: pathlib.Path) -> None:
             schema_source=schema_source,
             transcript=isolated_transcript,
         )
+        interaction_scenario = root / "interaction-scenario.json"
+        interaction_scenario.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "name": "external_engagement_interaction",
+                    "description": "One Specialist requests unsupported user input and is interrupted.",
+                    "codex_home": str(interaction_codex_home),
+                    "steps": [
+                        {"method": "initialize", "respond": {"result": {"codexHome": "${codex_home}", "userAgent": "fake-app-server/1", "capabilities": {"experimentalApi": False}}}},
+                        {"method": "account/read", "respond": {"result": {"requiresOpenaiAuth": False}}},
+                        {"method": "model/list", "respond": {"result": {"data": [{"model": "gpt-5.6", "isDefault": True, "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]}], "nextCursor": None}}},
+                        {"method": "thread/read", "respond": {"error": {"code": -32600, "message": "thread not found"}}},
+                        {"method": "thread/start", "respond": {"result": {"thread": {"id": "thread-interaction"}}}},
+                        {"method": "turn/start", "respond": {"result": {"turn": {"id": "turn-interaction"}}}, "emit": [{"kind": "request", "id": 8001, "method": "item/tool/requestUserInput", "params": {"threadId": "thread-interaction", "turnId": "turn-interaction", "questions": [{"id": "confirmation", "header": "Confirm", "question": "Continue?", "isSecret": False}]}}]},
+                        {"method": "turn/interrupt", "respond": {"result": {"interrupted": True}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-interaction", "turn": {"id": "turn-interaction", "status": "interrupted", "items": []}}}]},
+                        {"method": "thread/archive", "respond": {"result": {"thread": {"id": "thread-interaction", "archived": True}}}},
+                    ],
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        interaction_codex = interaction_bin_root / "codex"
+        native_codex.create_native_codex(
+            interaction_codex,
+            scenario=interaction_scenario,
+            codex_home=interaction_codex_home,
+            schema_source=schema_source,
+        )
         profile = "task022-specialist"
         added, added_envelope = invoke(
             binary,
@@ -293,6 +329,22 @@ def validate(binary: pathlib.Path) -> None:
         )
         if isolated_added.returncode != 0:
             raise AssertionError(f"isolated profile add failed: {isolated_envelope!r}")
+        interaction_profile = "task022-interaction"
+        interaction_added, interaction_envelope = invoke(
+            binary,
+            home,
+            [
+                "profile", "add", interaction_profile, "--workspace", str(workspace),
+                "--codex-home", str(interaction_codex_home), "--native-subagents", "enabled",
+                "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+                "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",
+                "--", str(interaction_codex),
+            ],
+        )
+        if interaction_added.returncode != 0:
+            raise AssertionError(
+                f"interaction profile add failed: {interaction_envelope!r}"
+            )
 
         try:
             opened = call(binary, home, workspace, owner, {
@@ -596,6 +648,17 @@ def validate(binary: pathlib.Path) -> None:
             })
             if canonical_waited["tasks"][0]["state"] != "completed_not_delivered":
                 raise AssertionError(f"canonical task did not complete: {canonical_waited!r}")
+            writer_status, writer_envelope = invoke(
+                binary,
+                home,
+                ["workspace", "writer", "status", "--workspace", str(workspace)],
+            )
+            if writer_status.returncode != 0:
+                raise AssertionError(f"writer status failed: {writer_envelope!r}")
+            if writer_envelope["data"]["authority_state"] != "none":
+                raise AssertionError(
+                    f"idle canonical Writer was not reconciled: {writer_envelope!r}"
+                )
             canonical_collected = call(binary, home, workspace, owner, {
                 "operation": "collect_external_specialist_results",
                 "engagement_id": engagement_id,
@@ -626,6 +689,68 @@ def validate(binary: pathlib.Path) -> None:
             completed_record = json.loads(completed_runtime.read_text(encoding="utf-8"))
             stop_worker(int(completed_record["identity"]["pid"]))
 
+            interaction_opened = call(binary, home, workspace, owner, {
+                "operation": "open_external_engagement",
+                "external_controller_ref": {
+                    "namespace": "dolgorae.e2e", "kind": "host", "id": "interaction"
+                },
+                "label": "unsupported interaction",
+                "idempotency_key": "open-interaction",
+            })
+            interaction_engagement_id = str(interaction_opened["engagement_id"])
+            interaction_hired = call(binary, home, workspace, owner, {
+                "operation": "hire_external_specialist",
+                "engagement_id": interaction_engagement_id,
+                "role_ref": "researcher",
+                "agent_configuration": {
+                    "schema_version": 1, "runtime_profile": interaction_profile, "model": "gpt-5.6",
+                    "default_effort": "medium", "purpose": "research", "purpose_label": None,
+                    "required_capabilities": [], "instructions": "Request an unsupported approval.",
+                    "execution_lane": "shared_readonly",
+                    "required_assurance": "best_effort_personal_alpha",
+                    "native_subagent_policy": "enabled",
+                },
+                "objective": "Exercise unsupported interaction reconciliation",
+                "requested_access": "read_only",
+                "idempotency_key": "hire-interaction",
+            }, interaction_child)
+            interaction_run_id = str(interaction_hired["specialist_run_id"])
+            interaction_assigned = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                task_request(interaction_engagement_id, interaction_run_id, 4),
+            )
+            interaction_task_id = str(interaction_assigned["task_id"])
+            interaction_waited = call(binary, home, workspace, owner, {
+                "operation": "await_external_specialist_tasks",
+                "engagement_id": interaction_engagement_id,
+                "task_ids": [interaction_task_id],
+                "return_when": "all",
+                "transport_wait_seconds": 10,
+            })
+            if interaction_waited["pending"]:
+                interaction_waited = call(binary, home, workspace, owner, {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": interaction_engagement_id,
+                    "task_ids": [interaction_task_id],
+                    "return_when": "all",
+                    "transport_wait_seconds": 10,
+                })
+            if interaction_waited["pending"] or len(interaction_waited["tasks"]) != 1:
+                raise AssertionError(
+                    f"unsupported interaction did not settle exactly once: {interaction_waited!r}"
+                )
+            interaction_task = interaction_waited["tasks"][0]
+            if (
+                interaction_task["state"] != "failed"
+                or interaction_task["safe_error_code"]
+                != "SPECIALIST_INTERACTION_UNSUPPORTED"
+            ):
+                raise AssertionError(
+                    f"unsupported interaction was not terminalized safely: {interaction_waited!r}"
+                )
             abort_opened = call(binary, home, workspace, owner, {
                 "operation": "open_external_engagement",
                 "external_controller_ref": {"namespace": "dolgorae.e2e", "kind": "host", "id": "abort"},
@@ -694,6 +819,25 @@ def validate(binary: pathlib.Path) -> None:
             })
             if aborted["state"] != "aborted":
                 raise AssertionError(f"engagement was not durably aborted: {aborted!r}")
+            call(binary, home, workspace, owner, {
+                "operation": "release_external_specialist",
+                "engagement_id": interaction_engagement_id,
+                "specialist_run_id": interaction_run_id,
+                "reason": "interaction E2E complete",
+                "idempotency_key": "release-interaction",
+            })
+            interaction_closed = call(binary, home, workspace, owner, {
+                "operation": "close_external_engagement",
+                "engagement_id": interaction_engagement_id,
+                "mode": "complete",
+                "reason": "interaction E2E complete",
+                "idempotency_key": "close-interaction",
+            })
+            if interaction_closed["state"] != "completed":
+                raise AssertionError(
+                    f"interaction engagement did not close: {interaction_closed!r}"
+                )
+
         finally:
             invoke(binary, home, [
                 "profile", "server", "stop", profile,
@@ -701,6 +845,10 @@ def validate(binary: pathlib.Path) -> None:
             ])
             invoke(binary, home, [
                 "profile", "server", "stop", isolated_profile,
+                "--workspace", str(workspace), "--operator-file", str(operator),
+            ])
+            invoke(binary, home, [
+                "profile", "server", "stop", interaction_profile,
                 "--workspace", str(workspace), "--operator-file", str(operator),
             ])
 
