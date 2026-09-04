@@ -988,6 +988,8 @@ read-only Specialist Review Preview without delaying `MILESTONE-SR1`.
 
 Status: `PLANNED`
 
+Detailed SOT: [EPIC-006 dossier](../todo/TODO-EPIC-006-external-specialist-engagement-hardening.md)
+
 Goal: Generalize the one-shot read-only Specialist Review Preview into a durable,
 reusable external Specialist service while the external AI remains the only
 semantic control plane.

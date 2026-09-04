@@ -9,7 +9,7 @@ None.
 
 ## Adopted active-Epic dossiers
 
-None.
+- [`EPIC-006: External Specialist Engagement Hardening`](TODO-EPIC-006-external-specialist-engagement-hardening.md)
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the
