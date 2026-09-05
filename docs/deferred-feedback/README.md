@@ -29,6 +29,22 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: adding or renaming an engagement, member, or task state, or
   introducing the next orchestration schema migration.
 
+## DF-003: Attest external-facade caller identity
+
+- Owner: External Specialist Facade maintainers
+- Finding: nested-hire defense in depth resolves `CODEX_THREAD_ID` from the
+  caller environment, which a same-uid subprocess can unset or replace. The
+  aggregate-owner Controller credential and profile isolation remain the
+  authoritative capability boundary, so this does not grant a Specialist new
+  authority under the current contract.
+- Reason for deferral: an independently authoritative caller identity requires
+  a descriptor-passed or worker-attested channel across the host, CLI, and Run
+  boundary. That trust-boundary change is independent of EPIC-006 correctness
+  while the owner credential remains unavailable to Specialist Runs.
+- Revisit condition: extending the threat model to hostile same-uid callers,
+  exposing the External Specialist Facade to a Specialist Runtime Profile, or
+  adding an attested caller-identity carrier.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical
