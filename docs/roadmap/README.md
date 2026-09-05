@@ -7,6 +7,9 @@ Status: Ordered implementation roadmap. `EPIC-000`, `TASK-000-H`, `EPIC-001`,
 `TASK-012`, and `TASK-013` are `COMPLETE` and form the first user-usable
 product slice. `EPIC-004`, `TASK-014`, `TASK-015`, and `TASK-016` are
 `COMPLETE` and establish the `v0.1.0` Integration Preview product boundary.
+`EPIC-005`, `TASK-017` through `TASK-021`, `EPIC-006`, and `TASK-022` are
+`COMPLETE` and establish the writer, recovery, and reusable external Specialist
+safety foundation. `EPIC-013` is the next planned Epic before `EPIC-007`.
 `EPIC-012` and `TASK-035` are also `COMPLETE`; they provide development-channel
 production infrastructure but do not add a user-facing product milestone.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -21,11 +24,12 @@ After `MILESTONE-SR1`, `EPIC-004` implements common immutable review targets,
 extends Specialist Review to dirty and historical Git state, and activates
 Dolgorae as Aquarium independent-review's Codex backend. After the `v0.1.0`
 Integration Preview, the implementation roadmap proceeds through access and
-recovery safety, external Specialist hardening, the supervised Gul Run gateway
-and Brokered Hierarchy core, live Primary control-plane integration, the durable
-Collaboration Plane, operator and audit interfaces, and final conformance and
-Personal Alpha acceptance. `TASK-025` remains the live run-bound transport probe
-and occurs only after the Brokered Hierarchy core is complete.
+recovery safety, external Specialist hardening, the global Codex Profile
+cutover, the supervised Gul Run gateway and Brokered Hierarchy core, live
+Primary control-plane integration, the durable Collaboration Plane, operator
+and audit interfaces, and final conformance and Personal Alpha acceptance.
+`TASK-025` remains the live run-bound transport probe and occurs only after the
+Brokered Hierarchy core is complete.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -59,10 +63,10 @@ or any safety limitation stated in its owning Epic.
 | --- | --- | --- | --- |
 | `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
-| `v0.1.2` | Milestone Preview | `EPIC-006` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
+| `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
 | `v0.1.3` | Milestone Preview | `EPIC-008` complete, including the preceding `EPIC-007` control-plane core | Through `MILESTONE-BH1` |
 | `v0.1.4` | Milestone Preview | `EPIC-009` complete | Through `MILESTONE-BC1` |
-| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
+| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
 readiness, the complete target specification, or customer support. A completion
@@ -89,12 +93,11 @@ Allowed Epic and Task states are `PLANNED`, `ACTIVE`, `IN_REVIEW`, `BLOCKED`,
 - Zero active items is valid during a future quiescent SOT-only state.
 - A Task may become active only after all preceding Tasks are complete and all
   SOT contradictions affecting it are resolved.
-- The completed `EPIC-000` and `EPIC-001` identifiers are retained as historical
-  records. Beginning with `EPIC-002` and `TASK-004`, Epic and Task identifiers
-  use only zero-padded integers and increase by one in execution order. New work
-  inserted before planned items takes the next number at that position and
-  renumbers the later planned items; completed IDs are never rewritten, suffixes
-  are not inserted, and work is never moved across an Epic boundary.
+- The completed `EPIC-000` and `EPIC-001` identifiers and historical suffixed
+  Task identifiers are retained. New Epic and Task identifiers use independent
+  zero-padded integer sequences, allocate the greatest number ever present plus
+  one, and never change or become reusable after allocation. Identity does not
+  encode execution order; roadmap position and explicit dependencies do.
 - An Epic becomes complete only when all of its Tasks and Epic-level acceptance
   checks are complete.
 
@@ -1032,6 +1035,135 @@ Epic acceptance: completion unlocks `MILESTONE-ES1`. External AI hosts may keep,
 reuse, recover, and explicitly coordinate durable Specialist Engagements beyond
 the one-shot review preview.
 
+## EPIC-013: Global Codex Profile Cutover
+
+Status: `PLANNED`
+
+Detailed SOT: [global Codex Profile cutover dossier](../todo/TODO-EPIC-013-global-codex-profile-cutover.md)
+
+Goal: Replace workspace-local Runtime Profiles with global Codex Profiles that
+provide the same explicitly selected account and execution environment to every
+workspace, independent of which Codex frontend invoked Dolgorae.
+
+### TASK-036: Global Codex Profile Contract and Hard-Cut Home Layout
+
+Status: `PLANNED`
+
+Depends on `TASK-022`. Update the behavioral, architectural, and decision
+authorities before implementation. Define Profile as one global Codex account
+launch contract containing its native executable, canonical `CODEX_HOME`,
+validated global arguments, explicit non-secret environment, and process-static
+capabilities. Define Specialist Role as the separate character and instruction
+concept owned by `TASK-024`.
+
+Prepare one strict mode-0600 `~/.dolgorae/profiles.yaml` registry and the checked
+post-cut command contract. Profile CRUD and diagnostics become global, remove
+workspace discovery, and reject `--workspace` immediately only when TASK-038
+activates the complete cutover. Keep the prepared post-cut `dolgorae init`
+contract limited to portable workspace policy and workspace-scoped Run, writer,
+audit, and recovery state; it creates no Profile, default account, or
+workspace-local `local.yaml`.
+
+Prepare a checked Dolgorae-home generation marker and validator. After the
+TASK-038 activation, stateful commands fail closed with
+`LEGACY_STATE_UNSUPPORTED` when the fixed home is unmarked, legacy, partial, or
+mixed-generation. Do not inspect legacy Profiles, recover legacy Runs, migrate,
+delete, overwrite, or silently initialize such a home. Stateless help, version,
+and capability discovery remain available. Publish the operator-owned
+backup-or-move and fresh-initialization procedure.
+
+TASK-036 is preparatory: its new registry and home path are unreachable from
+production commands, and the complete pre-cut CLI, Run, one-shot review, and
+External Specialist Engagement behavior must remain usable at task completion.
+An existing compatible tracked workspace policy is preserved byte-for-byte;
+after activation, `init` recomputes its deterministic workspace ID and creates
+fresh empty machine state with `created:true`, then returns `created:false` on
+an exact idempotent repeat. Incompatible policy or machine identity fails before
+mutation.
+
+Before `TASK-023`, remove the workspace field from public-v1 ListProfiles,
+GetProfile, and ListProfileDiagnostics requests and reserve each removed field
+number and name. Keep workspace plus `profile_name` on StartRun. Preserve
+completed v1 artifacts and introduce distinct successor contracts wherever
+semantics or persisted shapes change.
+
+Verification: global registry schema and post-cut CLI contract tests;
+initialization without account selection; legacy, partial, mixed-generation,
+wrong-owner, permission, symlink, malformed, duplicate, and concurrent-update
+failures; descriptor and conformance checks for the corrected public-v1 request
+shapes; proof that rejected legacy state is not mutated; and regression proof
+that all completed EPIC-006 paths still use the available pre-cut behavior.
+
+### TASK-037: Global Profile Runtime, State, and Immutable Run Binding
+
+Status: `PLANNED`
+
+Depends on `TASK-036`. Prepare the successor Profile lookup, launch preparation,
+Profile Server lifecycle, diagnostics, membership, and removal or migration
+guards against the global registry. Keep this path unreachable from production
+commands until TASK-038 activates every consumer together. Keep Run, writer
+lease, aggregate, audit, and recovery authority isolated below each workspace
+state root.
+
+Require explicit Profile selection for every Run and store a complete immutable
+resolved Profile snapshot with that Run. Never infer Profile selection from the
+calling process, `PATH`, `CODEX_HOME`, frontend name, workspace, or a hidden
+default. The same Profile may serve multiple workspaces, and one workspace may
+use multiple Profiles. Active or unknown membership in any workspace blocks
+unsafe Profile replacement, removal, Profile Server stop, or generation change.
+
+Version every affected persisted or machine-readable contract instead of
+changing the meaning of a completed schema in place. Reject legacy-home and
+legacy-Run recovery rather than adding a compatibility layer.
+
+Verification: inactive successor-path tests for cross-workspace shared Profile Server and membership;
+multiple Profiles in one workspace; deterministic snapshot and server-key
+tests; caller-environment isolation; cross-workspace lifecycle guards;
+concurrent start, stop, remove, and generation-change races; and restart and
+diagnostic behavior under the new home generation; plus regression proof that
+the production path still provides the complete pre-cut behavior.
+
+### TASK-038: Specialist Consumers and v0.1.2 Acceptance
+
+Status: `PLANNED`
+
+Depends on `TASK-037`. Revalidate the prepared registry, Run path, and both
+Specialist consumers, then activate the new home gate, global Profile CLI,
+account-neutral `init`, Run admission, one-shot Specialist Review, and completed
+External Specialist Engagement facade together in the final task-owned change.
+No partially active state may be landed or committed. Move both Specialist
+paths to explicit global Profile selection.
+Update hire validation, immutable Agent Configuration, member persistence,
+normalized idempotency input and digest, Run allocation, restart recovery,
+completed-result redelivery, and machine output through versioned successor
+contracts where required. Preserve aggregate-owner authorization, Controller
+authority, writer coordination, immutable target capture, and the existing
+external-host semantic-control boundary.
+
+Record the handoff that `TASK-024` owns Specialist Roles, including the common
+and project Role sources and Specialist Policy resolution. This Task establishes
+the terminology and Profile boundary only; it does not implement Role storage,
+selection, precedence, or policy.
+
+Verification: activation-boundary proof that no production command observes a
+mixed old/new state; existing compatible project rediscovery with the same
+deterministic workspace ID, byte-identical policy, fresh empty state,
+`created:true`, then idempotent `created:false`; fail-closed incompatible marker
+and workspace-record cases; one-shot and reusable engagement regression matrices across
+multiple Profiles and workspaces; same-key replay and different-input conflict;
+restart, recovery, and redelivery; caller `codex` versus `codex-hsy` environment
+isolation; recursive-review, nested-hire, authorization, target, and writer
+denials; updated checked examples and machine schemas; and the complete
+repository gate.
+
+Epic acceptance: one global Profile has one account and launch contract, may be
+selected explicitly by Runs in multiple workspaces, and behaves identically
+regardless of the invoking Codex frontend. No workspace initialization or
+tracked project file selects an account. Legacy state fails closed without
+mutation, completed EPIC-006 behavior remains usable through the new contracts,
+the public-v1 profile request boundary is ready for TASK-023, and `v0.1.2`
+remains ineligible until all three Tasks complete.
+
 ## EPIC-007: Dolgorae Orchestration Control Plane and Brokered Hierarchy Core
 
 Status: `PLANNED`
@@ -1043,7 +1175,7 @@ Hierarchy over the hardened independent Run and Specialist foundations.
 
 Status: `PLANNED`
 
-Depends on `TASK-022`. Implement the production host required before any
+Depends on `TASK-038`. Implement the production host required before any
 live Gul Orchestrated Session is claimed: foreground `dolgorae serve`, the
 single-instance gateway record and lock, private Unix-socket lifecycle,
 peer-UID validation, pinned tonic/prost generation, and one reconstructable
@@ -1089,8 +1221,9 @@ Depends on `TASK-023`. Implement the first-class `Dolgorae-Orchestrated Session`
 independent Run core and the hardened Specialist execution path. Implement
 prepared Aggregate Bootstrap Operations coupled to a parentless Primary
 `StartRun` with checked Orchestration Launch Intent, the machine-local
-Specialist Policy Registry, explicit approval policy and immutable Specialist
-Policy snapshot, one-active-aggregate membership, immutable role and Agent
+Specialist Policy Registry, common and project Specialist Role sources, explicit
+Role resolution, explicit approval policy and immutable Specialist Policy
+snapshot, one-active-aggregate membership, immutable Role and Agent
 Configuration snapshots, preallocated child Run identity, write-ahead spawn
 operations, aggregate-scoped idempotency, accepted Specialist tasks,
 completed-not-delivered result retention, safe redelivery, owned-member
