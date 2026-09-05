@@ -9,8 +9,9 @@ product slice. `EPIC-004`, `TASK-014`, `TASK-015`, and `TASK-016` are
 `COMPLETE` and establish the `v0.1.0` Integration Preview product boundary.
 `EPIC-005`, `TASK-017` through `TASK-021`, `EPIC-006`, and `TASK-022` are
 `COMPLETE` and establish the writer, recovery, and reusable external Specialist
-safety foundation. `EPIC-013` is the next planned Epic before `EPIC-007`.
-`EPIC-012` and `TASK-035` are also `COMPLETE`; they provide development-channel
+safety foundation. `EPIC-013` and `TASK-036` through `TASK-038` are also
+`COMPLETE` and establish the global Codex Profile cutover before `EPIC-007`.
+`EPIC-012` and `TASK-035` are `COMPLETE`; they provide development-channel
 production infrastructure but do not add a user-facing product milestone.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
@@ -1037,9 +1038,12 @@ the one-shot review preview.
 
 ## EPIC-013: Global Codex Profile Cutover
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [global Codex Profile cutover dossier](../todo/TODO-EPIC-013-global-codex-profile-cutover.md)
+Canonical Outcomes: [specification](../specs/README.md#spec-003-profile-account-and-singleton-binding),
+[architecture](../architecture/README.md#profile-registry-and-singleton-membership),
+[ADR-035](../architecture-decision-records/README.md#adr-035-replace-workspace-local-runtime-profiles-with-global-codex-profiles),
+and [protocol contracts](../protocol/).
 
 Goal: Replace workspace-local Runtime Profiles with global Codex Profiles that
 provide the same explicitly selected account and execution environment to every

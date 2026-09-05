@@ -9,7 +9,7 @@ None.
 
 ## Adopted active-Epic dossiers
 
-- [`EPIC-013` global Codex Profile cutover](TODO-EPIC-013-global-codex-profile-cutover.md)
+None.
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the
