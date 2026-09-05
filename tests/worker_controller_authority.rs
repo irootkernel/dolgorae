@@ -911,6 +911,7 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         requested_assurance: Assurance::BestEffortPersonalAlpha,
         achieved_assurance: Assurance::BestEffortPersonalAlpha,
         profile,
+        global_profile_binding: None,
         agent_configuration,
         profile_capability_snapshot: ProfileCapabilitySnapshot {
             schema_version: 1,

@@ -3,6 +3,7 @@ use crate::domain::{
     Access, AggregateKind, Assurance, ControlMode, ControllerIdentity, ControllerKind,
     ExecutionLane, Purpose, PurposeKind, RunLifecycle,
 };
+use crate::global_runtime::GlobalProfileBinding;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
 use crate::workspace::{
@@ -225,6 +226,8 @@ pub struct RunManifest {
     pub requested_assurance: Assurance,
     pub achieved_assurance: Assurance,
     pub profile: ProfileSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_profile_binding: Option<GlobalProfileBinding>,
     pub agent_configuration: AgentConfigurationSnapshot,
     pub profile_capability_snapshot: ProfileCapabilitySnapshot,
     pub app_server: AppServerFacts,
@@ -798,7 +801,7 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
             reason,
         )
     };
-    if manifest.schema_version != 1 || manifest.run_id.get_version_num() != 7 {
+    if !matches!(manifest.schema_version, 1 | 2) || manifest.run_id.get_version_num() != 7 {
         return Err(invalid(
             "schema_version and UUIDv7 run identity are required",
         ));
@@ -846,6 +849,26 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
         ));
     }
     validate_profile_snapshot(&manifest.profile).map_err(invalid)?;
+    match (manifest.schema_version, &manifest.global_profile_binding) {
+        (1, None) => {}
+        (2, Some(binding)) => {
+            binding.validate_for_recovery().map_err(|_| {
+                invalid("global Profile binding is incomplete or internally inconsistent")
+            })?;
+            if binding.selected_name != manifest.profile.profile_name
+                || binding.server_key != manifest.profile.initial_server_key
+            {
+                return Err(invalid(
+                    "global Profile binding disagrees with the Run profile",
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "schema v1 excludes and schema v2 requires a global Profile binding",
+            ));
+        }
+    }
     validate_agent_configuration(manifest).map_err(invalid)?;
     if manifest.profile.profile_name != manifest.profile_capability_snapshot.profile_name {
         return Err(invalid("profile snapshot names disagree"));

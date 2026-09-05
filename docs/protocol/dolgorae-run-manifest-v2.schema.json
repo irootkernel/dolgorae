@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/run-manifest/v2",
+  "title": "Dolgorae immutable global Profile Run manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "workspace_id", "canonical_workspace", "workspace_mode",
+    "start_baseline", "created_at", "initial_access", "control_mode", "execution_lane",
+    "requested_assurance", "achieved_assurance", "profile", "global_profile_binding",
+    "agent_configuration", "profile_capability_snapshot", "app_server", "dolgorae", "model",
+    "initial_reasoning_effort", "default_reasoning_effort", "instructions", "controller", "purpose",
+    "parent_ref", "required_capabilities", "thread_id", "fork_provenance",
+    "write_continuation_provenance", "aggregate_binding", "audit", "compatibility"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "run_id": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/uuid_v7" },
+    "workspace_id": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/sha256" },
+    "canonical_workspace": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/path" },
+    "workspace_mode": { "enum": ["git", "non_git"] },
+    "start_baseline": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/git_baseline" },
+    "created_at": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/microsecond_timestamp" },
+    "initial_access": { "enum": ["read", "write", "transitioning", "unsupported", "unknown"] },
+    "control_mode": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/control_mode" },
+    "execution_lane": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane" },
+    "requested_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+    "achieved_assurance": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance" },
+    "profile": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/profile" },
+    "global_profile_binding": { "$ref": "https://dolgorae.local/schema/global-profile-binding/v2" },
+    "agent_configuration": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/agent_configuration" },
+    "profile_capability_snapshot": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/profile_capability_snapshot" },
+    "app_server": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/app_server" },
+    "dolgorae": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/dolgorae" },
+    "model": { "type": "string", "minLength": 1 },
+    "initial_reasoning_effort": { "type": "string", "minLength": 1 },
+    "default_reasoning_effort": { "type": "string", "minLength": 1 },
+    "instructions": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/instructions" },
+    "controller": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/controller_binding" },
+    "purpose": { "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose" },
+    "parent_ref": {
+      "oneOf": [
+        { "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/parent_ref" },
+        { "type": "null" }
+      ]
+    },
+    "required_capabilities": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "thread_id": { "type": ["string", "null"], "minLength": 1 },
+    "fork_provenance": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/fork_provenance" }, { "type": "null" }] },
+    "write_continuation_provenance": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/write_continuation_lineage" }, { "type": "null" }] },
+    "aggregate_binding": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/aggregate_binding" }, { "type": "null" }] },
+    "audit": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/audit" },
+    "compatibility": { "enum": ["pending", "accepted", "rejected"] }
+  },
+  "x-invariants": [
+    "global_profile_binding.selected_name equals profile.profile_name and profile_capability_snapshot.profile_name",
+    "global_profile_binding.server_key equals profile.initial_server_key and profile_capability_snapshot.server_key",
+    "recovery uses global_profile_binding and profile without reading profiles.yaml",
+    "all workspace-owned state remains below the workspace identified by workspace_id"
+  ]
+}

@@ -101,6 +101,18 @@ fn source_module_dependencies_match_the_approved_graph() {
             "global_profile",
             &["darwin", "jcs", "machine", "paths", "profile", "workspace"][..],
         ),
+        (
+            "global_runtime",
+            &[
+                "darwin",
+                "global_profile",
+                "jcs",
+                "machine",
+                "paths",
+                "profile",
+                "workspace",
+            ][..],
+        ),
         ("jcs", &[][..]),
         (
             "ledger",
@@ -172,6 +184,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "audit",
                 "domain",
+                "global_runtime",
                 "jcs",
                 "machine",
                 "projection",
@@ -304,6 +317,30 @@ fn unsafe_implementation_remains_inside_the_darwin_adapter() {
                 !source.contains(forbidden),
                 "{} contains {forbidden:?}; unsafe code belongs in src/darwin.rs",
                 path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn task_037_global_runtime_has_no_production_selector() {
+    let root = repository_root().join("src");
+    for module in [
+        "cli.rs",
+        "semantic.rs",
+        "external_engagement.rs",
+        "mcp_review_server.rs",
+    ] {
+        let source = fs::read_to_string(root.join(module)).unwrap();
+        for inactive_entry in [
+            "admit_global_profile",
+            "remove_global_profile",
+            "ResolvedGlobalProfile",
+            "GlobalServerStateStore",
+        ] {
+            assert!(
+                !source.contains(inactive_entry),
+                "{module} activates TASK-037 entry {inactive_entry} before TASK-038"
             );
         }
     }

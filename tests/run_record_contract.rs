@@ -3,8 +3,13 @@ use dolgorae::domain::{
     Access, AggregateKind, Assurance, ControlMode, ControllerIdentity, ControllerKind,
     ExecutionLane, Purpose, PurposeKind,
 };
+use dolgorae::global_runtime::ResolvedGlobalProfile;
 use dolgorae::jcs::{
     PayloadRepresentation, RAW_PAYLOAD_LIMIT, canonicalize, parse, represent_payload,
+};
+use dolgorae::profile::{
+    CompatibilityVerdict as ProfileCompatibilityVerdict,
+    ExecutableIdentity as ProfileExecutableIdentity, ProfileSnapshot as ServerProfileSnapshot,
 };
 use dolgorae::projection::RunStateProjection;
 use dolgorae::run::{
@@ -15,7 +20,10 @@ use dolgorae::run::{
     WriteContinuationProvenance, agent_configuration_digest, controller_capability_digest,
     launch_contract_digest, runtime_profile_snapshot_digest,
 };
-use dolgorae::workspace::{GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode};
+use dolgorae::workspace::{
+    GitBaseline, LosslessPath, NativeSubagents, RuntimeProfile, SystemWorkspacePlatform,
+    WorkspaceMode,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -204,6 +212,72 @@ fn run_publication_is_exclusive_canonical_and_permission_safe() {
             .to_string_lossy()
             .starts_with('.')
     }));
+}
+
+#[test]
+fn global_profile_manifest_v2_is_complete_and_recoverable_without_registry() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let mut manifest = sample_manifest();
+    let definition = RuntimeProfile {
+        argv: manifest.profile.normalized_argv.clone(),
+        codex_home: manifest.profile.canonical_codex_home.clone(),
+        environment: manifest.profile.sanitized_environment.clone(),
+        native_subagents: NativeSubagents::Enabled,
+    };
+    let snapshot = ServerProfileSnapshot {
+        schema_version: 1,
+        profile_name: manifest.profile.profile_name.clone(),
+        canonical_codex_home: manifest.profile.canonical_codex_home.clone(),
+        normalized_argv: manifest.profile.normalized_argv.clone(),
+        launch_cwd_policy: manifest.profile.launch_cwd_policy.clone(),
+        derived_launch_cwd: manifest.profile.derived_launch_cwd.clone(),
+        sanitized_environment: manifest.profile.sanitized_environment.clone(),
+        enabled_features: manifest.profile.enabled_features.clone(),
+        disabled_features: manifest.profile.disabled_features.clone(),
+        process_static_configuration: manifest.profile.process_static_configuration.clone(),
+        initial_configuration_observation: manifest
+            .profile
+            .initial_configuration_observation
+            .clone(),
+        executable_identity: ProfileExecutableIdentity {
+            resolved_path: manifest
+                .profile
+                .executable_identity
+                .resolved_path
+                .to_path_buf()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            device: manifest.profile.executable_identity.device,
+            inode: manifest.profile.executable_identity.inode,
+            sha256: manifest.profile.executable_identity.sha256.clone(),
+        },
+        codex_version: manifest.profile.codex_version.clone(),
+        schema_bundle_sha256: manifest.profile.app_server_schema_sha256.clone(),
+        compatibility_manifest_sha256: manifest.profile.compatibility_manifest_sha256.clone(),
+        launch_contract_sha256: manifest.profile.launch_contract_sha256.clone(),
+        compatibility_verdict: ProfileCompatibilityVerdict::Tested,
+        server_key: manifest.profile.initial_server_key.clone(),
+    };
+    manifest.schema_version = 2;
+    manifest.global_profile_binding = Some(
+        ResolvedGlobalProfile::from_definition("default", definition)
+            .unwrap()
+            .bind(snapshot)
+            .unwrap(),
+    );
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    store.publish(&manifest).unwrap();
+    let recovered = store.load_manifest(manifest.run_id).unwrap();
+    recovered
+        .global_profile_binding
+        .as_ref()
+        .unwrap()
+        .validate_for_recovery()
+        .unwrap();
 }
 
 #[test]
@@ -658,6 +732,7 @@ fn sample_manifest() -> RunManifest {
         requested_assurance: Assurance::BestEffortPersonalAlpha,
         achieved_assurance: Assurance::BestEffortPersonalAlpha,
         profile,
+        global_profile_binding: None,
         agent_configuration,
         profile_capability_snapshot: ProfileCapabilitySnapshot {
             schema_version: 1,

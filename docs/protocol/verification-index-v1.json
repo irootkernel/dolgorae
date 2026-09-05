@@ -58,7 +58,8 @@
         "TASK-008",
         "TASK-011",
         "TASK-012",
-        "TASK-036"
+        "TASK-036",
+        "TASK-037"
       ],
       "catches": [
         "strict machine-local Runtime Profile registry schema and initial empty registry",
@@ -75,6 +76,7 @@
         "Runtime Profile versus Agent Configuration",
         "explicit native-subagent acknowledgement",
         "global Codex Profile registry and inactive hard-cut home generation",
+        "inactive immutable global Profile Run binding and cross-workspace membership",
         "post-cut workspace-free Profile command contract",
         "Reviewer Runtime Profile excludes recursive external review adapter"
       ]
@@ -176,11 +178,13 @@
         "TASK-029",
         "TASK-031",
         "TASK-032",
-        "TASK-036"
+        "TASK-036",
+        "TASK-037"
       ],
       "catches": [
         "machine and protobuf envelopes",
         "global-Profile machine and error successor envelopes",
+        "global Profile Run binding, runtime discovery, server-state, membership, and Agent Configuration successors",
         "public-v1 Profile request workspace-field reservations",
         "checked immutable review-target request, result, receipt, manifest, and error envelopes",
         "typed errors and timeouts",

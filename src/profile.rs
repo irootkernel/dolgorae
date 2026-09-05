@@ -1793,6 +1793,25 @@ fn snapshot_for(
     result
 }
 
+/// Prepare the launch snapshot for a definition already resolved from the
+/// global registry. This entry point is intentionally not wired to command
+/// dispatch until the EPIC-013 activation boundary.
+pub(crate) fn snapshot_for_global(
+    home: &DolgoraeHome,
+    name: &str,
+    profile: &RuntimeProfile,
+) -> Result<ProfileSnapshot, MachineError> {
+    snapshot_for(
+        &Context {
+            workspace_id: "global-profile-v1".to_owned(),
+            registry_path: home.root().join("profiles.yaml"),
+            dolgorae_home_root: home.root().to_path_buf(),
+        },
+        name,
+        profile,
+    )
+}
+
 fn configuration_snapshot(
     profile_name: &str,
     profile: &RuntimeProfile,

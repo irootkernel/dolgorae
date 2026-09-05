@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/global-profile-binding/v2",
+  "title": "Dolgorae immutable global Profile Run binding v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "selected_name", "definition", "definition_sha256",
+    "launch_snapshot", "launch_snapshot_sha256", "server_key"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "selected_name": { "$ref": "#/$defs/profile_name" },
+    "definition": { "$ref": "https://dolgorae.local/schema/global-profile-registry/v1#/$defs/profile" },
+    "definition_sha256": { "$ref": "#/$defs/sha256" },
+    "launch_snapshot": { "$ref": "https://dolgorae.local/schema/profile-server-state/v1#/$defs/snapshot" },
+    "launch_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+    "server_key": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "profile_name": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "x-invariants": [
+    "definition_sha256 is the SHA-256 of the JCS-encoded complete definition",
+    "launch_snapshot_sha256 is the SHA-256 of the JCS-encoded complete launch_snapshot",
+    "selected_name equals launch_snapshot.profile_name",
+    "server_key equals launch_snapshot.server_key",
+    "recovery validates this object without reopening the global registry"
+  ]
+}

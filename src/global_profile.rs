@@ -63,6 +63,60 @@ impl GlobalProfileStore {
         load_registry(&self.root)
     }
 
+    /// Resolve one immutable definition while holding the registry lock.
+    ///
+    /// Callers retain the returned value through launch preparation. They must
+    /// not reopen the registry during admission or recovery.
+    pub fn resolve(&self, name: &str) -> Result<RuntimeProfile, MachineError> {
+        self.with_resolved(name, Ok)
+    }
+
+    /// Execute admission preparation while retaining the root registry lock.
+    /// This is the lock-order entry point for registry -> server membership.
+    pub fn with_resolved<T>(
+        &self,
+        name: &str,
+        action: impl FnOnce(RuntimeProfile) -> Result<T, MachineError>,
+    ) -> Result<T, MachineError> {
+        let _lock = lock_initialized_home(&self.root)?;
+        let profile = load_registry(&self.root)?
+            .profiles
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                MachineError::new(
+                    "PROFILE_NOT_FOUND",
+                    "profile was not found",
+                    false,
+                    json!({"profile": name}),
+                )
+            })?;
+        action(profile)
+    }
+
+    /// Remove only after a caller-provided guard has proved that the resolved
+    /// definition can be removed. The root lock remains held through commit.
+    pub fn remove_if(
+        &self,
+        name: &str,
+        guard: impl FnOnce(&RuntimeProfile) -> Result<(), MachineError>,
+    ) -> Result<GlobalProfileRegistry, MachineError> {
+        let _lock = lock_initialized_home(&self.root)?;
+        let mut registry = load_registry(&self.root)?;
+        let profile = registry.profiles.get(name).ok_or_else(|| {
+            MachineError::new(
+                "PROFILE_NOT_FOUND",
+                "profile was not found",
+                false,
+                json!({"profile": name}),
+            )
+        })?;
+        guard(profile)?;
+        registry.profiles.remove(name);
+        store_registry(&self.root, &registry)?;
+        Ok(registry)
+    }
+
     pub fn add(
         &self,
         name: String,
@@ -84,21 +138,6 @@ impl GlobalProfileStore {
             registry.schema_version,
             &registry.profiles,
         )?;
-        store_registry(&self.root, &registry)?;
-        Ok(registry)
-    }
-
-    pub fn remove(&self, name: &str) -> Result<GlobalProfileRegistry, MachineError> {
-        let _lock = lock_initialized_home(&self.root)?;
-        let mut registry = load_registry(&self.root)?;
-        if registry.profiles.remove(name).is_none() {
-            return Err(MachineError::new(
-                "PROFILE_NOT_FOUND",
-                "profile was not found",
-                false,
-                json!({"profile": name}),
-            ));
-        }
         store_registry(&self.root, &registry)?;
         Ok(registry)
     }
@@ -458,9 +497,16 @@ mod tests {
                 & 0o777,
             0o600
         );
-        assert_eq!(store.remove("primary").unwrap().profiles.len(), 1);
         assert_eq!(
-            store.remove("missing").unwrap_err().code,
+            store
+                .remove_if("primary", |_| Ok(()))
+                .unwrap()
+                .profiles
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.remove_if("missing", |_| Ok(())).unwrap_err().code,
             "PROFILE_NOT_FOUND"
         );
         fs::remove_dir_all(parent).unwrap();

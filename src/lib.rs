@@ -11,6 +11,7 @@ pub mod event;
 pub mod external_engagement;
 pub mod fault;
 pub mod global_profile;
+pub mod global_runtime;
 pub mod jcs;
 pub mod ledger;
 pub mod machine;

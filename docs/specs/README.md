@@ -648,6 +648,13 @@ allocate its Codex thread.
 
 Run creation stores a complete immutable Runtime Profile snapshot and a
 separate immutable Agent Configuration snapshot, not only their digests. The
+global Profile successor additionally stores the exact selected registry name,
+the complete resolved registry definition and JCS digest, and the complete
+prepared launch snapshot and JCS digest in the Run generation before process
+creation. Recovery MUST validate those persisted bytes and MUST NOT reopen
+`profiles.yaml`; registry removal, replacement, alias changes, caller `PATH`,
+caller `CODEX_HOME`, and frontend executable naming cannot change an admitted
+Run's launch authority.
 Runtime Profile snapshot contains exactly the profile name, canonical
 `CODEX_HOME`,
 normalized argv, `launch_cwd_policy`, derived concrete launch cwd, sanitized environment, enabled

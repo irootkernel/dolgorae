@@ -1096,7 +1096,7 @@ that all completed EPIC-006 paths still use the available pre-cut behavior.
 
 ### TASK-037: Global Profile Runtime, State, and Immutable Run Binding
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-036`. Prepare the successor Profile lookup, launch preparation,
 Profile Server lifecycle, diagnostics, membership, and removal or migration

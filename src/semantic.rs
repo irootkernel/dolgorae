@@ -4437,6 +4437,7 @@ fn build_manifest(
         audit: AuditPolicy::default(),
         compatibility: CompatibilityVerdict::Accepted,
         profile,
+        global_profile_binding: None,
         agent_configuration,
     })
 }

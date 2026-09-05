@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/runtime-discovery/v2",
+  "title": "Dolgorae global Profile runtime discovery v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "selected_profile", "server_key", "server_epoch", "socket_path", "binding_sha256"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "selected_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "server_key": { "$ref": "#/$defs/sha256" },
+    "server_epoch": { "type": "integer", "minimum": 1 },
+    "socket_path": { "type": "string", "pattern": "^/" },
+    "binding_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": { "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+  "x-invariants": [
+    "discovery is derived from the persisted Run binding and exact server generation",
+    "selected_profile is presentation identity and does not participate in server_key derivation"
+  ]
+}

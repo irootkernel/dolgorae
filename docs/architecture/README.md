@@ -870,6 +870,36 @@ homes fail closed as `LEGACY_STATE_UNSUPPORTED`; no legacy bytes are inspected
 for migration or changed. TASK-038 activates this gate atomically after the
 TASK-036 and TASK-037 successor paths are complete.
 
+TASK-037 keeps its implementation unreachable from production dispatch and
+prepares the complete persistence boundary used at activation. One locked
+global registry read produces a `ResolvedGlobalProfile`; launch preparation
+consumes that owned value and embeds the complete binding in the workspace-
+scoped `run-manifest/v2`. Recovery accepts only that manifest's complete
+definition, launch snapshot, and JCS digests. It has no registry or caller
+environment input.
+
+The affected-contract census is:
+
+| Contract | Successor decision |
+| --- | --- |
+| global registry | `global-profile-registry/v1` already has global meaning; unchanged |
+| Run manifest and binding | `run-manifest/v2` plus `global-profile-binding/v2` |
+| Profile Server state | `profile-server-state/v2` binds the global snapshot digest |
+| runtime discovery | new `runtime-discovery/v2` binds a Run to an exact server generation |
+| membership journal/index | new `profile-membership/v2`, global by `server_key` |
+| Agent Configuration | `agent-configuration/v2` binds the selected Profile and binding digest |
+| machine success/error envelopes | `machine/v2` and `error-contract/v2`, prepared by TASK-036 |
+| public Profile DTO | unchanged: it already presents a selected launch contract and capability status |
+| Profile diagnostics/events | unchanged in TASK-037: their Profile and server-key fields retain their meaning |
+| Specialist facade and review tools | TASK-038 owns their successor contracts because that Task changes their selection inputs |
+
+The global membership lock remains held from the empty-membership proof through
+the destructive lifecycle commit. Admission uses the same lock. Consequently,
+stop, restart, migration, removal, replacement, and physical generation change
+cannot race a member into a server after the guard has decided it is quiescent.
+Both `active` and `unknown` outcomes block; corrupt or mismatched journal/index
+bytes return `PROFILE_MEMBERSHIP_INCOMPLETE` and also fail closed.
+
 The Dolgorae home contains a canonical-home coordinator at
 `homes/<home-key>/{home.lock,active.json}` and contract state at
 `profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,epoch,server.log,server.log.1}`.
