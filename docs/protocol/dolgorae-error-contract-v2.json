@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/error-contract/v2",
+  "title": "Dolgorae error contract v2",
+  "x-exit-status": {
+    "LEGACY_STATE_UNSUPPORTED": 5
+  },
+  "oneOf": [
+    {
+      "$ref": "https://dolgorae.local/schema/error-contract/v1"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "LEGACY_STATE_UNSUPPORTED"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "home",
+            "classification"
+          ],
+          "properties": {
+            "home": {
+              "type": "string",
+              "pattern": "^/"
+            },
+            "classification": {
+              "enum": [
+                "unmarked_nonempty",
+                "malformed_marker",
+                "unsupported_generation",
+                "mixed_generation",
+                "partial_generation"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

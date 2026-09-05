@@ -66,7 +66,7 @@
       "const": 1
     },
     "rpc_descriptor_sha256": {
-      "const": "3ed39e10057eab70e7eaa18a63254268069cb5bec076d4322c99457436c892ca"
+      "const": "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252"
     },
     "grpc_methods": {
       "type": "array",

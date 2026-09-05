@@ -8,7 +8,7 @@ pub mod public_v1 {
 pub const PUBLIC_V1_DESCRIPTOR: &[u8] =
     include_bytes!("../docs/protocol/dolgorae-public-v1.descriptor.pb");
 pub const PUBLIC_V1_DESCRIPTOR_SHA256: &str =
-    "3ed39e10057eab70e7eaa18a63254268069cb5bec076d4322c99457436c892ca";
+    "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252";
 
 #[must_use]
 pub fn public_v1_descriptor_digest() -> String {

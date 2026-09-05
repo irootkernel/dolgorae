@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/machine-output/v2",
+  "title": "Dolgorae machine output v2",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/success"
+    },
+    {
+      "$ref": "#/$defs/failure"
+    }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "ok",
+        "command",
+        "invocation_id"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "command": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+        },
+        "invocation_id": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+        }
+      }
+    },
+    "success": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "ok",
+            "command",
+            "invocation_id",
+            "data"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 2
+            },
+            "ok": {
+              "const": true
+            },
+            "command": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+            },
+            "invocation_id": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+            },
+            "data": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/data"
+            }
+          }
+        }
+      ]
+    },
+    "failure": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "ok",
+            "command",
+            "invocation_id",
+            "error"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 2
+            },
+            "ok": {
+              "const": false
+            },
+            "command": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+            },
+            "invocation_id": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+            },
+            "error": {
+              "$ref": "https://dolgorae.local/schema/error-contract/v2"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

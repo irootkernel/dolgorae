@@ -726,8 +726,9 @@ message InspectWorkspaceResponse {
 }
 
 message ListProfilesRequest {
+  reserved 2;
+  reserved "workspace";
   RequestContext context = 1;
-  WorkspaceRef workspace = 2;
 }
 
 message ModelCapability {
@@ -761,8 +762,9 @@ message ListProfilesResponse {
 }
 
 message GetProfileRequest {
+  reserved 2;
+  reserved "workspace";
   RequestContext context = 1;
-  WorkspaceRef workspace = 2;
   string profile_name = 3;
 }
 
@@ -772,8 +774,9 @@ message GetProfileResponse {
 }
 
 message ListProfileDiagnosticsRequest {
+  reserved 2;
+  reserved "workspace";
   RequestContext context = 1;
-  WorkspaceRef workspace = 2;
   string profile_name = 3;
   string after_cursor = 4;
   uint32 limit = 5;

@@ -1277,13 +1277,22 @@ pub fn parse_local_profiles(path: &Path) -> Result<LocalProfileRegistry, Machine
     let bytes = read_bounded(path, 1024 * 1024)?;
     let registry: LocalProfileRegistry = serde_yaml_ng::from_slice(&bytes)
         .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))?;
-    if registry.schema_version != 1 {
+    validate_runtime_profiles(path, registry.schema_version, &registry.profiles)?;
+    Ok(registry)
+}
+
+pub(crate) fn validate_runtime_profiles(
+    path: &Path,
+    schema_version: u32,
+    profiles: &BTreeMap<String, RuntimeProfile>,
+) -> Result<(), MachineError> {
+    if schema_version != 1 {
         return Err(MachineError::profile_config_invalid(
             path,
             "unsupported schema_version",
         ));
     }
-    for (name, profile) in &registry.profiles {
+    for (name, profile) in profiles {
         if name.is_empty()
             || profile.argv.is_empty()
             || profile.argv.iter().any(String::is_empty)
@@ -1324,7 +1333,7 @@ pub fn parse_local_profiles(path: &Path) -> Result<LocalProfileRegistry, Machine
         validate_profile_path(path, name, &profile.environment["PATH"])?;
         validate_profile_argv(path, name, &profile.argv)?;
     }
-    Ok(registry)
+    Ok(())
 }
 
 fn validate_profile_path(

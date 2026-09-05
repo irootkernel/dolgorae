@@ -97,6 +97,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         ("event", &["audit", "domain", "jcs", "workspace"][..]),
         ("fault", &[][..]),
+        (
+            "global_profile",
+            &["darwin", "jcs", "machine", "paths", "profile", "workspace"][..],
+        ),
         ("jcs", &[][..]),
         (
             "ledger",

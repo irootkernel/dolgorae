@@ -246,7 +246,7 @@ Machine CLI command and the external stdio MCP tool `dolgorae_review`. Its
 checked model-visible shape is
 [`dolgorae-specialist-review-tool-v1.schema.json`](../protocol/dolgorae-specialist-review-tool-v1.schema.json).
 
-The Coordinator binds the canonical workspace, Reviewer Runtime Profile,
+The Coordinator binds the canonical workspace, Reviewer Codex Profile,
 aggregate-owner and per-Run Controller credentials, external provenance,
 request reference, and idempotency outside the model payload. It then executes
 one explicit sequence:
@@ -350,7 +350,7 @@ reports technical verdict independently of engagement, Run, and settlement
 state. The completed working-tree v1 path remains a compatible entry point; the
 new target contract is additive and versioned.
 
-The Coordinator keeps source-workspace authority and Runtime Profile ownership
+The Coordinator keeps source-workspace authority and Codex Profile ownership
 on the engagement while overriding only the managed Reviewer's launch working
 directory with the immutable capture root. It verifies the pinned executable
 identity immediately before that source-bearing launch. Engagement storage
@@ -404,7 +404,7 @@ model cannot provide or override those fields. `request_specialist` resolves a
 role only from the session's immutable, schema-validated Specialist Policy
 snapshot in
 [`dolgorae-specialist-policy-v1.schema.json`](../protocol/dolgorae-specialist-policy-v1.schema.json).
-The model cannot choose Runtime Profile, model, credential, priority, or access
+The model cannot choose Codex Profile, model, credential, priority, or access
 outside that policy.
 
 For `user_approval_required`, the service records one approval-waiting spawn
@@ -633,7 +633,7 @@ from the key. Compatible profile names are aliases for one `server_key`.
 Different stopped definitions for one canonical home may coexist, but a
 different contract cannot start while another verified lifetime is active.
 
-The Runtime Profile supplies deterministic `PATH`, `LANG`, and `LC_ALL`; caller
+The Codex Profile supplies deterministic `PATH`, `LANG`, and `LC_ALL`; caller
 shell, virtual-environment, and locale state is never inherited. The concrete
 launch directory is derived only after `server_key` is known and is not itself
 hashed into that key, avoiding a fixed-point identity. Profile start, stop,
@@ -805,12 +805,12 @@ External Specialist Engagement, a Specialist cannot hire another first-class
 Dolgorae Specialist in v1; the external AI hires each role directly. Native
 Delegation remains an in-Run runtime detail.
 
-Runtime Profile and Agent Configuration are distinct. Runtime Profile owns the
+Codex Profile and Agent Configuration are distinct. Codex Profile owns the
 executable, `CODEX_HOME`, deterministic environment, process-static Codex
 configuration, and verified capabilities. Agent Configuration owns the role
 reference and normalized instructions, model, default effort, purpose, required
-capabilities, and Runtime Profile snapshot reference. Multiple roles may share
-one Runtime Profile when their process launch contract is identical.
+capabilities, and Codex Profile snapshot reference. Multiple roles may share
+one Codex Profile when their process launch contract is identical.
 
 `parent_ref` remains authority-neutral provenance and presentation metadata.
 Reserved namespaces are emitted only after the authenticated Broker or External
@@ -825,7 +825,7 @@ reconstructs missing authority.
 Native Subagent Policy is orthogonal to both use cases. Native children share
 the parent Run's thread tree, policy, and authority, and never become aggregate
 members, Independent Specialist Runs, peer Workers, or Dedicated Lane Servers.
-The selected Runtime Profile must explicitly acknowledge
+The selected Codex Profile must explicitly acknowledge
 `native_subagents: enabled`; v1 does not claim disable enforcement for the
 Codex 0.149.0 production pin. The original negative probe remains historical
 0.147.0 evidence.
@@ -851,15 +851,25 @@ enforcement remains unavailable. These results do not claim strong containment.
 
 ### Profile Registry and Singleton Membership
 
-`~/.dolgorae/workspaces/<workspace-id>/local.yaml` is machine-local and stores named
-Runtime Profile launch definitions, including explicit non-secret environment
-values but no credential. Agent Configurations are separate immutable Run
-snapshots and are not inferred from Runtime Profile display names.
+`~/.dolgorae/profiles.yaml` is user-global and stores named Codex Profile launch
+definitions, including explicit non-secret environment values but no
+credential. The home root lock serializes registry reads and atomic
+write-temp/fsync/rename/directory-fsync updates. Agent Configurations are
+separate immutable Run snapshots and are not inferred from Profile display
+names. Different names with an identical resolved launch contract and
+`server_key` remain valid aliases; a Run records the selected name and complete
+snapshot.
 `~/.dolgorae/workspaces/<workspace-id>/specialist-policies/` stores checked named
 Specialist Policy JSON documents. A launch resolves one explicit name, validates
 all referenced Agent Configurations against current profile capabilities, and
 copies the complete policy plus JCS digest into the session before root Run
 allocation. Existing sessions never reread the registry.
+The mode-0600 `~/.dolgorae/state.json` generation marker is validated before
+stateful access. Unmarked nonempty, malformed, unsupported, partial, and mixed
+homes fail closed as `LEGACY_STATE_UNSUPPORTED`; no legacy bytes are inspected
+for migration or changed. TASK-038 activates this gate atomically after the
+TASK-036 and TASK-037 successor paths are complete.
+
 The Dolgorae home contains a canonical-home coordinator at
 `homes/<home-key>/{home.lock,active.json}` and contract state at
 `profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,epoch,server.log,server.log.1}`.
@@ -1272,6 +1282,8 @@ All machine-local configuration and mutable authority are outside the workspace:
 
 ```text
 ~/.dolgorae/
+  state.json
+  profiles.yaml
   rpc/
   controller-carriers/
   operator/
@@ -1280,7 +1292,6 @@ All machine-local configuration and mutable authority are outside the workspace:
   workspaces/
     <workspace-id>/
       workspace.json
-      local.yaml
       specialist-policies/
       runs/
       idempotency/
@@ -1319,7 +1330,7 @@ attach or cleanup decision is authorized by exact Dolgorae-home records,
 held locks, process identity, and socket inode.
 
 Git worktrees remain distinct workspaces because each canonical top-level path
-has a distinct workspace ID. Runtime Profiles may be reused across workspaces,
+has a distinct workspace ID. Codex Profiles may be reused across workspaces,
 but Run, aggregate, writer, and lock state are isolated below each workspace
 state root. No absolute executable, socket, PID, authentication, Run, or
 aggregate state is placed in tracked project policy.

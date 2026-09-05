@@ -1037,7 +1037,7 @@ the one-shot review preview.
 
 ## EPIC-013: Global Codex Profile Cutover
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [global Codex Profile cutover dossier](../todo/TODO-EPIC-013-global-codex-profile-cutover.md)
 
@@ -1047,7 +1047,7 @@ workspace, independent of which Codex frontend invoked Dolgorae.
 
 ### TASK-036: Global Codex Profile Contract and Hard-Cut Home Layout
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-022`. Update the behavioral, architectural, and decision
 authorities before implementation. Define Profile as one global Codex account

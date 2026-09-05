@@ -59,6 +59,7 @@ test-prepare:
 	buf build docs/protocol >/dev/null
 	$(PYTHON_BIN) tools/validators/validate_json_schemas.py
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
+	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
 	$(PYTHON_BIN) tools/validators/validate_markdown.py
 	$(MAKE) validate-agent-skills
 	$(MAKE) test-aquarium-dev-producer

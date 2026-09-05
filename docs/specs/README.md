@@ -135,17 +135,17 @@ validator explicitly named by this specification are also normative.
 - **Thread generation**: the monotonic Dolgorae binding generation for a Codex
   thread start, resume, or fork operation that installs immutable developer
   instructions.
-- **Runtime Profile**: a user-local named Codex execution configuration
+- **Codex Profile** (or **Profile**): a user-global named Codex account and execution configuration
   consisting of a direct absolute executable, normalized global argv, canonical
   `CODEX_HOME`, deterministic non-secret environment, process-static
   configuration, and verified runtime capabilities. It does not define agent
   character.
 - **Agent Configuration**: the immutable role-facing configuration resolved for
-  a Run: Runtime Profile snapshot, model, default effort, purpose, required
+  a Run: Codex Profile snapshot, model, default effort, purpose, required
   capabilities, and Controller instructions. Different Agent Configurations may
-  share one Runtime Profile.
+  share one Codex Profile.
 - **Profile Server**: the shared-read-only Codex App Server singleton selected
-  by one Runtime Profile launch-authority contract.
+  by one Codex Profile launch-authority contract.
 - **Dedicated Lane Server**: one physical Codex App Server generation owned by a
   Run's immutable dedicated logical lane.
 - **Event Projection**: the `minimal` or `operational` delivery view over one
@@ -449,7 +449,6 @@ canonical workspace at:
 ```text
 ~/.dolgorae/workspaces/<workspace-id>/
   workspace.json
-  local.yaml
   specialist-policies/
   runs/
   runtime/
@@ -459,7 +458,9 @@ canonical workspace at:
 ```
 
 `workspace.json` binds the workspace ID to the lossless canonical path and
-initialization mode. `local.yaml` is the mode-0600 Runtime Profile registry.
+initialization mode. The global mode-0600 Profile registry is
+`~/.dolgorae/profiles.yaml`; no workspace state root contains a Profile
+registry.
 `specialist-policies/` is a current-uid-owned mode-0700 directory containing
 mode-0600 checked JSON policy documents named `<policy-name>.json`. `runs/`,
 `runtime/`, `orchestration/`, `evidence/`, and `cache/` contain only
@@ -491,18 +492,19 @@ review artifacts. `SPEC-014` is the sole current authority for execution-lane
 cardinality, residency, server generations, profile lifecycle, and process
 census.
 
-The machine-local Runtime Profile registry lives at:
+The user-global Codex Profile registry lives at:
 
 ```text
-~/.dolgorae/workspaces/<workspace-id>/local.yaml
+~/.dolgorae/profiles.yaml
 ```
 
-The canonical workspace contains no mutable profile registry. Runtime Profile
+The canonical workspace and its machine-local workspace state contain no
+mutable profile registry. Codex Profile
 configuration is execution, account, tooling, and process-static capability
 configuration. Agent character is owned by the immutable Agent Configuration
 resolved for each Run.
 
-A Runtime Profile contains:
+A Codex Profile contains:
 
 - a unique name;
 - an absolute Codex executable and shell-free validated global argv;
@@ -515,7 +517,7 @@ A public profile MUST state `native_subagents: enabled` explicitly. Absence is
 `PROFILE_CONFIG_INVALID`. `disabled` remains diagnostic-only because the pinned
 runtime does not enforce it.
 
-`local.yaml` is strict YAML with top-level `schema_version: 1` and a `profiles`
+`profiles.yaml` is strict YAML with top-level `schema_version: 1` and a `profiles`
 mapping keyed by name. Each entry contains nonempty `argv: [string, ...]`,
 absolute `codex_home: string`, `environment: {string: string}`, and required
 `native_subagents: enabled`. An absent policy is `PROFILE_CONFIG_INVALID`. An
@@ -555,18 +557,38 @@ Environment names are explicit, require `PATH`, `LANG`, and `LC_ALL`, reserve `C
 all stored values as non-secret local configuration. Unknown or duplicate keys,
 empty argv, relative homes,
 wrong types, a missing required environment value, malformed YAML, and unsupported schema versions return
-`PROFILE_CONFIG_INVALID`. Profile add/remove holds a per-workspace Dolgorae-home config lock and uses
+`PROFILE_CONFIG_INVALID`. Profile add/remove holds the Dolgorae-home root lock and uses
 write-temp, file `fsync`, rename, and directory `fsync`; the registry is
 hand-editable and MUST NOT contain credentials, tokens, or other secrets.
-The per-workspace Dolgorae-home root is mode 0700 and `local.yaml` is
+The fixed Dolgorae home is mode 0700 and `profiles.yaml` is
 mode 0600; creation and replacement reject a wrong-owner or more-permissive
 file. That root is outside the agent-writable workspace.
 
-Profile names are unique within one project. Every profile command MUST resolve
-an initialized workspace through `--workspace` or normal upward discovery.
+Profile names are unique within the fixed Dolgorae home. Profile management and
+diagnostic commands MUST NOT discover or accept a workspace; `--workspace` is
+an `INVALID_ARGUMENT`. Run and Specialist creation MUST select an explicit
+Profile and MUST NOT infer one from a workspace, caller environment, frontend,
+or hidden default.
 `profile add` MUST reject an existing name with
 `PROFILE_ALREADY_EXISTS`; it MUST NOT overwrite a profile implicitly. Replacement
 requires an explicit remove followed by add.
+
+The strict mode-0600 `~/.dolgorae/state.json` contains exactly
+`schema_version: 1` and `state_generation: global-profile-v1`. Before any
+stateful operation, Dolgorae MUST validate that marker, the mode-0700 home, and
+the absence of workspace-local `local.yaml`. A nonempty unmarked home, malformed
+or unsupported marker, partial layout, or mixed generation returns
+`LEGACY_STATE_UNSUPPORTED` before read or mutation. An absent or empty home may
+be initialized atomically. There is no automatic import, migration, deletion,
+or recovery of legacy Profiles, Runs, Profile Servers, engagements, writers, or
+aggregates. Stateless help, version, and capability discovery remain available.
+The operator recovery procedure is owned by the operations guide.
+
+TASK-036 and TASK-037 prepare these contracts and implementation paths without
+changing production dispatch. TASK-038 activates the home gate, global Profile
+commands, account-neutral workspace initialization, Run admission, and both
+Specialist consumers together. No supported revision reads or writes both
+Profile generations.
 
 ### Specialist Policy Registry
 
@@ -1413,7 +1435,8 @@ normative:
 | `INVALID_ARGUMENT` | 2 | any command | CLI syntax, input source, duration, effort, response JSON, incompatible option combination, or pre-existing export destination is invalid |
 | `WORKSPACE_NOT_INITIALIZED` | 3 | all commands except `init` and profile-only commands | the addressed path has no valid Dolgorae workspace |
 | `CONFIG_INVALID` | 3 | workspace commands | `config.yaml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
-| `PROFILE_CONFIG_INVALID` | 3 | profile commands and `run start` | `local.yaml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
+| `PROFILE_CONFIG_INVALID` | 3 | profile commands and `run start` | `profiles.yaml` is malformed, unsupported, duplicated, or has an unknown/wrongly typed key |
+| `LEGACY_STATE_UNSUPPORTED` | 5 | stateful commands after the global-Profile activation | the fixed Dolgorae home is unmarked, legacy, partial, mixed-generation, or carries an unsupported marker; the command makes no state mutation |
 | `PROFILE_NOT_FOUND` | 3 | profile commands and `run start` | the profile name is absent |
 | `RUN_NOT_FOUND` | 3 | every `run` command except `start/list` | the run ID is absent in the selected workspace |
 | `THREAD_NOT_FOUND` | 3 | `run resume/send/submit/wait/recover/reconcile` and history-copying `run fork` | the pinned Codex history required by the operation is absent; never emitted by `fork --fresh` |

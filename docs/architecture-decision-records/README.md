@@ -2194,3 +2194,62 @@ is loaded; later facade requests do not resubmit it.
   the checked v1 transport and complicates multi-member await and abort.
 - Let the aggregate owner use ordinary `run` commands: rejected because it
   would erase the member Controller boundary outside the trusted facade.
+
+## ADR-035: Replace Workspace-Local Runtime Profiles with Global Codex Profiles
+
+Status: Accepted
+
+### Context
+
+The completed Profile implementation stores the same account launch contract
+below each workspace and requires workspace discovery for Profile commands.
+Accounts, native executables, and `CODEX_HOME` are user-wide facts. Repeating
+them per project creates drift and lets caller context appear to influence a
+Run even though Dolgorae owns durable launch selection.
+
+Changing that authority in place would also reinterpret completed persisted
+and machine-readable v1 contracts. Existing development homes can contain Runs,
+Profile Servers, writers, and Specialist aggregates whose recovery assumptions
+depend on workspace-local Profile lookup.
+
+### Decision
+
+Store strict named Codex Profiles in mode-0600
+`~/.dolgorae/profiles.yaml`, serialized by the fixed home root lock. A Profile
+is one account launch contract: native executable, canonical `CODEX_HOME`,
+validated global arguments, explicit non-secret environment, and process-static
+capabilities. Profile commands are global and reject `--workspace`. Every Run
+and Specialist creation selects a Profile explicitly; workspace initialization
+does not create or select an account.
+
+Mark the accepted home generation with strict mode-0600
+`~/.dolgorae/state.json` containing `global-profile-v1`. Reject every nonempty
+unmarked, legacy, partial, mixed, malformed, or unsupported home before a
+stateful read or mutation. Provide no automatic migration or compatibility
+decoder. Preserve changed v1 contracts as historical artifacts and introduce
+successor versions.
+
+Prepare the new registry and consumers behind an inactive boundary in
+TASK-036 and TASK-037. TASK-038 activates the home gate, Profile CLI,
+account-neutral initialization, Run admission, and both Specialist consumers in
+one production cutover. Preserve distinct Profile names that resolve to the
+same launch contract as aliases; each Run stores its selected name and complete
+immutable snapshot.
+
+### Consequences
+
+- One Profile can serve Runs in multiple workspaces, while Run, writer,
+  aggregate, audit, and recovery authority remains workspace-scoped.
+- Caller executable, shell aliases, `PATH`, `CODEX_HOME`, and frontend identity
+  do not participate in Profile resolution after parsing.
+- Operators must stop Dolgorae, back up or move a legacy home, initialize a
+  fresh generation, recreate Profiles, and register compatible workspaces.
+
+### Rejected alternatives
+
+- Read both global and workspace registries during a transition: rejected
+  because selection and recovery would depend on ambiguous mutable authority.
+- Infer a default Profile from a workspace or caller: rejected because account
+  selection must remain explicit and frontend-independent.
+- Automatically migrate a legacy home: rejected because old Runs and server
+  membership cannot be safely reinterpreted under the new authority boundary.
