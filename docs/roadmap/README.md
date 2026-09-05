@@ -986,9 +986,14 @@ read-only Specialist Review Preview without delaying `MILESTONE-SR1`.
 
 ## EPIC-006: External Specialist Engagement Hardening
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
-Detailed SOT: [EPIC-006 dossier](../todo/TODO-EPIC-006-external-specialist-engagement-hardening.md)
+Canonical Outcomes: [external engagement specification](../specs/README.md#external-specialist-engagement),
+[facade architecture](../architecture/README.md#external-specialist-facade),
+[ADR-034](../architecture-decision-records/README.md#adr-034-delegate-external-member-control-through-the-aggregate-owner),
+[checked facade protocol](../protocol/dolgorae-external-specialist-facade-v1.schema.json),
+[implementation](../../src/external_engagement.rs), and
+[black-box contract tests](../../tests/e2e/test_external_engagement_cli.py)
 
 Goal: Generalize the one-shot read-only Specialist Review Preview into a durable,
 reusable external Specialist service while the external AI remains the only
