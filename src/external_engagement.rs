@@ -2291,6 +2291,35 @@ mod tests {
     }
 
     #[test]
+    fn facade_v2_hire_rejects_the_legacy_profile_field() {
+        assert!(
+            serde_json::from_value::<Request>(json!({
+                "operation":"hire_external_specialist",
+                "engagement_id":Uuid::now_v7(),
+                "role_ref":"researcher",
+                "agent_configuration":{
+                    "schema_version":2,
+                    "runtime_profile":"default",
+                    "global_profile_binding_sha256":null,
+                    "model":null,
+                    "default_effort":"high",
+                    "purpose":"research",
+                    "purpose_label":null,
+                    "required_capabilities":[],
+                    "instructions":"Inspect.",
+                    "execution_lane":"shared_readonly",
+                    "required_assurance":"best_effort_personal_alpha",
+                    "native_subagent_policy":"enabled"
+                },
+                "objective":"Inspect.",
+                "requested_access":"read_only",
+                "idempotency_key":"legacy-profile-field"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn completed_task_projection_carries_the_durable_result() {
         let artifact_id = Uuid::now_v7();
         let values = task_values(vec![ExternalTaskSnapshot {

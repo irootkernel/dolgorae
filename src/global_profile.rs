@@ -288,8 +288,8 @@ fn lock_initialized_home(root: &Path) -> Result<File, MachineError> {
     DarwinSystem
         .lock_exclusive(&directory)
         .map_err(|error| MachineError::runtime_path_invalid(root, error.to_string()))?;
-    if inspect_root(root)? != HomeGenerationStatus::GlobalProfileV1 {
-        return Err(legacy_state_unsupported(root, "partial_generation"));
+    if inspect_root(root)? == HomeGenerationStatus::Uninitialized {
+        return Err(legacy_state_unsupported(root, "uninitialized"));
     }
     Ok(directory)
 }
@@ -434,6 +434,17 @@ mod tests {
                 .len(),
             0
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn an_empty_home_that_changes_after_the_cli_gate_keeps_its_classification() {
+        let (parent, home) = test_home();
+        fs::create_dir(home.root()).unwrap();
+        fs::set_permissions(home.root(), fs::Permissions::from_mode(0o700)).unwrap();
+        let error = GlobalProfileStore::new(&home).load().unwrap_err();
+        assert_eq!(error.code, "LEGACY_STATE_UNSUPPORTED");
+        assert_eq!(error.details["classification"], "uninitialized");
         fs::remove_dir_all(parent).unwrap();
     }
 

@@ -253,6 +253,22 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         for directory in (home, workspace, codex_home, bin_root):
             directory.mkdir(mode=0o700)
         subprocess.run(["git", "-C", str(workspace), "init", "-b", "main"], check=True, capture_output=True)
+
+        uninitialized_workspace_scoped = run(
+            binary, home, "profile", "list", "--workspace", str(workspace)
+        )
+        if (
+            uninitialized_workspace_scoped.returncode != 2
+            or envelope(uninitialized_workspace_scoped)["error"]["code"]
+            != "INVALID_ARGUMENT"
+        ):
+            raise AssertionError(
+                "removed workspace scope was not rejected before the home gate: "
+                f"{uninitialized_workspace_scoped.stdout}"
+            )
+        if (home / ".dolgorae").exists():
+            raise AssertionError("rejected Profile syntax initialized the Dolgorae home")
+
         initialized = run(binary, home, "init", str(workspace))
         if initialized.returncode != 0:
             raise AssertionError(f"workspace init failed: {initialized.stdout}")

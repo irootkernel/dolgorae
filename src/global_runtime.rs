@@ -409,11 +409,6 @@ pub struct GlobalQuiescenceGuard {
     pub index: GlobalMembershipIndex,
 }
 
-pub struct GlobalAdmission {
-    pub binding: GlobalProfileBinding,
-    pub membership: GlobalMembershipIndex,
-}
-
 pub struct GlobalServerStateStore {
     membership: GlobalMembershipStore,
 }
@@ -464,27 +459,6 @@ impl GlobalServerStateStore {
         }
         Ok(state)
     }
-}
-
-/// Resolve, prepare, and reserve membership under the global registry lock.
-/// The initial `unknown` disposition is fail-closed until Run publication can
-/// record `active` or explicit rollback can record `released`.
-pub fn admit_global_profile(
-    home: &DolgoraeHome,
-    selected_name: &str,
-    workspace_id: &str,
-    run_id: Uuid,
-) -> Result<GlobalAdmission, MachineError> {
-    GlobalProfileStore::new(home).with_resolved(selected_name, |definition| {
-        let binding =
-            ResolvedGlobalProfile::from_definition(selected_name, definition)?.prepare(home)?;
-        let membership = GlobalMembershipStore::new(home, &binding.server_key)?
-            .record_under_registry_lock(workspace_id, run_id, MembershipDisposition::Unknown)?;
-        Ok(GlobalAdmission {
-            binding,
-            membership,
-        })
-    })
 }
 
 /// Remove one selected alias only after global membership under its resolved
@@ -542,16 +516,16 @@ impl GlobalMembershipStore {
         self.record_locked_root(&root, workspace_id, run_id, disposition, facts)
     }
 
-    fn record_under_registry_lock(
+    pub(crate) fn record_under_lifecycle_locks(
         &self,
+        root: &Path,
         workspace_id: &str,
         run_id: Uuid,
         disposition: MembershipDisposition,
     ) -> Result<GlobalMembershipIndex, MachineError> {
         validate_member_identity(workspace_id)?;
-        let root = self.ensure_root_under_home_lock()?;
-        self.record_locked_root(
-            &root,
+        self.record_under_server_lock(
+            root,
             workspace_id,
             run_id,
             disposition,
@@ -568,6 +542,17 @@ impl GlobalMembershipStore {
         facts: GlobalMembershipFacts,
     ) -> Result<GlobalMembershipIndex, MachineError> {
         let _lock = lock_file(&root.join("server.lock"))?;
+        self.record_under_server_lock(root, workspace_id, run_id, disposition, facts)
+    }
+
+    fn record_under_server_lock(
+        &self,
+        root: &Path,
+        workspace_id: &str,
+        run_id: Uuid,
+        disposition: MembershipDisposition,
+        facts: GlobalMembershipFacts,
+    ) -> Result<GlobalMembershipIndex, MachineError> {
         let journal = root.join("membership.jsonl");
         let mut records = replay(&journal, &self.server_key)?;
         let revision = u64::try_from(records.len())
@@ -635,6 +620,7 @@ impl GlobalMembershipStore {
         let journal = root.join("membership.jsonl");
         let records = replay(&journal, &self.server_key)?;
         let index = derive_index(&self.server_key, &journal, &records)?;
+        self.verify_persisted_index(&root, &index)?;
         let blockers = index
             .members
             .values()
@@ -659,6 +645,15 @@ impl GlobalMembershipStore {
         let journal = root.join("membership.jsonl");
         let records = replay(&journal, &self.server_key)?;
         let index = derive_index(&self.server_key, &journal, &records)?;
+        self.verify_persisted_index(root, &index)?;
+        Ok(index)
+    }
+
+    fn verify_persisted_index(
+        &self,
+        root: &Path,
+        index: &GlobalMembershipIndex,
+    ) -> Result<(), MachineError> {
         let persisted = root.join("members.json");
         if persisted.exists() {
             verify_secure_file(&persisted, DarwinSystem.current_uid())?;
@@ -666,14 +661,14 @@ impl GlobalMembershipStore {
                 &fs::read(&persisted).map_err(|error| path_error(&persisted, error))?,
             )
             .map_err(|_| membership_incomplete(&self.server_key, "membership index is invalid"))?;
-            if actual != index {
+            if actual != *index {
                 return Err(membership_incomplete(
                     &self.server_key,
                     "membership index disagrees with journal",
                 ));
             }
         }
-        Ok(index)
+        Ok(())
     }
 
     pub fn require_quiescent(&self, operation: &str) -> Result<(), MachineError> {
@@ -1214,6 +1209,30 @@ mod tests {
             store.require_quiescent("restart").unwrap_err().code,
             "PROFILE_MEMBERSHIP_INCOMPLETE"
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn quiescence_rejects_a_persisted_index_that_disagrees_with_its_journal() {
+        let (parent, home) = home();
+        let store = GlobalMembershipStore::new(&home, &"9".repeat(64)).unwrap();
+        let run_id = Uuid::now_v7();
+        store
+            .record(&"1".repeat(64), run_id, MembershipDisposition::Released)
+            .unwrap();
+        let persisted = home
+            .root()
+            .join("profiles")
+            .join("9".repeat(64))
+            .join("members.json");
+        let mut index: GlobalMembershipIndex =
+            serde_json::from_slice(&fs::read(&persisted).unwrap()).unwrap();
+        index.revision += 1;
+        fs::write(&persisted, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+        let error = store
+            .require_quiescent_under_server_lock("selected", "stop")
+            .unwrap_err();
+        assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
         fs::remove_dir_all(parent).unwrap();
     }
 

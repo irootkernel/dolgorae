@@ -302,6 +302,74 @@ pub fn ensure_global_server(
     Ok(state)
 }
 
+/// Admit the first fail-closed Run membership while holding the same home and
+/// server locks used by destructive lifecycle reservations. A stop that wins
+/// first changes the ready contract before this validation; an admission that
+/// wins first leaves an `unknown` member that blocks the stop.
+pub fn admit_global_run(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    state: &ServerState,
+    workspace_id: &str,
+    run_id: Uuid,
+) -> Result<crate::global_runtime::GlobalMembershipIndex, MachineError> {
+    binding.validate_for_recovery()?;
+    crate::global_runtime::GlobalProfileServerState::from_prepared(state)?.discover(binding)?;
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        workspace_id: "global-profile-v1".to_owned(),
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let paths = LifecyclePaths::open(&context, &binding.launch_snapshot)?;
+    let (_home_lock, _server_lock) = paths.lock()?;
+    verify_migration_fence(
+        &paths.home_root.join("migration.json"),
+        None,
+        &binding.selected_name,
+        &binding.server_key,
+    )?;
+    let current = read_state_if_running(&paths.state_path)?.ok_or_else(|| {
+        profile_server_busy(
+            &binding.selected_name,
+            &binding.server_key,
+            "the profile server stopped before Run admission",
+        )
+    })?;
+    crate::global_runtime::GlobalProfileServerState::from_prepared(&current)?.discover(binding)?;
+    validate_admission_lifetime(
+        &binding.selected_name,
+        &binding.launch_snapshot,
+        state,
+        &current,
+        read_home_active(&paths.active_path)?.as_ref(),
+    )?;
+    crate::global_runtime::GlobalMembershipStore::new(&home, &binding.server_key)?
+        .record_under_lifecycle_locks(
+            &paths.root,
+            workspace_id,
+            run_id,
+            crate::global_runtime::MembershipDisposition::Unknown,
+        )
+}
+
+fn validate_admission_lifetime(
+    profile_name: &str,
+    snapshot: &ProfileSnapshot,
+    expected: &ServerState,
+    current: &ServerState,
+    active: Option<&HomeActive>,
+) -> Result<(), MachineError> {
+    if current.epoch_id != expected.epoch_id || current.server_key != expected.server_key {
+        return Err(profile_mismatch(
+            profile_name,
+            "server_epoch_identity",
+            json!({"server_key": expected.server_key, "epoch_id": expected.epoch_id}),
+            json!({"server_key": current.server_key, "epoch_id": current.epoch_id}),
+        ));
+    }
+    verify_stop_home_active(snapshot, current, active)
+}
+
 fn publish_global_server_state(context: &Context, state: &ServerState) -> Result<(), MachineError> {
     let successor = crate::global_runtime::GlobalProfileServerState::from_prepared(state)?;
     crate::global_runtime::GlobalServerStateStore::from_root(
@@ -6401,6 +6469,44 @@ mod tests {
         };
         verify_stop_home_active(&snapshot, &state, Some(&ready)).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_admission_rejects_a_stop_reservation_for_the_same_server_lifetime() {
+        let snapshot = stopped_snapshot();
+        let state = stopped_state();
+        let stopping = HomeActive {
+            schema_version: 1,
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            server_key: snapshot.server_key.clone(),
+            server_epoch: state.server_epoch,
+            lifecycle: "stopping".to_owned(),
+            pid: Some(state.pid),
+            transition_token: Some(Uuid::now_v7()),
+        };
+        let error = validate_admission_lifetime(
+            &snapshot.profile_name,
+            &snapshot,
+            &state,
+            &state,
+            Some(&stopping),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "PROFILE_SERVER_BUSY");
+
+        let ready = HomeActive {
+            lifecycle: "ready".to_owned(),
+            transition_token: None,
+            ..stopping
+        };
+        validate_admission_lifetime(
+            &snapshot.profile_name,
+            &snapshot,
+            &state,
+            &state,
+            Some(&ready),
+        )
+        .unwrap();
     }
 
     #[test]

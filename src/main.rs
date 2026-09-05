@@ -142,6 +142,14 @@ fn execute(cli: Cli) -> ExitCode {
         }
         return render_version(args.json);
     }
+    if let Command::Profile { command } = &cli.command {
+        let (operation, arguments) = profile_operation(command);
+        if let Err(error) =
+            dolgorae::global_profile::validate_post_cut_arguments(operation, arguments)
+        {
+            return render_failure(cli.human, command_name, error);
+        }
+    }
     if !matches!(
         &cli.command,
         Command::Runtime {
@@ -338,59 +346,7 @@ fn execute(cli: Cli) -> ExitCode {
         };
     }
     if let Command::Profile { command } = &cli.command {
-        let (operation, arguments) = match command {
-            ProfileCommand::Add(args) => (dolgorae::profile::ProfileOperation::Add, &args.args),
-            ProfileCommand::List(args) => (dolgorae::profile::ProfileOperation::List, &args.args),
-            ProfileCommand::Show(args) => (dolgorae::profile::ProfileOperation::Show, &args.args),
-            ProfileCommand::Remove(args) => {
-                (dolgorae::profile::ProfileOperation::Remove, &args.args)
-            }
-            ProfileCommand::Doctor(args) => {
-                (dolgorae::profile::ProfileOperation::Doctor, &args.args)
-            }
-            ProfileCommand::Server { command } => match command {
-                ProfileServerCommand::Status(args) => (
-                    dolgorae::profile::ProfileOperation::ServerStatus,
-                    &args.args,
-                ),
-                ProfileServerCommand::Start(args) => {
-                    (dolgorae::profile::ProfileOperation::ServerStart, &args.args)
-                }
-                ProfileServerCommand::Stop(args) => {
-                    (dolgorae::profile::ProfileOperation::ServerStop, &args.args)
-                }
-                ProfileServerCommand::Restart(args) => (
-                    dolgorae::profile::ProfileOperation::ServerRestart,
-                    &args.args,
-                ),
-                ProfileServerCommand::Migrate(args) => (
-                    dolgorae::profile::ProfileOperation::ServerMigrate,
-                    &args.args,
-                ),
-            },
-            ProfileCommand::Membership { command } => match command {
-                ProfileMembershipCommand::Verify(args) => (
-                    dolgorae::profile::ProfileOperation::MembershipVerify,
-                    &args.args,
-                ),
-                ProfileMembershipCommand::TombstoneOrphan(args) => (
-                    dolgorae::profile::ProfileOperation::MembershipTombstoneOrphan,
-                    &args.args,
-                ),
-            },
-            ProfileCommand::State {
-                command: ProfileStateCommand::Reset(args),
-            } => (dolgorae::profile::ProfileOperation::StateReset, &args.args),
-            ProfileCommand::Diagnostics {
-                command: ProfileDiagnosticsCommand::List(args),
-            } => (
-                dolgorae::profile::ProfileOperation::DiagnosticsList,
-                &args.args,
-            ),
-            ProfileCommand::Events(args) => {
-                (dolgorae::profile::ProfileOperation::Events, &args.args)
-            }
-        };
+        let (operation, arguments) = profile_operation(command);
         return match dolgorae::profile::execute_global(operation, arguments) {
             Ok(data) => {
                 if cli.human {
@@ -559,6 +515,58 @@ fn execute(cli: Cli) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => render_failure(cli.human, command_name, error),
+    }
+}
+
+fn profile_operation(
+    command: &ProfileCommand,
+) -> (dolgorae::profile::ProfileOperation, &[OsString]) {
+    match command {
+        ProfileCommand::Add(args) => (dolgorae::profile::ProfileOperation::Add, &args.args),
+        ProfileCommand::List(args) => (dolgorae::profile::ProfileOperation::List, &args.args),
+        ProfileCommand::Show(args) => (dolgorae::profile::ProfileOperation::Show, &args.args),
+        ProfileCommand::Remove(args) => (dolgorae::profile::ProfileOperation::Remove, &args.args),
+        ProfileCommand::Doctor(args) => (dolgorae::profile::ProfileOperation::Doctor, &args.args),
+        ProfileCommand::Server { command } => match command {
+            ProfileServerCommand::Status(args) => (
+                dolgorae::profile::ProfileOperation::ServerStatus,
+                &args.args,
+            ),
+            ProfileServerCommand::Start(args) => {
+                (dolgorae::profile::ProfileOperation::ServerStart, &args.args)
+            }
+            ProfileServerCommand::Stop(args) => {
+                (dolgorae::profile::ProfileOperation::ServerStop, &args.args)
+            }
+            ProfileServerCommand::Restart(args) => (
+                dolgorae::profile::ProfileOperation::ServerRestart,
+                &args.args,
+            ),
+            ProfileServerCommand::Migrate(args) => (
+                dolgorae::profile::ProfileOperation::ServerMigrate,
+                &args.args,
+            ),
+        },
+        ProfileCommand::Membership { command } => match command {
+            ProfileMembershipCommand::Verify(args) => (
+                dolgorae::profile::ProfileOperation::MembershipVerify,
+                &args.args,
+            ),
+            ProfileMembershipCommand::TombstoneOrphan(args) => (
+                dolgorae::profile::ProfileOperation::MembershipTombstoneOrphan,
+                &args.args,
+            ),
+        },
+        ProfileCommand::State {
+            command: ProfileStateCommand::Reset(args),
+        } => (dolgorae::profile::ProfileOperation::StateReset, &args.args),
+        ProfileCommand::Diagnostics {
+            command: ProfileDiagnosticsCommand::List(args),
+        } => (
+            dolgorae::profile::ProfileOperation::DiagnosticsList,
+            &args.args,
+        ),
+        ProfileCommand::Events(args) => (dolgorae::profile::ProfileOperation::Events, &args.args),
     }
 }
 

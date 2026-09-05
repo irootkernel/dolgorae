@@ -380,7 +380,7 @@ pub(crate) struct PreparedReviewer {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExternalAgentConfigurationInput {
     pub schema_version: u32,
-    #[serde(rename = "selected_profile", alias = "runtime_profile")]
+    #[serde(rename = "selected_profile")]
     pub runtime_profile: String,
     #[serde(default)]
     pub global_profile_binding_sha256: Option<String>,
@@ -439,8 +439,8 @@ pub(crate) fn prepare_external_specialist(
             })
     {
         return Err(MachineError::invalid_argument(
-            "runtime_profile",
-            "runtime profile does not match the checked pattern",
+            "selected_profile",
+            "selected profile does not match the checked pattern",
         ));
     }
     let home = DolgoraeHome::system()?;
@@ -1507,11 +1507,7 @@ fn run_start_with_context(
         ));
     }
     let run_id = reservation.run_id;
-    GlobalMembershipStore::new(&home, &global_profile_binding.server_key)?.record(
-        &view.workspace_id,
-        run_id,
-        MembershipDisposition::Unknown,
-    )?;
+    crate::profile::admit_global_run(&global_profile_binding, &state, &view.workspace_id, run_id)?;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     // The identical retry returns the original Run.  Reaching a published Run
     // through its own reservation is exactly the response-loss reconciliation
