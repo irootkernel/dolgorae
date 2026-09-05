@@ -14,6 +14,13 @@ import tempfile
 import time
 
 import native_codex
+from schema_support import assert_valid, validator
+
+
+PROTOCOL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol"
+FACADE_SCHEMA = validator(
+    PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v1.schema.json"
+)
 
 
 def invoke(
@@ -45,6 +52,7 @@ def call(
     expected_error: str | None = None,
     environment_overrides: dict[str, str] | None = None,
 ) -> dict[str, object]:
+    assert_valid(request, FACADE_SCHEMA, f"{request.get('operation')} request")
     with tempfile.TemporaryFile() as request_file:
         os.fchmod(request_file.fileno(), 0o600)
         request_file.write(json.dumps(request, separators=(",", ":")).encode())
@@ -85,12 +93,25 @@ def call(
             raise AssertionError(
                 f"engagement call did not fail with {expected_error}: {envelope!r}"
             )
+        error = envelope["error"]
+        assert_valid(
+            {
+                "operation": "external_specialist_error",
+                "code": error["code"],
+                "message": error["message"],
+                "retryable": error["retryable"],
+            },
+            FACADE_SCHEMA,
+            f"{request.get('operation')} error",
+        )
         return envelope["error"]
     if str(owner) in completed.stdout or (
         new_controller is not None and str(new_controller) in completed.stdout
     ):
         raise AssertionError("engagement response disclosed a credential carrier path")
-    return envelope["data"]
+    result = envelope["data"]
+    assert_valid(result, FACADE_SCHEMA, f"{request.get('operation')} result")
+    return result
 
 
 def credential(

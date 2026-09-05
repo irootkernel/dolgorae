@@ -670,19 +670,29 @@
         },
         "code": {
           "enum": [
+            "INVALID_ARGUMENT",
+            "CONTROLLER_MISMATCH",
             "ENGAGEMENT_NOT_FOUND",
             "ENGAGEMENT_TERMINAL",
+            "ENGAGEMENT_STATE_CONFLICT",
+            "ENGAGEMENT_TIMEOUT",
             "IDEMPOTENCY_CONFLICT",
             "CONTROLLER_PRINCIPAL_MISMATCH",
             "EXTERNAL_PROVENANCE_MISMATCH",
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+            "STATE_CONFLICT",
+            "OUTCOME_UNKNOWN",
+            "RECOVERY_REQUIRED",
             "SPECIALIST_ROLE_UNAVAILABLE",
             "SPECIALIST_NOT_MEMBER",
             "SPECIALIST_POLICY_DENIED",
+            "SPECIALIST_RESULT_INVALID",
             "SPECIALIST_TASK_NOT_FOUND",
             "SPECIALIST_TASK_NOT_CANCELLABLE",
             "SPECIALIST_WRITER_CONFLICT",
             "TARGET_RUN_TERMINAL",
-            "INTERRUPTED_UNKNOWN"
+            "INTERRUPTED_UNKNOWN",
+            "INTERNAL_ERROR"
           ]
         },
         "message": {

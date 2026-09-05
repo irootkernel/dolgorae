@@ -34,6 +34,8 @@ development commits.
   interaction-response receipts survive worker restart.
 - Writer recovery now preserves known pre-effect state and releases closed
   engagement Writers without respawning workers.
+- External Specialist facade failures now conform to the checked error-result
+  contract.
 - Immutable worktree-target capture now rejects symlinks in every path
   component and bounds Git object output before buffering it.
 
