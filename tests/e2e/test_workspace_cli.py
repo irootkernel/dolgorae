@@ -50,14 +50,15 @@ def require_supported_git() -> None:
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     require_supported_git()
-    machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
+    machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     workspace_record = validator(protocol_root, "dolgorae-workspace-record-v1.schema.json")
     portable_policy = validator(
         protocol_root, "dolgorae-portable-workspace-policy-v1.schema.json"
     )
-    local_profiles = validator(
-        protocol_root, "dolgorae-local-profile-registry-v1.schema.json"
+    global_profiles = validator(
+        protocol_root, "dolgorae-global-profile-registry-v1.schema.json"
     )
+    home_state = validator(protocol_root, "dolgorae-home-state-v1.schema.json")
 
     with tempfile.TemporaryDirectory(prefix="dolgorae-task002-validator-") as temporary:
         root = pathlib.Path(temporary)
@@ -147,16 +148,25 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"unexpected portable policy bytes: {policy_text!r}")
         policy = {"schema_version": 1, "mode": "git"}
         assert_valid(policy, portable_policy, "portable workspace policy")
-        profiles_text = (state_root / "local.yaml").read_text(encoding="utf-8")
-        if profiles_text != "schema_version: 1\nprofiles: {}\n":
-            raise AssertionError(f"unexpected local profile bytes: {profiles_text!r}")
+        if (state_root / "local.yaml").exists():
+            raise AssertionError("workspace initialization created a local Profile registry")
+        profiles_text = (home / ".dolgorae" / "profiles.yaml").read_text(encoding="utf-8")
         profiles = {"schema_version": 1, "profiles": {}}
-        assert_valid(profiles, local_profiles, "local profile registry")
+        assert_valid(profiles, global_profiles, "global profile registry")
+        assert_valid(
+            json.loads((home / ".dolgorae" / "state.json").read_text(encoding="utf-8")),
+            home_state,
+            "Dolgorae home generation",
+        )
 
         for directory in [state_root, state_root / "runtime" / "locks", state_root / "orchestration"]:
             if stat.S_IMODE(directory.stat().st_mode) != 0o700:
                 raise AssertionError(f"unsafe directory mode: {directory}")
-        for file_path in [state_root / "workspace.json", state_root / "local.yaml"]:
+        for file_path in [
+            state_root / "workspace.json",
+            home / ".dolgorae" / "profiles.yaml",
+            home / ".dolgorae" / "state.json",
+        ]:
             if stat.S_IMODE(file_path.stat().st_mode) != 0o600:
                 raise AssertionError(f"unsafe file mode: {file_path}")
 

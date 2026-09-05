@@ -10,6 +10,7 @@ use crate::workspace::{
     GitBaseline, LosslessPath, WorkspaceMode, WorkspacePlatform, atomic_create, create_directory,
     sync_directory, verify_secure_directory, verify_secure_file,
 };
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -85,8 +86,7 @@ pub struct ExecutableIdentity {
     pub sha256: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfigurationSnapshot {
     pub schema_version: u32,
     pub runtime_profile: String,
@@ -101,6 +101,113 @@ pub struct AgentConfigurationSnapshot {
     pub execution_lane: ExecutionLane,
     pub required_assurance: Assurance,
     pub native_subagent_policy: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentConfigurationWire {
+    schema_version: u32,
+    runtime_profile: Option<String>,
+    runtime_profile_snapshot_sha256: Option<String>,
+    selected_profile: Option<String>,
+    global_profile_binding_sha256: Option<String>,
+    model: String,
+    default_effort: String,
+    purpose: Purpose,
+    required_capabilities: Vec<String>,
+    role_reference: Option<String>,
+    normalized_instructions: String,
+    instructions: InstructionSnapshot,
+    execution_lane: ExecutionLane,
+    required_assurance: Assurance,
+    native_subagent_policy: String,
+}
+
+impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AgentConfigurationWire::deserialize(deserializer)?;
+        let (runtime_profile, runtime_profile_snapshot_sha256) = match wire.schema_version {
+            1 if wire.selected_profile.is_none()
+                && wire.global_profile_binding_sha256.is_none() =>
+            {
+                (
+                    wire.runtime_profile
+                        .ok_or_else(|| serde::de::Error::missing_field("runtime_profile"))?,
+                    wire.runtime_profile_snapshot_sha256.ok_or_else(|| {
+                        serde::de::Error::missing_field("runtime_profile_snapshot_sha256")
+                    })?,
+                )
+            }
+            2 if wire.runtime_profile.is_none()
+                && wire.runtime_profile_snapshot_sha256.is_none() =>
+            {
+                (
+                    wire.selected_profile
+                        .ok_or_else(|| serde::de::Error::missing_field("selected_profile"))?,
+                    wire.global_profile_binding_sha256.ok_or_else(|| {
+                        serde::de::Error::missing_field("global_profile_binding_sha256")
+                    })?,
+                )
+            }
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "Agent Configuration profile fields do not match schema_version",
+                ));
+            }
+        };
+        Ok(Self {
+            schema_version: wire.schema_version,
+            runtime_profile,
+            runtime_profile_snapshot_sha256,
+            model: wire.model,
+            default_effort: wire.default_effort,
+            purpose: wire.purpose,
+            required_capabilities: wire.required_capabilities,
+            role_reference: wire.role_reference,
+            normalized_instructions: wire.normalized_instructions,
+            instructions: wire.instructions,
+            execution_lane: wire.execution_lane,
+            required_assurance: wire.required_assurance,
+            native_subagent_policy: wire.native_subagent_policy,
+        })
+    }
+}
+
+impl Serialize for AgentConfigurationSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("AgentConfigurationSnapshot", 14)?;
+        state.serialize_field("schema_version", &self.schema_version)?;
+        if self.schema_version == 1 {
+            state.serialize_field("runtime_profile", &self.runtime_profile)?;
+            state.serialize_field(
+                "runtime_profile_snapshot_sha256",
+                &self.runtime_profile_snapshot_sha256,
+            )?;
+        } else {
+            state.serialize_field("selected_profile", &self.runtime_profile)?;
+            state.serialize_field(
+                "global_profile_binding_sha256",
+                &self.runtime_profile_snapshot_sha256,
+            )?;
+        }
+        state.serialize_field("model", &self.model)?;
+        state.serialize_field("default_effort", &self.default_effort)?;
+        state.serialize_field("purpose", &self.purpose)?;
+        state.serialize_field("required_capabilities", &self.required_capabilities)?;
+        state.serialize_field("role_reference", &self.role_reference)?;
+        state.serialize_field("normalized_instructions", &self.normalized_instructions)?;
+        state.serialize_field("instructions", &self.instructions)?;
+        state.serialize_field("execution_lane", &self.execution_lane)?;
+        state.serialize_field("required_assurance", &self.required_assurance)?;
+        state.serialize_field("native_subagent_policy", &self.native_subagent_policy)?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1038,10 +1145,20 @@ fn validate_profile_snapshot(profile: &ProfileSnapshot) -> Result<(), &'static s
 
 fn validate_agent_configuration(manifest: &RunManifest) -> Result<(), &'static str> {
     let agent = &manifest.agent_configuration;
-    if agent.schema_version != 1
+    let expected_binding_sha256 = match manifest.schema_version {
+        1 => canonical_digest(&manifest.profile)?,
+        2 => manifest
+            .global_profile_binding
+            .as_ref()
+            .ok_or("global Profile binding is missing")?
+            .digest()
+            .map_err(|_| "global Profile binding digest is invalid")?,
+        _ => return Err("unsupported Run manifest generation"),
+    };
+    if agent.schema_version != manifest.schema_version
         || agent.runtime_profile != manifest.profile.profile_name
         || !is_sha256(&agent.runtime_profile_snapshot_sha256)
-        || agent.runtime_profile_snapshot_sha256 != canonical_digest(&manifest.profile)?
+        || agent.runtime_profile_snapshot_sha256 != expected_binding_sha256
         || agent.model != manifest.model
         || agent.default_effort != manifest.default_reasoning_effort
         || agent.purpose != manifest.purpose
@@ -1398,5 +1515,48 @@ mod tests {
             controller_capability_digest(&capability),
             sha256_hex(&capability)
         );
+    }
+
+    #[test]
+    fn agent_configuration_serialization_preserves_v1_and_uses_v2_profile_fields() {
+        let configuration = |schema_version| AgentConfigurationSnapshot {
+            schema_version,
+            runtime_profile: "default".to_owned(),
+            runtime_profile_snapshot_sha256: "a".repeat(64),
+            model: "gpt-5.6".to_owned(),
+            default_effort: "high".to_owned(),
+            purpose: Purpose {
+                kind: PurposeKind::Review,
+                external_label: None,
+            },
+            required_capabilities: Vec::new(),
+            role_reference: None,
+            normalized_instructions: "review".to_owned(),
+            instructions: InstructionSnapshot {
+                schema: "dolgorae.instructions/v1".to_owned(),
+                common_prefix_version: 1,
+                mode_prefix_version: 1,
+                purpose_prefix_version: 1,
+                normalized_byte_length: 6,
+                normalized_sha256: "b".repeat(64),
+            },
+            execution_lane: ExecutionLane::SharedReadonly,
+            required_assurance: Assurance::BestEffortPersonalAlpha,
+            native_subagent_policy: "enabled".to_owned(),
+        };
+
+        let v1 = serde_json::to_value(configuration(1)).unwrap();
+        assert_eq!(v1["runtime_profile"], "default");
+        assert_eq!(v1["runtime_profile_snapshot_sha256"], "a".repeat(64));
+        assert!(v1.get("selected_profile").is_none());
+
+        let v2 = serde_json::to_value(configuration(2)).unwrap();
+        assert_eq!(v2["selected_profile"], "default");
+        assert_eq!(v2["global_profile_binding_sha256"], "a".repeat(64));
+        assert!(v2.get("runtime_profile").is_none());
+
+        let mut mixed = v2;
+        mixed["schema_version"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<AgentConfigurationSnapshot>(mixed).is_err());
     }
 }

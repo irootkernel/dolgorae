@@ -867,12 +867,10 @@ allocation. Existing sessions never reread the registry.
 The mode-0600 `~/.dolgorae/state.json` generation marker is validated before
 stateful access. Unmarked nonempty, malformed, unsupported, partial, and mixed
 homes fail closed as `LEGACY_STATE_UNSUPPORTED`; no legacy bytes are inspected
-for migration or changed. TASK-038 activates this gate atomically after the
-TASK-036 and TASK-037 successor paths are complete.
+for migration or changed. The gate is active for every production stateful
+command.
 
-TASK-037 keeps its implementation unreachable from production dispatch and
-prepares the complete persistence boundary used at activation. One locked
-global registry read produces a `ResolvedGlobalProfile`; launch preparation
+One locked global registry read produces a `ResolvedGlobalProfile`; launch preparation
 consumes that owned value and embeds the complete binding in the workspace-
 scoped `run-manifest/v2`. Recovery accepts only that manifest's complete
 definition, launch snapshot, and JCS digests. It has no registry or caller
@@ -891,7 +889,7 @@ The affected-contract census is:
 | machine success/error envelopes | `machine/v2` and `error-contract/v2`, prepared by TASK-036 |
 | public Profile DTO | unchanged: it already presents a selected launch contract and capability status |
 | Profile diagnostics/events | unchanged in TASK-037: their Profile and server-key fields retain their meaning |
-| Specialist facade and review tools | TASK-038 owns their successor contracts because that Task changes their selection inputs |
+| Specialist facade and review tools | `external-specialist-facade/v2` and `specialist-review-tool/v2` use explicit global Profile selection |
 
 The global membership lock remains held from the empty-membership proof through
 the destructive lifecycle commit. Admission uses the same lock. Consequently,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box validation of the version and Machine v1 CLI contracts."""
+"""Black-box validation of the version and Machine v2 CLI contracts."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from schema_support import assert_valid, validator
 
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
-    machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
+    machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     version_schema = validator(protocol_root, "dolgorae-version-v1.schema.json")
     cases = (
         ("--help",),
@@ -120,6 +120,33 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         )
 
     home = pathlib.Path(os.environ["HOME"])
+    uninitialized = subprocess.run(
+        [str(binary), "profile", "list"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    uninitialized_envelope = json.loads(uninitialized.stdout)
+    if (
+        uninitialized.returncode != 5
+        or uninitialized_envelope["error"]["code"] != "LEGACY_STATE_UNSUPPORTED"
+        or uninitialized_envelope["error"]["details"]["classification"] != "uninitialized"
+        or (home / ".dolgorae").exists()
+    ):
+        raise AssertionError(
+            f"uninitialized stateful access did not fail without mutation: {uninitialized!r}"
+        )
+    assert_valid(uninitialized_envelope, machine, "uninitialized-home failure")
+
+    bootstrap = home.parent / "machine-bootstrap"
+    bootstrap.mkdir(mode=0o700)
+    initialized = subprocess.run(
+        [str(binary), "init", "--non-git", str(bootstrap)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert_valid(json.loads(initialized.stdout), machine, "home bootstrap")
     controller = home / "controller.json"
     operator_one = home / "operator-1.json"
     operator_two = home / "operator-2.json"

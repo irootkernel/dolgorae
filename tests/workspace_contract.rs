@@ -225,7 +225,7 @@ fn init_and_discovery_emit_context_specific_workspace_errors() {
 }
 
 #[test]
-fn run_start_profile_preflight_enforces_the_strict_launch_schema() {
+fn workspace_discovery_ignores_legacy_local_profile_files() {
     let tree = TestTree::new();
     let workspace = tree.path("workspace");
     make_dir(&workspace);
@@ -242,45 +242,6 @@ fn run_start_profile_preflight_enforces_the_strict_launch_schema() {
     fs::write(
         &local,
         "schema_version: 1\nprofiles:\n  bad:\n    argv: [/bin/sh, app-server]\n    codex_home: /tmp/codex-home\n    environment: {PATH: /bin, LANG: C, LC_ALL: C}\n    native_subagents: enabled\n",
-    )
-    .unwrap();
-    assert_eq!(
-        service
-            .discover_for_run_start(Some(&workspace))
-            .unwrap_err()
-            .code,
-        "PROFILE_CONFIG_INVALID"
-    );
-
-    let executable = tree.path("bin/codex");
-    make_dir(executable.parent().unwrap());
-    // The profile contract now rejects interpreter/text wrappers before it
-    // validates global argv.  Use a native image under the required basename
-    // so this test continues to isolate argv-policy validation.
-    fs::copy("/bin/sh", &executable).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(
-        &local,
-        format!(
-            "schema_version: 1\nprofiles:\n  bad:\n    argv: [{}, --enable, multi_agent]\n    codex_home: /tmp/codex-home\n    environment: {{PATH: /bin, LANG: C, LC_ALL: C}}\n    native_subagents: enabled\n",
-            executable.display()
-        ),
-    )
-    .unwrap();
-    assert_eq!(
-        service
-            .discover_for_run_start(Some(&workspace))
-            .unwrap_err()
-            .code,
-        "PROFILE_CONFIG_INVALID"
-    );
-
-    fs::write(
-        &local,
-        format!(
-            "schema_version: 1\nprofiles:\n  valid:\n    argv: [{}, --strict-config]\n    codex_home: /tmp/codex-home\n    environment: {{PATH: /bin, LANG: C, LC_ALL: C}}\n    native_subagents: enabled\n",
-            executable.display()
-        ),
     )
     .unwrap();
     assert!(service.discover_for_run_start(Some(&workspace)).is_ok());

@@ -46,7 +46,7 @@ def git(repository: pathlib.Path, *arguments: str) -> str:
 
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
-    machine_schema = validator(protocol_root, "dolgorae-machine-v1.schema.json")
+    machine_schema = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     v2_schema = validator(protocol_root, "dolgorae-specialist-review-tool-v2.schema.json")
     schema_source = native_codex.installed_codex()
     with tempfile.TemporaryDirectory(prefix="dolgorae-task015-") as temporary:
@@ -129,7 +129,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     binary,
                     home,
                     [
-                        "profile", "add", profile, "--workspace", str(workspace),
+                        "profile", "add", profile,
                         "--codex-home", str(case_home), "--native-subagents", "enabled",
                         "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                         "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",
@@ -245,7 +245,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     home,
                     [
                         "profile", "server", "stop", profile,
-                        "--workspace", str(workspace), "--operator-file", str(operator),
+                        "--operator-file", str(operator),
                     ],
                 )
 

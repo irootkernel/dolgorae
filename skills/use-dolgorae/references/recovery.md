@@ -14,10 +14,10 @@ Recovery starts with current public evidence and never with direct state edits.
    ```sh
    dolgorae runtime capabilities
    dolgorae workspace inspect --workspace <path>
-   dolgorae profile show <name> --workspace <path>
-   dolgorae profile doctor <name> --workspace <path>
-   dolgorae profile server status <name> --workspace <path>
-   dolgorae profile membership verify <name> --workspace <path>
+   dolgorae profile show <name>
+   dolgorae profile doctor <name>
+   dolgorae profile server status <name>
+   dolgorae profile membership verify <name>
    ```
 
 3. Parse exit and envelope independently. The stable exit classes are: 2 input,

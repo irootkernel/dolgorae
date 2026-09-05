@@ -42,6 +42,7 @@
             },
             "classification": {
               "enum": [
+                "uninitialized",
                 "unmarked_nonempty",
                 "malformed_marker",
                 "unsupported_generation",

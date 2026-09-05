@@ -64,12 +64,12 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    requires one commit revision. `range` requires one exact `A..B` or `A...B`
    expression. Do not substitute patch or stdin semantics, which Dolgorae does
    not provide.
-3. Inspect the named Runtime Profile and run its offline diagnosis before an
+3. Inspect the named global Codex Profile and run its offline diagnosis before an
    external review when current readiness is not already established:
 
    ```sh
-   dolgorae profile show <profile> --workspace <path>
-   dolgorae profile doctor <profile> --workspace <path>
+   dolgorae profile show <profile>
+   dolgorae profile doctor <profile>
    ```
 
    `profile doctor` reports its verdict in `data.compatibility` and diagnostics;

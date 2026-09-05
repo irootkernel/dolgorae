@@ -15,17 +15,20 @@ use crate::domain::{
 };
 use crate::engagement::EngagementStore;
 use crate::event::EventProjection;
+use crate::global_runtime::{
+    GlobalMembershipStore, GlobalProfileBinding, MembershipDisposition, ResolvedGlobalProfile,
+};
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
-use crate::profile::{ProfileOperation, ServerState};
+use crate::profile::ServerState;
 use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, AppServerFacts, AuditPolicy,
     CompatibilityVerdict, DolgoraeBuild, ExecutableIdentity, ForkProvenance, InstructionSnapshot,
     ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore,
     StartReservation, StartReservationStore, WriteContinuationProvenance,
-    agent_configuration_digest, launch_contract_digest, run_root, runtime_profile_snapshot_digest,
+    agent_configuration_digest, launch_contract_digest, run_root,
 };
 use crate::runtime::{RuntimeCapabilities, capabilities};
 use crate::specialist::ReviewerRuntimePlan;
@@ -370,13 +373,17 @@ pub(crate) struct PreparedReviewer {
     pub model: String,
     pub effort: String,
     pub profile_snapshot: crate::profile::ProfileSnapshot,
+    pub global_profile_binding: GlobalProfileBinding,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExternalAgentConfigurationInput {
     pub schema_version: u32,
+    #[serde(rename = "selected_profile", alias = "runtime_profile")]
     pub runtime_profile: String,
+    #[serde(default)]
+    pub global_profile_binding_sha256: Option<String>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub model: Option<String>,
     pub default_effort: String,
@@ -401,6 +408,7 @@ where
 pub(crate) struct PreparedExternalSpecialist {
     pub view: WorkspaceView,
     pub agent_configuration: AgentConfigurationSnapshot,
+    pub global_profile_binding: GlobalProfileBinding,
 }
 
 pub(crate) fn prepare_external_specialist(
@@ -408,7 +416,7 @@ pub(crate) fn prepare_external_specialist(
     role_ref: &str,
     input: ExternalAgentConfigurationInput,
 ) -> Result<PreparedExternalSpecialist, MachineError> {
-    if input.schema_version != 1
+    if input.schema_version != 2
         || input.required_assurance != "best_effort_personal_alpha"
         || input.native_subagent_policy != "enabled"
     {
@@ -435,7 +443,18 @@ pub(crate) fn prepare_external_specialist(
             "runtime profile does not match the checked pattern",
         ));
     }
-    let state = profile_server_state(&view, &input.runtime_profile)?;
+    let home = DolgoraeHome::system()?;
+    let global_profile_binding =
+        ResolvedGlobalProfile::resolve(&home, &input.runtime_profile)?.prepare(&home)?;
+    if let Some(expected) = &input.global_profile_binding_sha256
+        && expected != &global_profile_binding.digest()?
+    {
+        return Err(MachineError::invalid_argument(
+            "global_profile_binding_sha256",
+            "the requested global Profile binding has changed",
+        ));
+    }
+    let state = crate::profile::ensure_global_server(&global_profile_binding)?;
     let model = input.model.unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
         return Err(compatibility_rejected(
@@ -545,12 +564,10 @@ pub(crate) fn prepare_external_specialist(
         normalized_byte_length: input.instructions.len() as u64,
         normalized_sha256: sha256_hex(input.instructions.as_bytes()),
     };
-    let profile = run_profile_snapshot(&state.snapshot)?;
     let agent_configuration = AgentConfigurationSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         runtime_profile: input.runtime_profile,
-        runtime_profile_snapshot_sha256: runtime_profile_snapshot_digest(&profile)
-            .map_err(internal)?,
+        runtime_profile_snapshot_sha256: global_profile_binding.digest()?,
         model,
         default_effort: input.default_effort,
         purpose: Purpose {
@@ -568,6 +585,7 @@ pub(crate) fn prepare_external_specialist(
     Ok(PreparedExternalSpecialist {
         view,
         agent_configuration,
+        global_profile_binding,
     })
 }
 
@@ -577,13 +595,16 @@ pub(crate) fn prepare_reviewer(
     objective: &str,
 ) -> Result<PreparedReviewer, MachineError> {
     let view = WorkspaceService::system()?.discover(workspace)?;
-    let state = profile_server_state(&view, profile_name)?;
+    let home = DolgoraeHome::system()?;
+    let global_profile_binding =
+        ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare(&home)?;
+    let state = crate::profile::ensure_global_server(&global_profile_binding)?;
     let model = state.default_model.clone();
     let efforts = advertised_efforts(&state, profile_name, &model)?;
     let effort = default_effort(&efforts);
-    let profile_snapshot = state.snapshot.clone();
+    let profile_snapshot = global_profile_binding.launch_snapshot.clone();
     let profile = run_profile_snapshot(&profile_snapshot)?;
-    let plan = ReviewerRuntimePlan::resolve(
+    let mut plan = ReviewerRuntimePlan::resolve(
         &profile,
         ReviewerRuntimeRequest {
             runtime_profile: profile_name.to_owned(),
@@ -593,6 +614,8 @@ pub(crate) fn prepare_reviewer(
             required_capabilities: Vec::new(),
         },
     )?;
+    plan.agent_configuration.schema_version = 2;
+    plan.agent_configuration.runtime_profile_snapshot_sha256 = global_profile_binding.digest()?;
     let state_root = workspace_state_root(&view)?;
     Ok(PreparedReviewer {
         view,
@@ -601,6 +624,7 @@ pub(crate) fn prepare_reviewer(
         model,
         effort,
         profile_snapshot,
+        global_profile_binding,
     })
 }
 
@@ -1217,6 +1241,7 @@ pub(crate) struct ReviewerStartContext<'a> {
     pub aggregate_binding: &'a AggregateBinding,
     pub plan: &'a ReviewerRuntimePlan,
     pub review_cwd: Option<&'a Path>,
+    pub global_profile_binding: &'a GlobalProfileBinding,
 }
 
 pub(crate) fn start_reviewer_run(
@@ -1232,6 +1257,7 @@ pub(crate) struct ExternalSpecialistStartContext<'a> {
     pub agent_configuration: &'a AgentConfigurationSnapshot,
     pub launch_cwd: Option<&'a Path>,
     pub sandbox: &'a str,
+    pub global_profile_binding: &'a GlobalProfileBinding,
 }
 
 pub(crate) fn start_external_specialist_run(
@@ -1300,7 +1326,21 @@ fn run_start_with_context(
     // Checked before the reservation, not after it: a key this command would
     // refuse must never first become durable state under a Run identity.
     let idempotency_key = bounded_key(args, "--idempotency-key", 256)?;
-    let state = profile_server_state(&view, &profile_name)?;
+    let home = DolgoraeHome::system()?;
+    let global_profile_binding = if let Some(context) = reviewer {
+        context.global_profile_binding.clone()
+    } else if let Some(context) = external {
+        context.global_profile_binding.clone()
+    } else {
+        ResolvedGlobalProfile::resolve(&home, &profile_name)?.prepare(&home)?
+    };
+    if global_profile_binding.selected_name != profile_name {
+        return Err(MachineError::invalid_argument(
+            "--profile",
+            "the selected global Profile differs from the prepared consumer binding",
+        ));
+    }
+    let state = crate::profile::ensure_global_server(&global_profile_binding)?;
     let model = optional(args, "--model").unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
         return Err(compatibility_rejected(
@@ -1355,7 +1395,7 @@ fn run_start_with_context(
     }
 
     let state_root = workspace_state_root(&view)?;
-    let profile = run_profile_snapshot(&state.snapshot)?;
+    let profile = run_profile_snapshot(&global_profile_binding.launch_snapshot)?;
     // docs/specs/README.md: "Run allocation reserves its key before publishing a Run."
     // The normalization is decided here, before any Run identity exists, so a
     // retried allocation resolves to the same digest and therefore the same
@@ -1363,6 +1403,7 @@ fn run_start_with_context(
     let mut normalized_identity_sha256 = start_normalized_digest(
         &view,
         &profile,
+        &global_profile_binding,
         &binding,
         control_mode,
         execution_lane,
@@ -1466,6 +1507,11 @@ fn run_start_with_context(
         ));
     }
     let run_id = reservation.run_id;
+    GlobalMembershipStore::new(&home, &global_profile_binding.server_key)?.record(
+        &view.workspace_id,
+        run_id,
+        MembershipDisposition::Unknown,
+    )?;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     // The identical retry returns the original Run.  Reaching a published Run
     // through its own reservation is exactly the response-loss reconciliation
@@ -1473,7 +1519,7 @@ fn run_start_with_context(
     // — and because nothing here reached that Run's worker, the verdict is
     // derived from what durable state proves rather than asserted as `Match`.
     if store.load_manifest(run_id).is_ok() {
-        ensure_run_membership(workspace.as_deref(), &state, run_id)?;
+        ensure_global_run_membership(&home, &view.workspace_id, &global_profile_binding, run_id)?;
         return run_object(
             &state_root,
             run_id,
@@ -1487,6 +1533,7 @@ fn run_start_with_context(
         &view,
         &state,
         profile,
+        global_profile_binding.clone(),
         &model,
         &effort,
         &instructions_text,
@@ -1549,7 +1596,11 @@ fn run_start_with_context(
     // Membership is part of publishing the Run's connection authority, not a
     // later best-effort side effect.  The profile lifecycle must be able to
     // refuse stop/restart before the worker can attach to this server.
-    crate::profile::register_run_member(workspace.as_deref(), &state, &run_id.to_string())?;
+    GlobalMembershipStore::new(&home, &global_profile_binding.server_key)?.record(
+        &view.workspace_id,
+        run_id,
+        MembershipDisposition::Active,
+    )?;
 
     // Public Run allocation is deliberately threadless and process-free. The
     // first turn (or an explicit recovery/resume operation) wins the startup
@@ -1609,11 +1660,10 @@ fn run_start_with_context(
             session: Some(session),
         },
     ) {
-        let _ = crate::profile::release_run_member(
-            workspace.as_deref(),
-            &state,
-            &run_id.to_string(),
-            crate::profile::RunMemberRelease::Closed,
+        let _ = GlobalMembershipStore::new(&home, &global_profile_binding.server_key).and_then(
+            |membership| {
+                membership.record(&view.workspace_id, run_id, MembershipDisposition::Released)
+            },
         );
         return Err(error);
     }
@@ -1763,13 +1813,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         if verb == RunVerb::Close {
             let manifest =
                 RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
-            let _ = crate::profile::release_run_member_by_identity(
-                workspace.as_deref(),
-                &manifest.profile_capability_snapshot.profile_name,
-                &manifest.profile_capability_snapshot.server_key,
-                &run_id.to_string(),
-                crate::profile::RunMemberRelease::Closed,
-            );
+            let _ = release_global_run_membership(&manifest, run_id);
         }
         return Ok(result);
     }
@@ -1924,13 +1968,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         // failure (which would invite replay of an effect that already
         // happened). A live lifetime still receives the membership release;
         // an absent/replaced one has no server left for the member to gate.
-        let _ = crate::profile::release_run_member_by_identity(
-            workspace.as_deref(),
-            &manifest.profile_capability_snapshot.profile_name,
-            &manifest.profile_capability_snapshot.server_key,
-            &run_id.to_string(),
-            crate::profile::RunMemberRelease::Closed,
-        );
+        let _ = release_global_run_membership(&manifest, run_id);
     }
     Ok(value)
 }
@@ -3005,19 +3043,41 @@ fn handoff_value(handoff: &crate::writer::WriterHandoff, status: &str) -> Value 
     })
 }
 
-fn ensure_run_membership(
-    workspace: Option<&Path>,
-    state: &ServerState,
+fn ensure_global_run_membership(
+    home: &DolgoraeHome,
+    workspace_id: &str,
+    binding: &GlobalProfileBinding,
     run_id: Uuid,
 ) -> Result<(), MachineError> {
-    let run_id = run_id.to_string();
-    if !crate::profile::live_run_members(workspace, state)?
-        .iter()
-        .any(|member| member.run_id == run_id)
+    let store = GlobalMembershipStore::new(home, &binding.server_key)?;
+    let key = format!("{workspace_id}:{run_id}");
+    if store
+        .load()?
+        .members
+        .get(&key)
+        .is_none_or(|member| member.disposition != MembershipDisposition::Active)
     {
-        crate::profile::register_run_member(workspace, state, &run_id)?;
+        store.record(workspace_id, run_id, MembershipDisposition::Active)?;
     }
     Ok(())
+}
+
+fn release_global_run_membership(manifest: &RunManifest, run_id: Uuid) -> Result<(), MachineError> {
+    let binding = manifest.global_profile_binding.as_ref().ok_or_else(|| {
+        MachineError::new(
+            "LEGACY_STATE_UNSUPPORTED",
+            "legacy Run membership cannot be recovered after the global Profile cutover",
+            false,
+            json!({"run_id": run_id}),
+        )
+    })?;
+    GlobalMembershipStore::new(&DolgoraeHome::system()?, &binding.server_key)?
+        .record(
+            &manifest.workspace_id,
+            run_id,
+            MembershipDisposition::Released,
+        )
+        .map(|_| ())
 }
 
 /// Whether this failure means no worker answered, as opposed to a worker that
@@ -4079,33 +4139,6 @@ fn decode_response(bytes: &[u8], argument: &str) -> Result<Value, MachineError> 
         .map_err(|_| MachineError::invalid_argument(argument, "response is not JSON"))
 }
 
-fn profile_server_state(view: &WorkspaceView, profile: &str) -> Result<ServerState, MachineError> {
-    let workspace = view
-        .canonical_path
-        .to_path_buf()
-        .map_err(|_| internal("workspace path is not representable"))?;
-    let arguments = vec![
-        OsString::from("--workspace"),
-        workspace.into_os_string(),
-        OsString::from(profile),
-    ];
-    let status = crate::profile::execute(ProfileOperation::ServerStatus, &arguments)?;
-    let running = status
-        .get("lifecycle")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "running");
-    let document = if running {
-        status.get("state").cloned().unwrap_or(Value::Null)
-    } else {
-        crate::profile::execute(ProfileOperation::ServerStart, &arguments)?
-            .get("state")
-            .cloned()
-            .unwrap_or(Value::Null)
-    };
-    serde_json::from_value(document)
-        .map_err(|_| internal("profile server state is not the expected shape"))
-}
-
 /// Ask the profile's app-server which reasoning efforts the chosen model
 /// advertises.
 ///
@@ -4288,6 +4321,7 @@ fn default_effort(efforts: &[String]) -> String {
 fn start_normalized_digest(
     view: &WorkspaceView,
     profile: &ProfileSnapshot,
+    global_profile_binding: &GlobalProfileBinding,
     controller: &crate::run::ControllerBinding,
     control_mode: ControlMode,
     execution_lane: ExecutionLane,
@@ -4304,7 +4338,7 @@ fn start_normalized_digest(
         "workspace_id": view.workspace_id,
         "canonical_workspace": view.canonical_path,
         "profile": profile.profile_name,
-        "profile_snapshot_sha256": runtime_profile_snapshot_digest(profile).map_err(internal)?,
+        "global_profile_binding_sha256": global_profile_binding.digest()?,
         "controller_id": controller.identity.controller_id,
         "controller_generation": controller.identity.generation,
         "control_mode": control_mode.as_str(),
@@ -4344,6 +4378,7 @@ fn build_manifest(
     view: &WorkspaceView,
     state: &ServerState,
     profile: ProfileSnapshot,
+    global_profile_binding: GlobalProfileBinding,
     model: &str,
     effort: &str,
     instructions_text: &str,
@@ -4365,10 +4400,9 @@ fn build_manifest(
         normalized_sha256: sha256_hex(instructions_text.as_bytes()),
     };
     let agent_configuration = AgentConfigurationSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         runtime_profile: profile.profile_name.clone(),
-        runtime_profile_snapshot_sha256: runtime_profile_snapshot_digest(&profile)
-            .map_err(internal)?,
+        runtime_profile_snapshot_sha256: global_profile_binding.digest()?,
         model: model.to_owned(),
         default_effort: effort.to_owned(),
         purpose: purpose.clone(),
@@ -4381,7 +4415,7 @@ fn build_manifest(
         native_subagent_policy: "enabled".to_owned(),
     };
     Ok(RunManifest {
-        schema_version: 1,
+        schema_version: 2,
         run_id,
         workspace_id: view.workspace_id.clone(),
         canonical_workspace: view.canonical_path.clone(),
@@ -4437,7 +4471,7 @@ fn build_manifest(
         audit: AuditPolicy::default(),
         compatibility: CompatibilityVerdict::Accepted,
         profile,
-        global_profile_binding: None,
+        global_profile_binding: Some(global_profile_binding),
         agent_configuration,
     })
 }
@@ -4540,7 +4574,22 @@ fn ensure_run_worker(
     let manifest = store.load_manifest(run_id)?;
     let projection = store.load_state_projection(run_id)?;
     ensure_worker_spawn_lifecycle(run_id, projection.lifecycle)?;
-    let state = profile_server_state(view, &manifest.profile.profile_name)?;
+    let global_binding = manifest.global_profile_binding.as_ref().ok_or_else(|| {
+        MachineError::new(
+            "LEGACY_STATE_UNSUPPORTED",
+            "legacy Run recovery is unavailable after the global Profile cutover",
+            false,
+            json!({"run_id": run_id}),
+        )
+    })?;
+    global_binding.validate_for_recovery()?;
+    let state = crate::profile::ensure_global_server(global_binding)?;
+    ensure_global_run_membership(
+        &DolgoraeHome::system()?,
+        &view.workspace_id,
+        global_binding,
+        run_id,
+    )?;
     if state.snapshot.server_key != manifest.profile.initial_server_key {
         return Err(MachineError::new(
             "PROFILE_SERVER_EPOCH_MISMATCH",

@@ -476,6 +476,7 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                     agent_configuration: &prepared.agent_configuration,
                     launch_cwd: launch_cwd.as_deref(),
                     sandbox,
+                    global_profile_binding: &prepared.global_profile_binding,
                 },
             );
             let run_root = run_root(&state_root, reservation.specialist_run_id);
@@ -2268,8 +2269,9 @@ mod tests {
             "engagement_id":Uuid::now_v7(),
             "role_ref":"researcher",
             "agent_configuration":{
-                "schema_version":1,
-                "runtime_profile":"default",
+                "schema_version":2,
+                "selected_profile":"default",
+                "global_profile_binding_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "model":null,
                 "default_effort":"high",
                 "purpose":"research",

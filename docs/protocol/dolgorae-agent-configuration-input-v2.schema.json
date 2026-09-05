@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/agent-configuration-input/v2",
+  "title": "Dolgorae External Specialist Agent Configuration input v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "selected_profile", "model", "default_effort", "purpose",
+    "purpose_label", "required_capabilities", "instructions", "execution_lane",
+    "required_assurance", "native_subagent_policy"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "selected_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "global_profile_binding_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "model": { "type": ["string", "null"], "minLength": 1, "x-maxUtf8Bytes": 128 },
+    "default_effort": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 64 },
+    "purpose": { "enum": ["planning", "implementation", "review", "research", "discussion", "workflow_stage", "other"] },
+    "purpose_label": { "type": ["string", "null"], "x-maxUtf8Bytes": 256 },
+    "required_capabilities": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 } },
+    "instructions": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 65536 },
+    "execution_lane": { "enum": ["shared_readonly", "dedicated"] },
+    "required_assurance": { "const": "best_effort_personal_alpha" },
+    "native_subagent_policy": { "const": "enabled" }
+  },
+  "x-invariants": [
+    "selected_profile is resolved globally before Run allocation",
+    "when supplied, global_profile_binding_sha256 is an optimistic immutable-binding precondition",
+    "model null resolves before Run allocation"
+  ]
+}

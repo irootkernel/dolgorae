@@ -1,7 +1,4 @@
-//! Inactive global Profile runtime and immutable Run binding successor.
-//!
-//! TASK-037 completes this path without connecting it to production command
-//! dispatch. TASK-038 activates it together with every Profile consumer.
+//! Global Profile runtime, membership, and immutable Run binding.
 
 use crate::darwin::DarwinSystem;
 use crate::global_profile::GlobalProfileStore;
@@ -256,12 +253,25 @@ impl ResolvedGlobalProfile {
         self,
         launch_snapshot: ProfileSnapshot,
     ) -> Result<GlobalProfileBinding, MachineError> {
+        let mut expected_arguments = self
+            .definition
+            .argv
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !expected_arguments
+            .iter()
+            .any(|argument| argument == "--strict-config")
+        {
+            expected_arguments.push("--strict-config".to_owned());
+        }
+        expected_arguments.extend(["--enable".to_owned(), "multi_agent".to_owned()]);
         if self.schema_version != 1
             || self.definition_sha256 != canonical_digest(&self.definition)?
             || launch_snapshot.schema_version != 1
             || launch_snapshot.profile_name != self.selected_name
-            || self.definition.argv.len() != launch_snapshot.normalized_argv.len()
-            || self.definition.argv.get(1..) != launch_snapshot.normalized_argv.get(1..)
+            || launch_snapshot.normalized_argv.get(1..) != Some(expected_arguments.as_slice())
             || self
                 .definition
                 .environment
@@ -295,6 +305,10 @@ impl ResolvedGlobalProfile {
 }
 
 impl GlobalProfileBinding {
+    pub fn digest(&self) -> Result<String, MachineError> {
+        canonical_digest(self)
+    }
+
     /// Validate only persisted bytes. Recovery deliberately has no registry or
     /// caller-environment parameter and therefore cannot drift after admission.
     pub fn validate_for_recovery(&self) -> Result<(), MachineError> {
@@ -406,8 +420,12 @@ pub struct GlobalServerStateStore {
 
 impl GlobalServerStateStore {
     pub fn new(home: &DolgoraeHome, server_key: &str) -> Result<Self, MachineError> {
+        Self::from_root(home.root(), server_key)
+    }
+
+    pub(crate) fn from_root(root: &Path, server_key: &str) -> Result<Self, MachineError> {
         Ok(Self {
-            membership: GlobalMembershipStore::new(home, server_key)?,
+            membership: GlobalMembershipStore::from_root(root, server_key)?,
         })
     }
 
@@ -422,8 +440,10 @@ impl GlobalServerStateStore {
         let _lock = lock_file(&root.join("server.lock"))?;
         let path = root.join("state.json");
         let bytes = serde_json::to_vec_pretty(state).map_err(internal)?;
-        atomic_create(&SystemWorkspacePlatform, &path, &bytes, 0o600)
-            .map_err(|error| path_error(&path, error))?;
+        let temporary = root.join(format!(".state-{}.json", Uuid::now_v7()));
+        atomic_create(&SystemWorkspacePlatform, &temporary, &bytes, 0o600)
+            .map_err(|error| path_error(&temporary, error))?;
+        fs::rename(&temporary, &path).map_err(|error| path_error(&path, error))?;
         sync_directory(&root).map_err(|error| path_error(&root, error))?;
         Ok(path)
     }
@@ -484,9 +504,13 @@ pub fn remove_global_profile(home: &DolgoraeHome, selected_name: &str) -> Result
 
 impl GlobalMembershipStore {
     pub fn new(home: &DolgoraeHome, server_key: &str) -> Result<Self, MachineError> {
+        Self::from_root(home.root(), server_key)
+    }
+
+    pub(crate) fn from_root(root: &Path, server_key: &str) -> Result<Self, MachineError> {
         validate_server_key(server_key)?;
         Ok(Self {
-            home_root: home.root().to_path_buf(),
+            home_root: root.to_path_buf(),
             server_key: server_key.to_owned(),
         })
     }
@@ -597,6 +621,38 @@ impl GlobalMembershipStore {
         let root = self.ensure_root()?;
         let _lock = lock_file(&root.join("server.lock"))?;
         self.load_locked(&root)
+    }
+
+    /// Verify quiescence when the caller already holds this server key's
+    /// `server.lock` as part of the lifecycle lock hierarchy.
+    pub fn require_quiescent_under_server_lock(
+        &self,
+        profile: &str,
+        _operation: &str,
+    ) -> Result<GlobalMembershipIndex, MachineError> {
+        let root = self.home_root.join("profiles").join(&self.server_key);
+        verify_secure_directory(&root, DarwinSystem.current_uid())?;
+        let journal = root.join("membership.jsonl");
+        let records = replay(&journal, &self.server_key)?;
+        let index = derive_index(&self.server_key, &journal, &records)?;
+        let blockers = index
+            .members
+            .values()
+            .filter(|member| member.disposition != MembershipDisposition::Released)
+            .collect::<Vec<_>>();
+        if !blockers.is_empty() {
+            return Err(MachineError::new(
+                "PROFILE_MEMBERSHIP_INCOMPLETE",
+                "global Profile membership blocks the lifecycle operation",
+                false,
+                json!({
+                    "server_key": self.server_key,
+                    "profile": profile,
+                    "reason": format!("stopping this server would interrupt {} live run member(s)", blockers.len()),
+                }),
+            ));
+        }
+        Ok(index)
     }
 
     fn load_locked(&self, root: &Path) -> Result<GlobalMembershipIndex, MachineError> {
@@ -954,7 +1010,16 @@ mod tests {
             schema_version: 1,
             profile_name: name.to_owned(),
             canonical_codex_home: definition.codex_home.clone(),
-            normalized_argv: definition.argv.clone(),
+            normalized_argv: definition
+                .argv
+                .iter()
+                .cloned()
+                .chain([
+                    "--strict-config".to_owned(),
+                    "--enable".to_owned(),
+                    "multi_agent".to_owned(),
+                ])
+                .collect(),
             launch_cwd_policy: "profile_state_directory_v1".to_owned(),
             derived_launch_cwd: format!("/tmp/{key}"),
             sanitized_environment: definition.environment.clone(),

@@ -94,7 +94,7 @@ def main() -> int:
         raise ValueError(f"live scoped review failed with exit {completed.returncode}")
     envelope = json.loads(completed.stdout)
     resources = registry()
-    validate("dolgorae-machine-v1.schema.json", envelope, resources)
+    validate("dolgorae-machine-v2.schema.json", envelope, resources)
     result = envelope["data"]
     validate("dolgorae-specialist-review-tool-v2.schema.json", result, resources)
     observed = result["reviewer"]["executable"]

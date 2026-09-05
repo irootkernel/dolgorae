@@ -18,7 +18,6 @@ use std::process::{Command, Output, Stdio};
 
 const CONFIG_YAML: &[u8] = b"schema_version: 1\nmode: git\n";
 const NON_GIT_CONFIG_YAML: &[u8] = b"schema_version: 1\nmode: non_git\n";
-const LOCAL_YAML: &[u8] = b"schema_version: 1\nprofiles: {}\n";
 const PROJECT_IGNORE: &[u8] = b"/exports/\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -489,8 +488,8 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         self.require_state_separation(&canonical, &state_root)?;
         let policy_exists = fs::symlink_metadata(&policy_root).is_ok();
         let state_exists = fs::symlink_metadata(&state_root).is_ok();
-        if policy_exists || state_exists {
-            if !(policy_exists && state_exists) {
+        if state_exists {
+            if !policy_exists {
                 return Err(MachineError::initialization_conflict(
                     &canonical,
                     "partial workspace layout",
@@ -507,6 +506,25 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
                 )
                 .map_err(|error| reinitialization_error(&canonical, error))?;
             return Ok(view_from_record(record, false));
+        }
+
+        if policy_exists {
+            self.validate_portable_policy(&canonical, mode, &policy_root)
+                .map_err(|error| reinitialization_error(&canonical, error))?;
+            let baseline = match mode {
+                WorkspaceMode::Git => self.capture_git_baseline(&canonical)?,
+                WorkspaceMode::NonGit => GitBaseline::empty(),
+            };
+            self.create_machine_layout(&canonical, mode, &workspace_id, &state_root, baseline)?;
+            let record = self.validate_existing(
+                &canonical,
+                mode,
+                &workspace_id,
+                &policy_root,
+                &state_root,
+                false,
+            )?;
+            return Ok(view_from_record(record, true));
         }
 
         let baseline = match mode {
@@ -762,9 +780,10 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
 
     fn reject_nested_workspace(&self, canonical: &Path) -> Result<(), MachineError> {
         if let Some(parent) = canonical.parent()
-            && let Some(owner) = parent
-                .ancestors()
-                .find(|candidate| candidate.join(".dolgorae").is_dir())
+            && let Some(owner) = parent.ancestors().find(|candidate| {
+                let marker = candidate.join(".dolgorae");
+                marker.is_dir() && marker != self.dolgorae_home_root
+            })
         {
             return Err(MachineError::initialization_conflict(
                 canonical,
@@ -860,6 +879,17 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         )
         .map_err(|error| MachineError::initialization_conflict(canonical, error.to_string()))?;
 
+        self.create_machine_layout(canonical, mode, workspace_id, state_root, baseline)
+    }
+
+    fn create_machine_layout(
+        &self,
+        canonical: &Path,
+        mode: WorkspaceMode,
+        workspace_id: &str,
+        state_root: &Path,
+        baseline: GitBaseline,
+    ) -> Result<(), MachineError> {
         self.create_state_parents(state_root)?;
         for relative in [
             "specialist-policies",
@@ -875,13 +905,6 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
             })?;
         }
         self.require_local_apfs(state_root)?;
-        atomic_create(
-            &self.platform,
-            &state_root.join("local.yaml"),
-            LOCAL_YAML,
-            0o600,
-        )
-        .map_err(|error| MachineError::initialization_conflict(canonical, error.to_string()))?;
         let record = WorkspaceRecord {
             schema_version: 1,
             workspace_id: workspace_id.to_owned(),
@@ -913,6 +936,36 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
             .map_err(|error| MachineError::initialization_conflict(canonical, error.to_string()))
     }
 
+    fn validate_portable_policy(
+        &self,
+        canonical: &Path,
+        mode: WorkspaceMode,
+        policy_root: &Path,
+    ) -> Result<(), MachineError> {
+        let metadata = fs::symlink_metadata(policy_root)
+            .map_err(|error| MachineError::initialization_conflict(canonical, error.to_string()))?;
+        if !metadata.file_type().is_dir() {
+            return Err(MachineError::initialization_conflict(
+                canonical,
+                "portable policy root is not a directory",
+            ));
+        }
+        let policy = parse_portable_policy(&policy_root.join("config.yaml"))?;
+        if policy.schema_version != 1 || policy.mode != mode {
+            return Err(MachineError::initialization_conflict(
+                canonical,
+                "portable policy mode or schema differs",
+            ));
+        }
+        if read_bounded(&policy_root.join(".gitignore"), 4096)? != PROJECT_IGNORE {
+            return Err(MachineError::initialization_conflict(
+                canonical,
+                "portable policy files are incompatible",
+            ));
+        }
+        Ok(())
+    }
+
     fn create_state_parents(&self, state_root: &Path) -> Result<(), MachineError> {
         let mut current = self.dolgorae_home_root.clone();
         if !current.exists() {
@@ -942,7 +995,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         workspace_id: &str,
         policy_root: &Path,
         state_root: &Path,
-        validate_profiles: bool,
+        _validate_profiles: bool,
     ) -> Result<WorkspaceRecord, MachineError> {
         let policy_metadata = fs::symlink_metadata(policy_root).map_err(|error| {
             MachineError::initialization_conflict(
@@ -960,7 +1013,6 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
             policy_root.join("config.yaml"),
             policy_root.join(".gitignore"),
             state_root.join("workspace.json"),
-            state_root.join("local.yaml"),
             state_root.join("specialist-policies"),
             state_root.join("runs"),
             state_root.join("runtime"),
@@ -1008,10 +1060,6 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
             &state_root.join("workspace.json"),
             self.platform.current_uid(),
         )?;
-        verify_secure_file(&state_root.join("local.yaml"), self.platform.current_uid())?;
-        if validate_profiles {
-            parse_local_profiles(&state_root.join("local.yaml"))?;
-        }
         let record_bytes = read_bounded(&state_root.join("workspace.json"), 1024 * 1024)?;
         let record_text = std::str::from_utf8(&record_bytes).map_err(|error| {
             MachineError::config_invalid(state_root.join("workspace.json"), error.to_string())

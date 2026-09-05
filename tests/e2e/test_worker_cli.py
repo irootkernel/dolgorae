@@ -1237,7 +1237,7 @@ def validate_run_cli(binary: pathlib.Path) -> None:
     argv, so the runtime-record discovery, the SCM_RIGHTS credential send, and
     the published envelope shapes are all executed rather than assumed.
     """
-    machine_schema = validator(pathlib.Path("docs/protocol").resolve(), "dolgorae-machine-v1.schema.json")
+    machine_schema = validator(pathlib.Path("docs/protocol").resolve(), "dolgorae-machine-v2.schema.json")
     home = pathlib.Path(os.environ["HOME"])
     state_home = home / ".dolgorae" / "workspaces"
     with tempfile.TemporaryDirectory(prefix="dolgorae-epic002-runcli-") as temporary:
@@ -1784,7 +1784,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
     --fresh` register live members without publishing workers; `profile server
     stop` refuses them until their threadless close releases both memberships.
     """
-    machine_schema = validator(REPOSITORY / "docs" / "protocol", "dolgorae-machine-v1.schema.json")
+    machine_schema = validator(REPOSITORY / "docs" / "protocol", "dolgorae-machine-v2.schema.json")
     schema_source = native_codex.installed_codex()
     scenario = native_codex.scenario_path("run_start_model_list.json")
     with tempfile.TemporaryDirectory(prefix="dolgorae-epic002-runstart-") as temporary:
@@ -1843,9 +1843,12 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
 
         def membership_records() -> int:
             verified = data(
-                ["profile", "membership", "verify", "default", *owned], checked=False
+                ["profile", "membership", "verify", "default"], checked=False
             )
-            return int(verified["records"])
+            return sum(
+                member["disposition"] != "released"
+                for member in verified["members"]  # type: ignore[union-attr]
+            )
 
         codex = bin_root / "codex"
         transcript = root / "app-server-transcript.jsonl"
@@ -1861,7 +1864,6 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 "profile",
                 "add",
                 "default",
-                *owned,
                 "--codex-home",
                 str(codex_home),
                 "--native-subagents",
@@ -1888,7 +1890,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             # The singleton is started explicitly so the probe's own walk is
             # attributable: everything the Run resolves later is a second and
             # third walk over the same paginated catalogue.
-            state = data(["profile", "server", "start", "default", *owned], checked=False)[
+            state = data(["profile", "server", "start", "default"], checked=False)[
                 "state"
             ]
             if not isinstance(state, dict):
@@ -1905,8 +1907,8 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 raise AssertionError(f"the paginated default model was lost: {state!r}")
             if state["capabilities"]["model_list"] != "supported":  # type: ignore[index]
                 raise AssertionError(f"model_list was not proven by the walk: {state!r}")
-            if membership_records() != 1:
-                raise AssertionError("a fresh server published more than its own start record")
+            if membership_records() != 0:
+                raise AssertionError("a fresh server published Run membership")
 
             credential = root / "controller.json"
             data(
@@ -1961,7 +1963,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 raise AssertionError(f"the started Run lost its identity: {accepted!r}")
             if accepted["execution_lane"] != "shared_readonly" or accepted["thread_id"] is not None:
                 raise AssertionError(f"a freshly started Run claimed a Thread: {accepted!r}")
-            if membership_records() != 2:
+            if membership_records() != 1:
                 raise AssertionError("the started Run was not registered as a member")
 
             forked = data(
@@ -1986,7 +1988,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 or forked["lineage"]["source_run_id"] != started[0]  # type: ignore[index]
             ):
                 raise AssertionError(f"fresh fork copied source history: {forked!r}")
-            if membership_records() != 3:
+            if membership_records() != 2:
                 raise AssertionError("the fresh fork was not registered as a member")
 
             runtime_record = state_root / "runtime" / "runs" / f"{started[0]}.json"
@@ -2252,7 +2254,6 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 "server",
                 "stop",
                 "default",
-                *owned,
                 "--operator-file",
                 str(operator),
             ]
@@ -2291,7 +2292,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             )
             if destination_closed["state"] != "closed":
                 raise AssertionError(f"writer destination did not close: {destination_closed!r}")
-            if membership_records() != 11:
+            if membership_records() != 0:
                 raise AssertionError("a successful close did not release the membership")
             # The same stop, unchanged, now that the member is gone.
             if data(stop, checked=False)["stopped"] is not True:
@@ -2341,7 +2342,6 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                     "server",
                     "stop",
                     "default",
-                    *owned,
                     "--operator-file",
                     str(operator),
                     "--interrupt",

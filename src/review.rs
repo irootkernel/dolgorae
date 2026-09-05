@@ -368,6 +368,7 @@ pub fn execute(
                         aggregate_binding: binding,
                         plan,
                         review_cwd: None,
+                        global_profile_binding: &prepared.global_profile_binding,
                     },
                 ) {
                     Ok(_) => RuntimeOutcome::Accepted,
@@ -655,6 +656,7 @@ pub fn execute_scoped(
                         aggregate_binding: binding,
                         plan,
                         review_cwd: Some(&capture_root),
+                        global_profile_binding: &prepared.global_profile_binding,
                     },
                 ) {
                     Ok(_) => RuntimeOutcome::Accepted,

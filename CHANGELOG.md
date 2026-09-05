@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- User-global Codex Profiles with explicit per-Run selection, immutable Run
+  bindings, cross-workspace server membership, and fail-closed legacy-home
+  detection.
 - Reusable externally planned Specialist Engagements with multiple durable
   members, sequential tasks, reconnect-safe idempotency, result redelivery,
   isolated-change artifacts, and Writer-authorized canonical work.
@@ -25,6 +28,9 @@ development commits.
 
 ### Changed
 
+- Workspace initialization is account-neutral, Profile commands no longer
+  accept workspace scope, and both Specialist entry paths use the selected
+  global Profile through versioned machine-readable contracts.
 - Changed `version`, `--version`, and `-V` to compact `dolgorae v<version>`
   output and added exact two-field JSON through `version --json`.
 - Run and profile recovery now require four-verdict Darwin process identity

@@ -221,8 +221,13 @@ fn global_profile_manifest_v2_is_complete_and_recoverable_without_registry() {
     make_dir(&state_root);
     make_dir(&state_root.join("runs"));
     let mut manifest = sample_manifest();
+    manifest
+        .profile
+        .normalized_argv
+        .extend(["--enable".to_owned(), "multi_agent".to_owned()]);
+    manifest.profile.launch_contract_sha256 = launch_contract_digest(&manifest.profile).unwrap();
     let definition = RuntimeProfile {
-        argv: manifest.profile.normalized_argv.clone(),
+        argv: manifest.profile.normalized_argv[..2].to_vec(),
         codex_home: manifest.profile.canonical_codex_home.clone(),
         environment: manifest.profile.sanitized_environment.clone(),
         native_subagents: NativeSubagents::Enabled,
@@ -269,6 +274,13 @@ fn global_profile_manifest_v2_is_complete_and_recoverable_without_registry() {
             .bind(snapshot)
             .unwrap(),
     );
+    manifest.agent_configuration.schema_version = 2;
+    manifest.agent_configuration.runtime_profile_snapshot_sha256 = manifest
+        .global_profile_binding
+        .as_ref()
+        .unwrap()
+        .digest()
+        .unwrap();
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     store.publish(&manifest).unwrap();
     let recovered = store.load_manifest(manifest.run_id).unwrap();

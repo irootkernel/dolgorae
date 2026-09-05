@@ -1,8 +1,4 @@
-//! Inactive successor contract for global Codex Profiles.
-//!
-//! TASK-036 deliberately does not connect this module to production command
-//! dispatch. TASK-038 activates it only after every Run and Specialist
-//! consumer is ready for the same hard-cut home generation.
+//! Global Codex Profile registry and hard-cut home generation contract.
 
 use crate::darwin::DarwinSystem;
 use crate::machine::MachineError;
@@ -53,8 +49,12 @@ pub struct GlobalProfileStore {
 impl GlobalProfileStore {
     #[must_use]
     pub fn new(home: &DolgoraeHome) -> Self {
+        Self::from_root(home.root())
+    }
+
+    pub(crate) fn from_root(root: &Path) -> Self {
         Self {
-            root: home.root().to_path_buf(),
+            root: root.to_path_buf(),
         }
     }
 
@@ -164,6 +164,17 @@ pub fn inspect_generation(home: &DolgoraeHome) -> Result<HomeGenerationStatus, M
     inspect_root(home.root())
 }
 
+/// Require the active global-Profile home generation before any stateful
+/// production command observes workspace or runtime state.
+pub fn require_generation(home: &DolgoraeHome) -> Result<(), MachineError> {
+    match inspect_root(home.root())? {
+        HomeGenerationStatus::GlobalProfileV1 => Ok(()),
+        HomeGenerationStatus::Uninitialized => {
+            Err(legacy_state_unsupported(home.root(), "uninitialized"))
+        }
+    }
+}
+
 pub fn initialize_generation(home: &DolgoraeHome) -> Result<bool, MachineError> {
     let root = home.root();
     if !root.exists() {
@@ -179,6 +190,13 @@ pub fn initialize_generation(home: &DolgoraeHome) -> Result<bool, MachineError> 
     let created = match inspect_root(root)? {
         HomeGenerationStatus::GlobalProfileV1 => false,
         HomeGenerationStatus::Uninitialized => {
+            store_registry(
+                root,
+                &GlobalProfileRegistry {
+                    schema_version: 1,
+                    profiles: BTreeMap::new(),
+                },
+            )?;
             atomic_create(
                 &SystemWorkspacePlatform,
                 &root.join("state.json"),
@@ -197,15 +215,6 @@ pub fn initialize_generation(home: &DolgoraeHome) -> Result<bool, MachineError> 
             true
         }
     };
-    if !root.join("profiles.yaml").exists() {
-        store_registry(
-            root,
-            &GlobalProfileRegistry {
-                schema_version: 1,
-                profiles: BTreeMap::new(),
-            },
-        )?;
-    }
     Ok(created)
 }
 
@@ -239,6 +248,9 @@ fn inspect_root(root: &Path) -> Result<HomeGenerationStatus, MachineError> {
         .map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?;
     if state.schema_version != 1 || state.state_generation != "global-profile-v1" {
         return Err(legacy_state_unsupported(root, "unsupported_generation"));
+    }
+    if !root.join("profiles.yaml").exists() {
+        return Err(legacy_state_unsupported(root, "partial_generation"));
     }
     if contains_legacy_registry(root)? {
         return Err(legacy_state_unsupported(root, "mixed_generation"));
@@ -568,6 +580,17 @@ mod tests {
             inspect_generation(&home).unwrap_err().code,
             "RUNTIME_PATH_INVALID"
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn a_marker_without_its_global_registry_is_partial_generation_state() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        fs::remove_file(home.root().join("profiles.yaml")).unwrap();
+        let error = inspect_generation(&home).unwrap_err();
+        assert_eq!(error.code, "LEGACY_STATE_UNSUPPORTED");
+        assert_eq!(error.details["classification"], "partial_generation");
         fs::remove_dir_all(parent).unwrap();
     }
 }

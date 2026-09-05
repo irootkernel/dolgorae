@@ -104,7 +104,7 @@ def add_profile(
         binary,
         home,
         [
-            "profile", "add", name, "--workspace", str(workspace),
+            "profile", "add", name,
             "--codex-home", str(codex_home), "--native-subagents", "enabled",
             "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",

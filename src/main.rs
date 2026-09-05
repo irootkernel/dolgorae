@@ -142,6 +142,25 @@ fn execute(cli: Cli) -> ExitCode {
         }
         return render_version(args.json);
     }
+    if !matches!(
+        &cli.command,
+        Command::Runtime {
+            command: RuntimeCommand::Capabilities
+        }
+    ) {
+        let home = match dolgorae::paths::DolgoraeHome::system() {
+            Ok(home) => home,
+            Err(error) => return render_failure(cli.human, command_name, error.into()),
+        };
+        let generation = if matches!(&cli.command, Command::Init(_)) {
+            dolgorae::global_profile::initialize_generation(&home).map(|_| ())
+        } else {
+            dolgorae::global_profile::require_generation(&home)
+        };
+        if let Err(error) = generation {
+            return render_failure(cli.human, command_name, error);
+        }
+    }
     if let Command::SpecialistReviewMcp(args) = &cli.command {
         return match dolgorae::mcp_review_server::serve_stdio(&args.workspace, &args.profile) {
             Ok(()) => ExitCode::SUCCESS,
@@ -372,7 +391,7 @@ fn execute(cli: Cli) -> ExitCode {
                 (dolgorae::profile::ProfileOperation::Events, &args.args)
             }
         };
-        return match dolgorae::profile::execute(operation, arguments) {
+        return match dolgorae::profile::execute_global(operation, arguments) {
             Ok(data) => {
                 if cli.human {
                     println!(

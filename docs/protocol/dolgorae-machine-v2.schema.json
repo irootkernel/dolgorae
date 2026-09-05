@@ -63,11 +63,30 @@
               "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
             },
             "data": {
-              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/data"
+              "oneOf": [
+                { "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/data" },
+                { "$ref": "#/$defs/global_membership_verification" }
+              ]
             }
           }
         }
       ]
+    },
+    "global_membership_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "server_key", "complete", "revision", "records", "members"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "server_key": { "$ref": "https://dolgorae.local/schema/profile-membership/v2#/$defs/sha256" },
+        "complete": { "const": true },
+        "revision": { "type": "integer", "minimum": 0 },
+        "records": { "type": "integer", "minimum": 0 },
+        "members": {
+          "type": "array",
+          "items": { "$ref": "https://dolgorae.local/schema/profile-membership/v2#/$defs/record" }
+        }
+      }
     },
     "failure": {
       "allOf": [

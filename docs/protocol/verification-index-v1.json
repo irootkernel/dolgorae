@@ -59,7 +59,8 @@
         "TASK-011",
         "TASK-012",
         "TASK-036",
-        "TASK-037"
+        "TASK-037",
+        "TASK-038"
       ],
       "catches": [
         "strict machine-local Runtime Profile registry schema and initial empty registry",
@@ -179,7 +180,8 @@
         "TASK-031",
         "TASK-032",
         "TASK-036",
-        "TASK-037"
+        "TASK-037",
+        "TASK-038"
       ],
       "catches": [
         "machine and protobuf envelopes",

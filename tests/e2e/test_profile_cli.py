@@ -154,12 +154,8 @@ def set_mode(path: pathlib.Path, *, version: str = "0.149.0", schema: str = "ok"
     )
 
 
-def add_arguments(
-    workspace: pathlib.Path, codex_home: pathlib.Path, executable: pathlib.Path
-) -> list[str]:
+def add_arguments(codex_home: pathlib.Path, executable: pathlib.Path) -> list[str]:
     return [
-        "--workspace",
-        str(workspace),
         "--codex-home",
         str(codex_home),
         "--native-subagents",
@@ -191,7 +187,7 @@ def append_membership(
     that call would have written. Doing it here keeps the gate under test the
     product's own replay and index derivation rather than a stub.
     """
-    journal = profile_root / "membership.jsonl"
+    journal = profile_root / "runtime-membership.jsonl"
     records = [
         json.loads(line)
         for line in journal.read_text(encoding="utf-8").splitlines()
@@ -221,7 +217,7 @@ def append_membership(
             active[identity] = entry
         elif entry["kind"] in ("run_removed", "run_closed", "tombstone_orphan", "run_migrated"):
             active.pop(identity, None)
-    index_path = profile_root / "members.json"
+    index_path = profile_root / "runtime-members.json"
     index_path.write_text(
         json.dumps(
             {
@@ -235,7 +231,7 @@ def append_membership(
     )
     index_path.chmod(0o600)
 
-    state_path = profile_root / "state.json"
+    state_path = profile_root / "runtime-state.json"
     if state_path.is_file():
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["membership_revision"] = revision
@@ -245,7 +241,7 @@ def append_membership(
 
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
-    machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
+    machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     real_codex = native_codex.installed_codex()
 
     with tempfile.TemporaryDirectory(prefix="dolgorae-task005-") as temporary:
@@ -260,23 +256,35 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         initialized = run(binary, home, "init", str(workspace))
         if initialized.returncode != 0:
             raise AssertionError(f"workspace init failed: {initialized.stdout}")
+        workspace_id = envelope(initialized)["data"]["workspace_id"]
+
+        workspace_scoped = run(
+            binary, home, "profile", "list", "--workspace", str(workspace)
+        )
+        if (
+            workspace_scoped.returncode != 2
+            or envelope(workspace_scoped)["error"]["code"] != "INVALID_ARGUMENT"
+        ):
+            raise AssertionError(
+                f"profile command accepted removed workspace scope: {workspace_scoped.stdout}"
+            )
 
         fake = bin_root / "codex"
         create_fake_codex(fake, real_codex)
         set_mode(fake)
-        added = run(binary, home, "profile", "add", "default", *add_arguments(workspace, codex_home, fake))
+        added = run(binary, home, "profile", "add", "default", *add_arguments(codex_home, fake))
         added_envelope = envelope(added)
         if added.returncode != 0 or added_envelope["data"]["name"] != "default":
             raise AssertionError(f"profile add failed: {added.stdout}")
         assert_valid(added_envelope, machine, "profile-add Machine envelope")
-        registry_path = next((home / ".dolgorae" / "workspaces").glob("*/local.yaml"))
+        registry_path = home / ".dolgorae" / "profiles.yaml"
         if stat.S_IMODE(registry_path.stat().st_mode) != 0o600:
             raise AssertionError("profile registry mode is not 0600")
 
         # `profile show` never executes the profile, so its closed capability
         # snapshot must always be the explicit-unverified baseline: present,
         # complete, and never fabricated as supported.
-        shown = envelope(run(binary, home, "profile", "show", "default", "--workspace", str(workspace)))
+        shown = envelope(run(binary, home, "profile", "show", "default"))
         assert_valid(shown, machine, "profile-show Machine envelope")
         shown_capabilities = shown["data"]["capabilities"]
         if set(shown_capabilities) != CLOSED_CAPABILITY_NAMES:
@@ -284,7 +292,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if any(state != "unverified" for state in shown_capabilities.values()):
             raise AssertionError(f"profile show fabricated a non-unverified capability: {shown_capabilities}")
 
-        duplicate = run(binary, home, "profile", "add", "default", *add_arguments(workspace, codex_home, fake))
+        duplicate = run(binary, home, "profile", "add", "default", *add_arguments(codex_home, fake))
         if duplicate.returncode != 4 or envelope(duplicate)["error"]["code"] != "PROFILE_ALREADY_EXISTS":
             raise AssertionError(f"duplicate profile was not rejected: {duplicate.stdout}")
 
@@ -298,7 +306,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         scripted = script_root / "codex"
         create_script_codex(scripted)
         script_add = run(
-            binary, home, "profile", "add", "scripted", *add_arguments(workspace, codex_home, scripted)
+            binary, home, "profile", "add", "scripted", *add_arguments(codex_home, scripted)
         )
         script_envelope = envelope(script_add)
         if script_add.returncode != 3 or script_envelope["error"]["code"] != "PROFILE_CONFIG_INVALID":
@@ -318,7 +326,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "profile",
             "add",
             "wrapped",
-            *add_arguments(workspace, codex_home, wrapper_root / "codex"),
+            *add_arguments(codex_home, wrapper_root / "codex"),
         )
         if (
             wrapper_add.returncode != 3
@@ -326,16 +334,16 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         ):
             raise AssertionError(f"a wrapper argv[0] was accepted: {wrapper_add.stdout}")
 
-        reserved = add_arguments(workspace, codex_home, fake)
+        reserved = add_arguments(codex_home, fake)
         reserved.extend(["--enable", "multi_agent"])
         rejected = run(binary, home, "profile", "add", "reserved", *reserved)
         if rejected.returncode != 3 or envelope(rejected)["error"]["code"] != "PROFILE_CONFIG_INVALID":
             raise AssertionError(f"reserved native flag was not rejected: {rejected.stdout}")
-        listed = envelope(run(binary, home, "profile", "list", "--workspace", str(workspace)))
+        listed = envelope(run(binary, home, "profile", "list"))
         if [profile["name"] for profile in listed["data"]["profiles"]] != ["default"]:
             raise AssertionError("failed profile add changed the registry")
 
-        exact = run(binary, home, "profile", "doctor", "default", "--workspace", str(workspace))
+        exact = run(binary, home, "profile", "doctor", "default")
         exact_envelope = envelope(exact)
         if exact.returncode != 0:
             raise AssertionError(f"exact compatibility failed: {exact.stdout}")
@@ -359,8 +367,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "profile",
             "doctor",
             "default",
-            "--workspace",
-            str(workspace),
         )
         if newer.returncode != 0 or envelope(newer)["data"]["compatibility"] != "unverified":
             raise AssertionError(f"newer compatible version failed: {newer.stdout}")
@@ -372,8 +378,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "profile",
             "doctor",
             "default",
-            "--workspace",
-            str(workspace),
         )
         if older.returncode != 0 or envelope(older)["data"]["compatibility"] != "rejected":
             raise AssertionError(f"older version was not rejected: {older.stdout}")
@@ -385,8 +389,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "profile",
             "doctor",
             "default",
-            "--workspace",
-            str(workspace),
         )
         if missing.returncode != 0 or envelope(missing)["data"]["compatibility"] != "rejected":
             raise AssertionError(f"missing schema field was not rejected: {missing.stdout}")
@@ -398,8 +400,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "profile",
             "doctor",
             "default",
-            "--workspace",
-            str(workspace),
             "--launch-probe",
         )
         launched_envelope = envelope(launched)
@@ -472,8 +472,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "state",
             "reset",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
             "--operator-fd",
@@ -489,7 +487,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             )
         assert_valid(conflicting_carriers_envelope, machine, "conflicting-operator-carrier Machine envelope")
 
-        started = run(binary, home, "profile", "server", "start", "default", "--workspace", str(workspace))
+        started = run(binary, home, "profile", "server", "start", "default")
         started_data = envelope(started)["data"]
         if started.returncode != 0 or started_data["state"]["lifecycle"] != "ready":
             raise AssertionError(f"server start failed: {started.stdout}")
@@ -505,8 +503,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "state",
             "reset",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
             "--confirm-server-key",
@@ -522,7 +518,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"state reset of a running server was not rejected: {busy_reset.stdout}")
         assert_valid(busy_reset_envelope, machine, "state-reset-while-running Machine envelope")
 
-        status = envelope(run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace)))
+        status = envelope(run(binary, home, "profile", "server", "status", "default"))
         if status["data"]["lifecycle"] != "ready":
             raise AssertionError("server status did not reconnect to the singleton")
         assert_valid(status, machine, "profile-server-status Machine envelope")
@@ -530,7 +526,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # A Run registered as a live member of this server must not be
         # interrupted by an ordinary stop. Until registration existed the live
         # member set was always empty and every membership gate was vacuous.
-        workspace_id = registry_path.parent.name
         append_membership(profile_root, "run_registered", workspace_id, "run-live-member")
         gated_stop = run(
             binary,
@@ -539,8 +534,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "server",
             "stop",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
         )
@@ -565,8 +558,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "server",
             "stop",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
             "--interrupt",
@@ -584,8 +575,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 "diagnostics",
                 "list",
                 "default",
-                "--workspace",
-                str(workspace),
                 "--projection",
                 "operational",
                 "--operator-file",
@@ -607,20 +596,20 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # matrix, which needs a running old server to migrate away from.
         append_membership(profile_root, "run_closed", workspace_id, "run-live-member")
         restarted = run(
-            binary, home, "profile", "server", "start", "default", "--workspace", str(workspace)
+            binary, home, "profile", "server", "start", "default"
         )
         if restarted.returncode != 0 or envelope(restarted)["data"]["state"]["lifecycle"] != "ready":
             raise AssertionError(f"server restart after the interrupt failed: {restarted.stdout}")
         assert_valid(envelope(restarted), machine, "profile-server-restart Machine envelope")
         ungated_members = envelope(
-            run(binary, home, "profile", "membership", "verify", "default", "--workspace", str(workspace))
+            run(binary, home, "profile", "membership", "verify", "default")
         )["data"]
         if ungated_members["complete"] is not True:
             raise AssertionError(
                 f"releasing the member left the journal incomplete: {ungated_members}"
             )
 
-        conflicting_arguments = add_arguments(workspace, codex_home, fake)
+        conflicting_arguments = add_arguments(codex_home, fake)
         conflicting_arguments[conflicting_arguments.index("LANG=en_US.UTF-8")] = "LANG=C"
         conflicting_arguments[conflicting_arguments.index("LC_ALL=en_US.UTF-8")] = "LC_ALL=C"
         conflicting_add = run(binary, home, "profile", "add", "conflict", *conflicting_arguments)
@@ -631,7 +620,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # contract. It must never migrate an unrelated, already-running
         # singleton and then tear the replacement down as probe cleanup.
         old_state = envelope(
-            run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace))
+            run(binary, home, "profile", "server", "status", "default")
         )["data"]["state"]
         conflicting_probe = run(
             binary,
@@ -639,8 +628,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "profile",
             "doctor",
             "conflict",
-            "--workspace",
-            str(workspace),
             "--launch-probe",
         )
         if (
@@ -649,7 +636,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         ):
             raise AssertionError(f"diagnostic probe crossed the active contract: {conflicting_probe.stdout}")
         probe_preserved = envelope(
-            run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace))
+            run(binary, home, "profile", "server", "status", "default")
         )["data"]["state"]
         if probe_preserved["pid"] != old_state["pid"]:
             raise AssertionError("diagnostic launch probe replaced the existing singleton")
@@ -659,7 +646,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # active contract untouched.
         append_membership(profile_root, "run_registered", workspace_id, "run-rollover-blocker")
         conflicting_start = run(
-            binary, home, "profile", "server", "start", "conflict", "--workspace", str(workspace)
+            binary, home, "profile", "server", "start", "conflict"
         )
         if (
             conflicting_start.returncode != 4
@@ -667,7 +654,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         ):
             raise AssertionError(f"live same-home singleton was not preserved: {conflicting_start.stdout}")
         preserved = envelope(
-            run(binary, home, "profile", "server", "status", "default", "--workspace", str(workspace))
+            run(binary, home, "profile", "server", "status", "default")
         )["data"]["state"]
         if preserved["pid"] != old_state["pid"] or preserved["server_key"] != old_state["server_key"]:
             raise AssertionError("failed automatic rollover changed the live source server")
@@ -677,7 +664,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # generation without an operator credential.
         append_membership(profile_root, "run_closed", workspace_id, "run-rollover-blocker")
         conflicting_start = run(
-            binary, home, "profile", "server", "start", "conflict", "--workspace", str(workspace)
+            binary, home, "profile", "server", "start", "conflict"
         )
         conflicting_data = envelope(conflicting_start)["data"] if conflicting_start.returncode == 0 else {}
         if conflicting_start.returncode != 0 or conflicting_data["state"]["lifecycle"] != "ready":
@@ -689,7 +676,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # Returning to the original profile exercises a second automatic
         # rollover and proves the committed migration fence is reusable.
         returned = run(
-            binary, home, "profile", "server", "start", "default", "--workspace", str(workspace)
+            binary, home, "profile", "server", "start", "default"
         )
         returned_data = envelope(returned)["data"] if returned.returncode == 0 else {}
         if returned.returncode != 0 or returned_data["state"]["server_key"] != exact_data["server_key"]:
@@ -697,14 +684,14 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(envelope(returned), machine, "quiescent-rollover-return Machine envelope")
 
         conflicting_remove = run(
-            binary, home, "profile", "remove", "conflict", "--workspace", str(workspace)
+            binary, home, "profile", "remove", "conflict"
         )
         if conflicting_remove.returncode != 0:
             raise AssertionError(f"conflict profile cleanup failed: {conflicting_remove.stdout}")
 
         set_mode(fake, version="0.150.0")
         migrated_snapshot = envelope(
-            run(binary, home, "profile", "doctor", "default", "--workspace", str(workspace))
+            run(binary, home, "profile", "doctor", "default")
         )["data"]
         migrated = run(
             binary,
@@ -713,8 +700,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "server",
             "migrate",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
             "--confirm-old-server-key",
@@ -733,8 +718,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 "server",
                 "stop",
                 "default",
-                "--workspace",
-                str(workspace),
                 "--operator-fd",
                 str(capability.fileno()),
                 pass_fds=(capability.fileno(),),
@@ -743,12 +726,12 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"server stop failed: {stopped.stdout}")
         assert_valid(envelope(stopped), machine, "profile-server-final-stop Machine envelope")
         set_mode(fake)
-        membership = envelope(run(binary, home, "profile", "membership", "verify", "default", "--workspace", str(workspace)))
-        if membership["data"]["complete"] is not True or membership["data"]["revision"] < 2:
-            raise AssertionError("membership journal did not retain both generations")
+        membership = envelope(run(binary, home, "profile", "membership", "verify", "default"))
+        if membership["data"]["complete"] is not True or membership["data"]["revision"] != 0:
+            raise AssertionError("legacy lifecycle membership leaked into global membership")
         assert_valid(membership, machine, "profile-membership-verify Machine envelope")
 
-        state = envelope(run(binary, home, "profile", "diagnostics", "list", "default", "--workspace", str(workspace)))
+        state = envelope(run(binary, home, "profile", "diagnostics", "list", "default"))
         if not state["data"]["items"]:
             raise AssertionError("profile diagnostics are empty")
         assert_valid(state, machine, "profile-diagnostics-list Machine envelope")
@@ -763,8 +746,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "state",
             "reset",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
             "--confirm-server-key",
@@ -819,8 +800,6 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             "state",
             "reset",
             "default",
-            "--workspace",
-            str(workspace),
             "--operator-file",
             str(operator),
             "--confirm-server-key",
@@ -835,7 +814,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if repaired_migration["phase"] != "rolled_back":
             raise AssertionError(f"stale migration fence phase was not rolled back: {repaired_migration}")
 
-        removed = run(binary, home, "profile", "remove", "default", "--workspace", str(workspace))
+        removed = run(binary, home, "profile", "remove", "default")
         if removed.returncode != 0 or envelope(removed)["data"]["removed"] is not True:
             raise AssertionError(f"profile remove failed: {removed.stdout}")
 

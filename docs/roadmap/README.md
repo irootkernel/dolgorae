@@ -1125,7 +1125,7 @@ the production path still provides the complete pre-cut behavior.
 
 ### TASK-038: Specialist Consumers and v0.1.2 Acceptance
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-037`. Revalidate the prepared registry, Run path, and both
 Specialist consumers, then activate the new home gate, global Profile CLI,

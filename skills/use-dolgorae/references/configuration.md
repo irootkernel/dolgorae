@@ -1,17 +1,15 @@
 # Dolgorae Configuration
 
 Read this reference only when creating, inspecting, removing, or replacing a
-Runtime Profile. Configuration is workspace-scoped but machine-local under the
-fixed Dolgorae home. Use the public CLI rather than editing registry files
-directly.
+global Codex Profile. Configuration is user-global and machine-local under the
+fixed Dolgorae home. Use the public CLI rather than editing registry files directly.
 
-## Create a Runtime Profile
+## Create a global Codex Profile
 
-1. Resolve an initialized workspace and inspect existing names:
+1. Inspect existing global names:
 
    ```sh
-   dolgorae workspace inspect --workspace <path>
-   dolgorae profile list --workspace <path>
+   dolgorae profile list
    ```
 
 2. Obtain the intended profile name, canonical absolute `CODEX_HOME`, direct
@@ -30,7 +28,6 @@ directly.
 
    ```sh
    dolgorae profile add <name> \
-     --workspace <path> \
      --codex-home <absolute-codex-home> \
      --native-subagents enabled \
      --env PATH=<absolute-search-path> \
@@ -50,8 +47,8 @@ directly.
 5. Read the returned profile identity, then run the offline check:
 
    ```sh
-   dolgorae profile show <name> --workspace <path>
-   dolgorae profile doctor <name> --workspace <path>
+   dolgorae profile show <name>
+   dolgorae profile doctor <name>
    ```
 
    Inspect `data.compatibility` and every diagnostic even when the envelope is
@@ -84,4 +81,4 @@ registry or policy snapshot directly.
 - Do not expose `CODEX_HOME` contents, authentication state, environment values,
   executable digests, or diagnostic records beyond what the user needs.
 - After a mutation, repeat the corresponding list/show operation and report the
-  exact workspace and profile identity that changed.
+  exact Profile identity that changed.

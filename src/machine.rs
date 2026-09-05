@@ -16,7 +16,7 @@ impl SuccessEnvelope {
     #[must_use]
     pub fn new(command: impl Into<String>, data: Value) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             ok: true,
             command: command.into(),
             invocation_id: new_uuid_v7(),
@@ -184,6 +184,7 @@ pub fn exit_status_for(code: &str) -> u8 {
         "PROFILE_MISMATCH"
         | "COMPATIBILITY_REJECTED"
         | "DOLGORAE_PROTOCOL_MISMATCH"
+        | "LEGACY_STATE_UNSUPPORTED"
         | "PROTOCOL_VERSION_UNSUPPORTED"
         | "UNSUPPORTED_SCHEMA_VERSION"
         | "SAME_HOME_MULTI_SERVER_UNSAFE" => 5,
@@ -230,7 +231,7 @@ impl FailureEnvelope {
     #[must_use]
     pub fn new(command: impl Into<String>, error: MachineError) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             ok: false,
             command: command.into(),
             invocation_id: new_uuid_v7(),
@@ -252,7 +253,7 @@ mod tests {
     fn success_envelope_is_closed_and_uuid_v7() {
         let envelope = SuccessEnvelope::new("version", serde_json::json!({"version": "0.1.0"}));
         let value = serde_json::to_value(envelope).unwrap();
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["ok"], true);
         assert_eq!(
             value["invocation_id"].as_str().unwrap().chars().nth(14),
@@ -274,6 +275,7 @@ mod tests {
             ("ARTIFACT_NOT_FOUND", 3),
             ("RUN_STATE_CONFLICT", 4),
             ("COMPATIBILITY_REJECTED", 5),
+            ("LEGACY_STATE_UNSUPPORTED", 5),
             ("SAME_HOME_MULTI_SERVER_UNSAFE", 5),
             ("TRANSPORT_FAILURE", 6),
             ("DEDICATED_SERVER_START_FAILED", 6),
@@ -294,7 +296,7 @@ mod tests {
     #[test]
     fn consumers_can_tolerate_unknown_input_fields() {
         let value = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "ok": true,
             "command": "version",
             "invocation_id": new_uuid_v7(),

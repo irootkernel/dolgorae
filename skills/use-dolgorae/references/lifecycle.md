@@ -25,7 +25,7 @@ status so project-policy changes remain visible.
 Use status before every process lifecycle action:
 
 ```sh
-dolgorae profile server status <name> --workspace <path>
+dolgorae profile server status <name>
 ```
 
 `profile server start` may launch a long-lived local Codex App Server and

@@ -19,7 +19,7 @@ from schema_support import assert_valid, validator
 
 PROTOCOL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol"
 FACADE_SCHEMA = validator(
-    PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v1.schema.json"
+    PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v2.schema.json"
 )
 
 
@@ -327,7 +327,7 @@ def validate(binary: pathlib.Path) -> None:
             binary,
             home,
             [
-                "profile", "add", profile, "--workspace", str(workspace),
+                "profile", "add", profile,
                 "--codex-home", str(codex_home), "--native-subagents", "enabled",
                 "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                 "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",
@@ -341,7 +341,7 @@ def validate(binary: pathlib.Path) -> None:
             binary,
             home,
             [
-                "profile", "add", isolated_profile, "--workspace", str(workspace),
+                "profile", "add", isolated_profile,
                 "--codex-home", str(isolated_codex_home), "--native-subagents", "enabled",
                 "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                 "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",
@@ -355,7 +355,7 @@ def validate(binary: pathlib.Path) -> None:
             binary,
             home,
             [
-                "profile", "add", interaction_profile, "--workspace", str(workspace),
+                "profile", "add", interaction_profile,
                 "--codex-home", str(interaction_codex_home), "--native-subagents", "enabled",
                 "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                 "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",
@@ -397,8 +397,8 @@ def validate(binary: pathlib.Path) -> None:
                 "engagement_id": engagement_id,
                 "role_ref": "researcher",
                 "agent_configuration": {
-                    "schema_version": 1,
-                    "runtime_profile": profile,
+                    "schema_version": 2,
+                    "selected_profile": profile,
                     "model": "gpt-5.6",
                     "default_effort": "medium",
                     "purpose": "research",
@@ -529,8 +529,8 @@ def validate(binary: pathlib.Path) -> None:
                     "engagement_id": engagement_id,
                     "role_ref": "implementer",
                     "agent_configuration": {
-                        "schema_version": 1,
-                        "runtime_profile": isolated_profile,
+                        "schema_version": 2,
+                        "selected_profile": isolated_profile,
                         "model": "gpt-5.6",
                         "default_effort": "medium",
                         "purpose": "implementation",
@@ -609,8 +609,8 @@ def validate(binary: pathlib.Path) -> None:
                     "engagement_id": engagement_id,
                     "role_ref": "implementer",
                     "agent_configuration": {
-                        "schema_version": 1,
-                        "runtime_profile": isolated_profile,
+                        "schema_version": 2,
+                        "selected_profile": isolated_profile,
                         "model": "gpt-5.6",
                         "default_effort": "medium",
                         "purpose": "implementation",
@@ -724,7 +724,7 @@ def validate(binary: pathlib.Path) -> None:
                 "engagement_id": interaction_engagement_id,
                 "role_ref": "researcher",
                 "agent_configuration": {
-                    "schema_version": 1, "runtime_profile": interaction_profile, "model": "gpt-5.6",
+                    "schema_version": 2, "selected_profile": interaction_profile, "model": "gpt-5.6",
                     "default_effort": "medium", "purpose": "research", "purpose_label": None,
                     "required_capabilities": [], "instructions": "Request an unsupported approval.",
                     "execution_lane": "shared_readonly",
@@ -784,7 +784,7 @@ def validate(binary: pathlib.Path) -> None:
                 "engagement_id": abort_engagement_id,
                 "role_ref": "researcher",
                 "agent_configuration": {
-                    "schema_version": 1, "runtime_profile": profile, "model": "gpt-5.6",
+                    "schema_version": 2, "selected_profile": profile, "model": "gpt-5.6",
                     "default_effort": "medium", "purpose": "research", "purpose_label": None,
                     "required_capabilities": [], "instructions": "Wait until interrupted.",
                     "execution_lane": "shared_readonly",
@@ -862,15 +862,15 @@ def validate(binary: pathlib.Path) -> None:
         finally:
             invoke(binary, home, [
                 "profile", "server", "stop", profile,
-                "--workspace", str(workspace), "--operator-file", str(operator),
+                "--operator-file", str(operator),
             ])
             invoke(binary, home, [
                 "profile", "server", "stop", isolated_profile,
-                "--workspace", str(workspace), "--operator-file", str(operator),
+                "--operator-file", str(operator),
             ])
             invoke(binary, home, [
                 "profile", "server", "stop", interaction_profile,
-                "--workspace", str(workspace), "--operator-file", str(operator),
+                "--operator-file", str(operator),
             ])
 
 

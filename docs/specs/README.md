@@ -584,11 +584,10 @@ or recovery of legacy Profiles, Runs, Profile Servers, engagements, writers, or
 aggregates. Stateless help, version, and capability discovery remain available.
 The operator recovery procedure is owned by the operations guide.
 
-TASK-036 and TASK-037 prepare these contracts and implementation paths without
-changing production dispatch. TASK-038 activates the home gate, global Profile
+The global Profile generation is active across the home gate, global Profile
 commands, account-neutral workspace initialization, Run admission, and both
-Specialist consumers together. No supported revision reads or writes both
-Profile generations.
+Specialist consumers. No supported command reads or writes both Profile
+generations.
 
 ### Specialist Policy Registry
 
@@ -1000,21 +999,21 @@ dolgorae [--human] workspace writer handoff-prepare --workspace <path> --from <r
 dolgorae [--human] workspace writer handoff-commit --workspace <path> --handoff-id <id> --expected-generation <n> [--controller-file <path> | --controller-fd <fd>]
 dolgorae [--human] workspace writer handoff-cancel --workspace <path> --handoff-id <id> [--controller-file <path> | --controller-fd <fd>]
 
-dolgorae [--human] profile add <name> [--workspace <path>] --codex-home <absolute-path> --native-subagents enabled [--env <name=value>]... -- <argv...>
-dolgorae [--human] profile list [--workspace <path>]
-dolgorae [--human] profile show <name> [--workspace <path>]
-dolgorae [--human] profile remove <name> [--workspace <path>]
-dolgorae [--human] profile doctor <name> [--workspace <path>] [--launch-probe [--leave-running]]
-dolgorae [--human] profile server status <name> [--workspace <path>]
-dolgorae [--human] profile server start <name> [--workspace <path>]
-dolgorae [--human] profile server stop <name> [--workspace <path>] [--operator-file <path> | --operator-fd <fd>] [--interrupt --confirm-server-key <key>]
-dolgorae [--human] profile server restart <name> [--workspace <path>] [--operator-file <path> | --operator-fd <fd>] [--interrupt --confirm-server-key <key>]
-dolgorae [--human] profile server migrate <name> [--workspace <path>] [--operator-file <path> | --operator-fd <fd>] --confirm-old-server-key <key> --confirm-new-server-key <key> [--interrupt]
-dolgorae [--human] profile membership verify <name> [--workspace <path>]
-dolgorae [--human] profile membership tombstone-orphan <name> [--workspace <path>] [--operator-file <path> | --operator-fd <fd>] --confirm-server-key <key> --confirm-workspace-id <id> --confirm-run-id <id>
-dolgorae [--human] profile state reset <name> [--workspace <path>] [--operator-file <path> | --operator-fd <fd>] --confirm-server-key <key> --require-server-absence
-dolgorae [--human] profile diagnostics list <name> [--workspace <path>] [--after <cursor>] [--limit <n>] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
-dolgorae [--human] profile events <name> [--workspace <path>] [--after <cursor>] [--follow] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
+dolgorae [--human] profile add <name> --codex-home <absolute-path> --native-subagents enabled [--env <name=value>]... -- <argv...>
+dolgorae [--human] profile list
+dolgorae [--human] profile show <name>
+dolgorae [--human] profile remove <name>
+dolgorae [--human] profile doctor <name> [--launch-probe [--leave-running]]
+dolgorae [--human] profile server status <name>
+dolgorae [--human] profile server start <name>
+dolgorae [--human] profile server stop <name> [--operator-file <path> | --operator-fd <fd>] [--interrupt --confirm-server-key <key>]
+dolgorae [--human] profile server restart <name> [--operator-file <path> | --operator-fd <fd>] [--interrupt --confirm-server-key <key>]
+dolgorae [--human] profile server migrate <name> [--operator-file <path> | --operator-fd <fd>] --confirm-old-server-key <key> --confirm-new-server-key <key> [--interrupt]
+dolgorae [--human] profile membership verify <name>
+dolgorae [--human] profile membership tombstone-orphan <name> [--operator-file <path> | --operator-fd <fd>] --confirm-server-key <key> --confirm-workspace-id <id> --confirm-run-id <id>
+dolgorae [--human] profile state reset <name> [--operator-file <path> | --operator-fd <fd>] --confirm-server-key <key> --require-server-absence
+dolgorae [--human] profile diagnostics list <name> [--after <cursor>] [--limit <n>] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
+dolgorae [--human] profile events <name> [--after <cursor>] [--follow] [--projection <minimal|operational>] [--operator-file <path> | --operator-fd <fd>]
 
 dolgorae [--human] specialist policy add <name> [--workspace <path>] --file <path>
 dolgorae [--human] specialist policy list [--workspace <path>]

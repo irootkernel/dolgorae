@@ -1,13 +1,11 @@
-//! Machine-local Runtime Profile registry and Codex App Server lifecycle.
+//! User-global Codex Profile registry and Codex App Server lifecycle.
 
 use crate::app_server::{JsonRpcConnection, TransportError};
 use crate::darwin::DarwinSystem;
 use crate::jcs::{PayloadRepresentation, canonicalize, parse, represent_payload};
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
-use crate::workspace::{
-    LocalProfileRegistry, NativeSubagents, RuntimeProfile, WorkspaceService, parse_local_profiles,
-};
+use crate::workspace::{NativeSubagents, RuntimeProfile, parse_local_profiles};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -273,6 +271,47 @@ pub fn execute(operation: ProfileOperation, arguments: &[OsString]) -> Result<Va
     }
 }
 
+/// Active global Profile command surface. It rejects workspace selection
+/// before parsing or touching the fixed Dolgorae home.
+pub fn execute_global(
+    operation: ProfileOperation,
+    arguments: &[OsString],
+) -> Result<Value, MachineError> {
+    crate::global_profile::validate_post_cut_arguments(operation, arguments)?;
+    execute(operation, arguments)
+}
+
+/// Attach to or start the server generation pinned by an already resolved
+/// global Profile binding. This path never reopens the registry.
+pub fn ensure_global_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<ServerState, MachineError> {
+    binding.validate_for_recovery()?;
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        workspace_id: "global-profile-v1".to_owned(),
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let state = start_snapshot(
+        &context,
+        &binding.launch_snapshot,
+        &mut OperatorHandoff::none(),
+    )?;
+    publish_global_server_state(&context, &state)?;
+    Ok(state)
+}
+
+fn publish_global_server_state(context: &Context, state: &ServerState) -> Result<(), MachineError> {
+    let successor = crate::global_runtime::GlobalProfileServerState::from_prepared(state)?;
+    crate::global_runtime::GlobalServerStateStore::from_root(
+        &context.dolgorae_home_root,
+        &state.server_key,
+    )?
+    .publish(&successor)?;
+    Ok(())
+}
+
 /// Validates profile command arguments against the same shape and
 /// mutually-exclusive-carrier rules `execute` enforces, without running the
 /// operation. Callers that only need to know whether an invocation is
@@ -494,17 +533,8 @@ fn add(parsed: &Parsed) -> Result<Value, MachineError> {
         ));
     }
     let environment = parsed.environment()?;
-    let _config_lock = config_lock(&context)?;
-    let mut registry = load_registry(&context)?;
-    if registry.profiles.contains_key(&name) {
-        return Err(MachineError::new(
-            "PROFILE_ALREADY_EXISTS",
-            "profile already exists",
-            false,
-            json!({"profile": name}),
-        ));
-    }
-    registry.profiles.insert(
+    let home = DolgoraeHome::system()?;
+    crate::global_profile::GlobalProfileStore::new(&home).add(
         name.clone(),
         RuntimeProfile {
             argv,
@@ -512,8 +542,7 @@ fn add(parsed: &Parsed) -> Result<Value, MachineError> {
             environment,
             native_subagents: NativeSubagents::Enabled,
         },
-    );
-    store_registry(&context, &registry)?;
+    )?;
     let validated = parse_local_profiles(&context.registry_path)?;
     let profile = validated.profiles.get(&name).expect("stored profile");
     serde_json::to_value(profile_view(&name, profile)).map_err(internal)
@@ -551,13 +580,9 @@ fn show(parsed: &Parsed) -> Result<Value, MachineError> {
 
 fn remove(parsed: &Parsed) -> Result<Value, MachineError> {
     let name = parsed.required_positional(0, "profile name")?;
-    let context = context(parsed.path("--workspace")?.as_deref())?;
-    let _config_lock = config_lock(&context)?;
-    let mut registry = load_registry(&context)?;
-    if registry.profiles.remove(&name).is_none() {
-        return Err(profile_not_found(&name));
-    }
-    store_registry(&context, &registry)?;
+    let _ = context(parsed.path("--workspace")?.as_deref())?;
+    let home = DolgoraeHome::system()?;
+    crate::global_runtime::remove_global_profile(&home, &name)?;
     Ok(json!({"profile": name, "removed": true}))
 }
 
@@ -659,6 +684,9 @@ fn server_status(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let state = read_state_if_running(&profile_state_path(&context, &snapshot))?;
+    if let Some(state) = &state {
+        publish_global_server_state(&context, state)?;
+    }
     Ok(json!({
         "profile": name,
         "server_key": snapshot.server_key,
@@ -671,6 +699,7 @@ fn server_start(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let state = start_snapshot(&context, &snapshot, &mut OperatorHandoff::none())?;
+    publish_global_server_state(&context, &state)?;
     Ok(json!({"profile": name, "started": true, "state": state}))
 }
 
@@ -768,6 +797,13 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
     let migration_locks =
         acquire_migration_locks(&home_root, &old_root, &old, &new_root, &snapshot.server_key)?;
     stop_operator.handoff(&migration_locks.home);
+    crate::global_runtime::GlobalMembershipStore::from_root(&context.dolgorae_home_root, &old)?
+        .require_quiescent_under_server_lock(&name, "migrate")?;
+    crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &snapshot.server_key,
+    )?
+    .require_quiescent_under_server_lock(&name, "migrate")?;
     if let Some((migration_id, new_state)) =
         reconcile_blocked_migration(&context, &snapshot, &old, &new, &home_root, &migration_path)?
     {
@@ -785,7 +821,7 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
 
     // Re-read every source proof under the migration locks. Observations made
     // before this point cannot authorize terminating a later lifetime.
-    let old_state = read_state_if_running(&old_root.join("state.json"))?
+    let old_state = read_state_if_running(&old_root.join("runtime-state.json"))?
         .ok_or_else(|| profile_mismatch(&name, "old_server_running", json!(true), json!(false)))?;
     if old_state.server_key != old {
         return Err(profile_mismatch(
@@ -809,7 +845,7 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
         profile: name.clone(),
         server_key: old.clone(),
     };
-    let old_records = replay_membership(&old_root.join("membership.jsonl"), &old_scope)?;
+    let old_records = replay_membership(&old_root.join("runtime-membership.jsonl"), &old_scope)?;
     let old_index = derive_membership_index(&old_root, &old_records)?;
     verify_membership_index(&old_root, &old_index, &old_scope)?;
     let orphans = membership_orphans(&context, &old_state.snapshot, &old_index)?;
@@ -1179,7 +1215,7 @@ fn reconcile_blocked_migration(
                 .dolgorae_home_root
                 .join("profiles")
                 .join(confirmed_new_key)
-                .join("state.json"),
+                .join("runtime-state.json"),
         )?
         .ok_or_else(|| {
             profile_mismatch(
@@ -1202,7 +1238,7 @@ fn reconcile_blocked_migration(
                 .dolgorae_home_root
                 .join("profiles")
                 .join(confirmed_old_key)
-                .join("state.json"),
+                .join("runtime-state.json"),
         )?
         .ok_or_else(|| {
             profile_mismatch(
@@ -1288,6 +1324,16 @@ fn automatic_quiescent_migration(
         &new_root,
         &new_snapshot.server_key,
     )?;
+    crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        old_server_key,
+    )?
+    .require_quiescent_under_server_lock(&new_snapshot.profile_name, "automatic_migrate")?;
+    crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &new_snapshot.server_key,
+    )?
+    .require_quiescent_under_server_lock(&new_snapshot.profile_name, "automatic_migrate")?;
     verify_migration_fence(
         &migration_path,
         None,
@@ -1307,14 +1353,15 @@ fn automatic_quiescent_migration(
         && active.lifecycle == "ready"
         && active.transition_token.is_none()
     {
-        let new_state = read_state_if_running(&new_root.join("state.json"))?.ok_or_else(|| {
-            profile_mismatch(
-                &new_snapshot.profile_name,
-                "automatic_rollover_requested_server_running",
-                json!(true),
-                json!(false),
-            )
-        })?;
+        let new_state =
+            read_state_if_running(&new_root.join("runtime-state.json"))?.ok_or_else(|| {
+                profile_mismatch(
+                    &new_snapshot.profile_name,
+                    "automatic_rollover_requested_server_running",
+                    json!(true),
+                    json!(false),
+                )
+            })?;
         return attach_running(new_snapshot, &new_state, Some(&active));
     }
     if active.server_key != old_server_key
@@ -1330,14 +1377,15 @@ fn automatic_quiescent_migration(
             ),
         ));
     }
-    let old_state = read_state_if_running(&old_root.join("state.json"))?.ok_or_else(|| {
-        profile_mismatch(
-            &new_snapshot.profile_name,
-            "old_server_running",
-            json!(true),
-            json!(false),
-        )
-    })?;
+    let old_state =
+        read_state_if_running(&old_root.join("runtime-state.json"))?.ok_or_else(|| {
+            profile_mismatch(
+                &new_snapshot.profile_name,
+                "old_server_running",
+                json!(true),
+                json!(false),
+            )
+        })?;
     if old_state.server_key != old_server_key
         || old_state.snapshot.canonical_codex_home != new_snapshot.canonical_codex_home
         || active.server_epoch != old_state.server_epoch
@@ -1366,7 +1414,7 @@ fn automatic_quiescent_migration(
         profile: old_state.snapshot.profile_name.clone(),
         server_key: old_server_key.to_owned(),
     };
-    let old_records = replay_membership(&old_root.join("membership.jsonl"), &old_scope)?;
+    let old_records = replay_membership(&old_root.join("runtime-membership.jsonl"), &old_scope)?;
     if old_records.last().map_or(0, |record| record.revision) != old_state.membership_revision {
         return Err(old_scope.incomplete("membership journal and server state revisions differ"));
     }
@@ -1418,22 +1466,19 @@ fn automatic_quiescent_migration(
 fn membership_verify(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
-    let root = profile_root(&context, &snapshot);
-    let scope = MembershipScope {
-        profile: name.clone(),
-        server_key: snapshot.server_key.clone(),
-    };
-    let records = replay_membership(&root.join("membership.jsonl"), &scope)?;
-    let index = derive_membership_index(&root, &records)?;
-    verify_membership_index(&root, &index, &scope)?;
-    let orphans = membership_orphans(&context, &snapshot, &index)?;
+    let index = crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &snapshot.server_key,
+    )?
+    .load()?;
+    let members = index.members.values().cloned().collect::<Vec<_>>();
     Ok(json!({
         "profile": name,
         "server_key": snapshot.server_key,
-        "complete": orphans.is_empty(),
-        "revision": records.last().map_or(0, |record| record.revision),
-        "records": records.len(),
-        "orphans": orphans,
+        "complete": true,
+        "revision": index.revision,
+        "records": index.revision,
+        "members": members,
     }))
 }
 
@@ -1452,44 +1497,46 @@ fn membership_tombstone(parsed: &Parsed) -> Result<Value, MachineError> {
     }
     let workspace = parsed.required("--confirm-workspace-id")?;
     let run = parsed.required("--confirm-run-id")?;
-    let root = profile_root(&context, &snapshot);
-    let scope = MembershipScope {
-        profile: name.clone(),
-        server_key: snapshot.server_key.clone(),
-    };
-    let records = replay_membership(&root.join("membership.jsonl"), &scope)?;
-    let index = derive_membership_index(&root, &records)?;
-    let orphans = membership_orphans(&context, &snapshot, &index)?;
-    if !orphans
-        .iter()
-        .any(|value| value["workspace_id"] == workspace && value["run_id"] == run)
+    let run_id = Uuid::parse_str(&run)
+        .ok()
+        .filter(|value| value.get_version_num() == 7)
+        .ok_or_else(|| {
+            MachineError::invalid_argument("--confirm-run-id", "run id must be UUIDv7")
+        })?;
+    let store = crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &snapshot.server_key,
+    )?;
+    let index = store.load()?;
+    let identity = format!("{workspace}:{run_id}");
+    if !index.members.contains_key(&identity)
+        || context
+            .dolgorae_home_root
+            .join("workspaces")
+            .join(&workspace)
+            .join("runs")
+            .join(run_id.to_string())
+            .join("manifest.json")
+            .exists()
     {
         return Err(profile_mismatch(
             &name,
             "confirmed_orphan_member",
-            json!({"workspace_id": workspace, "run_id": run}),
-            json!(orphans),
+            json!({"workspace_id": workspace, "run_id": run_id}),
+            json!(index.members),
         ));
     }
     // Membership repair acquires no lock below `operator.lock`, so the hold
     // taken here has nothing to hand off to and instead spans the tombstone
     // append and the revision commit that follows it.
     let operator = parsed.authorize_operator("profile.membership.tombstone_orphan")?;
-    let revision = append_membership(
-        &root.join("membership.jsonl"),
-        "tombstone_orphan",
-        &workspace,
-        Some(run),
-        &scope,
-    )?;
-    let state_path = root.join("state.json");
-    if let Some(mut state) = read_state(&state_path)? {
-        state.membership_revision = revision;
-        atomic_replace(
-            &state_path,
-            &serde_json::to_vec_pretty(&state).map_err(internal)?,
-        )?;
-    }
+    let revision = store
+        .record(
+            &workspace,
+            run_id,
+            crate::global_runtime::MembershipDisposition::Released,
+        )?
+        .revision;
     operator.release();
     Ok(json!({"profile": name, "revision": revision, "tombstoned": true}))
 }
@@ -1524,11 +1571,25 @@ fn state_reset(parsed: &Parsed) -> Result<Value, MachineError> {
     // authorizing hold is taken only once it is behind us and stays live
     // across the state removal until the home lock replaces it.
     let mut operator = parsed.authorize_operator("profile.state.reset")?;
+    let server_root = profile_root(&context, &snapshot);
+    let server_lock = lock_file(&server_root.join("server.lock"))?;
+    operator.handoff(&server_lock);
+    crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &snapshot.server_key,
+    )?
+    .require_quiescent_under_server_lock(&name, "state_reset")?;
     let state_path = profile_state_path(&context, &snapshot);
     if state_path.exists() {
         fs::remove_file(&state_path).map_err(io_error)?;
         sync_parent(&state_path)?;
     }
+    let successor_state_path = server_root.join("state.json");
+    if successor_state_path.exists() {
+        fs::remove_file(&successor_state_path).map_err(io_error)?;
+        sync_parent(&successor_state_path)?;
+    }
+    drop(server_lock);
     let home = home_root(&context, &snapshot.canonical_codex_home)?;
     let mut migration_repaired = false;
     if home.exists() {
@@ -1642,62 +1703,24 @@ fn selected_profile_from(
 }
 
 fn context(workspace: Option<&Path>) -> Result<Context, MachineError> {
-    let service = WorkspaceService::system()?;
-    let view = service.discover(workspace)?;
+    if workspace.is_some() {
+        return Err(MachineError::invalid_argument(
+            "--workspace",
+            "global Profile commands do not accept a workspace",
+        ));
+    }
     let dolgorae_home = DolgoraeHome::system()?;
-    let state_root = dolgorae_home.workspace_root(&view.workspace_id);
     Ok(Context {
-        workspace_id: view.workspace_id,
-        registry_path: state_root.join("local.yaml"),
+        workspace_id: "global-profile-v1".to_owned(),
+        registry_path: dolgorae_home.root().join("profiles.yaml"),
         dolgorae_home_root: dolgorae_home.root().to_path_buf(),
     })
 }
 
-fn load_registry(context: &Context) -> Result<LocalProfileRegistry, MachineError> {
-    verify_private_regular_file(&context.registry_path, 0o600)?;
-    parse_local_profiles(&context.registry_path)
-}
-
-fn store_registry(context: &Context, registry: &LocalProfileRegistry) -> Result<(), MachineError> {
-    let bytes = serde_yaml_ng::to_string(registry)
-        .map_err(internal)?
-        .into_bytes();
-    if bytes.len() as u64 > MAX_REGISTRY_BYTES {
-        return Err(MachineError::profile_config_invalid(
-            &context.registry_path,
-            "profile registry exceeds 1 MiB",
-        ));
-    }
-    let parent = context
-        .registry_path
-        .parent()
-        .ok_or_else(|| transport("profile registry has no parent"))?;
-    verify_private_regular_file(&context.registry_path, 0o600)?;
-    let temporary = parent.join(format!(".local-{}.yaml", Uuid::now_v7()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temporary)
-        .map_err(io_error)?;
-    file.write_all(&bytes).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    if let Err(error) = parse_local_profiles(&temporary) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    fs::rename(&temporary, &context.registry_path).map_err(io_error)?;
-    sync_parent(&context.registry_path)
-}
-
-fn config_lock(context: &Context) -> Result<File, MachineError> {
-    let parent = context
-        .registry_path
-        .parent()
-        .ok_or_else(|| transport("profile registry has no parent"))?;
-    verify_private_directory(parent)?;
-    lock_file(&parent.join("local.lock"))
+fn load_registry(
+    context: &Context,
+) -> Result<crate::global_profile::GlobalProfileRegistry, MachineError> {
+    crate::global_profile::GlobalProfileStore::from_root(&context.dolgorae_home_root).load()
 }
 
 fn profile_view(name: &str, profile: &RuntimeProfile) -> ProfileView {
@@ -2573,7 +2596,7 @@ impl LifecyclePaths {
         let home_root = home_root(context, &snapshot.canonical_codex_home)?;
         secure_dir(&home_root)?;
         Ok(Self {
-            state_path: root.join("state.json"),
+            state_path: root.join("runtime-state.json"),
             active_path: home_root.join("active.json"),
             root,
             home_root,
@@ -2588,7 +2611,7 @@ impl LifecyclePaths {
     }
 
     fn membership_path(&self) -> PathBuf {
-        self.root.join("membership.jsonl")
+        self.root.join("runtime-membership.jsonl")
     }
 }
 
@@ -2679,6 +2702,15 @@ fn prepare_start(
             ));
         }
     }
+    crate::global_runtime::GlobalMembershipStore::from_root(
+        paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?,
+        &snapshot.server_key,
+    )?
+    .require_quiescent_under_server_lock(&snapshot.profile_name, "start_generation")?;
     let socket = socket_path(&snapshot.server_key)?;
     clear_stale_socket(snapshot, &socket, &paths.state_path)?;
     let epoch = reserve_epoch(&paths.root.join("epoch"))?;
@@ -3448,6 +3480,17 @@ fn prepare_stop(
     }
     let index = derive_membership_index(&paths.root, &membership)?;
     let members = live_member_evidence(&index);
+    if !interrupt {
+        crate::global_runtime::GlobalMembershipStore::from_root(
+            paths
+                .root
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| internal("global Profile root has no home"))?,
+            &snapshot.server_key,
+        )?
+        .require_quiescent_under_server_lock(&snapshot.profile_name, "stop")?;
+    }
     if !members.is_empty() && !interrupt {
         return Err(scope.incomplete(format!(
             "stopping this server would interrupt {} live run member(s); \
@@ -3614,6 +3657,10 @@ fn commit_stop(
         fs::remove_file(&reservation.state.socket_path).map_err(io_error)?;
     }
     fs::remove_file(&paths.state_path).map_err(io_error)?;
+    let successor_state = paths.root.join("state.json");
+    if successor_state.exists() {
+        fs::remove_file(&successor_state).map_err(io_error)?;
+    }
     sync_parent(&paths.state_path)?;
     clear_home_active(
         &snapshot.profile_name,
@@ -3923,7 +3970,7 @@ fn process_identity_matches_on_boot(
 fn server_lifetime_absent(context: &Context, server_key: &str) -> Result<bool, MachineError> {
     require_canonical_persisted_server_key(server_key)?;
     let root = context.dolgorae_home_root.join("profiles").join(server_key);
-    let state_path = root.join("state.json");
+    let state_path = root.join("runtime-state.json");
     if read_state_if_running(&state_path)?.is_some() {
         return Ok(false);
     }
@@ -4166,7 +4213,7 @@ fn profile_root(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
 }
 
 fn profile_state_path(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
-    profile_root(context, snapshot).join("state.json")
+    profile_root(context, snapshot).join("runtime-state.json")
 }
 
 fn home_root(context: &Context, canonical_codex_home: &str) -> Result<PathBuf, MachineError> {
@@ -4288,7 +4335,7 @@ fn append_membership(
         .ok_or_else(|| transport("membership journal has no parent"))?;
     let index = derive_membership_index(root, &records)?;
     atomic_replace(
-        &root.join("members.json"),
+        &root.join("runtime-members.json"),
         &serde_json::to_vec_pretty(&index).map_err(internal)?,
     )?;
     Ok(revision)
@@ -4314,7 +4361,7 @@ fn derive_membership_index(
             _ => {}
         }
     }
-    let journal = root.join("membership.jsonl");
+    let journal = root.join("runtime-membership.jsonl");
     let journal_sha256 = if journal.exists() {
         file_sha256(&journal)?
     } else {
@@ -4333,7 +4380,7 @@ fn verify_membership_index(
     expected: &MembershipIndex,
     scope: &MembershipScope,
 ) -> Result<(), MachineError> {
-    let path = root.join("members.json");
+    let path = root.join("runtime-members.json");
     if !path.exists() {
         if expected.revision == 0 {
             return Ok(());
@@ -4474,7 +4521,7 @@ pub fn release_run_member_by_identity(
     let context = context(workspace)?;
     let root = context.dolgorae_home_root.join("profiles").join(server_key);
     verify_private_directory(&root)?;
-    let state = read_state_if_running(&root.join("state.json"))?.ok_or_else(|| {
+    let state = read_state_if_running(&root.join("runtime-state.json"))?.ok_or_else(|| {
         profile_server_busy(
             profile_name,
             server_key,
@@ -4511,7 +4558,7 @@ pub fn live_run_members(
         profile: state.snapshot.profile_name.clone(),
         server_key: state.server_key.clone(),
     };
-    let records = replay_membership(&root.join("membership.jsonl"), &scope)?;
+    let records = replay_membership(&root.join("runtime-membership.jsonl"), &scope)?;
     let index = derive_membership_index(&root, &records)?;
     verify_membership_index(&root, &index, &scope)?;
     Ok(run_members(&index))
@@ -4535,7 +4582,7 @@ fn record_membership(
     verify_private_directory(&home)?;
     let _home_lock = lock_file(&home.join("home.lock"))?;
     let _server_lock = lock_file(&root.join("server.lock"))?;
-    let state_path = root.join("state.json");
+    let state_path = root.join("runtime-state.json");
     // A membership record is only meaningful against the exact lifetime the
     // caller joined: a server that has been restarted underneath it is a
     // different epoch with a different journal position.
@@ -4568,7 +4615,7 @@ fn record_membership(
         profile: state.snapshot.profile_name.clone(),
         server_key: state.server_key.clone(),
     };
-    let journal = root.join("membership.jsonl");
+    let journal = root.join("runtime-membership.jsonl");
     let revision = append_membership(
         &journal,
         kind,
@@ -5570,7 +5617,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("dolgorae-membership-test-{}", Uuid::now_v7()));
         secure_dir(&root).unwrap();
-        let path = root.join("membership.jsonl");
+        let path = root.join("runtime-membership.jsonl");
         let scope = MembershipScope {
             profile: "default".to_owned(),
             server_key: "a".repeat(64),
@@ -6467,7 +6514,7 @@ mod tests {
         state.socket_device = socket_metadata.dev();
         state.socket_inode = socket_metadata.ino();
         atomic_replace(
-            &new_root.join("state.json"),
+            &new_root.join("runtime-state.json"),
             &serde_json::to_vec_pretty(&state).unwrap(),
         )
         .unwrap();
@@ -6525,7 +6572,7 @@ mod tests {
         state.socket_device = socket_metadata.dev();
         state.socket_inode = socket_metadata.ino();
         atomic_replace(
-            &new_root.join("state.json"),
+            &new_root.join("runtime-state.json"),
             &serde_json::to_vec_pretty(&state).unwrap(),
         )
         .unwrap();

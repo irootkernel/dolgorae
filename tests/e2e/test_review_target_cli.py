@@ -92,7 +92,7 @@ def assert_read_only_tree(root: pathlib.Path) -> None:
 
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
-    machine = validator(protocol_root, "dolgorae-machine-v1.schema.json")
+    machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     contract = validator(protocol_root, "dolgorae-review-target-v1.schema.json")
     with tempfile.TemporaryDirectory(prefix="dolgorae-task014-") as temporary:
         root = pathlib.Path(temporary)

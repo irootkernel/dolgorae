@@ -139,6 +139,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "app_server",
                 "controller",
                 "darwin",
+                "global_profile",
+                "global_runtime",
                 "jcs",
                 "machine",
                 "paths",
@@ -208,6 +210,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "event",
                 "engagement",
+                "global_runtime",
                 "jcs",
                 "ledger",
                 "machine",
@@ -323,27 +326,14 @@ fn unsafe_implementation_remains_inside_the_darwin_adapter() {
 }
 
 #[test]
-fn task_037_global_runtime_has_no_production_selector() {
+fn task_038_activates_one_global_runtime_selector() {
     let root = repository_root().join("src");
-    for module in [
-        "cli.rs",
-        "semantic.rs",
-        "external_engagement.rs",
-        "mcp_review_server.rs",
-    ] {
-        let source = fs::read_to_string(root.join(module)).unwrap();
-        for inactive_entry in [
-            "admit_global_profile",
-            "remove_global_profile",
-            "ResolvedGlobalProfile",
-            "GlobalServerStateStore",
-        ] {
-            assert!(
-                !source.contains(inactive_entry),
-                "{module} activates TASK-037 entry {inactive_entry} before TASK-038"
-            );
-        }
-    }
+    let main = fs::read_to_string(root.join("main.rs")).unwrap();
+    let semantic = fs::read_to_string(root.join("semantic.rs")).unwrap();
+    assert!(main.contains("require_generation"));
+    assert!(main.contains("execute_global"));
+    assert!(semantic.contains("ResolvedGlobalProfile"));
+    assert!(semantic.contains("global_profile_binding"));
 }
 
 #[test]

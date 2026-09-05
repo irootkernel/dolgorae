@@ -16,9 +16,11 @@ EXAMPLES = PROTOCOL / "examples"
 
 def schema_name(example_name: str) -> str:
     prefixes = {
+        "agent-configuration-v2.": "dolgorae-agent-configuration-input-v2.schema.json",
         "agent-configuration.": "dolgorae-agent-configuration-v1.schema.json",
         "collaboration-": "dolgorae-collaboration-tool-v1.schema.json",
         "controller-credential.": "dolgorae-controller-credential-v1.schema.json",
+        "external-engagement-v2-": "dolgorae-external-specialist-facade-v2.schema.json",
         "external-engagement-": "dolgorae-external-specialist-facade-v1.schema.json",
         "idempotency-intent.": "dolgorae-idempotency-intent-v1.schema.json",
         "ledger-state.": "dolgorae-ledger-state-v1.schema.json",
