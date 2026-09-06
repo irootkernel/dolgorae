@@ -1455,6 +1455,35 @@ mod tests {
     }
 
     #[test]
+    fn run_start_requires_explicit_profile_when_every_other_option_is_present() {
+        let mut args = vec![
+            "dolgorae",
+            "run",
+            "--controller-file",
+            "credential",
+            "start",
+            "--workspace",
+            "/workspace",
+            "--control-mode",
+            "managed-agent",
+            "--execution-lane",
+            "shared-readonly",
+            "--required-assurance",
+            "best-effort-personal-alpha",
+            "--purpose",
+            "implementation",
+            "--idempotency-key",
+            "start",
+        ];
+        let cli = Cli::try_parse_from(&args).unwrap();
+        let error = validate_argument_contract(&cli.command).unwrap_err();
+        assert!(error.contains("missing required option --profile"));
+        args.extend(["--profile", "explicit"]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        validate_argument_contract(&cli.command).unwrap();
+    }
+
+    #[test]
     fn specialist_review_exposes_only_the_public_fixed_carrier() {
         let accepted = [
             "dolgorae",

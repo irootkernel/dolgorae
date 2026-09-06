@@ -920,7 +920,10 @@ Membership records workspace/run/controller, worker generation, thread,
 connection, lifecycle, writer, observed epoch and runtime locator. Startup
 replays the journal, validates every referenced manifest/runtime record, and
 rejects missing/corrupt/revision-mismatched history; it does not rebuild by
-scanning incidental project directories. Operator repair verifies the valid
+scanning incidental project directories. The common membership reader and
+appender compare the derived index and persisted server-state identity/revision
+before any append, so an ordinary write cannot conceal an earlier inconsistency.
+Operator repair verifies the valid
 prefix and exact confirmed orphan and appends a tombstone/new revision. A
 startup transaction holds
 home-keyed `home.lock` before contract-keyed `server.lock`, validates or claims

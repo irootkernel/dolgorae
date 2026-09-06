@@ -7404,6 +7404,7 @@ else:
             .live_process_identity(std::process::id())
             .unwrap();
         let mut state = stopped_state();
+        state.membership_revision = 0;
         state.server_key = new_key.clone();
         state.snapshot = snapshot.clone();
         state.pid = std::process::id();

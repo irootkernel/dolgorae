@@ -45,6 +45,42 @@ from current work. It is not a second roadmap or status authority.
   exposing the External Specialist Facade to a Specialist Runtime Profile, or
   adding an attested caller-identity carrier.
 
+## DF-004: Keep membership checksum fields in one representation
+
+- Owner: Global Profile membership maintainers
+- Finding: append and replay construct equivalent checksum bodies separately.
+- Reason for deferral: the fields currently agree and journal replay tests
+  verify their compatibility; consolidation is independent of current behavior.
+- Revisit condition: the next membership schema revision or checksum-field change.
+
+## DF-005: Enforce complete launch-snapshot projection during schema evolution
+
+- Owner: Global Profile runtime maintainers
+- Finding: the name-neutral launch snapshot explicitly copies the named
+  snapshot's fields, so a future field needs a matching projection change.
+- Reason for deferral: all current launch fields are present and binding tests
+  cover current equality; this is a future schema-maintenance constraint.
+- Revisit condition: adding a Profile snapshot field or changing launch identity.
+
+## DF-006: Centralize the Profile lifecycle home path
+
+- Owner: Global Profile lifecycle maintainers
+- Finding: lifecycle operations derive the home from the server root at several
+  call sites instead of retaining it in their shared path context.
+- Reason for deferral: the fixed current layout is consistent at those sites;
+  changing the path representation is independent of current lifecycle safety.
+- Revisit condition: changing the Profile server directory layout.
+
+## DF-007: Coordinate orphan verification with Run manifest successors
+
+- Owner: Global Profile and Run persistence maintainers
+- Finding: the Profile layer's bounded orphan check explicitly reads v2 Run
+  identity fields to preserve the approved dependency boundary.
+- Reason for deferral: current v2 fields agree with the Run owner; a shared
+  verifier requires a separate boundary design when the contract evolves.
+- Revisit condition: introducing a Run manifest successor or changing its
+  workspace, Run, or global Profile identity fields.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

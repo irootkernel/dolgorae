@@ -48,6 +48,7 @@ development commits.
 ### Fixed
 
 - Reject duplicate Profile and environment keys before reading or changing the global registry.
+- Reject inconsistent membership history before Profile lifecycle operations or membership updates.
 
 ## v0.1.1 - 2026-08-31
 

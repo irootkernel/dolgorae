@@ -1949,6 +1949,15 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 "implementation",
             ]
 
+            without_profile = start.copy()
+            profile_option = without_profile.index("--profile")
+            del without_profile[profile_option:profile_option + 2]
+            missing_profile = failure(
+                [*without_profile, "--idempotency-key", "missing-profile"], expect=2
+            )
+            if missing_profile["code"] != "INVALID_ARGUMENT" or "--profile" not in json.dumps(missing_profile):
+                raise AssertionError(f"profile-less Run start was not refused: {missing_profile!r}")
+
             accepted = data(
                 [
                     *start,

@@ -502,6 +502,8 @@ impl GlobalMembershipStore {
     ) -> Result<GlobalMembershipIndex, MachineError> {
         let journal = root.join("membership.jsonl");
         let mut records = replay(&journal, &self.profile, &self.server_key)?;
+        let previous_index = derive_index(&self.server_key, &journal, &records)?;
+        let previous_state = self.verify_consistency(root, &previous_index)?;
         if let Some(previous) = records
             .iter()
             .rev()
@@ -565,21 +567,7 @@ impl GlobalMembershipStore {
         let index = derive_index(&self.server_key, &journal, &records)?;
         store_index(&root.join("members.json"), &index)?;
         let state_path = root.join("state.json");
-        if state_path.exists() {
-            verify_secure_file(&state_path, DarwinSystem.current_uid())?;
-            let mut state: ServerState = serde_json::from_slice(
-                &fs::read(&state_path).map_err(|error| path_error(&state_path, error))?,
-            )
-            .map_err(|_| {
-                membership_incomplete(&self.profile, &self.server_key, "server state is malformed")
-            })?;
-            if state.server_key != self.server_key {
-                return Err(membership_incomplete(
-                    &self.profile,
-                    &self.server_key,
-                    "server state is stored under the wrong key",
-                ));
-            }
+        if let Some(mut state) = previous_state {
             state.membership_revision = index.revision;
             let temporary = root.join(format!(".state-{}.json", Uuid::now_v7()));
             atomic_create(
@@ -663,10 +651,7 @@ impl GlobalMembershipStore {
     ) -> Result<GlobalMembershipIndex, MachineError> {
         let root = self.home_root.join("profiles").join(&self.server_key);
         verify_secure_directory(&root, DarwinSystem.current_uid())?;
-        let journal = root.join("membership.jsonl");
-        let records = replay(&journal, &self.profile, &self.server_key)?;
-        let index = derive_index(&self.server_key, &journal, &records)?;
-        self.verify_persisted_index(&root, &index)?;
+        let index = self.load_locked(&root)?;
         let blockers = index
             .members
             .values()
@@ -691,8 +676,42 @@ impl GlobalMembershipStore {
         let journal = root.join("membership.jsonl");
         let records = replay(&journal, &self.profile, &self.server_key)?;
         let index = derive_index(&self.server_key, &journal, &records)?;
-        self.verify_persisted_index(root, &index)?;
+        self.verify_consistency(root, &index)?;
         Ok(index)
+    }
+
+    fn verify_consistency(
+        &self,
+        root: &Path,
+        index: &GlobalMembershipIndex,
+    ) -> Result<Option<ServerState>, MachineError> {
+        self.verify_persisted_index(root, index)?;
+        let path = root.join("state.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        verify_secure_file(&path, DarwinSystem.current_uid())?;
+        let state: ServerState =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| path_error(&path, error))?)
+                .map_err(|_| {
+                    membership_incomplete(
+                        &self.profile,
+                        &self.server_key,
+                        "server state is malformed",
+                    )
+                })?;
+        if state.schema_version != 2
+            || state.server_key != self.server_key
+            || state.snapshot.server_key != self.server_key
+            || state.membership_revision != index.revision
+        {
+            return Err(membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "server state identity or membership revision disagrees with journal",
+            ));
+        }
+        Ok(Some(state))
     }
 
     fn verify_persisted_index(
@@ -1411,6 +1430,137 @@ mod tests {
         let index = store.load().unwrap();
         assert_eq!(index.revision, 12);
         assert_eq!(index.members.len(), 12);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn inconsistent_server_evidence_blocks_reads_removal_and_append_without_mutation() {
+        for corruption in [
+            "missing_history",
+            "ahead",
+            "behind",
+            "wrong_key",
+            "wrong_snapshot",
+            "legacy",
+            "malformed",
+            "index",
+        ] {
+            let (parent, home) = home();
+            let key = "d".repeat(64);
+            let profile = definition(&parent);
+            let registry = GlobalProfileStore::new(&home);
+            registry
+                .add("selected".to_owned(), profile.clone())
+                .unwrap();
+            let resolved = ResolvedGlobalProfile::resolve(&home, "selected").unwrap();
+            registry
+                .record_binding(crate::global_profile::ProfileBindingRecord {
+                    selected_name: "selected".to_owned(),
+                    definition_sha256: resolved.definition_sha256,
+                    server_key: key.clone(),
+                    launch_snapshot_sha256: "b".repeat(64),
+                })
+                .unwrap();
+            let store = GlobalMembershipStore::new(&home, "selected", &key).unwrap();
+            let run_id = Uuid::now_v7();
+            store
+                .record(&"1".repeat(64), run_id, MembershipDisposition::Released)
+                .unwrap();
+            let root = home.root().join("profiles").join(&key);
+            let mut state = server_state(snapshot("selected", &profile, &key));
+            state.membership_revision = 1;
+            match corruption {
+                "missing_history" => {
+                    fs::remove_file(root.join("membership.jsonl")).unwrap();
+                    fs::remove_file(root.join("members.json")).unwrap();
+                }
+                "ahead" => state.membership_revision = 2,
+                "behind" => state.membership_revision = 0,
+                "wrong_key" => state.server_key = "e".repeat(64),
+                "wrong_snapshot" => state.snapshot.server_key = "e".repeat(64),
+                "legacy" => state.schema_version = 1,
+                "index" => fs::write(root.join("members.json"), b"{}").unwrap(),
+                "malformed" => {}
+                _ => unreachable!(),
+            }
+            let state_bytes = if corruption == "malformed" {
+                b"{}".to_vec()
+            } else {
+                serde_json::to_vec_pretty(&state).unwrap()
+            };
+            atomic_create(
+                &SystemWorkspacePlatform,
+                &root.join("state.json"),
+                &state_bytes,
+                0o600,
+            )
+            .unwrap();
+            let paths = [
+                root.join("membership.jsonl"),
+                root.join("members.json"),
+                root.join("state.json"),
+                home.root().join("profiles.yaml"),
+                home.root().join("profile-bindings.json"),
+            ];
+            let before = paths.each_ref().map(|path| fs::read(path).ok());
+            for error in [
+                store.load().unwrap_err(),
+                store.require_quiescent("selected", "stop").unwrap_err(),
+                store
+                    .require_quiescent_under_server_lock("selected", "restart")
+                    .unwrap_err(),
+                remove_global_profile(&home, "selected").unwrap_err(),
+                store
+                    .record(&"1".repeat(64), run_id, MembershipDisposition::Active)
+                    .unwrap_err(),
+            ] {
+                assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE", "{corruption}");
+            }
+            assert_eq!(
+                paths.each_ref().map(|path| fs::read(path).ok()),
+                before,
+                "{corruption}"
+            );
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+
+    #[test]
+    fn pristine_membership_and_a_missing_derived_index_preserve_journal_authority() {
+        let (parent, home) = home();
+        let key = "c".repeat(64);
+        let store = GlobalMembershipStore::new(&home, "selected", &key).unwrap();
+        assert_eq!(store.load().unwrap().revision, 0);
+        let root = home.root().join("profiles").join(&key);
+        let state = server_state(snapshot("selected", &definition(&parent), &key));
+        atomic_create(
+            &SystemWorkspacePlatform,
+            &root.join("state.json"),
+            &serde_json::to_vec(&state).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let run_id = Uuid::now_v7();
+        store
+            .record(&"1".repeat(64), run_id, MembershipDisposition::Active)
+            .unwrap();
+        fs::remove_file(root.join("members.json")).unwrap();
+        assert_eq!(store.load().unwrap().revision, 1);
+        assert_eq!(
+            store
+                .require_quiescent("selected", "stop")
+                .unwrap_err()
+                .code,
+            "PROFILE_SERVER_BUSY"
+        );
+        let index = store
+            .record(&"1".repeat(64), run_id, MembershipDisposition::Released)
+            .unwrap();
+        assert_eq!(index.revision, 2);
+        let state: ServerState =
+            serde_json::from_slice(&fs::read(root.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state.membership_revision, 2);
+        store.require_quiescent("selected", "stop").unwrap();
         fs::remove_dir_all(parent).unwrap();
     }
 
