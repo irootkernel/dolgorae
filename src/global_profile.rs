@@ -695,6 +695,26 @@ mod tests {
     }
 
     #[test]
+    fn initialization_preserves_an_insecure_staging_directory() {
+        let (parent, home) = test_home();
+        let staging = parent.join(".dolgorae.initializing");
+        fs::create_dir(&staging).unwrap();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o777)).unwrap();
+        fs::write(staging.join("partial"), b"preserve").unwrap();
+        assert_eq!(
+            initialize_generation(&home).unwrap_err().code,
+            "RUNTIME_PATH_INVALID"
+        );
+        assert_eq!(fs::read(staging.join("partial")).unwrap(), b"preserve");
+        assert_eq!(
+            fs::metadata(&staging).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
+        assert!(!home.root().exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn an_empty_home_that_changes_after_the_cli_gate_keeps_its_classification() {
         let (parent, home) = test_home();
         fs::create_dir(home.root()).unwrap();
@@ -876,10 +896,21 @@ mod tests {
             .unwrap();
         let path = home.root().join("profile-bindings.json");
         let unchanged = fs::read(&path).unwrap();
-        store.record_binding(record).unwrap();
+        store.record_binding(record.clone()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), unchanged);
 
         store.remove_if("primary", |_| Ok(())).unwrap();
+        let registry_after_removal = fs::read(home.root().join("profiles.yaml")).unwrap();
+        let history_after_removal = fs::read(&path).unwrap();
+        assert_eq!(
+            store.record_binding(record).unwrap_err().code,
+            "PROFILE_NOT_FOUND"
+        );
+        assert_eq!(
+            fs::read(home.root().join("profiles.yaml")).unwrap(),
+            registry_after_removal
+        );
+        assert_eq!(fs::read(&path).unwrap(), history_after_removal);
         assert_eq!(
             require_recorded_binding_under_lifecycle_locks(
                 home.root(),
