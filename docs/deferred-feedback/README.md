@@ -119,6 +119,46 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: adding storage maintenance or investigating repeated
   crash-related accumulation in the global home.
 
+## DF-012: Construct reviewer configurations at their final version boundary
+
+- Owner: Specialist planning and semantic-service maintainers
+- Finding: the reviewer planner produces a historical configuration that its
+  production caller converts to the current version and binding digest.
+- Reason for deferral: the sole production caller performs both conversions
+  before publishing the configuration; direct current-version construction
+  would make future consumers less dependent on that caller convention.
+- Revisit condition: adding a reviewer-plan consumer or a configuration version.
+
+## DF-013: Make snapshot binding persistence explicit to future callers
+
+- Owner: Global Profile launch maintainers
+- Finding: snapshot preparation also records the name-to-launch binding history.
+- Reason for deferral: current callers authorize preparation and its durable
+  binding write; an explicit return-and-record boundary would help future
+  read-only consumers avoid accidentally adopting a mutating helper.
+- Revisit condition: introducing a read-only snapshot consumer or changing launch
+  preparation ownership.
+
+## DF-014: Consolidate compatibility checks while preserving entry contracts
+
+- Owner: Run and External Specialist semantic-service maintainers
+- Finding: Run admission and prepared Specialist admission repeat model, effort,
+  and capability checks with entry-specific error construction.
+- Reason for deferral: both paths reject incompatible inputs under their current
+  contracts; sharing validation facts is independent of that behavior and must
+  retain each public error surface and its boundary revalidation.
+- Revisit condition: changing compatibility requirements or adding a consumer.
+
+## DF-015: Add a checked Run manifest successor fixture
+
+- Owner: Run persistence and protocol-validation maintainers
+- Finding: the v2 manifest has Rust publication and recovery coverage but no
+  positive fixture routed through the checked JSON Schema example validator.
+- Reason for deferral: no manifest/schema divergence has been established;
+  a retained representative fixture would supplement existing semantic tests
+  with direct schema-instance coverage.
+- Revisit condition: changing the manifest schema or expanding checked examples.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical
