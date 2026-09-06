@@ -290,6 +290,60 @@ fn global_profile_manifest_v2_is_complete_and_recoverable_without_registry() {
         .unwrap()
         .validate_for_recovery()
         .unwrap();
+
+    let manifest_path = state_root
+        .join("runs")
+        .join(manifest.run_id.to_string())
+        .join("manifest.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let reject = |invalid: RunManifest, message: &str| {
+        let error = store.publish(&invalid).unwrap_err();
+        assert_eq!(error.code, "RUN_STATE_INVARIANT_VIOLATION");
+        assert_eq!(error.message, message);
+        assert_eq!(fs::read(&manifest_path).unwrap(), original);
+        fs::write(&manifest_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let error = store.load_manifest(manifest.run_id).unwrap_err();
+        assert_eq!(error.code, "RUN_STATE_INVARIANT_VIOLATION");
+        assert_eq!(error.message, message);
+        fs::write(&manifest_path, &original).unwrap();
+        store.load_manifest(manifest.run_id).unwrap();
+    };
+    let mut legacy_with_binding = manifest.clone();
+    legacy_with_binding.schema_version = 1;
+    legacy_with_binding.agent_configuration.schema_version = 1;
+    reject(
+        legacy_with_binding,
+        "schema v1 excludes and schema v2 requires a global Profile binding",
+    );
+    let mut missing_binding = manifest.clone();
+    missing_binding.global_profile_binding = None;
+    reject(
+        missing_binding,
+        "schema v1 excludes and schema v2 requires a global Profile binding",
+    );
+    for mismatch_name in [true, false] {
+        let mut mismatched = manifest.clone();
+        let binding = manifest.global_profile_binding.as_ref().unwrap();
+        let mut snapshot = binding.launch_snapshot.clone();
+        if mismatch_name {
+            snapshot.profile_name = "other".to_owned();
+        } else {
+            snapshot.server_key = "e".repeat(64);
+        }
+        let binding = ResolvedGlobalProfile::from_definition(
+            &snapshot.profile_name,
+            binding.definition.clone(),
+        )
+        .unwrap()
+        .bind(snapshot)
+        .unwrap();
+        binding.validate_for_recovery().unwrap();
+        mismatched.global_profile_binding = Some(binding);
+        reject(
+            mismatched,
+            "global Profile binding disagrees with the Run profile",
+        );
+    }
 }
 
 #[test]
