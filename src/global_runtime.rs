@@ -1212,13 +1212,31 @@ mod tests {
             .unwrap()
             .bind(snapshot("selected", &profile, &"b".repeat(64)))
             .unwrap();
+        let state = server_state(binding.launch_snapshot.clone());
+        let diagnostic = state.global_diagnostic(&binding).unwrap();
         store.remove_if("selected", |_| Ok(())).unwrap();
         binding.validate_for_recovery().unwrap();
-        let state = server_state(binding.launch_snapshot.clone());
         state.validate_for_global_restart().unwrap();
+        assert_eq!(state.global_diagnostic(&binding).unwrap(), diagnostic);
+        assert_eq!(diagnostic["profile"], "selected");
+        assert_eq!(diagnostic["server_key"], binding.server_key);
+
+        let mut other_generation = state.clone();
+        other_generation.server_key = "c".repeat(64);
+        other_generation.snapshot.server_key = other_generation.server_key.clone();
+        other_generation.validate_for_global_restart().unwrap();
         assert_eq!(
-            state.global_diagnostic(&binding).unwrap(),
-            state.global_diagnostic(&binding).unwrap()
+            other_generation.discover_global(&binding).unwrap_err().code,
+            "RUN_MANIFEST_INVALID"
+        );
+        let mut other_snapshot = state;
+        other_snapshot
+            .snapshot
+            .normalized_argv
+            .push("--strict-config".to_owned());
+        assert_eq!(
+            other_snapshot.discover_global(&binding).unwrap_err().code,
+            "RUN_MANIFEST_INVALID"
         );
         fs::remove_dir_all(parent).unwrap();
     }
