@@ -1812,7 +1812,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
         owned = ["--workspace", str(workspace)]
 
         def call(
-            argv: list[str], *, expect: int = 0, checked: bool = True
+            argv: list[str], *, expect: int = 0
         ) -> list[dict[str, object]]:
             status, objects = machine(binary, *argv, environment=account)
             if status != expect:
@@ -1822,18 +1822,11 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             if not objects:
                 raise AssertionError(f"no machine object for {argv}")
             for instance in objects:
-                if checked:
-                    assert_valid(instance, machine_schema, f"envelope for {argv}")
+                assert_valid(instance, machine_schema, f"envelope for {argv}")
             return objects
 
-        # `checked=False` is only ever passed for a *successful* profile-family
-        # envelope. The published machine schema already describes the full
-        # profile view this slice has not finished publishing, so validating
-        # those successes here would assert a contract no current command meets
-        # — which is what test_profile_cli.py's own schema checks stay off for
-        # too. Every failure envelope, and every Run object, is checked.
-        def data(argv: list[str], *, checked: bool = True) -> dict[str, object]:
-            objects = call(argv, checked=checked)
+        def data(argv: list[str]) -> dict[str, object]:
+            objects = call(argv)
             if len(objects) != 1 or objects[0]["ok"] is not True:
                 raise AssertionError(f"{argv} failed: {objects!r}")
             return dict(objects[0]["data"])  # type: ignore[arg-type]
@@ -1883,7 +1876,6 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 "--",
                 str(codex),
             ],
-            checked=False,
         )
         # Minted before anything is spawned so the cleanup below can always
         # reach the singleton, including when a case fails halfway through it.
@@ -1896,7 +1888,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             # The singleton is started explicitly so the probe's own walk is
             # attributable: everything the Run resolves later is a second and
             # third walk over the same paginated catalogue.
-            state = data(["profile", "server", "start", "default"], checked=False)[
+            state = data(["profile", "server", "start", "default"])[
                 "state"
             ]
             if not isinstance(state, dict):
@@ -2320,7 +2312,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             if membership_records() != 0:
                 raise AssertionError("a successful close did not release the membership")
             # The same stop, unchanged, now that the member is gone.
-            if data(stop, checked=False)["stopped"] is not True:
+            if data(stop)["stopped"] is not True:
                 raise AssertionError("the released membership still gated the stop")
 
             # The fixture's own record of what the client sent it. Reading it

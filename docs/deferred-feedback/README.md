@@ -81,6 +81,44 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: introducing a Run manifest successor or changing its
   workspace, Run, or global Profile identity fields.
 
+## DF-008: Keep global Profile digest predicates consistent
+
+- Owner: Global Profile runtime maintainers
+- Finding: registry digest validation and runtime server-key validation repeat
+  the same lowercase SHA-256 predicate.
+- Reason for deferral: their current accepted formats agree; centralization is
+  independent of current binding and membership correctness.
+- Revisit condition: changing a digest format or its accepted representation.
+
+## DF-009: Centralize quiescence refusal construction
+
+- Owner: Global Profile membership maintainers
+- Finding: the two quiescence lock-entry paths construct the same busy error.
+- Reason for deferral: current codes, details, and retryability agree and both
+  paths reject live members; consolidation addresses future contract drift.
+- Revisit condition: changing the Profile busy error or quiescence diagnostics.
+
+## DF-010: Exercise concurrent initial home creation across processes
+
+- Owner: Global Profile home maintainers
+- Finding: registry writes and membership appends have concurrency coverage,
+  while initial generation creation is covered by sequential lifecycle tests.
+- Reason for deferral: initial creation holds the parent-directory lock and
+  rechecks the generation under that lock; an additional process-race campaign
+  strengthens evidence without correcting a known current race.
+- Revisit condition: changing initialization locking, staging recovery, or the
+  atomic home-publication sequence.
+
+## DF-011: Define recovery of abandoned atomic-write temporaries
+
+- Owner: Global Profile persistence maintainers
+- Finding: a crash can leave private atomic-write temporary files beside the
+  live registry or membership state.
+- Reason for deferral: those mode-0600 files are not read as live authority;
+  automatic cleanup needs its own safe ownership and active-writer rules.
+- Revisit condition: adding storage maintenance or investigating repeated
+  crash-related accumulation in the global home.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical
