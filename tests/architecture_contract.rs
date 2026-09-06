@@ -210,6 +210,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "event",
                 "engagement",
+                "global_profile",
                 "global_runtime",
                 "jcs",
                 "ledger",

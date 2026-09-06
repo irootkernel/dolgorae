@@ -234,7 +234,7 @@ is invalid.
 
 An External Specialist Engagement is opened explicitly through
 `open_external_engagement` on the External Specialist Facade defined by
-[`dolgorae-external-specialist-facade-v1.schema.json`](../protocol/dolgorae-external-specialist-facade-v1.schema.json).
+[`dolgorae-external-specialist-facade-v2.schema.json`](../protocol/dolgorae-external-specialist-facade-v2.schema.json).
 The open request supplies immutable external provenance and one aggregate-scoped
 idempotency key. The adapter binds the canonical workspace and exactly one
 protected aggregate-owner Controller credential outside model-visible payloads.
@@ -483,7 +483,10 @@ workspace record. Repeating `init` succeeds with `created:false` only
 when mode, canonical workspace, workspace ID, schema, and existing policy files
 are compatible. It never overwrites an existing tracked policy file. A partial
 layout, nested workspace, changed mode, state-root identity conflict, or
-incompatible policy returns `WORKSPACE_INITIALIZATION_CONFLICT`.
+incompatible policy returns `WORKSPACE_INITIALIZATION_CONFLICT` before creating
+or changing global home state or workspace state. The home generation is
+inspected without mutation first; global initialization follows successful
+workspace admission and precedes workspace publication.
 
 ## SPEC-003: Profile, Account, and Singleton Binding
 
@@ -670,7 +673,7 @@ creation. Recovery MUST validate those persisted bytes and MUST NOT reopen
 `profiles.yaml`; registry removal, replacement, alias changes, caller `PATH`,
 caller `CODEX_HOME`, and frontend executable naming cannot change an admitted
 Run's launch authority.
-Codex Profile snapshot contains exactly the profile name, canonical
+The Codex Profile snapshot contains exactly the profile name, canonical
 `CODEX_HOME`,
 normalized argv, `launch_cwd_policy`, derived concrete launch cwd, sanitized environment, enabled
 and disabled features, normalized process-static configuration, initial configuration
@@ -1279,7 +1282,7 @@ Success envelope:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "command": "run.status",
   "invocation_id": "019...",
@@ -1291,7 +1294,7 @@ Failure envelope:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
   "command": "run.send",
   "invocation_id": "019...",
@@ -1304,7 +1307,7 @@ Failure envelope:
 }
 ```
 
-JSON field names use `snake_case`. Machine-output schema version 1 is closed:
+JSON field names use `snake_case`. Machine-output schema version 2 is closed:
 producers MUST NOT add fields and consumers MUST reject unknown fields. Any
 additive, removed, or meaning-changing producer field requires a new schema
 version. This is distinct from the Codex-input compatibility rule, where Dolgorae
@@ -1320,8 +1323,8 @@ opening an unsupported on-disk run, audit, or hash version fails closed and
 requires the matching binary; v1 defines no in-place migration.
 
 The checked [version-output schema](../protocol/dolgorae-version-v1.schema.json),
-[machine-output schema](../protocol/dolgorae-machine-v1.schema.json),
-[error contract](../protocol/dolgorae-error-contract-v1.json),
+[machine-output schema](../protocol/dolgorae-machine-v2.schema.json),
+[error contract](../protocol/dolgorae-error-contract-v2.json),
 [client-event-record schema](../protocol/dolgorae-event-record-v1.schema.json),
 [event-delivery schema](../protocol/dolgorae-event-delivery-v1.schema.json),
 [interaction schema](../protocol/dolgorae-interaction-v1.schema.json),
@@ -1336,6 +1339,20 @@ The checked [version-output schema](../protocol/dolgorae-version-v1.schema.json)
 [Protobuf source](../protocol/dolgorae/public/v1/dolgorae.proto), and
 [descriptor manifest](../protocol/dolgorae-public-v1.descriptor.json)
 are normative.
+
+Superseded machine, facade, and review-tool v1 contracts and examples remain
+frozen pre-cutover fixtures, not current producer payloads. In particular, the unversioned
+`engagement-call-machine-success.valid.json`,
+`specialist-policy-show-machine-success.valid.json`, and
+`specialist-review-machine-success.valid.json` examples retain machine/v1
+validation; current machine/v2 output is checked by the executable E2E tests.
+The unversioned `external-engagement-*` examples retain facade/v1 validation,
+while `external-engagement-v2-*` examples describe the current facade. The
+unversioned Specialist review payload examples likewise retain review-tool/v1
+validation, while `specialist-review-v2-*` examples describe its successor. The
+retained home-state/v1 schema describes an unsupported development generation,
+not evidence of a released or migratable home.
+
 `command` is a closed dotted
 subcommand enum and `invocation_id` is a UUIDv7. `data` is a command-tagged
 union built from these reusable objects:
@@ -3089,7 +3106,7 @@ continuation Turn solely because a result arrived.
 An External Specialist Engagement exists when another AI is already the Primary
 Agent and semantic control plane. It is opened and operated through the checked
 private CLI or MCP payload contract
-[`dolgorae-external-specialist-facade-v1.schema.json`](../protocol/dolgorae-external-specialist-facade-v1.schema.json).
+[`dolgorae-external-specialist-facade-v2.schema.json`](../protocol/dolgorae-external-specialist-facade-v2.schema.json).
 Opening is an explicit, empty aggregate operation. The adapter binds the
 canonical workspace and an aggregate-owner Controller credential outside the
 payload. Dolgorae stores an immutable Aggregate Controller Binding containing
@@ -3100,6 +3117,13 @@ credential and is rejected before observation or mutation when the workspace or
 binding differs. Hiring additionally creates a member Run through a write-ahead
 hire operation and a separately supplied per-Run Controller carrier. Raw managed
 Run creation never infers or joins an engagement.
+
+Hiring requires `agent_configuration.schema_version: 2` and an explicit
+`selected_profile`. The optional `global_profile_binding_sha256` is an optimistic
+precondition on the resolved immutable binding; a mismatch is rejected before
+admission. The legacy `runtime_profile` input field is rejected. The checked
+[current hire example](../protocol/examples/external-engagement-v2-hire.valid.json)
+shows this contract.
 
 The private facade is the only aggregate-owner delegation boundary. For a
 facade-mediated member mutation, the Worker validates the presented owner
@@ -3125,7 +3149,7 @@ for the cursor page returned by that call; later pages remain
 projection; isolated-write results contain that projection together with the
 captured Git patch. Collection records a durable delivery receipt, and a later
 cursor replay returns the same result bytes without replaying the Turn.
-Facade v1 has no interaction-response operation and never transfers the member
+Facade v2 has no interaction-response operation and never transfers the member
 Controller credential. If a Specialist requests an interaction, reconciliation
 interrupts it and records `SPECIALIST_INTERACTION_UNSUPPORTED` after terminal
 proof, or `interrupted_unknown` when that proof is unavailable; it never leaves
@@ -3244,7 +3268,7 @@ executable to verify.
 The optional external stdio MCP adapter exposes exactly one corresponding
 model-facing tool named `dolgorae_review`. Both entry points use the checked
 review payloads in
-[`dolgorae-specialist-review-tool-v1.schema.json`](../protocol/dolgorae-specialist-review-tool-v1.schema.json).
+[`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
 The CLI wraps a successful review result in the ordinary checked machine
 envelope with command tag `specialist.review`; an enabled MCP adapter returns
 the checked review result or checked review error directly. Both compile to the

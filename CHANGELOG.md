@@ -49,6 +49,7 @@ development commits.
 
 - Reject duplicate Profile and environment keys before reading or changing the global registry.
 - Reject inconsistent membership history before Profile lifecycle operations or membership updates.
+- Validate workspace compatibility before creating global home state during initialization.
 
 ## v0.1.1 - 2026-08-31
 

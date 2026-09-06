@@ -648,7 +648,10 @@ impl SemanticService for CoreSemanticService {
                 Box::new(capabilities()),
             )),
             SemanticCommand::Initialize { path, mode } => WorkspaceService::system()?
-                .initialize(path.as_deref(), *mode)
+                .initialize_with_preparation(path.as_deref(), *mode, || {
+                    let home = crate::paths::DolgoraeHome::system()?;
+                    crate::global_profile::initialize_generation(&home).map(|_| ())
+                })
                 .map(SemanticResult::Workspace),
             SemanticCommand::WorkspaceInspect { workspace } => WorkspaceService::system()?
                 .discover(workspace.as_deref())

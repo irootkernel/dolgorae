@@ -15,6 +15,9 @@ EXAMPLES = PROTOCOL / "examples"
 
 
 def schema_name(example_name: str) -> str:
+    # Unversioned pre-cutover examples are frozen v1 fixtures (SPEC-006).
+    # Explicit v2 names validate successor payloads; executable E2E checks
+    # validate the current machine/v2 producers.
     prefixes = {
         "agent-configuration-snapshot-v2.": "dolgorae-agent-configuration-v2.schema.json",
         "agent-configuration-v2.": "dolgorae-agent-configuration-input-v2.schema.json",

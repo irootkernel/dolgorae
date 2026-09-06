@@ -451,6 +451,16 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         supplied: Option<&Path>,
         mode: WorkspaceMode,
     ) -> Result<WorkspaceView, MachineError> {
+        self.initialize_with_preparation(supplied, mode, || Ok(()))
+    }
+
+    /// Prepare shared state only after workspace admission has succeeded.
+    pub(crate) fn initialize_with_preparation(
+        &self,
+        supplied: Option<&Path>,
+        mode: WorkspaceMode,
+        prepare: impl FnOnce() -> Result<(), MachineError>,
+    ) -> Result<WorkspaceView, MachineError> {
         let supplied = supplied
             .map(Path::to_path_buf)
             .or_else(|| std::env::current_dir().ok())
@@ -505,6 +515,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
                     true,
                 )
                 .map_err(|error| reinitialization_error(&canonical, error))?;
+            prepare()?;
             return Ok(view_from_record(record, false));
         }
 
@@ -515,6 +526,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
                 WorkspaceMode::Git => self.capture_git_baseline(&canonical)?,
                 WorkspaceMode::NonGit => GitBaseline::empty(),
             };
+            prepare()?;
             self.create_machine_layout(&canonical, mode, &workspace_id, &state_root, baseline)?;
             let record = self.validate_existing(
                 &canonical,
@@ -531,6 +543,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
             WorkspaceMode::Git => self.capture_git_baseline(&canonical)?,
             WorkspaceMode::NonGit => GitBaseline::empty(),
         };
+        prepare()?;
         self.create_new_layout(
             &canonical,
             mode,
@@ -1651,6 +1664,50 @@ pub(crate) fn verify_secure_file(path: &Path, uid: u32) -> Result<(), MachineErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialization_admission_precedes_shared_state_preparation() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-init-admission-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        let policy = workspace.join(".dolgorae");
+        fs::create_dir_all(&policy).unwrap();
+        let home = root.join("home");
+        fs::create_dir(&home).unwrap();
+        fs::write(policy.join("config.yaml"), "schema_version: 1\nmode: git\n").unwrap();
+        fs::write(policy.join(".gitignore"), "/exports/\n").unwrap();
+        let state = home.join(".dolgorae");
+        let service =
+            WorkspaceService::new(SystemWorkspacePlatform, SystemGitRunner, state.clone());
+        let error = service
+            .initialize_with_preparation(Some(&workspace), WorkspaceMode::NonGit, || {
+                panic!("incompatible policy reached shared state preparation")
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "WORKSPACE_INITIALIZATION_CONFLICT");
+        assert!(!state.exists());
+        fs::write(
+            policy.join("config.yaml"),
+            "schema_version: 1\nmode: non_git\n",
+        )
+        .unwrap();
+        let before = fs::read(policy.join("config.yaml")).unwrap();
+        let called = std::cell::Cell::new(false);
+        let error = service
+            .initialize_with_preparation(Some(&workspace), WorkspaceMode::NonGit, || {
+                called.set(true);
+                Err(MachineError::initialization_conflict(
+                    &workspace,
+                    "shared preparation failed",
+                ))
+            })
+            .unwrap_err();
+        assert!(called.get());
+        assert_eq!(error.code, "WORKSPACE_INITIALIZATION_CONFLICT");
+        assert!(!state.exists());
+        assert_eq!(fs::read(policy.join("config.yaml")).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn git_quoted_paths_decode_losslessly() {

@@ -68,6 +68,28 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         root = pathlib.Path(temporary)
         home = root / "home"
         home.mkdir(mode=0o700)
+        for existing_empty_home in (False, True):
+            refused_home = root / f"refused-home-{existing_empty_home}"
+            refused_home.mkdir(mode=0o700)
+            global_root = refused_home / ".dolgorae"
+            if existing_empty_home:
+                global_root.mkdir(mode=0o700)
+            incompatible = root / f"incompatible-{existing_empty_home}"
+            incompatible.mkdir(mode=0o700)
+            policy = incompatible / ".dolgorae"
+            policy.mkdir(mode=0o700)
+            (policy / "config.yaml").write_text("schema_version: 1\nmode: git\n", encoding="utf-8")
+            (policy / ".gitignore").write_text("/exports/\n", encoding="utf-8")
+            before = {path.name: path.read_bytes() for path in policy.iterdir()}
+            refused = run(binary, ["init", "--non-git", str(incompatible)], refused_home)
+            envelope = json.loads(refused.stdout)
+            assert_valid(envelope, machine, "incompatible-init Machine envelope")
+            if refused.returncode != 4 or envelope["error"]["code"] != "WORKSPACE_INITIALIZATION_CONFLICT":
+                raise AssertionError(f"incompatible policy was not refused: {refused!r}")
+            if global_root.exists() != existing_empty_home or (global_root.exists() and list(global_root.iterdir())):
+                raise AssertionError("rejected initialization mutated global home state")
+            if {path.name: path.read_bytes() for path in policy.iterdir()} != before:
+                raise AssertionError("rejected initialization changed portable policy")
         repository = root / "repository"
         repository.mkdir(mode=0o700)
         git(repository, "init", "-b", "main")

@@ -86,6 +86,11 @@ installed daemon is introduced.
 ### Shared Semantic Service
 
 The semantic service owns every public operation independently of wire format.
+For initialization it composes Workspace admission with global Profile home
+creation: the Workspace layer invokes a preparation callback only after its
+compatibility checks, and the semantic layer calls the global Profile owner
+through that callback before Workspace publication. Workspace does not depend
+on the global Profile module.
 It accepts validated domain requests, performs Controller and Operator
 authorization at the existing serialization points, coordinates workers and
 durable repositories, and returns domain results or typed Dolgorae errors. The

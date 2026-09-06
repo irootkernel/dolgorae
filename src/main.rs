@@ -161,7 +161,7 @@ fn execute(cli: Cli) -> ExitCode {
             Err(error) => return render_failure(cli.human, command_name, error.into()),
         };
         let generation = if matches!(&cli.command, Command::Init(_)) {
-            dolgorae::global_profile::initialize_generation(&home).map(|_| ())
+            dolgorae::global_profile::inspect_generation(&home).map(|_| ())
         } else {
             dolgorae::global_profile::require_generation(&home)
         };
