@@ -554,7 +554,9 @@ Changing the policy changes the immutable launch contract and requires an
 operator-authorized migration.
 Environment names are explicit, require `PATH`, `LANG`, and `LC_ALL`, reserve `CODEX_HOME`, `HOME`,
 `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, and every `DOLGORAE_*` name to Dolgorae, and treat
-all stored values as non-secret local configuration. Unknown or duplicate keys,
+all stored values as non-secret local configuration. Duplicate keys at every
+mapping depth, including Profile names and environment names, are rejected.
+Unknown or duplicate keys,
 empty argv, relative homes,
 wrong types, a missing required environment value, malformed YAML, and unsupported schema versions return
 `PROFILE_CONFIG_INVALID`. Profile add/remove holds the Dolgorae-home root lock and uses
@@ -574,6 +576,13 @@ or hidden default.
 `profile add` MUST reject an existing name with
 `PROFILE_ALREADY_EXISTS`; it MUST NOT overwrite a profile implicitly. Replacement
 requires an explicit remove followed by add.
+Removal may discard a target whose executable is no longer available, but still
+requires an unambiguous registry and validates the remaining definitions before
+replacement. It commits the registry before pruning binding history. A failure
+between those writes retains conservative historical bindings; it never permits
+new admission for the removed name. Re-adding that name retains those bindings
+until a later guarded removal proves every historical server quiescent and
+prunes them.
 
 The strict mode-0600 `~/.dolgorae/state.json` contains exactly
 `schema_version: 2` and `state_generation: global-profile-v2`. The same

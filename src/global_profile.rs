@@ -461,8 +461,9 @@ fn load_registry_for_removal(root: &Path) -> Result<GlobalProfileRegistry, Machi
             "profile registry exceeds 1 MiB",
         ));
     }
-    let registry: GlobalProfileRegistry = serde_yaml_ng::from_slice(&bytes)
-        .map_err(|error| MachineError::profile_config_invalid(&path, error.to_string()))?;
+    // Removal must remain possible when the target executable is unavailable.
+    // Decode strictly here; store_registry validates the remaining definitions.
+    let registry = decode_registry(&path, &bytes)?;
     if registry.schema_version != 1 {
         return Err(MachineError::profile_config_invalid(
             &path,
@@ -567,13 +568,21 @@ fn store_binding_history(root: &Path, history: &ProfileBindingHistory) -> Result
 }
 
 fn parse_registry_bytes(path: &Path, bytes: &[u8]) -> Result<GlobalProfileRegistry, MachineError> {
-    let registry: GlobalProfileRegistry = serde_yaml_ng::from_slice(bytes)
-        .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))?;
+    let registry = decode_registry(path, bytes)?;
     validate_runtime_profiles(path, registry.schema_version, &registry.profiles)?;
     for name in registry.profiles.keys() {
         validate_global_profile_name(path, name)?;
     }
     Ok(registry)
+}
+
+fn decode_registry(path: &Path, bytes: &[u8]) -> Result<GlobalProfileRegistry, MachineError> {
+    // Value rejects duplicate mapping keys at every depth; direct BTreeMap
+    // deserialization would silently keep the last value instead.
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_slice(bytes)
+        .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))?;
+    serde_yaml_ng::from_value(value)
+        .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))
 }
 
 fn validate_global_profile_name(path: &Path, name: &str) -> Result<(), MachineError> {
@@ -974,6 +983,133 @@ mod tests {
         assert_eq!(
             GlobalProfileStore::new(&home).load().unwrap_err().code,
             "RUNTIME_PATH_INVALID"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn nested_duplicate_keys_fail_before_registry_reads_or_removal() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let profile = serde_json::to_string(&valid_profile(&parent)).unwrap();
+        let registry = format!(r#"{{"schema_version":1,"profiles":{{"primary":{profile}}}}}"#);
+        let cases = [
+            format!(
+                r#"{{"schema_version":1,"profiles":{{"primary":{profile},"primary":{profile}}}}}"#
+            ),
+            registry.replace(
+                r#""LANG":"C.UTF-8""#,
+                r#""LANG":"invalid","LANG":"C.UTF-8""#,
+            ),
+            "schema_version: 1\nprofiles: {}\nprofiles: {}\n".to_owned(),
+        ];
+        let path = home.root().join("profiles.yaml");
+        let history = fs::read(home.root().join("profile-bindings.json")).unwrap();
+        let store = GlobalProfileStore::new(&home);
+        for contents in cases {
+            assert_ne!(contents, registry);
+            fs::write(&path, &contents).unwrap();
+            assert_eq!(store.load().unwrap_err().code, "PROFILE_CONFIG_INVALID");
+            assert_eq!(
+                store
+                    .remove_if::<()>("primary", |_| panic!("ambiguous registry reached guard"))
+                    .unwrap_err()
+                    .code,
+                "PROFILE_CONFIG_INVALID"
+            );
+            assert_eq!(fs::read(&path).unwrap(), contents.as_bytes());
+            assert_eq!(
+                fs::read(home.root().join("profile-bindings.json")).unwrap(),
+                history
+            );
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn secure_home_components_reject_a_different_expected_owner() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let uid = DarwinSystem.current_uid();
+        let foreign_uid = uid.wrapping_add(1);
+        verify_secure_directory(home.root(), uid).unwrap();
+        assert_eq!(
+            verify_secure_directory(home.root(), foreign_uid)
+                .unwrap_err()
+                .code,
+            "RUNTIME_PATH_INVALID"
+        );
+        for name in ["state.json", "profiles.yaml", "profile-bindings.json"] {
+            let path = home.root().join(name);
+            let before = fs::read(&path).unwrap();
+            verify_secure_file(&path, uid).unwrap();
+            assert_eq!(
+                verify_secure_file(&path, foreign_uid).unwrap_err().code,
+                "RUNTIME_PATH_INVALID"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn interrupted_removal_retains_history_until_a_later_guarded_removal() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let store = GlobalProfileStore::new(&home);
+        let profile = valid_profile(&parent);
+        store.add("primary".to_owned(), profile.clone()).unwrap();
+        let definition_sha256 = crate::jcs::sha256_hex(
+            &crate::jcs::canonicalize(
+                &crate::jcs::parse(&serde_json::to_string(&profile).unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
+        store
+            .record_binding(ProfileBindingRecord {
+                selected_name: "primary".to_owned(),
+                definition_sha256,
+                server_key: "a".repeat(64),
+                launch_snapshot_sha256: "b".repeat(64),
+            })
+            .unwrap();
+        // Model the durable boundary after registry replacement, before history pruning.
+        store_registry(
+            home.root(),
+            &GlobalProfileRegistry {
+                schema_version: 1,
+                profiles: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            store.resolve("primary").unwrap_err().code,
+            "PROFILE_NOT_FOUND"
+        );
+        assert_eq!(
+            bound_server_keys_under_root_lock(home.root(), "primary").unwrap(),
+            vec!["a".repeat(64)]
+        );
+        store.add("primary".to_owned(), profile).unwrap();
+        let history = fs::read(home.root().join("profile-bindings.json")).unwrap();
+        assert_eq!(
+            store
+                .remove_if("primary", |_| Err::<(), _>(
+                    MachineError::profile_config_invalid(home.root(), "guard denied")
+                ))
+                .unwrap_err()
+                .code,
+            "PROFILE_CONFIG_INVALID"
+        );
+        assert_eq!(
+            fs::read(home.root().join("profile-bindings.json")).unwrap(),
+            history
+        );
+        store.remove_if("primary", |_| Ok(())).unwrap();
+        assert!(
+            bound_server_keys_under_root_lock(home.root(), "primary")
+                .unwrap()
+                .is_empty()
         );
         fs::remove_dir_all(parent).unwrap();
     }

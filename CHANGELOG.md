@@ -45,6 +45,10 @@ development commits.
 - Immutable worktree-target capture now rejects symlinks in every path
   component and bounds Git object output before buffering it.
 
+### Fixed
+
+- Reject duplicate Profile and environment keys before reading or changing the global registry.
+
 ## v0.1.1 - 2026-08-31
 
 ### Changed
