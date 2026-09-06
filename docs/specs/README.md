@@ -685,6 +685,12 @@ Existing Runs MUST NOT be rebound to another account or `CODEX_HOME`. The
 Agent Configuration snapshot additionally records the accepted model, default
 effort, purpose, required capabilities, role reference, normalized Controller
 instructions, instruction digests, and Codex Profile snapshot digest.
+Profile fields MUST match the snapshot schema version: v1 uses
+`runtime_profile` and `runtime_profile_snapshot_sha256`, while v2 uses
+`selected_profile` and `global_profile_binding_sha256`. A field from the other
+version is forbidden even when its value is `null`; the selected version
+requires both fields as strings. The nullable `role_reference` field remains
+required, with `null` representing explicit absence.
 Different Agent Configurations MAY share one Codex Profile and one compatible
 Profile Server launch contract.
 

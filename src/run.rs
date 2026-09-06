@@ -107,20 +107,33 @@ pub struct AgentConfigurationSnapshot {
 #[serde(deny_unknown_fields)]
 struct AgentConfigurationWire {
     schema_version: u32,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
     runtime_profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
     runtime_profile_snapshot_sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
     selected_profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
     global_profile_binding_sha256: Option<String>,
     model: String,
     default_effort: String,
     purpose: Purpose,
     required_capabilities: Vec<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     role_reference: Option<String>,
     normalized_instructions: String,
     instructions: InstructionSnapshot,
     execution_lane: ExecutionLane,
     required_assurance: Assurance,
     native_subagent_policy: String,
+}
+
+fn deserialize_profile_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Only an absent key receives the default None; a present key must be a string.
+    String::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
@@ -1557,6 +1570,42 @@ mod tests {
 
         for (valid, wrong_version) in [(&v1, 2), (&v2, 1)] {
             assert!(serde_json::from_value::<AgentConfigurationSnapshot>(valid.clone()).is_ok());
+            for field in valid.as_object().unwrap().keys() {
+                let mut missing = valid.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<AgentConfigurationSnapshot>(missing).is_err(),
+                    "accepted missing {field} in v{}",
+                    valid["schema_version"]
+                );
+            }
+            for field in [
+                "runtime_profile",
+                "runtime_profile_snapshot_sha256",
+                "selected_profile",
+                "global_profile_binding_sha256",
+            ] {
+                for value in [
+                    serde_json::Value::Null,
+                    serde_json::json!(1),
+                    serde_json::json!(false),
+                    serde_json::json!({}),
+                    serde_json::json!([]),
+                ] {
+                    let mut malformed = valid.clone();
+                    malformed[field] = value;
+                    assert!(
+                        serde_json::from_value::<AgentConfigurationSnapshot>(malformed).is_err(),
+                        "accepted non-string {field} in v{}",
+                        valid["schema_version"]
+                    );
+                }
+                if valid.get(field).is_none() {
+                    let mut mixed = valid.clone();
+                    mixed[field] = v1.get(field).or_else(|| v2.get(field)).unwrap().clone();
+                    assert!(serde_json::from_value::<AgentConfigurationSnapshot>(mixed).is_err());
+                }
+            }
             let mut mismatched = valid.clone();
             mismatched["schema_version"] = serde_json::json!(wrong_version);
             assert!(serde_json::from_value::<AgentConfigurationSnapshot>(mismatched).is_err());

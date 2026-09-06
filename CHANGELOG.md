@@ -28,6 +28,8 @@ development commits.
 
 ### Changed
 
+- Reject null or mixed-version Profile fields and missing required fields in
+  immutable Agent Configuration snapshots.
 - Align External Specialist v2 error projections with the Machine error contract,
   including missing global Profiles and unsupported home generations.
 - Reject insecure existing server locks before Profile membership or lifecycle
