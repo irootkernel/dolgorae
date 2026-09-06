@@ -51,8 +51,13 @@ def call(
     new_controller: pathlib.Path | None = None,
     expected_error: str | None = None,
     environment_overrides: dict[str, str] | None = None,
+    invalid_request: bool = False,
 ) -> dict[str, object]:
-    assert_valid(request, FACADE_SCHEMA, f"{request.get('operation')} request")
+    if invalid_request:
+        if FACADE_SCHEMA.is_valid(request):
+            raise AssertionError("negative request unexpectedly conforms to the schema")
+    else:
+        assert_valid(request, FACADE_SCHEMA, f"{request.get('operation')} request")
     with tempfile.TemporaryFile() as request_file:
         os.fchmod(request_file.fileno(), 0o600)
         request_file.write(json.dumps(request, separators=(",", ":")).encode())
@@ -413,6 +418,31 @@ def validate(binary: pathlib.Path) -> None:
                 "requested_access": "read_only",
                 "idempotency_key": "hire",
             }
+            for selected_profile in (None, "", ".invalid", "Invalid", "a" * 129):
+                rejected = json.loads(json.dumps(hire_request))
+                if selected_profile is None:
+                    del rejected["agent_configuration"]["selected_profile"]
+                else:
+                    rejected["agent_configuration"]["selected_profile"] = selected_profile
+                call(
+                    binary, home, workspace, owner, rejected, child,
+                    expected_error="INVALID_ARGUMENT",
+                    invalid_request=not FACADE_SCHEMA.is_valid(rejected),
+                )
+            rejected = json.loads(json.dumps(hire_request))
+            rejected["agent_configuration"]["global_profile_binding_sha256"] = "0" * 64
+            error = call(
+                binary, home, workspace, owner, rejected, child,
+                expected_error="INVALID_ARGUMENT",
+            )
+            if error["details"]["argument"] != "global_profile_binding_sha256":
+                raise AssertionError(f"stale binding rejected at the wrong boundary: {error!r}")
+            engagement = call(binary, home, workspace, owner, {
+                "operation": "get_external_engagement", "engagement_id": engagement_id,
+            })
+            if engagement["specialists"] or list((state_root / "runs").glob("*")):
+                raise AssertionError("rejected Profile input admitted a Specialist or Run")
+
             hired = call(binary, home, workspace, owner, hire_request, child)
             run_id = str(hired["specialist_run_id"])
             replayed_hire = call(binary, home, workspace, owner, hire_request, child)
