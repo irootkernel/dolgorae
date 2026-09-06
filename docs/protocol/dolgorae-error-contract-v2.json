@@ -3,7 +3,17 @@
   "$id": "https://dolgorae.local/schema/error-contract/v2",
   "title": "Dolgorae error contract v2",
   "x-exit-status": {
-    "LEGACY_STATE_UNSUPPORTED": 5
+    "LEGACY_STATE_UNSUPPORTED": 5,
+    "STATE_CONFLICT": 4,
+    "SPECIALIST_POLICY_DENIED": 4,
+    "SPECIALIST_NOT_MEMBER": 4,
+    "ENGAGEMENT_NOT_FOUND": 4,
+    "ENGAGEMENT_TIMEOUT": 4,
+    "ORCHESTRATION_SCHEMA_UNSUPPORTED": 4,
+    "SPECIALIST_TASK_NOT_FOUND": 4,
+    "SPECIALIST_RESULT_INVALID": 4,
+    "SPECIALIST_WRITER_CONFLICT": 4,
+    "ENGAGEMENT_STATE_CONFLICT": 4
   },
   "oneOf": [
     {
@@ -53,6 +63,461 @@
           }
         }
       }
+    },
+    {
+      "$ref": "#/$defs/engagement_error"
     }
-  ]
+  ],
+  "$defs": {
+    "engagement_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "const": "IDEMPOTENCY_CONFLICT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_action"
+              ],
+              "properties": {
+                "required_action": {
+                  "const": "use_original_input_or_new_key"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "STATE_CONFLICT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_action"
+              ],
+              "properties": {
+                "required_action": {
+                  "const": "inspect_engagement"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "SPECIALIST_POLICY_DENIED"
+            },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {}
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "required_action"
+                  ],
+                  "properties": {
+                    "required_action": {
+                      "const": "change_specialist_or_access"
+                    }
+                  }
+                }
+              ]
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "SPECIALIST_NOT_MEMBER"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "specialist_run_id"
+              ],
+              "properties": {
+                "specialist_run_id": {
+                  "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "ENGAGEMENT_NOT_FOUND"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_action"
+              ],
+              "properties": {
+                "required_action": {
+                  "const": "use_existing_engagement"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "ENGAGEMENT_TIMEOUT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_action"
+              ],
+              "properties": {
+                "required_action": {
+                  "const": "cancel_or_await_again"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "observed"
+              ],
+              "properties": {
+                "observed": {
+                  "type": "string"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "SPECIALIST_TASK_NOT_FOUND"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "task_id"
+              ],
+              "properties": {
+                "task_id": {
+                  "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "SPECIALIST_RESULT_INVALID"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "task_id"
+              ],
+              "properties": {
+                "task_id": {
+                  "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "SPECIALIST_WRITER_CONFLICT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cause_code"
+              ],
+              "properties": {
+                "cause_code": {
+                  "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/error_code"
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "INTERNAL_ERROR"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "type": "string"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "ENGAGEMENT_STATE_CONFLICT"
+            },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "specialist_run_id"
+                  ],
+                  "properties": {
+                    "specialist_run_id": {
+                      "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "engagement_id"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                    },
+                    "engagement_id": {
+                      "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "membership_state"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                    },
+                    "membership_state": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "RECOVERY_REQUIRED"
+            },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "required_action"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                    },
+                    "required_action": {
+                      "const": "restore_isolated_worktree"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "lifecycle"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                    },
+                    "lifecycle": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "OUTCOME_UNKNOWN"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run_id"
+              ],
+              "properties": {
+                "run_id": {
+                  "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "ENGAGEMENT_STATE_CONFLICT"
+            },
+            "retryable": {
+              "const": true
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "specialist_run_id",
+                "required_action"
+              ],
+              "properties": {
+                "specialist_run_id": {
+                  "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                },
+                "required_action": {
+                  "const": "retry_after_reconciliation"
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "OUTCOME_UNKNOWN"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "task_id",
+                "required_action"
+              ],
+              "properties": {
+                "task_id": {
+                  "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                },
+                "required_action": {
+                  "const": "retry_reconciliation"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
 }

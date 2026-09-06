@@ -28,6 +28,8 @@ development commits.
 
 ### Changed
 
+- Align External Specialist v2 error projections with the Machine error contract,
+  including missing global Profiles and unsupported home generations.
 - Reject insecure existing server locks before Profile membership or lifecycle
   operations without changing their permissions.
 - Workspace initialization is account-neutral, Profile commands no longer

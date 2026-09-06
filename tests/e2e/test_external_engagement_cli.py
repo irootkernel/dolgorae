@@ -21,6 +21,7 @@ PROTOCOL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol
 FACADE_SCHEMA = validator(
     PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v2.schema.json"
 )
+MACHINE_SCHEMA = validator(PROTOCOL_ROOT, "dolgorae-machine-v2.schema.json")
 
 
 def invoke(
@@ -91,6 +92,7 @@ def call(
     if completed.stderr:
         raise AssertionError(f"unexpected engagement stderr: {completed.stderr!r}")
     envelope = json.loads(completed.stdout)
+    assert_valid(envelope, MACHINE_SCHEMA, f"{request.get('operation')} Machine envelope")
     if completed.returncode != 0 and expected_error is None:
         raise AssertionError(f"engagement call failed: {envelope!r}")
     if expected_error is not None:
@@ -418,6 +420,17 @@ def validate(binary: pathlib.Path) -> None:
                 "requested_access": "read_only",
                 "idempotency_key": "hire",
             }
+            for overrides in (
+                {"schema_version": 1},
+                {"runtime_profile": profile},
+                {"runtime_profile": None},
+            ):
+                rejected = json.loads(json.dumps(hire_request))
+                rejected["agent_configuration"].update(overrides)
+                call(
+                    binary, home, workspace, owner, rejected, child,
+                    expected_error="INVALID_ARGUMENT", invalid_request=True,
+                )
             for selected_profile in (None, "", ".invalid", "Invalid", "a" * 129):
                 rejected = json.loads(json.dumps(hire_request))
                 if selected_profile is None:
@@ -429,6 +442,14 @@ def validate(binary: pathlib.Path) -> None:
                     expected_error="INVALID_ARGUMENT",
                     invalid_request=not FACADE_SCHEMA.is_valid(rejected),
                 )
+            rejected = json.loads(json.dumps(hire_request))
+            rejected["agent_configuration"]["selected_profile"] = "missing-profile"
+            error = call(
+                binary, home, workspace, owner, rejected, child,
+                expected_error="PROFILE_NOT_FOUND",
+            )
+            if error["details"]["profile"] != "missing-profile":
+                raise AssertionError(f"missing Profile rejected at the wrong boundary: {error!r}")
             rejected = json.loads(json.dumps(hire_request))
             rejected["agent_configuration"]["global_profile_binding_sha256"] = "0" * 64
             error = call(

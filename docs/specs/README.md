@@ -3125,6 +3125,18 @@ admission. The legacy `runtime_profile` input field is rejected. The checked
 [current hire example](../protocol/examples/external-engagement-v2-hire.valid.json)
 shows this contract.
 
+Facade v2 error projections preserve the original facade error-code vocabulary
+and include the closed Machine error-code vocabulary for Profile resolution,
+home-generation failures, and propagated Run errors. They carry
+`operation: external_specialist_error`, `code`, `message`, and `retryable`;
+the CLI Machine envelope retains the corresponding typed `details`.
+Machine v2 also accepts the engagement-specific detail variants: scoped
+idempotency recovery actions, membership and task identifiers, Specialist policy
+and writer conflicts, and engagement reconciliation failures. These variants
+remain closed objects; they do not relax the existing Run error variants.
+An absent selected Profile returns `PROFILE_NOT_FOUND` before member or Run
+admission. Frozen facade v1 error projections retain their original vocabulary.
+
 The private facade is the only aggregate-owner delegation boundary. For a
 facade-mediated member mutation, the Worker validates the presented owner
 credential, immutable Run aggregate binding, and current SQLite membership at

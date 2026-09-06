@@ -21,9 +21,45 @@
     { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/release_result" },
     { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/close_request" },
     { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/close_result" },
-    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/error_result" }
+    { "$ref": "#/$defs/error_result" }
   ],
   "$defs": {
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "operation": {
+          "const": "external_specialist_error"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/error_code"
+            },
+            {
+              "const": "LEGACY_STATE_UNSUPPORTED"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/error_result/properties/code"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
     "hire_request": {
       "type": "object",
       "additionalProperties": false,

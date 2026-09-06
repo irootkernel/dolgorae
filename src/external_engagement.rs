@@ -2354,8 +2354,8 @@ mod tests {
             "engagement_id":Uuid::now_v7(),
             "role_ref":"researcher",
             "agent_configuration":{
-                "schema_version":1,
-                "runtime_profile":"default",
+                "schema_version":2,
+                "selected_profile":"default",
                 "model":null,
                 "default_effort":"high",
                 "purpose":"research",
@@ -2370,6 +2370,10 @@ mod tests {
             "requested_access":"read_only",
             "idempotency_key":"hire-required-nullable"
         });
+        serde_json::from_value::<Request>(base.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
         for field in ["model", "purpose_label"] {
             let mut missing = base.clone();
             missing["agent_configuration"]
