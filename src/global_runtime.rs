@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -962,10 +962,22 @@ fn lock_file(path: &Path) -> Result<File, MachineError> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(|error| path_error(path, error))?;
+    verify_lock_file(&file, path, DarwinSystem.current_uid())?;
     DarwinSystem
         .lock_exclusive(&file)
         .map_err(|error| path_error(path, error))?;
     Ok(file)
+}
+
+fn verify_lock_file(file: &File, path: &Path, uid: u32) -> Result<(), MachineError> {
+    let metadata = file.metadata().map_err(|error| path_error(path, error))?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o600 {
+        return Err(MachineError::runtime_path_invalid(
+            path,
+            "lock file must be current-uid-owned regular file with mode 0600",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_member_identity(workspace_id: &str) -> Result<(), MachineError> {
@@ -1430,6 +1442,97 @@ mod tests {
         let index = store.load().unwrap();
         assert_eq!(index.revision, 12);
         assert_eq!(index.members.len(), 12);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn insecure_server_locks_block_reads_removal_and_append_without_mutation() {
+        for corruption in ["permissions", "directory", "symlink"] {
+            let (parent, home) = home();
+            let key = "d".repeat(64);
+            let profile = definition(&parent);
+            let registry = GlobalProfileStore::new(&home);
+            registry
+                .add("selected".to_owned(), profile.clone())
+                .unwrap();
+            let resolved = ResolvedGlobalProfile::resolve(&home, "selected").unwrap();
+            registry
+                .record_binding(crate::global_profile::ProfileBindingRecord {
+                    selected_name: "selected".to_owned(),
+                    definition_sha256: resolved.definition_sha256,
+                    server_key: key.clone(),
+                    launch_snapshot_sha256: "b".repeat(64),
+                })
+                .unwrap();
+            let store = GlobalMembershipStore::new(&home, "selected", &key).unwrap();
+            let run_id = Uuid::now_v7();
+            store
+                .record(&"1".repeat(64), run_id, MembershipDisposition::Released)
+                .unwrap();
+            let root = home.root().join("profiles").join(&key);
+            let path = root.join("server.lock");
+            match corruption {
+                "permissions" => {
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap()
+                }
+                "directory" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                "symlink" => {
+                    fs::remove_file(&path).unwrap();
+                    std::os::unix::fs::symlink(root.join("members.json"), &path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let paths = [
+                root.join("membership.jsonl"),
+                root.join("members.json"),
+                home.root().join("profiles.yaml"),
+                home.root().join("profile-bindings.json"),
+            ];
+            let before = paths.each_ref().map(|path| fs::read(path).unwrap());
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            for error in [
+                store.load().unwrap_err(),
+                store.require_quiescent("selected", "stop").unwrap_err(),
+                remove_global_profile(&home, "selected").unwrap_err(),
+                store
+                    .record(&"1".repeat(64), run_id, MembershipDisposition::Active)
+                    .unwrap_err(),
+            ] {
+                assert_eq!(error.code, "RUNTIME_PATH_INVALID", "{corruption}");
+            }
+            assert_eq!(paths.each_ref().map(|path| fs::read(path).unwrap()), before);
+            let after = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(
+                (after.ino(), after.mode(), after.uid()),
+                (metadata.ino(), metadata.mode(), metadata.uid())
+            );
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+
+    #[test]
+    fn lock_descriptor_validation_rejects_foreign_ownership_and_non_files() {
+        let (parent, home) = home();
+        let path = home.root().join("test.lock");
+        let file = lock_file(&path).unwrap();
+        let uid = DarwinSystem.current_uid();
+        assert_eq!(
+            verify_lock_file(&file, &path, uid.wrapping_add(1))
+                .unwrap_err()
+                .code,
+            "RUNTIME_PATH_INVALID"
+        );
+        let directory = File::open(home.root()).unwrap();
+        assert_eq!(
+            verify_lock_file(&directory, home.root(), uid)
+                .unwrap_err()
+                .code,
+            "RUNTIME_PATH_INVALID"
+        );
+        drop(file);
         fs::remove_dir_all(parent).unwrap();
     }
 

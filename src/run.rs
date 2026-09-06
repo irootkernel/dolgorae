@@ -1555,8 +1555,22 @@ mod tests {
         assert_eq!(v2["global_profile_binding_sha256"], "a".repeat(64));
         assert!(v2.get("runtime_profile").is_none());
 
-        let mut mixed = v2;
-        mixed["schema_version"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<AgentConfigurationSnapshot>(mixed).is_err());
+        for (valid, wrong_version) in [(&v1, 2), (&v2, 1)] {
+            assert!(serde_json::from_value::<AgentConfigurationSnapshot>(valid.clone()).is_ok());
+            let mut mismatched = valid.clone();
+            mismatched["schema_version"] = serde_json::json!(wrong_version);
+            assert!(serde_json::from_value::<AgentConfigurationSnapshot>(mismatched).is_err());
+
+            let mut mixed = valid.clone();
+            for field in [
+                "runtime_profile",
+                "runtime_profile_snapshot_sha256",
+                "selected_profile",
+                "global_profile_binding_sha256",
+            ] {
+                mixed[field] = v1.get(field).or_else(|| v2.get(field)).unwrap().clone();
+            }
+            assert!(serde_json::from_value::<AgentConfigurationSnapshot>(mixed).is_err());
+        }
     }
 }

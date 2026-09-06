@@ -28,6 +28,8 @@ development commits.
 
 ### Changed
 
+- Reject insecure existing server locks before Profile membership or lifecycle
+  operations without changing their permissions.
 - Workspace initialization is account-neutral, Profile commands no longer
   accept workspace scope, and both Specialist entry paths use the selected
   global Profile through versioned machine-readable contracts.

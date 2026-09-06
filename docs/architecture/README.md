@@ -910,6 +910,9 @@ The Dolgorae home contains a canonical-home coordinator at
 The server directory has only this lifecycle state and membership file set;
 there is no parallel `runtime-*` journal. All components are current-uid-owned
 mode 0700/0600 and descriptor-relative.
+Membership lock acquisition validates the opened `server.lock` descriptor as a
+current-uid-owned regular file with mode 0600 before locking it; invalid existing
+nodes are rejected without permission repair or membership mutation.
 The socket node uses the validated short path
 `/tmp/dolgorae-<uid>/p/<base32-first-160-server-key-bits>.sock`; its full path
 and device/inode are recorded in profile state.
