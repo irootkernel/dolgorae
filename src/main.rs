@@ -347,7 +347,11 @@ fn execute(cli: Cli) -> ExitCode {
     }
     if let Command::Profile { command } = &cli.command {
         let (operation, arguments) = profile_operation(command);
-        return match dolgorae::profile::execute_global(operation, arguments) {
+        return match dolgorae::profile::execute_global_with_member_quiescer(
+            operation,
+            arguments,
+            dolgorae::semantic::quiesce_profile_member,
+        ) {
             Ok(data) => {
                 if cli.human {
                     println!(

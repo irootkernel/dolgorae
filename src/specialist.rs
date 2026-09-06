@@ -82,7 +82,7 @@ impl ReviewerRuntimePlan {
         if request.runtime_profile != profile.profile_name {
             return Err(MachineError::new(
                 "REVIEW_PROFILE_UNAVAILABLE",
-                "the selected Reviewer Runtime Profile does not match the resolved profile",
+                "the selected Reviewer Codex Profile does not match the resolved profile",
                 false,
                 serde_json::json!({"profile": request.runtime_profile}),
             ));
@@ -278,7 +278,7 @@ fn reject_recursive_review_adapter(profile: &ProfileSnapshot) -> Result<(), Mach
     if registered {
         return Err(MachineError::new(
             "REVIEW_PROFILE_UNAVAILABLE",
-            "the Reviewer Runtime Profile registers the recursive external review adapter",
+            "the Reviewer Codex Profile registers the recursive external review adapter",
             false,
             serde_json::json!({"required_action":"remove_dolgorae_review_from_reviewer_profile"}),
         ));

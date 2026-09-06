@@ -1507,7 +1507,6 @@ fn run_start_with_context(
         ));
     }
     let run_id = reservation.run_id;
-    crate::profile::admit_global_run(&global_profile_binding, &state, &view.workspace_id, run_id)?;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     // The identical retry returns the original Run.  Reaching a published Run
     // through its own reservation is exactly the response-loss reconciliation
@@ -1515,7 +1514,6 @@ fn run_start_with_context(
     // — and because nothing here reached that Run's worker, the verdict is
     // derived from what durable state proves rather than asserted as `Match`.
     if store.load_manifest(run_id).is_ok() {
-        ensure_global_run_membership(&home, &view.workspace_id, &global_profile_binding, run_id)?;
         return run_object(
             &state_root,
             run_id,
@@ -1523,149 +1521,188 @@ fn run_start_with_context(
             projection_identity_verdict(&state_root, run_id),
         );
     }
-    let start_baseline = WorkspaceService::system()?.capture_run_baseline(&view)?;
-    let mut manifest = build_manifest(
-        run_id,
-        &view,
-        &state,
-        profile,
-        global_profile_binding.clone(),
-        &model,
-        &effort,
-        &instructions_text,
-        purpose,
-        parent_ref,
-        control_mode,
-        execution_lane,
-        assurance,
-        binding,
-        required_capabilities,
-        start_baseline,
-    )?;
-    if let Some(context) = reviewer {
-        manifest.agent_configuration = context.plan.agent_configuration.clone();
-        manifest.aggregate_binding = Some(context.aggregate_binding.clone());
-        context.plan.validate_manifest(&manifest)?;
-    }
-    if let Some(context) = external {
-        manifest.agent_configuration = context.agent_configuration.clone();
-        manifest.aggregate_binding = Some(context.aggregate_binding.clone());
-        validate_external_specialist_manifest(&manifest, context.agent_configuration)?;
-    }
-    if let Some(context) = continuation {
-        manifest.write_continuation_provenance = Some(context.provenance.clone());
-    }
-    if let Some(context) = fork {
-        manifest.fork_provenance = Some(context.provenance.clone());
-    }
-    let directory = store.publish(&manifest)?;
-
-    let mut ledger = ConformantLedger::open_for_bootstrap(&directory.root, run_id)
-        .map_err(|error| internal(error.to_string()))?;
-    ledger
-        .bootstrap(&BootstrapRequest {
-            timestamp: SystemLedgerClock::default().timestamp(),
-            workspace_id: view.workspace_id.clone(),
-            intent: IdempotencyIntent {
-                schema_version: 1,
-                operation: if fork.is_some() {
-                    IdempotencyOperation::ForkRun
-                } else {
-                    IdempotencyOperation::StartRun
-                },
-                idempotency_key,
-                normalized_identity_sha256,
-                run_id,
-            },
-            record_kind: BootstrapRecordKind::RunCreated,
-            initial_access: Access::Read.as_str().to_owned(),
-            default_effort: Some(effort.clone()),
-        })
-        .map_err(|error| internal(error.to_string()))?;
-    if reviewer.is_none() {
-        ledger
-            .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
-            .map_err(|error| internal(error.to_string()))?;
-    }
-    drop(ledger);
-
-    // Membership is part of publishing the Run's connection authority, not a
-    // later best-effort side effect.  The profile lifecycle must be able to
-    // refuse stop/restart before the worker can attach to this server.
-    GlobalMembershipStore::new(&home, &global_profile_binding.server_key)?.record(
-        &view.workspace_id,
-        run_id,
-        MembershipDisposition::Active,
-    )?;
-
-    // Public Run allocation is deliberately threadless and process-free. The
-    // first turn (or an explicit recovery/resume operation) wins the startup
-    // election and constructs the connection from the immutable manifest.
-    // Internal reviewer allocation retains its already-selected isolated cwd
-    // and starts immediately because that path is not part of the public Run
-    // manifest.
-    if reviewer.is_none() {
-        return run_object(&state_root, run_id, 0, "Absent");
-    }
-
-    let session = WorkerSessionBootstrap {
-        app_server_socket: PathBuf::from(&state.socket_path),
-        canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
-        server_key: state.snapshot.server_key.clone(),
-        server_epoch: state.server_epoch,
-        controller_id: manifest.controller.identity.controller_id,
-        control_mode: manifest.control_mode.as_str().to_owned(),
-        fixed_model: model.clone(),
-        default_effort: effort.clone(),
-        supported_efforts: efforts,
-        cwd: match reviewer
-            .and_then(|context| context.review_cwd)
-            .or_else(|| external.and_then(|context| context.launch_cwd))
-        {
-            Some(path) => path.to_path_buf(),
-            None => view
-                .canonical_path
-                .to_path_buf()
-                .map_err(|_| internal("workspace path is not representable"))?,
-        },
-        developer_instructions: instructions_text,
-        sandbox: external
-            .map_or("read-only", |context| context.sandbox)
-            .to_owned(),
-        approval_policy: "never".to_owned(),
-        safety_policy: reviewer.map_or(crate::turn::SessionSafetyPolicy::Standard, |context| {
-            context.plan.safety_policy
-        }),
-        artifact_root: directory.root.join("artifacts"),
-        attach: SessionAttach::Start,
-        transport_timeout_seconds: 900,
-        dedicated_server: None,
-    };
-    let control_socket_epoch = 1;
-    if let Err(error) = start_worker(
-        &state_root,
-        &crate::worker::RunWorkerStart {
-            workspace_id: view.workspace_id.clone(),
+    crate::profile::admit_global_run(&global_profile_binding, &state, &view.workspace_id, run_id)?;
+    let mut worker_started = false;
+    let admitted_result = (|| -> Result<Value, MachineError> {
+        let start_baseline = WorkspaceService::system()?.capture_run_baseline(&view)?;
+        let mut manifest = build_manifest(
             run_id,
-            run_generation: 1,
-            ledger_root: directory.root.clone(),
-            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
-            mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
-            control_socket_epoch,
-            profile: profile_name,
-            session: Some(session),
-        },
-    ) {
-        let _ = GlobalMembershipStore::new(&home, &global_profile_binding.server_key).and_then(
-            |membership| {
-                membership.record(&view.workspace_id, run_id, MembershipDisposition::Released)
+            &view,
+            &state,
+            profile,
+            global_profile_binding.clone(),
+            &model,
+            &effort,
+            &instructions_text,
+            purpose,
+            parent_ref,
+            control_mode,
+            execution_lane,
+            assurance,
+            binding,
+            required_capabilities,
+            start_baseline,
+        )?;
+        if let Some(context) = reviewer {
+            manifest.agent_configuration = context.plan.agent_configuration.clone();
+            manifest.aggregate_binding = Some(context.aggregate_binding.clone());
+            context.plan.validate_manifest(&manifest)?;
+        }
+        if let Some(context) = external {
+            manifest.agent_configuration = context.agent_configuration.clone();
+            manifest.aggregate_binding = Some(context.aggregate_binding.clone());
+            validate_external_specialist_manifest(&manifest, context.agent_configuration)?;
+        }
+        if let Some(context) = continuation {
+            manifest.write_continuation_provenance = Some(context.provenance.clone());
+        }
+        if let Some(context) = fork {
+            manifest.fork_provenance = Some(context.provenance.clone());
+        }
+        let directory = store.publish(&manifest)?;
+
+        let mut ledger = ConformantLedger::open_for_bootstrap(&directory.root, run_id)
+            .map_err(|error| internal(error.to_string()))?;
+        ledger
+            .bootstrap(&BootstrapRequest {
+                timestamp: SystemLedgerClock::default().timestamp(),
+                workspace_id: view.workspace_id.clone(),
+                intent: IdempotencyIntent {
+                    schema_version: 1,
+                    operation: if fork.is_some() {
+                        IdempotencyOperation::ForkRun
+                    } else {
+                        IdempotencyOperation::StartRun
+                    },
+                    idempotency_key,
+                    normalized_identity_sha256,
+                    run_id,
+                },
+                record_kind: BootstrapRecordKind::RunCreated,
+                initial_access: Access::Read.as_str().to_owned(),
+                default_effort: Some(effort.clone()),
+            })
+            .map_err(|error| internal(error.to_string()))?;
+        if reviewer.is_none() {
+            ledger
+                .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
+                .map_err(|error| internal(error.to_string()))?;
+        }
+        drop(ledger);
+
+        // Membership is part of publishing the Run's connection authority, not a
+        // later best-effort side effect.  The profile lifecycle must be able to
+        // refuse stop/restart before the worker can attach to this server.
+        crate::profile::reattach_global_run(
+            &global_profile_binding,
+            &state,
+            &view.workspace_id,
+            run_id,
+            crate::global_runtime::GlobalMembershipFacts {
+                controller_id: Some(manifest.controller.identity.controller_id),
+                worker_generation: reviewer.is_some().then_some(1),
+                thread_id: manifest.thread_id.clone(),
+                connection_id: None,
+                lifecycle: if reviewer.is_none() {
+                    "threadless_ready"
+                } else {
+                    "worker_starting"
+                }
+                .to_owned(),
+                writer: manifest.initial_access.as_str() == "write",
+                observed_epoch: Some(state.server_epoch),
+                runtime_locator: Some(directory.root.to_string_lossy().into_owned()),
             },
-        );
-        return Err(error);
+        )?;
+
+        // Public Run allocation is deliberately threadless and process-free. The
+        // first turn (or an explicit recovery/resume operation) wins the startup
+        // election and constructs the connection from the immutable manifest.
+        // Internal reviewer allocation retains its already-selected isolated cwd
+        // and starts immediately because that path is not part of the public Run
+        // manifest.
+        if reviewer.is_none() {
+            return run_object(&state_root, run_id, 0, "Absent");
+        }
+
+        let session = WorkerSessionBootstrap {
+            app_server_socket: PathBuf::from(&state.socket_path),
+            canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
+            server_key: state.snapshot.server_key.clone(),
+            server_epoch: state.server_epoch,
+            controller_id: manifest.controller.identity.controller_id,
+            control_mode: manifest.control_mode.as_str().to_owned(),
+            fixed_model: model.clone(),
+            default_effort: effort.clone(),
+            supported_efforts: efforts,
+            cwd: match reviewer
+                .and_then(|context| context.review_cwd)
+                .or_else(|| external.and_then(|context| context.launch_cwd))
+            {
+                Some(path) => path.to_path_buf(),
+                None => view
+                    .canonical_path
+                    .to_path_buf()
+                    .map_err(|_| internal("workspace path is not representable"))?,
+            },
+            developer_instructions: instructions_text,
+            sandbox: external
+                .map_or("read-only", |context| context.sandbox)
+                .to_owned(),
+            approval_policy: "never".to_owned(),
+            safety_policy: reviewer.map_or(crate::turn::SessionSafetyPolicy::Standard, |context| {
+                context.plan.safety_policy
+            }),
+            artifact_root: directory.root.join("artifacts"),
+            attach: SessionAttach::Start,
+            transport_timeout_seconds: 900,
+            dedicated_server: None,
+        };
+        let control_socket_epoch = 1;
+        let startup_range = fenced_worker_startup_range(
+            &global_profile_binding,
+            &state,
+            &view.workspace_id,
+            &state_root,
+            run_id,
+            1,
+        )?;
+        start_worker(
+            &state_root,
+            &crate::worker::RunWorkerStart {
+                workspace_id: view.workspace_id.clone(),
+                run_id,
+                run_generation: 1,
+                ledger_root: directory.root.clone(),
+                dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+                mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
+                control_socket_epoch,
+                profile: profile_name,
+                session: Some(session),
+            },
+            startup_range,
+        )?;
+        worker_started = true;
+        // The Run's own record is the answer, not a summary of what start did:
+        // SPEC-006 has every lifecycle command return the resulting `run`.
+        run_object(&state_root, run_id, control_socket_epoch, "Match")
+    })();
+    match admitted_result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if !worker_started {
+                let _ = GlobalMembershipStore::new(
+                    &home,
+                    &global_profile_binding.selected_name,
+                    &global_profile_binding.server_key,
+                )
+                .and_then(|store| {
+                    store.record(&view.workspace_id, run_id, MembershipDisposition::Released)
+                });
+            }
+            Err(error)
+        }
     }
-    // The Run's own record is the answer, not a summary of what start did:
-    // SPEC-006 has every lifecycle command return the resulting `run`.
-    run_object(&state_root, run_id, control_socket_epoch, "Match")
 }
 
 /// Drive one Run verb through the worker's control socket.
@@ -2011,6 +2048,258 @@ fn stop_lifecycle_generation(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Quiesce one member selected by a durable Profile stop fence, then append
+/// the Run-local operator-override observation before the Profile Server may
+/// be signalled. The Profile fence prevents a new worker from completing
+/// startup; the Run startup range closes the remaining in-flight election.
+#[cfg(target_os = "macos")]
+pub fn quiesce_profile_member(
+    home_root: &Path,
+    member: &crate::global_runtime::GlobalMembershipRecord,
+    profile: &str,
+    server_key: &str,
+    server_epoch: u64,
+    operation_id: Uuid,
+) -> Result<String, MachineError> {
+    let state_root = home_root.join("workspaces").join(&member.workspace_id);
+    let run_root = state_root.join("runs").join(member.run_id.to_string());
+    let locator_matches = member
+        .runtime_locator
+        .as_deref()
+        .and_then(|locator| std::fs::canonicalize(locator).ok())
+        .zip(std::fs::canonicalize(&run_root).ok())
+        .is_some_and(|(locator, expected)| locator == expected);
+    if !locator_matches {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "global Profile membership cannot be proven",
+            false,
+            json!({
+                "profile": profile,
+                "server_key": server_key,
+                "reason": "member runtime locator does not match its durable identity",
+            }),
+        ));
+    }
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(member.run_id)?;
+    let binding = manifest.global_profile_binding.as_ref().ok_or_else(|| {
+        MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "global Profile membership cannot be proven",
+            false,
+            json!({"profile": profile, "server_key": server_key, "reason": "member profile binding is missing"}),
+        )
+    })?;
+    if manifest.workspace_id != member.workspace_id || binding.server_key != server_key {
+        return Err(MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "global Profile membership cannot be proven",
+            false,
+            json!({"profile": profile, "server_key": server_key, "reason": "member manifest does not match the stop scope"}),
+        ));
+    }
+
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let before = store.load_state_projection(member.run_id)?;
+    let runtime_root = crate::worker::runtime_root(&state_root);
+    let runtime_record = crate::worker::runtime_record_path(&runtime_root, member.run_id)
+        .map_err(|error| error.machine_error(member.run_id, &state_root))?;
+    if runtime_record.exists() {
+        let record =
+            crate::worker::read_runtime_record(&runtime_record, DarwinSystem.current_uid())
+                .map_err(|error| error.machine_error(member.run_id, &runtime_record))?;
+        match crate::worker::classify_worker_identity(&record) {
+            crate::worker::ProcessIdentityVerdict::Match => {
+                stop_lifecycle_generation(&state_root, member.run_id, &runtime_record)?;
+            }
+            crate::worker::ProcessIdentityVerdict::Absent => {
+                crate::worker::remove_verified_absent_runtime(
+                    &runtime_record,
+                    DarwinSystem.current_uid(),
+                )
+                .map_err(|error| error.machine_error(member.run_id, &runtime_record))?;
+            }
+            verdict => {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the member worker cannot be safely interrupted",
+                    false,
+                    json!({
+                        "run_id": member.run_id,
+                        "generation": record.identity.run_generation,
+                        "identity_verdict": verdict.as_str(),
+                        "reason": "worker_identity_does_not_authorize_interrupt",
+                    }),
+                ));
+            }
+        }
+    }
+
+    let lock = RunStartupLock::open(&state_root, member.run_id)?;
+    lock.acquire()?;
+    let result = (|| {
+        if runtime_record.exists() {
+            let record =
+                crate::worker::read_runtime_record(&runtime_record, DarwinSystem.current_uid())
+                    .map_err(|error| error.machine_error(member.run_id, &runtime_record))?;
+            match crate::worker::classify_worker_identity(&record) {
+                crate::worker::ProcessIdentityVerdict::Match => {
+                    return Err(crate::controller::run_busy(
+                        member.run_id,
+                        "startup",
+                        "a member worker appeared after the Profile stop fence",
+                    ));
+                }
+                crate::worker::ProcessIdentityVerdict::Absent => {
+                    crate::worker::remove_verified_absent_runtime(
+                        &runtime_record,
+                        DarwinSystem.current_uid(),
+                    )
+                    .map_err(|error| error.machine_error(member.run_id, &runtime_record))?;
+                }
+                verdict => {
+                    return Err(MachineError::new(
+                        "RECOVERY_REQUIRED",
+                        "the member worker that appeared after the Profile stop fence cannot be safely replaced",
+                        false,
+                        json!({
+                            "run_id": member.run_id,
+                            "generation": record.identity.run_generation,
+                            "identity_verdict": verdict.as_str(),
+                            "reason": "worker_identity_does_not_authorize_replacement",
+                        }),
+                    ));
+                }
+            }
+        }
+        let mut ledger = ConformantLedger::open(&run_root, member.run_id)
+            .map_err(|error| internal(error.to_string()))?;
+        let operation_id_text = operation_id.to_string();
+        let observations = ledger
+            .inner()
+            .payloads_of_kind(AuditKind::ProfileObserved)
+            .map_err(|error| internal(error.to_string()))?;
+        if let Some(outcome) =
+            recorded_profile_observation_outcome(&observations, &operation_id_text)?
+        {
+            return Ok(outcome);
+        }
+        let observed_turn = ledger
+            .inner()
+            .durable_records()
+            .map_err(|error| internal(error.to_string()))?
+            .iter()
+            .filter(|record| {
+                record.sequence() > before.ledger_head.sequence
+                    && record.kind() == AuditKind::TurnStarted
+            })
+            .filter_map(|record| {
+                let crate::jcs::LosslessJson::Object(entries) = record.payload() else {
+                    return None;
+                };
+                entries.iter().find_map(|(name, value)| {
+                    (name == "turn_id")
+                        .then_some(value)
+                        .and_then(|value| match value {
+                            crate::jcs::LosslessJson::String(value) => Some(value.clone()),
+                            _ => None,
+                        })
+                })
+            })
+            .next_back()
+            .or_else(|| before.active_turn_id.clone());
+        let timestamp = SystemLedgerClock::default().timestamp();
+        let after = ledger
+            .verify()
+            .map_err(|error| internal(error.to_string()))?;
+        let (outcome, mark_unknown) =
+            profile_quiesce_outcome(observed_turn.is_some(), after.lifecycle);
+        if mark_unknown {
+            ledger
+                .mark_profile_interrupt_outcome_unknown(&timestamp, operation_id)
+                .map_err(|error| internal(error.to_string()))?;
+        }
+        let payload = json!({
+            "observation": "operator_override",
+            "operation_id": operation_id,
+            "profile": profile,
+            "server_key": server_key,
+            "server_epoch": server_epoch,
+            "turn_id": observed_turn,
+            "outcome": outcome,
+        });
+        ledger
+            .append_profile_observation(&timestamp, operation_id, &payload)
+            .map_err(|error| internal(error.to_string()))?;
+        Ok(outcome.to_owned())
+    })();
+    lock.release();
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn recorded_profile_observation_outcome(
+    observations: &[Value],
+    operation_id: &str,
+) -> Result<Option<String>, MachineError> {
+    let Some(existing) = observations
+        .iter()
+        .find(|value| value.get("operation_id").and_then(Value::as_str) == Some(operation_id))
+    else {
+        return Ok(None);
+    };
+    existing
+        .get("outcome")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            matches!(
+                *value,
+                "terminal_observed" | "no_active_turn" | "outcome_unknown"
+            )
+        })
+        .map(|value| Some(value.to_owned()))
+        .ok_or_else(|| internal("operator override outcome is invalid"))
+}
+
+/// Classify the durable state on both sides of worker shutdown. The caller
+/// records `outcome_unknown` when a worker vanished without advancing the
+/// ledger, before it appends the operator-override observation.
+#[cfg(target_os = "macos")]
+fn profile_quiesce_outcome(had_active_turn: bool, after: RunLifecycle) -> (&'static str, bool) {
+    if after == RunLifecycle::OutcomeUnknown {
+        ("outcome_unknown", false)
+    } else if matches!(
+        after,
+        RunLifecycle::Running
+            | RunLifecycle::WaitingInteraction
+            | RunLifecycle::ReconciliationRequired
+    ) {
+        ("outcome_unknown", true)
+    } else if had_active_turn {
+        ("terminal_observed", false)
+    } else {
+        ("no_active_turn", false)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn quiesce_profile_member(
+    _home_root: &Path,
+    _member: &crate::global_runtime::GlobalMembershipRecord,
+    _profile: &str,
+    _server_key: &str,
+    _server_epoch: u64,
+    _operation_id: Uuid,
+) -> Result<String, MachineError> {
+    Err(MachineError::new(
+        "INTERNAL_ERROR",
+        "global Profile member quiescence requires macOS",
+        false,
+        json!({"invariant": "global Profile member quiescence requires macOS"}),
+    ))
 }
 
 /// Complete pause/close for a run that has never allocated a Codex thread.
@@ -3044,16 +3333,44 @@ fn ensure_global_run_membership(
     workspace_id: &str,
     binding: &GlobalProfileBinding,
     run_id: Uuid,
+    state: &crate::profile::ServerState,
 ) -> Result<(), MachineError> {
-    let store = GlobalMembershipStore::new(home, &binding.server_key)?;
+    let store = GlobalMembershipStore::new(home, &binding.selected_name, &binding.server_key)?;
     let key = format!("{workspace_id}:{run_id}");
-    if store
-        .load()?
-        .members
-        .get(&key)
-        .is_none_or(|member| member.disposition != MembershipDisposition::Active)
-    {
-        store.record(workspace_id, run_id, MembershipDisposition::Active)?;
+    let membership = store.load()?;
+    let existing = membership.members.get(&key);
+    if existing.is_none_or(|member| {
+        member.disposition != MembershipDisposition::Active
+            || member.observed_epoch != Some(state.server_epoch)
+    }) {
+        crate::profile::reattach_global_run(
+            binding,
+            state,
+            workspace_id,
+            run_id,
+            crate::global_runtime::GlobalMembershipFacts {
+                controller_id: existing.and_then(|member| member.controller_id),
+                worker_generation: existing.and_then(|member| member.worker_generation),
+                thread_id: existing.and_then(|member| member.thread_id.clone()),
+                connection_id: existing.and_then(|member| member.connection_id),
+                lifecycle: "run_reattached".to_owned(),
+                writer: false,
+                observed_epoch: Some(state.server_epoch),
+                runtime_locator: existing
+                    .and_then(|member| member.runtime_locator.clone())
+                    .or_else(|| {
+                        Some(
+                            home.root()
+                                .join("workspaces")
+                                .join(workspace_id)
+                                .join("runs")
+                                .join(run_id.to_string())
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                    }),
+            },
+        )?;
     }
     Ok(())
 }
@@ -3067,13 +3384,17 @@ fn release_global_run_membership(manifest: &RunManifest, run_id: Uuid) -> Result
             json!({"run_id": run_id}),
         )
     })?;
-    GlobalMembershipStore::new(&DolgoraeHome::system()?, &binding.server_key)?
-        .record(
-            &manifest.workspace_id,
-            run_id,
-            MembershipDisposition::Released,
-        )
-        .map(|_| ())
+    GlobalMembershipStore::new(
+        &DolgoraeHome::system()?,
+        &binding.selected_name,
+        &binding.server_key,
+    )?
+    .record(
+        &manifest.workspace_id,
+        run_id,
+        MembershipDisposition::Released,
+    )
+    .map(|_| ())
 }
 
 /// Whether this failure means no worker answered, as opposed to a worker that
@@ -4521,12 +4842,80 @@ fn run_profile_snapshot(
 fn start_worker(
     state_root: &Path,
     start: &crate::worker::RunWorkerStart,
+    startup_range: crate::worker::StartupLockFile,
 ) -> Result<crate::worker::StartedRun, MachineError> {
     let record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), start.run_id)
             .map_err(|error| error.machine_error(start.run_id, state_root))?;
-    crate::worker::start_run_worker(state_root, start)
+    crate::worker::start_run_worker_with_startup_range(state_root, start, startup_range)
         .map_err(|error| error.machine_error(start.run_id, &record))
+}
+
+#[cfg(target_os = "macos")]
+fn fenced_worker_startup_range(
+    binding: &GlobalProfileBinding,
+    state: &ServerState,
+    workspace_id: &str,
+    state_root: &Path,
+    run_id: Uuid,
+    run_generation: u64,
+) -> Result<crate::worker::StartupLockFile, MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let runtime = crate::worker::runtime_root(state_root);
+    crate::worker::prepare_runtime_root(&runtime, uid)
+        .map_err(|error| error.machine_error(run_id, &runtime))?;
+    let startup_path = crate::worker::startup_lock_path(&runtime, run_id);
+    let startup_range = crate::worker::StartupLockFile::open(&startup_path, uid)
+        .map_err(|error| error.machine_error(run_id, &startup_path))?;
+    startup_range
+        .hold_startup_range(crate::worker::STARTUP_BOUND_TIMEOUT)
+        .map_err(|error| worker_startup_range_error(error, run_id, &startup_path))?;
+    let owner = crate::worker::current_startup_owner(workspace_id, run_id, run_generation)
+        .and_then(|owner| startup_range.write_owner(&owner));
+    if let Err(error) = owner {
+        let _ = startup_range.release_startup_range();
+        return Err(worker_startup_range_error(error, run_id, &startup_path));
+    }
+    if let Err(error) =
+        crate::profile::fence_global_run_worker_start(binding, state, workspace_id, run_id)
+    {
+        let _ = startup_range.release_startup_range();
+        return Err(error);
+    }
+    Ok(startup_range)
+}
+
+#[cfg(target_os = "macos")]
+fn worker_startup_range_error(
+    error: crate::worker::WorkerProtocolError,
+    run_id: Uuid,
+    startup_path: &Path,
+) -> MachineError {
+    match error {
+        crate::worker::WorkerProtocolError::StartupBusy => crate::controller::run_busy(
+            run_id,
+            "startup",
+            "another operation holds this run's startup lock",
+        ),
+        error => error.machine_error(run_id, startup_path),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fenced_worker_startup_range(
+    _binding: &GlobalProfileBinding,
+    _state: &ServerState,
+    _workspace_id: &str,
+    _state_root: &Path,
+    run_id: Uuid,
+    _run_generation: u64,
+) -> Result<crate::worker::StartupLockFile, MachineError> {
+    Err(MachineError::new(
+        "INTERNAL_ERROR",
+        "per-Run workers are supported on macOS only",
+        false,
+        json!({"invariant": format!("worker start is unavailable for {run_id}")}),
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -4585,6 +4974,7 @@ fn ensure_run_worker(
         &view.workspace_id,
         global_binding,
         run_id,
+        &state,
     )?;
     if state.snapshot.server_key != manifest.profile.initial_server_key {
         return Err(MachineError::new(
@@ -4729,6 +5119,14 @@ fn ensure_run_worker(
         transport_timeout_seconds: 900,
         dedicated_server,
     };
+    let startup_range = fenced_worker_startup_range(
+        global_binding,
+        &state,
+        &view.workspace_id,
+        state_root,
+        run_id,
+        run_generation,
+    )?;
     let start = start_worker(
         state_root,
         &crate::worker::RunWorkerStart {
@@ -4742,6 +5140,7 @@ fn ensure_run_worker(
             profile: manifest.profile.profile_name,
             session: Some(session),
         },
+        startup_range,
     );
     if let Err(error) = start {
         if manifest.execution_lane == ExecutionLane::Dedicated {
@@ -4788,6 +5187,7 @@ fn ensure_run_worker(
 fn start_worker(
     _state_root: &Path,
     _start: &crate::worker::RunWorkerStart,
+    _startup_range: crate::worker::StartupLockFile,
 ) -> Result<crate::worker::StartedRun, MachineError> {
     Err(MachineError::new(
         "INTERNAL_ERROR",
@@ -5331,12 +5731,11 @@ impl RunStartupLock {
     fn open(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
         let uid = DarwinSystem.current_uid();
         let runtime = crate::worker::runtime_root(state_root);
-        let unavailable = || {
-            crate::controller::run_busy(run_id, "startup", "this run's startup lock is unavailable")
-        };
-        crate::worker::prepare_runtime_root(&runtime, uid).map_err(|_| unavailable())?;
+        crate::worker::prepare_runtime_root(&runtime, uid)
+            .map_err(|error| worker_startup_range_error(error, run_id, &runtime))?;
         let path = crate::worker::startup_lock_path(&runtime, run_id);
-        let lock = crate::worker::StartupLockFile::open(&path, uid).map_err(|_| unavailable())?;
+        let lock = crate::worker::StartupLockFile::open(&path, uid)
+            .map_err(|error| worker_startup_range_error(error, run_id, &path))?;
         Ok(Self { lock, run_id })
     }
 }
@@ -5348,14 +5747,7 @@ impl RunMutationLock for RunStartupLock {
         // the same registered busy answer when it loses.
         self.lock
             .hold_startup_range(crate::worker::STARTUP_BOUND_TIMEOUT)
-            .map_err(|_| {
-                MachineError::new(
-                    "RUN_BUSY",
-                    "another operation holds this run's startup lock",
-                    true,
-                    serde_json::json!({"run_id": self.run_id, "owner_kind": "startup"}),
-                )
-            })
+            .map_err(|error| worker_startup_range_error(error, self.run_id, self.lock.path()))
     }
 
     fn release(&self) {
@@ -5367,6 +5759,72 @@ impl RunMutationLock for RunStartupLock {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn profile_quiesce_classifies_every_durable_worker_outcome() {
+        assert_eq!(
+            profile_quiesce_outcome(true, RunLifecycle::Idle),
+            ("terminal_observed", false)
+        );
+        assert_eq!(
+            profile_quiesce_outcome(true, RunLifecycle::Running),
+            ("outcome_unknown", true)
+        );
+        assert_eq!(
+            profile_quiesce_outcome(true, RunLifecycle::OutcomeUnknown),
+            ("outcome_unknown", false)
+        );
+        assert_eq!(
+            profile_quiesce_outcome(false, RunLifecycle::Idle),
+            ("no_active_turn", false)
+        );
+        assert_eq!(
+            profile_quiesce_outcome(false, RunLifecycle::OutcomeUnknown),
+            ("outcome_unknown", false)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn profile_quiesce_resumes_the_matching_ledger_observation() {
+        let operation_id = Uuid::now_v7().to_string();
+        let observations = vec![
+            json!({"operation_id": Uuid::now_v7(), "outcome": "terminal_observed"}),
+            json!({"operation_id": operation_id.clone(), "outcome": "outcome_unknown"}),
+        ];
+        assert_eq!(
+            recorded_profile_observation_outcome(&observations, &operation_id).unwrap(),
+            Some("outcome_unknown".to_owned())
+        );
+        assert_eq!(
+            recorded_profile_observation_outcome(&observations, &Uuid::now_v7().to_string())
+                .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn worker_startup_fence_preserves_busy_and_identity_collision_errors() {
+        let run_id = Uuid::now_v7();
+        let path = Path::new("/tmp/startup.lock");
+        let busy = worker_startup_range_error(
+            crate::worker::WorkerProtocolError::StartupBusy,
+            run_id,
+            path,
+        );
+        assert_eq!(busy.code, "RUN_BUSY");
+        assert!(busy.retryable);
+
+        let collision = worker_startup_range_error(
+            crate::worker::WorkerProtocolError::SocketIdentityMismatch,
+            run_id,
+            path,
+        );
+        assert_eq!(collision.code, "RUNTIME_PATH_COLLISION");
+        assert!(!collision.retryable);
+    }
 
     fn writer_test_store(label: &str) -> (PathBuf, crate::writer::WriterStore) {
         let root = std::env::temp_dir().join(format!("dlg-writer-{label}-{}", Uuid::now_v7()));

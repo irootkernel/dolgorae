@@ -111,7 +111,7 @@ validator explicitly named by this specification are also normative.
   Specialist Run.
 - **Native Delegation**: a Codex agent's use of Codex-native subagents inside
   its own Run.
-- **Native Subagent Policy**: the orthogonal Runtime Profile capability and
+- **Native Subagent Policy**: the orthogonal Codex Profile capability and
   immutable instruction policy governing Native Delegation. It is not a use
   case or Agent Topology.
 - **Observer**: a same-OS-user caller allowed to read client-safe projections
@@ -160,7 +160,7 @@ validator explicitly named by this specification are also normative.
   bridge, and sole workspace orchestration-database mutation owner hosted by
   `dolgorae serve`. SQLite, not this runtime, remains durable authority.
 - **Codex Config Profile**: a Codex `--profile` selection inside normalized
-  global argv; it is not a Dolgorae Runtime Profile.
+  global argv; it is not a Dolgorae Codex Profile.
 - **Reader**: a Run whose Turns use Codex read-only sandbox policy.
 - **Writer**: the single Run named by durable Dolgorae writer authority for a
   canonical workspace and whose Turns may use workspace-write sandbox policy.
@@ -174,7 +174,7 @@ validator explicitly named by this specification are also normative.
 The user or trusted integration explicitly selects one of two product use
 cases. User-facing clients MAY resolve low-level settings from that selection,
 but the semantic service MUST receive complete `control_mode`, execution lane,
-required assurance, Runtime Profile, purpose, and native-subagent policy values.
+required assurance, Codex Profile, purpose, and native-subagent policy values.
 An `UNSPECIFIED` value or hidden interactive default is invalid.
 
 | User-facing use case | Primary placement | Run composition | Semantic orchestration owner | Dolgorae operational ownership |
@@ -298,7 +298,7 @@ An External Specialist Engagement never becomes a Brokered Hierarchy. V1
 prohibits a Specialist in that use case from hiring another first-class
 Dolgorae Specialist. The external control plane hires additional roles directly.
 
-Runtime Profile selection never selects agent character. The complete immutable
+Codex Profile selection never selects agent character. The complete immutable
 Agent Configuration snapshot defines the role used by a Primary or Specialist
 Run. Native Subagent Policy is orthogonal to both use cases.
 
@@ -325,13 +325,13 @@ Hierarchy.
 
 A Codex-native subagent is an internal descendant of one Codex Run. An
 Independent Specialist Run is a durable peer Run. These concepts MUST NOT be
-conflated. Native Delegation remains an orthogonal Runtime Profile capability
+conflated. Native Delegation remains an orthogonal Codex Profile capability
 and never creates a Dolgorae aggregate member, Controller, Worker, or writer
 authority.
 
 Dolgorae MUST NOT install a Dolgorae global daemon, project daemon, launchd
 unit, Codex binary, authentication material, or `CODEX_HOME`. It MAY manage one
-Codex App Server singleton per canonical Runtime Profile launch-authority
+Codex App Server singleton per canonical Codex Profile launch-authority
 contract and one or more Run-owned Dedicated Lane Server generations. Those
 Codex processes are not Dolgorae daemons.
 
@@ -344,7 +344,7 @@ installers, and automatic updates are not supported release targets. Empirical
 release evidence is valid only for the recorded OS build and MUST be refreshed
 on a new macOS major version.
 
-Dolgorae depends on user-prepared Runtime Profiles. Codex App Server 0.149.0 is
+Dolgorae depends on user-prepared Codex Profiles. Codex App Server 0.149.0 is
 the current compatibility baseline. Background-process safety is owned by each
 Sticky Dedicated logical lane across its successive physical generations and
 by the macOS process census; it MUST NOT depend on a future Codex terminal-
@@ -564,7 +564,9 @@ The fixed Dolgorae home is mode 0700 and `profiles.yaml` is
 mode 0600; creation and replacement reject a wrong-owner or more-permissive
 file. That root is outside the agent-writable workspace.
 
-Profile names are unique within the fixed Dolgorae home. Profile management and
+Profile names are one to 128 ASCII characters, begin with a lowercase letter or
+digit, and otherwise contain only lowercase letters, digits, `.`, `_`, or `-`.
+They are unique within the fixed Dolgorae home. Profile management and
 diagnostic commands MUST NOT discover or accept a workspace; `--workspace` is
 an `INVALID_ARGUMENT`. Run and Specialist creation MUST select an explicit
 Profile and MUST NOT infer one from a workspace, caller environment, frontend,
@@ -574,12 +576,17 @@ or hidden default.
 requires an explicit remove followed by add.
 
 The strict mode-0600 `~/.dolgorae/state.json` contains exactly
-`schema_version: 1` and `state_generation: global-profile-v1`. Before any
+`schema_version: 2` and `state_generation: global-profile-v2`. The same
+generation contains mode-0600 `profile-bindings.json`, which records every
+successfully prepared Profile name, definition digest, server key, and launch
+snapshot digest so removal never depends on reopening the executable or
+`CODEX_HOME`. Before any
 stateful operation, Dolgorae MUST validate that marker, the mode-0700 home, and
 the absence of workspace-local `local.yaml`. A nonempty unmarked home, malformed
-or unsupported marker, partial layout, or mixed generation returns
+or unsupported marker, missing binding history, partial layout, or mixed generation returns
 `LEGACY_STATE_UNSUPPORTED` before read or mutation. An absent or empty home may
-be initialized atomically. There is no automatic import, migration, deletion,
+be initialized by constructing the complete generation in a private sibling
+directory and atomically renaming it into place. There is no automatic import, migration, deletion,
 or recovery of legacy Profiles, Runs, Profile Servers, engagements, writers, or
 aggregates. Stateless help, version, and capability discovery remain available.
 The operator recovery procedure is owned by the operations guide.
@@ -604,7 +611,7 @@ and its executable semantic validator. The content `policy_name` MUST match the
 filename exactly. Files are current-uid-owned mode 0600, no-symlink regular
 files, at most 1 MiB, and installed through a descriptor-relative temporary
 file, file `fsync`, rename, and directory `fsync`. Unknown schema versions,
-duplicate role references, unresolved Runtime Profiles, unavailable required
+duplicate role references, unresolved Codex Profiles, unavailable required
 capabilities, write-capable roles without Dedicated Lane configuration, or
 invalid collaboration activation are rejected before installation.
 
@@ -612,7 +619,7 @@ Policy add is create-exclusive. Replacement requires an explicit remove and
 add; removing or replacing a registry entry never mutates an existing session
 because every session stores the complete policy snapshot and digest. A new
 Orchestration Launch Intent MUST name an installed policy. Policy resolution,
-Agent Configuration validation against the current Runtime Profile capability
+Agent Configuration validation against the current Codex Profile capability
 snapshot, and JCS hashing occur before root Run allocation. The resolved policy
 name, revision, and digest participate in StartRun idempotency normalization.
 
@@ -621,7 +628,7 @@ client chooses a named policy when creating the protected Controller carrier.
 A client MAY present simple presets such as approval-required and fully-
 delegated, but each preset resolves to an explicit installed policy name.
 
-Dolgorae MUST construct the singleton environment from the Runtime Profile definition,
+Dolgorae MUST construct the singleton environment from the Codex Profile definition,
 not from the invocation that wins startup. It obtains `HOME`, `USER`, `LOGNAME`,
 and `SHELL` from the current account record, obtains `TMPDIR` from the platform
 user-temporary-directory API, sets canonical `CODEX_HOME`, copies only the
@@ -637,7 +644,7 @@ that the selected locale is reported by the platform locale database. The three
 exact values enter the immutable launch authority and profile state. Caller
 `PATH`, virtual-environment variables and locale categories are never inherited.
 
-`run start` MUST require an explicit Runtime Profile. Before allocating a Run,
+`run start` MUST require an explicit Codex Profile. Before allocating a Run,
 Dolgorae MUST validate the executable, version, App Server schema,
 initialization handshake, login readiness, model listing, actual `codexHome`,
 and required capabilities. A `codexHome` mismatch is a hard failure. This
@@ -645,7 +652,7 @@ readiness check MAY start or reuse the shared Profile Server even for a
 Dedicated Run; it MUST NOT start that Run's physical Dedicated Lane Server or
 allocate its Codex thread.
 
-Run creation stores a complete immutable Runtime Profile snapshot and a
+Run creation stores a complete immutable Codex Profile snapshot and a
 separate immutable Agent Configuration snapshot, not only their digests. The
 global Profile successor additionally stores the exact selected registry name,
 the complete resolved registry definition and JCS digest, and the complete
@@ -654,7 +661,7 @@ creation. Recovery MUST validate those persisted bytes and MUST NOT reopen
 `profiles.yaml`; registry removal, replacement, alias changes, caller `PATH`,
 caller `CODEX_HOME`, and frontend executable naming cannot change an admitted
 Run's launch authority.
-Runtime Profile snapshot contains exactly the profile name, canonical
+Codex Profile snapshot contains exactly the profile name, canonical
 `CODEX_HOME`,
 normalized argv, `launch_cwd_policy`, derived concrete launch cwd, sanitized environment, enabled
 and disabled features, normalized process-static configuration, initial configuration
@@ -665,8 +672,8 @@ to reconstruct the accepted launch contract after registry edit or deletion.
 Existing Runs MUST NOT be rebound to another account or `CODEX_HOME`. The
 Agent Configuration snapshot additionally records the accepted model, default
 effort, purpose, required capabilities, role reference, normalized Controller
-instructions, instruction digests, and Runtime Profile snapshot digest.
-Different Agent Configurations MAY share one Runtime Profile and one compatible
+instructions, instruction digests, and Codex Profile snapshot digest.
+Different Agent Configurations MAY share one Codex Profile and one compatible
 Profile Server launch contract.
 
 The launch-authority contract records
@@ -759,7 +766,7 @@ The socket node instead uses the macOS-safe short path
 unpadded base32 of the first 160 server-key bits. The private root is validated
 like worker sockets; full path and device/inode are recorded in server state.
 The token is only a locator. An existing node is attachable only when profile
-state proves the full 32-byte server key, Runtime Profile identity, canonical
+state proves the full 32-byte server key, Codex Profile identity, canonical
 home, launch-contract digest, epoch, socket device/inode, PID/PGID/UID/start
 time, and executable identity all match. Any mismatch or unverifiable field is
 `RUNTIME_PATH_COLLISION`; Dolgorae MUST NOT attach, unlink, signal, or infer
@@ -805,9 +812,10 @@ specified by SPEC-014. The global
 `--dangerously-bypass-approvals-and-sandbox` option remains forbidden because it
 would bypass normalized approvals and effective-policy verification.
 
-`state.json` records server key, launch-contract digest, canonical home,
-process/executable/socket identity, lifecycle, compatibility verdict,
-timestamp, server epoch, and membership revision. The directory-fsynced,
+`state.json` is the single authoritative Profile Server lifecycle record and
+records server key, launch-contract digest, canonical home,
+process/executable/socket identity, lifecycle, compatibility verdict, server
+epoch, and membership revision. The directory-fsynced,
 hash-chained `membership.jsonl` is the authoritative catalog of registration,
 state-transition, and removal records across project roots. Registration is
 appended before a run connection is published. `members.json` is an atomic
@@ -817,7 +825,8 @@ writer states, observed epoch, and runtime locator. Startup replays the journal,
 validates every referenced manifest/runtime record, and rewrites the snapshot;
 it never claims completeness by scanning incidental directories. A missing,
 corrupt, or revision-mismatched journal is incomplete and blocks profile-global
-operations. It is repairable only through the operator procedure below; there
+operations. A membership append updates `members.json` and the `state.json`
+membership revision under the same server lock. It is repairable only through the operator procedure below; there
 is no automatic or force rebuild.
 Each new server process
 reserves and fsyncs a never-reused higher epoch before spawn, then publishes
@@ -843,6 +852,13 @@ infer turn failure from connection or server termination and MUST NOT
 auto-resume runs. Controller capabilities and the server key do not authorize
 this profile-wide operation.
 
+The Run-local operator-override record uses the closed audit-v1
+`profile_observed` kind with `observation: operator_override`, the Profile and
+server generation, the stop's UUIDv7 quiesce revision, the observed Turn when
+present, and exactly one of `terminal_observed`, `no_active_turn`, or
+`outcome_unknown`. The quiesce revision is the idempotency identity within each
+Run ledger; retrying the same fenced stop never appends a second override.
+
 Stop and restart use three phases. Fence acquires and revalidates operator,
 home, and server locks, persists `stopping` or `restarting` plus a fresh quiesce
 revision, rejects new attach/recovery/turn work, fsyncs, and releases all global
@@ -854,12 +870,16 @@ identity-bound kqueue observation, enumerates exact PGID members, sends
 `SIGKILL` only to revalidated survivors when necessary, proves group and log
 drainer absence, and verifies the recorded socket inode without a coordination
 lock. Final COMMIT reacquires the prefix and clears identity, unlinks only the
-revalidated socket inode, and advances state after absence proof. Unknown turn,
+revalidated socket inode, and advances state after absence proof. Unknown
 member, process, group, or socket identity remains fenced and blocks a new
-epoch.
+epoch. Once the exact prior process group, drainer, and socket are proven
+absent, its valid attachments become `released`; an uncertain Run outcome
+remains lifecycle `interrupted_unknown` and must be reconciled before Run work
+resumes.
 
-`profile membership verify` replays the valid journal prefix and reports
-orphans without mutation. `profile membership tombstone-orphan` requires the
+`profile membership verify` replays the valid journal prefix, validates each
+referenced manifest and immutable server binding, and reports missing,
+malformed, or mismatched orphans without mutation. `profile membership tombstone-orphan` requires the
 operator credential and exact server-key, workspace-ID, and run-ID
 confirmations; `profile state reset` additionally requires recorded singleton
 absence. Repairs append and fsync a tombstone/audit record and new membership
@@ -1624,7 +1644,7 @@ artifact path.
 Profile diagnostics have a separate append-only journal and canonical decimal
 cursor. `profile events` and `profile diagnostics list` never reuse or advance a
 Run cursor. Minimal profile events are same-uid readable, redacted, bounded, and
-contain only lifecycle severity/category, timestamp, Runtime Profile name, full
+contain only lifecycle severity/category, timestamp, Codex Profile name, full
 server key/epoch when available, and an opaque diagnostic ID. Operational
 profile events additionally contain verified process/socket identities,
 foreign-thread routing metadata, configuration drift fields and bounded
@@ -2718,7 +2738,7 @@ prefix. It creates a mode-0700 directory containing 0600 `bundle.json`,
 boundary as well as
 schema version, workspace/run identity, filenames, hashes, and source-derived
 timestamps; lexicographic filenames and source bytes make repeated exports
-content-deterministic. Runtime records, locks, logs, machine-local Runtime Profile configuration,
+content-deterministic. Runtime records, locks, logs, machine-local Codex Profile configuration,
 `CODEX_HOME`, images, and raw torn-tail evidence are excluded. A failing audit
 does not suppress export: both bundle and verification set
 `verification_failed:true`, while other state-changing commands fail closed.
@@ -2813,7 +2833,7 @@ Configuration digest are the durable role snapshot. Side effects performed by
 MCP servers, plugins, or apps outside the shell sandbox remain outside the hard
 one-writer guarantee.
 
-The selected Runtime Profile MUST explicitly declare `native_subagents:
+The selected Codex Profile MUST explicitly declare `native_subagents:
 enabled`. Exact Codex 0.147.0 enabled evidence reports lifecycle observation and
 quiescence tracking as `supported`; its disabled diagnostic still created a
 child and therefore proves that disable enforcement is unavailable. V1 MUST NOT
@@ -2861,7 +2881,7 @@ for configured Specialist work only under the session's explicit approval
 policy and immutable Specialist Policy snapshot. The snapshot validates against
 `protocol/dolgorae-specialist-policy-v1.schema.json`; its complete JCS SHA-256 is
 recorded on the session, and role references resolve only against that snapshot.
-Runtime Profile identity never selects role character.
+Codex Profile identity never selects role character.
 
 The broker owns a distinct internal Controller credential for every Specialist
 Run and keeps all credentials outside prompts, model input, events, audit
@@ -2875,7 +2895,7 @@ The Primary Run uses the private run-bound payload contract
 `protocol/dolgorae-orchestration-tool-v1.schema.json`. The bridge binds session,
 source Run, source Turn, tool-call identity, root priority, Controller authority,
 and idempotency outside model-controlled arguments. The model cannot provide or
-override those fields and cannot select a Runtime Profile, model, Controller,
+override those fields and cannot select a Codex Profile, model, Controller,
 priority elevation, or access beyond the immutable Specialist Policy. The
 checked operations are:
 
@@ -2946,7 +2966,7 @@ result, and record causal audit state.
 
 The Collaboration Plane MUST NOT provide peer lifecycle control. A Specialist
 cannot through collaboration hire another Specialist, obtain a peer credential,
-address another session, change a peer role or Runtime Profile, interrupt or
+address another session, change a peer role or Codex Profile, interrupt or
 close a peer Run, resolve a peer interaction, or transfer writer authority.
 External Specialist Engagements do not support Specialist-to-Specialist
 collaboration in v1.
@@ -3243,7 +3263,7 @@ fallback. Same reference with different normalized input returns
 
 The model-visible request contains only the review objective, fixed
 `working_tree` scope, allowlisted focus dimensions, fixed structured result
-contract, and bounded deadline. Canonical workspace, Runtime Profile,
+contract, and bounded deadline. Canonical workspace, Codex Profile,
 aggregate-owner and per-Run Controller credentials, external provenance,
 request identity, and idempotency MUST be bound by the trusted adapter and MUST
 NOT be accepted from model arguments. The external MCP adapter does not require
@@ -3252,7 +3272,7 @@ semantic control plane.
 
 The Reviewer MUST be an independent `managed_agent` Run with a separate Codex
 thread, immutable Reviewer Agent Configuration, canonical-workspace read-only
-access, and shell network disabled. Its Runtime Profile MUST NOT register the
+access, and shell network disabled. Its Codex Profile MUST NOT register the
 `dolgorae_review` adapter. The semantic service MUST also reject nested
 first-class Specialist creation from the externally hired Reviewer by matching
 the caller thread to the durable Reviewer Run binding through a typed Run-store
@@ -3759,7 +3779,7 @@ make deduplication deterministic and replay MUST NOT execute a side effect.
 ## SPEC-014: Control Modes, Execution Lanes, and Assurance
 
 Every Run MUST durably record immutable `control_mode`, `execution_lane`,
-required assurance, purpose, Runtime Profile snapshot, and Agent Configuration
+required assurance, purpose, Codex Profile snapshot, and Agent Configuration
 snapshot at creation. `control_mode` is `direct_interactive` or `managed_agent`;
 `execution_lane` is `shared_readonly` or `dedicated`. The semantic service MUST
 reject omission and every `UNSPECIFIED` value. User-facing clients may resolve

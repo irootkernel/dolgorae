@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/home-state/v2",
+  "title": "Dolgorae home state generation marker v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state_generation"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "state_generation": { "const": "global-profile-v2" }
+  }
+}

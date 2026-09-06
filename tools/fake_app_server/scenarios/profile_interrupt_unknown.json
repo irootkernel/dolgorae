@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "name": "profile_interrupt_unknown",
+  "description": "A Profile Server catalogue plus one worker Turn whose terminal never arrives after Profile stop interrupts it.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "account/read",
+      "respond": {"result": {"requiresOpenaiAuth": false}}
+    },
+    {
+      "method": "model/list",
+      "respond": {
+        "result": {
+          "data": [{
+            "model": "gpt-5.6",
+            "isDefault": true,
+            "supportedReasoningEfforts": [
+              {"reasoningEffort": "low"},
+              {"reasoningEffort": "medium"},
+              {"reasoningEffort": "high"}
+            ]
+          }],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "thread/read",
+      "respond": {"error": {"code": -32600, "message": "thread not found"}}
+    },
+    {
+      "method": "thread/start",
+      "respond": {"result": {"thread": {"id": "thread-profile-unknown"}}}
+    },
+    {
+      "method": "turn/start",
+      "respond": {"result": {"turn": {"id": "turn-profile-unknown"}}}
+    },
+    {
+      "method": "turn/interrupt",
+      "respond": {"result": {"interrupted": true}}
+    }
+  ]
+}

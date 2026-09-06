@@ -5,7 +5,7 @@ use crate::darwin::DarwinSystem;
 use crate::jcs::{PayloadRepresentation, canonicalize, parse, represent_payload};
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
-use crate::workspace::{NativeSubagents, RuntimeProfile, parse_local_profiles};
+use crate::workspace::{NativeSubagents, RuntimeProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -172,27 +172,6 @@ struct HomeActive {
     transition_token: Option<Uuid>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MembershipRecord {
-    schema_version: u32,
-    revision: u64,
-    kind: String,
-    workspace_id: String,
-    run_id: Option<String>,
-    previous_sha256: String,
-    record_sha256: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MembershipIndex {
-    schema_version: u32,
-    revision: u64,
-    journal_sha256: String,
-    active_members: BTreeMap<String, MembershipRecord>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DoctorResult {
     pub profile: String,
@@ -212,7 +191,6 @@ pub struct DoctorResult {
 }
 
 struct Context {
-    workspace_id: String,
     registry_path: PathBuf,
     dolgorae_home_root: PathBuf,
 }
@@ -250,19 +228,47 @@ pub enum ProfileOperation {
 
 pub const PROFILE_LOG_DRAINER_COMMAND: &str = "__profile-log-drainer";
 
+pub type ProfileMemberQuiescer = fn(
+    &Path,
+    &crate::global_runtime::GlobalMembershipRecord,
+    &str,
+    &str,
+    u64,
+    Uuid,
+) -> Result<String, MachineError>;
+
+fn unavailable_member_quiescer(
+    _home_root: &Path,
+    _member: &crate::global_runtime::GlobalMembershipRecord,
+    _profile: &str,
+    _server_key: &str,
+    _server_epoch: u64,
+    _operation_id: Uuid,
+) -> Result<String, MachineError> {
+    Err(internal("profile member quiescence is unavailable"))
+}
+
 pub fn execute(operation: ProfileOperation, arguments: &[OsString]) -> Result<Value, MachineError> {
+    execute_with_member_quiescer(operation, arguments, unavailable_member_quiescer)
+}
+
+fn execute_with_member_quiescer(
+    operation: ProfileOperation,
+    arguments: &[OsString],
+    member_quiescer: ProfileMemberQuiescer,
+) -> Result<Value, MachineError> {
     let parsed = Parsed::new(arguments, operation)?;
     match operation {
         ProfileOperation::Add => add(&parsed),
         ProfileOperation::List => list(&parsed),
         ProfileOperation::Show => show(&parsed),
         ProfileOperation::Remove => remove(&parsed),
-        ProfileOperation::Doctor => doctor(&parsed),
+        ProfileOperation::Doctor => doctor(&parsed, member_quiescer),
         ProfileOperation::ServerStatus => server_status(&parsed),
         ProfileOperation::ServerStart => server_start(&parsed),
-        ProfileOperation::ServerStop => server_stop(&parsed, false),
-        ProfileOperation::ServerRestart => server_restart(&parsed),
-        ProfileOperation::ServerMigrate => server_migrate(&parsed),
+        ProfileOperation::ServerStop => server_stop(&parsed, false, member_quiescer),
+        ProfileOperation::ServerRestart => server_restart(&parsed, member_quiescer),
+        ProfileOperation::ServerMigrate => server_migrate(&parsed, member_quiescer),
         ProfileOperation::MembershipVerify => membership_verify(&parsed),
         ProfileOperation::MembershipTombstoneOrphan => membership_tombstone(&parsed),
         ProfileOperation::StateReset => state_reset(&parsed),
@@ -281,6 +287,15 @@ pub fn execute_global(
     execute(operation, arguments)
 }
 
+pub fn execute_global_with_member_quiescer(
+    operation: ProfileOperation,
+    arguments: &[OsString],
+    member_quiescer: ProfileMemberQuiescer,
+) -> Result<Value, MachineError> {
+    crate::global_profile::validate_post_cut_arguments(operation, arguments)?;
+    execute_with_member_quiescer(operation, arguments, member_quiescer)
+}
+
 /// Attach to or start the server generation pinned by an already resolved
 /// global Profile binding. This path never reopens the registry.
 pub fn ensure_global_server(
@@ -289,7 +304,6 @@ pub fn ensure_global_server(
     binding.validate_for_recovery()?;
     let home = DolgoraeHome::system()?;
     let context = Context {
-        workspace_id: "global-profile-v1".to_owned(),
         registry_path: home.root().join("profiles.yaml"),
         dolgorae_home_root: home.root().to_path_buf(),
     };
@@ -298,7 +312,6 @@ pub fn ensure_global_server(
         &binding.launch_snapshot,
         &mut OperatorHandoff::none(),
     )?;
-    publish_global_server_state(&context, &state)?;
     Ok(state)
 }
 
@@ -312,11 +325,135 @@ pub fn admit_global_run(
     workspace_id: &str,
     run_id: Uuid,
 ) -> Result<crate::global_runtime::GlobalMembershipIndex, MachineError> {
+    let home = DolgoraeHome::system()?;
+    record_global_run_under_lifecycle_locks(
+        binding,
+        state,
+        workspace_id,
+        run_id,
+        crate::global_runtime::MembershipDisposition::Unknown,
+        crate::global_runtime::GlobalMembershipFacts {
+            controller_id: None,
+            worker_generation: None,
+            thread_id: None,
+            connection_id: None,
+            lifecycle: "admitting".to_owned(),
+            writer: false,
+            observed_epoch: Some(state.server_epoch),
+            runtime_locator: Some(
+                home.root()
+                    .join("workspaces")
+                    .join(workspace_id)
+                    .join("runs")
+                    .join(run_id.to_string())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        },
+    )
+}
+
+pub fn reattach_global_run(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    state: &ServerState,
+    workspace_id: &str,
+    run_id: Uuid,
+    facts: crate::global_runtime::GlobalMembershipFacts,
+) -> Result<crate::global_runtime::GlobalMembershipIndex, MachineError> {
+    record_global_run_under_lifecycle_locks(
+        binding,
+        state,
+        workspace_id,
+        run_id,
+        crate::global_runtime::MembershipDisposition::Active,
+        facts,
+    )
+}
+
+/// Revalidate a Run's admitted Profile lifetime while its caller retains the
+/// already-acquired startup range. A stop may persist its global fence only
+/// before this revalidation or after these lifecycle locks are released, and
+/// unlocked quiesce cannot pass the retained Run range until worker startup
+/// has either published a runtime record or failed.
+pub(crate) fn fence_global_run_worker_start(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    state: &ServerState,
+    workspace_id: &str,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let home = DolgoraeHome::system()?;
+    fence_global_run_worker_start_in(home.root(), binding, state, workspace_id, run_id)
+}
+
+fn fence_global_run_worker_start_in(
+    dolgorae_home_root: &Path,
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    state: &ServerState,
+    workspace_id: &str,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
     binding.validate_for_recovery()?;
-    crate::global_runtime::GlobalProfileServerState::from_prepared(state)?.discover(binding)?;
+    state.discover_global(binding)?;
+    let context = Context {
+        registry_path: dolgorae_home_root.join("profiles.yaml"),
+        dolgorae_home_root: dolgorae_home_root.to_path_buf(),
+    };
+    let paths = LifecyclePaths::open(&context, &binding.launch_snapshot)?;
+    let (_home_lock, _server_lock) = paths.lock()?;
+    verify_migration_fence(
+        &paths.home_root.join("migration.json"),
+        None,
+        &binding.selected_name,
+        &binding.server_key,
+    )?;
+    let current = read_state_if_running(&paths.state_path)?.ok_or_else(|| {
+        profile_server_busy(
+            &binding.selected_name,
+            &binding.server_key,
+            "the profile server stopped before Run worker startup",
+        )
+    })?;
+    current.discover_global(binding)?;
+    validate_admission_lifetime(
+        &binding.selected_name,
+        &binding.launch_snapshot,
+        state,
+        &current,
+        read_home_active(&paths.active_path)?.as_ref(),
+    )?;
+    let membership = crate::global_runtime::GlobalMembershipStore::from_root(
+        dolgorae_home_root,
+        &binding.selected_name,
+        &binding.server_key,
+    )?
+    .load_under_server_lock(&paths.root)?;
+    let identity = format!("{workspace_id}:{run_id}");
+    let admitted = membership.members.get(&identity).is_some_and(|member| {
+        member.disposition == crate::global_runtime::MembershipDisposition::Active
+            && member.observed_epoch == Some(current.server_epoch)
+    });
+    if !admitted {
+        return Err(profile_server_busy(
+            &binding.selected_name,
+            &binding.server_key,
+            "the Run membership changed before worker startup",
+        ));
+    }
+    Ok(())
+}
+
+fn record_global_run_under_lifecycle_locks(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    state: &ServerState,
+    workspace_id: &str,
+    run_id: Uuid,
+    disposition: crate::global_runtime::MembershipDisposition,
+    facts: crate::global_runtime::GlobalMembershipFacts,
+) -> Result<crate::global_runtime::GlobalMembershipIndex, MachineError> {
+    binding.validate_for_recovery()?;
+    state.discover_global(binding)?;
     let home = DolgoraeHome::system()?;
     let context = Context {
-        workspace_id: "global-profile-v1".to_owned(),
         registry_path: home.root().join("profiles.yaml"),
         dolgorae_home_root: home.root().to_path_buf(),
     };
@@ -335,7 +472,7 @@ pub fn admit_global_run(
             "the profile server stopped before Run admission",
         )
     })?;
-    crate::global_runtime::GlobalProfileServerState::from_prepared(&current)?.discover(binding)?;
+    current.discover_global(binding)?;
     validate_admission_lifetime(
         &binding.selected_name,
         &binding.launch_snapshot,
@@ -343,13 +480,12 @@ pub fn admit_global_run(
         &current,
         read_home_active(&paths.active_path)?.as_ref(),
     )?;
-    crate::global_runtime::GlobalMembershipStore::new(&home, &binding.server_key)?
-        .record_under_lifecycle_locks(
-            &paths.root,
-            workspace_id,
-            run_id,
-            crate::global_runtime::MembershipDisposition::Unknown,
-        )
+    crate::global_runtime::GlobalMembershipStore::new(
+        &home,
+        &binding.selected_name,
+        &binding.server_key,
+    )?
+    .record_under_lifecycle_locks(&paths.root, workspace_id, run_id, disposition, facts)
 }
 
 fn validate_admission_lifetime(
@@ -368,16 +504,6 @@ fn validate_admission_lifetime(
         ));
     }
     verify_stop_home_active(snapshot, current, active)
-}
-
-fn publish_global_server_state(context: &Context, state: &ServerState) -> Result<(), MachineError> {
-    let successor = crate::global_runtime::GlobalProfileServerState::from_prepared(state)?;
-    crate::global_runtime::GlobalServerStateStore::from_root(
-        &context.dolgorae_home_root,
-        &state.server_key,
-    )?
-    .publish(&successor)?;
-    Ok(())
 }
 
 /// Validates profile command arguments against the same shape and
@@ -584,7 +710,7 @@ fn add(parsed: &Parsed) -> Result<Value, MachineError> {
     if parsed.required("--native-subagents")? != "enabled" {
         return Err(MachineError::new(
             "NATIVE_SUBAGENT_DISABLE_UNAVAILABLE",
-            "public Runtime Profiles require native subagents enabled",
+            "public Codex Profiles require native subagents enabled",
             false,
             json!({
                 "profile": name,
@@ -602,7 +728,7 @@ fn add(parsed: &Parsed) -> Result<Value, MachineError> {
     }
     let environment = parsed.environment()?;
     let home = DolgoraeHome::system()?;
-    crate::global_profile::GlobalProfileStore::new(&home).add(
+    let registry = crate::global_profile::GlobalProfileStore::new(&home).add(
         name.clone(),
         RuntimeProfile {
             argv,
@@ -611,8 +737,9 @@ fn add(parsed: &Parsed) -> Result<Value, MachineError> {
             native_subagents: NativeSubagents::Enabled,
         },
     )?;
-    let validated = parse_local_profiles(&context.registry_path)?;
-    let profile = validated.profiles.get(&name).expect("stored profile");
+    let profile = registry.profiles.get(&name).ok_or_else(|| {
+        internal("committed global Profile registry did not contain the added profile")
+    })?;
     serde_json::to_value(profile_view(&name, profile)).map_err(internal)
 }
 
@@ -654,7 +781,7 @@ fn remove(parsed: &Parsed) -> Result<Value, MachineError> {
     Ok(json!({"profile": name, "removed": true}))
 }
 
-fn doctor(parsed: &Parsed) -> Result<Value, MachineError> {
+fn doctor(parsed: &Parsed, member_quiescer: ProfileMemberQuiescer) -> Result<Value, MachineError> {
     let launch_probe = parsed.flag("--launch-probe");
     let leave_running = parsed.flag("--leave-running");
     if leave_running && !launch_probe {
@@ -705,7 +832,14 @@ fn doctor(parsed: &Parsed) -> Result<Value, MachineError> {
             started = true;
         }
         if started && !leave_running {
-            stop_snapshot(&context, &snapshot, false, &mut OperatorHandoff::none())?;
+            stop_snapshot(
+                &context,
+                &snapshot,
+                false,
+                &mut OperatorHandoff::none(),
+                &mut || Ok(OperatorHandoff::none()),
+                member_quiescer,
+            )?;
         }
     }
     // Bare doctor never launches a probe, but it still reports the closed
@@ -752,9 +886,6 @@ fn server_status(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let state = read_state_if_running(&profile_state_path(&context, &snapshot))?;
-    if let Some(state) = &state {
-        publish_global_server_state(&context, state)?;
-    }
     Ok(json!({
         "profile": name,
         "server_key": snapshot.server_key,
@@ -767,11 +898,14 @@ fn server_start(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let state = start_snapshot(&context, &snapshot, &mut OperatorHandoff::none())?;
-    publish_global_server_state(&context, &state)?;
     Ok(json!({"profile": name, "started": true, "state": state}))
 }
 
-fn server_stop(parsed: &Parsed, allow_without_operator: bool) -> Result<Value, MachineError> {
+fn server_stop(
+    parsed: &Parsed,
+    allow_without_operator: bool,
+    member_quiescer: ProfileMemberQuiescer,
+) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     if !allow_without_operator {
         parsed.precheck_operator("profile.server.stop")?;
@@ -784,18 +918,35 @@ fn server_stop(parsed: &Parsed, allow_without_operator: bool) -> Result<Value, M
     } else {
         parsed.authorize_operator("profile.server.stop")?
     };
-    let stopped = stop_snapshot(&context, &snapshot, interrupt, &mut operator)?;
+    let stopped = stop_snapshot(
+        &context,
+        &snapshot,
+        interrupt,
+        &mut operator,
+        &mut || parsed.authorize_operator("profile.server.stop"),
+        member_quiescer,
+    )?;
     Ok(json!({"profile": name, "server_key": snapshot.server_key, "stopped": stopped}))
 }
 
-fn server_restart(parsed: &Parsed) -> Result<Value, MachineError> {
+fn server_restart(
+    parsed: &Parsed,
+    member_quiescer: ProfileMemberQuiescer,
+) -> Result<Value, MachineError> {
     parsed.precheck_operator("profile.server.restart")?;
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let interrupt = parsed.flag("--interrupt");
     require_interrupt_confirmation(parsed, &name, &snapshot, interrupt)?;
     let mut stop_operator = parsed.authorize_operator("profile.server.restart")?;
-    stop_snapshot(&context, &snapshot, interrupt, &mut stop_operator)?;
+    stop_snapshot(
+        &context,
+        &snapshot,
+        interrupt,
+        &mut stop_operator,
+        &mut || parsed.authorize_operator("profile.server.restart"),
+        member_quiescer,
+    )?;
     // Restarting is two operator-authorized effects. The stop handed
     // `operator.lock` off to the home and server locks and then released it
     // for the quiesce, so the start reauthorizes: a credential rotated while
@@ -826,7 +977,10 @@ fn require_interrupt_confirmation(
     Ok(())
 }
 
-fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
+fn server_migrate(
+    parsed: &Parsed,
+    member_quiescer: ProfileMemberQuiescer,
+) -> Result<Value, MachineError> {
     parsed.precheck_operator("profile.server.migrate")?;
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
@@ -865,10 +1019,17 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
     let migration_locks =
         acquire_migration_locks(&home_root, &old_root, &old, &new_root, &snapshot.server_key)?;
     stop_operator.handoff(&migration_locks.home);
-    crate::global_runtime::GlobalMembershipStore::from_root(&context.dolgorae_home_root, &old)?
-        .require_quiescent_under_server_lock(&name, "migrate")?;
+    let old_membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &name,
+        &old,
+    )?;
+    if !parsed.flag("--interrupt") {
+        old_membership_store.require_quiescent_under_server_lock(&name, "migrate")?;
+    }
     crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
+        &name,
         &snapshot.server_key,
     )?
     .require_quiescent_under_server_lock(&name, "migrate")?;
@@ -889,7 +1050,7 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
 
     // Re-read every source proof under the migration locks. Observations made
     // before this point cannot authorize terminating a later lifetime.
-    let old_state = read_state_if_running(&old_root.join("runtime-state.json"))?
+    let old_state = read_state_if_running(&old_root.join("state.json"))?
         .ok_or_else(|| profile_mismatch(&name, "old_server_running", json!(true), json!(false)))?;
     if old_state.server_key != old {
         return Err(profile_mismatch(
@@ -913,22 +1074,22 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
         profile: name.clone(),
         server_key: old.clone(),
     };
-    let old_records = replay_membership(&old_root.join("runtime-membership.jsonl"), &old_scope)?;
-    let old_index = derive_membership_index(&old_root, &old_records)?;
-    verify_membership_index(&old_root, &old_index, &old_scope)?;
-    let orphans = membership_orphans(&context, &old_state.snapshot, &old_index)?;
-    if !orphans.is_empty() {
+    let old_index = old_membership_store.load_under_server_lock(&old_root)?;
+    if old_index.revision != old_state.membership_revision {
+        return Err(old_scope.incomplete("membership journal and server state revisions differ"));
+    }
+    let orphans = old_index
+        .members
+        .values()
+        .filter(|member| {
+            membership_orphan_reason(&context.dolgorae_home_root, &old, member).is_some()
+        })
+        .count();
+    if orphans != 0 {
         return Err(old_scope.incomplete(format!(
             "migration source membership has {} orphan members",
-            orphans.len()
+            orphans
         )));
-    }
-    if !old_index.active_members.is_empty() && !parsed.flag("--interrupt") {
-        return Err(profile_membership_incomplete(
-            &name,
-            &old,
-            "migration with live members requires explicit --interrupt",
-        ));
     }
     let mut migration =
         migration_record(migration_id, &old_state, &snapshot, "operator_authorized");
@@ -949,6 +1110,7 @@ fn server_migrate(parsed: &Parsed) -> Result<Value, MachineError> {
         },
         &mut stop_operator,
         || parsed.authorize_operator("profile.server.migrate"),
+        member_quiescer,
     )?;
     Ok(json!({
         "profile": name,
@@ -1057,7 +1219,8 @@ struct MigrationExecution<'a> {
 fn execute_migration(
     execution: MigrationExecution<'_>,
     stop_operator: &mut OperatorHandoff,
-    authorize_start: impl FnOnce() -> Result<OperatorHandoff, MachineError>,
+    mut authorize_phase: impl FnMut() -> Result<OperatorHandoff, MachineError>,
+    member_quiescer: ProfileMemberQuiescer,
 ) -> Result<ServerState, MachineError> {
     let MigrationExecution {
         migration_id,
@@ -1074,6 +1237,8 @@ fn execute_migration(
         migration_id,
         interrupt,
         stop_operator,
+        &mut authorize_phase,
+        member_quiescer,
     ) {
         let failure = *failure;
         if failure.process_stopped {
@@ -1105,7 +1270,7 @@ fn execute_migration(
             error,
         );
     }
-    let mut start_operator = match authorize_start() {
+    let mut start_operator = match authorize_phase() {
         Ok(operator) => operator,
         Err(error) => {
             return compensate_stopped_migration(
@@ -1283,7 +1448,7 @@ fn reconcile_blocked_migration(
                 .dolgorae_home_root
                 .join("profiles")
                 .join(confirmed_new_key)
-                .join("runtime-state.json"),
+                .join("state.json"),
         )?
         .ok_or_else(|| {
             profile_mismatch(
@@ -1306,7 +1471,7 @@ fn reconcile_blocked_migration(
                 .dolgorae_home_root
                 .join("profiles")
                 .join(confirmed_old_key)
-                .join("runtime-state.json"),
+                .join("state.json"),
         )?
         .ok_or_else(|| {
             profile_mismatch(
@@ -1394,11 +1559,13 @@ fn automatic_quiescent_migration(
     )?;
     crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
+        &new_snapshot.profile_name,
         old_server_key,
     )?
     .require_quiescent_under_server_lock(&new_snapshot.profile_name, "automatic_migrate")?;
     crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
+        &new_snapshot.profile_name,
         &new_snapshot.server_key,
     )?
     .require_quiescent_under_server_lock(&new_snapshot.profile_name, "automatic_migrate")?;
@@ -1421,15 +1588,14 @@ fn automatic_quiescent_migration(
         && active.lifecycle == "ready"
         && active.transition_token.is_none()
     {
-        let new_state =
-            read_state_if_running(&new_root.join("runtime-state.json"))?.ok_or_else(|| {
-                profile_mismatch(
-                    &new_snapshot.profile_name,
-                    "automatic_rollover_requested_server_running",
-                    json!(true),
-                    json!(false),
-                )
-            })?;
+        let new_state = read_state_if_running(&new_root.join("state.json"))?.ok_or_else(|| {
+            profile_mismatch(
+                &new_snapshot.profile_name,
+                "automatic_rollover_requested_server_running",
+                json!(true),
+                json!(false),
+            )
+        })?;
         return attach_running(new_snapshot, &new_state, Some(&active));
     }
     if active.server_key != old_server_key
@@ -1445,15 +1611,14 @@ fn automatic_quiescent_migration(
             ),
         ));
     }
-    let old_state =
-        read_state_if_running(&old_root.join("runtime-state.json"))?.ok_or_else(|| {
-            profile_mismatch(
-                &new_snapshot.profile_name,
-                "old_server_running",
-                json!(true),
-                json!(false),
-            )
-        })?;
+    let old_state = read_state_if_running(&old_root.join("state.json"))?.ok_or_else(|| {
+        profile_mismatch(
+            &new_snapshot.profile_name,
+            "old_server_running",
+            json!(true),
+            json!(false),
+        )
+    })?;
     if old_state.server_key != old_server_key
         || old_state.snapshot.canonical_codex_home != new_snapshot.canonical_codex_home
         || active.server_epoch != old_state.server_epoch
@@ -1482,20 +1647,36 @@ fn automatic_quiescent_migration(
         profile: old_state.snapshot.profile_name.clone(),
         server_key: old_server_key.to_owned(),
     };
-    let old_records = replay_membership(&old_root.join("runtime-membership.jsonl"), &old_scope)?;
-    if old_records.last().map_or(0, |record| record.revision) != old_state.membership_revision {
+    let old_index = crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &old_state.snapshot.profile_name,
+        old_server_key,
+    )?
+    .load_under_server_lock(&old_root)?;
+    if old_index.revision != old_state.membership_revision {
         return Err(old_scope.incomplete("membership journal and server state revisions differ"));
     }
-    let old_index = derive_membership_index(&old_root, &old_records)?;
-    verify_membership_index(&old_root, &old_index, &old_scope)?;
-    let orphans = membership_orphans(context, &old_state.snapshot, &old_index)?;
-    if !orphans.is_empty() {
+    let orphans = old_index
+        .members
+        .values()
+        .filter(|member| {
+            membership_orphan_reason(&context.dolgorae_home_root, old_server_key, member).is_some()
+        })
+        .count();
+    if orphans != 0 {
         return Err(old_scope.incomplete(format!(
             "automatic rollover source has {} orphan members",
-            orphans.len()
+            orphans
         )));
     }
-    let members = live_member_evidence(&old_index);
+    let members = old_index
+        .members
+        .values()
+        .filter(|member| {
+            member.disposition != crate::global_runtime::MembershipDisposition::Released
+        })
+        .map(|member| json!({"workspace_id": member.workspace_id, "run_id": member.run_id}))
+        .collect::<Vec<_>>();
     if !members.is_empty() {
         return Err(old_scope.incomplete(format!(
             "automatic rollover would interrupt {} live run member(s); use operator-authorized profile server migrate",
@@ -1528,26 +1709,144 @@ fn automatic_quiescent_migration(
         },
         &mut OperatorHandoff::none(),
         || Ok(OperatorHandoff::none()),
+        unavailable_member_quiescer,
     )
 }
 
 fn membership_verify(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
-    let index = crate::global_runtime::GlobalMembershipStore::from_root(
+    let root = profile_root(&context, &snapshot);
+    match fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "profile": name,
+                "server_key": snapshot.server_key,
+                "complete": true,
+                "revision": 0,
+                "records": 0,
+                "members": [],
+                "orphans": [],
+            }));
+        }
+        Err(error) => return Err(io_error(error)),
+        Ok(_) => {}
+    }
+    verify_private_directory(&root)?;
+    let store = crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
+        &name,
         &snapshot.server_key,
-    )?
-    .load()?;
+    )?;
+    let _server_lock = lock_file(&root.join("server.lock"))?;
+    let index = store.load_under_server_lock(&root)?;
+    if let Some(state) = read_state(&root.join("state.json"))?
+        && state.membership_revision != index.revision
+    {
+        return Err(profile_membership_incomplete(
+            &name,
+            &snapshot.server_key,
+            "membership journal and server state revisions differ",
+        ));
+    }
     let members = index.members.values().cloned().collect::<Vec<_>>();
+    let orphans = members
+        .iter()
+        .filter_map(|member| {
+            membership_orphan_reason(&context.dolgorae_home_root, &snapshot.server_key, member).map(
+                |reason| {
+                    json!({
+                        "workspace_id": member.workspace_id,
+                        "run_id": member.run_id,
+                        "reason": reason,
+                    })
+                },
+            )
+        })
+        .collect::<Vec<_>>();
     Ok(json!({
         "profile": name,
         "server_key": snapshot.server_key,
-        "complete": true,
+        "complete": orphans.is_empty(),
         "revision": index.revision,
         "records": index.revision,
         "members": members,
+        "orphans": orphans,
     }))
+}
+
+fn ensure_membership_manifests_valid(
+    home_root: &Path,
+    scope: &MembershipScope,
+    membership: &crate::global_runtime::GlobalMembershipIndex,
+) -> Result<(), MachineError> {
+    let orphan_count = membership
+        .members
+        .values()
+        .filter(|member| membership_orphan_reason(home_root, &scope.server_key, member).is_some())
+        .count();
+    if orphan_count == 0 {
+        Ok(())
+    } else {
+        Err(scope.incomplete(format!(
+            "membership contains {} orphan member(s)",
+            orphan_count
+        )))
+    }
+}
+
+fn membership_orphan_reason(
+    home_root: &Path,
+    server_key: &str,
+    member: &crate::global_runtime::GlobalMembershipRecord,
+) -> Option<&'static str> {
+    if member.disposition == crate::global_runtime::MembershipDisposition::Released {
+        return None;
+    }
+    let manifest_path = home_root
+        .join("workspaces")
+        .join(&member.workspace_id)
+        .join("runs")
+        .join(member.run_id.to_string())
+        .join("manifest.json");
+    let bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some("manifest_missing");
+        }
+        Err(_) => return Some("manifest_unreadable"),
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Some("manifest_malformed");
+    };
+    if crate::jcs::parse(text).is_err() {
+        return Some("manifest_malformed");
+    }
+    let manifest: Value = match serde_json::from_slice(&bytes) {
+        Ok(manifest) => manifest,
+        Err(_) => return Some("manifest_malformed"),
+    };
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(2)
+        || manifest.get("run_id").and_then(Value::as_str)
+            != Some(member.run_id.to_string().as_str())
+        || manifest.get("workspace_id").and_then(Value::as_str)
+            != Some(member.workspace_id.as_str())
+    {
+        return Some("manifest_identity_mismatch");
+    }
+    match manifest
+        .get("global_profile_binding")
+        .and_then(Value::as_object)
+    {
+        Some(binding)
+            if binding.get("schema_version").and_then(Value::as_u64) == Some(2)
+                && binding.get("server_key").and_then(Value::as_str) == Some(server_key) =>
+        {
+            None
+        }
+        Some(_) => Some("profile_binding_mismatch"),
+        None => Some("profile_binding_missing"),
+    }
 }
 
 fn membership_tombstone(parsed: &Parsed) -> Result<Value, MachineError> {
@@ -1573,37 +1872,20 @@ fn membership_tombstone(parsed: &Parsed) -> Result<Value, MachineError> {
         })?;
     let store = crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
+        &name,
         &snapshot.server_key,
     )?;
-    let index = store.load()?;
-    let identity = format!("{workspace}:{run_id}");
-    if !index.members.contains_key(&identity)
-        || context
-            .dolgorae_home_root
-            .join("workspaces")
-            .join(&workspace)
-            .join("runs")
-            .join(run_id.to_string())
-            .join("manifest.json")
-            .exists()
-    {
-        return Err(profile_mismatch(
-            &name,
-            "confirmed_orphan_member",
-            json!({"workspace_id": workspace, "run_id": run_id}),
-            json!(index.members),
-        ));
-    }
     // Membership repair acquires no lock below `operator.lock`, so the hold
     // taken here has nothing to hand off to and instead spans the tombstone
     // append and the revision commit that follows it.
     let operator = parsed.authorize_operator("profile.membership.tombstone_orphan")?;
     let revision = store
-        .record(
-            &workspace,
-            run_id,
-            crate::global_runtime::MembershipDisposition::Released,
-        )?
+        .tombstone_orphan(&workspace, run_id, |member| {
+            Ok(
+                membership_orphan_reason(&context.dolgorae_home_root, &snapshot.server_key, member)
+                    .is_some(),
+            )
+        })?
         .revision;
     operator.release();
     Ok(json!({"profile": name, "revision": revision, "tombstoned": true}))
@@ -1628,48 +1910,64 @@ fn state_reset(parsed: &Parsed) -> Result<Value, MachineError> {
             json!(confirm_server_key),
         ));
     }
-    if !server_lifetime_absent(&context, &snapshot.server_key)? {
+    let paths = LifecyclePaths::open(&context, &snapshot)?;
+    if let Some(state) = read_state(&paths.state_path)?
+        && !recorded_processes_absent(&state)?
+    {
         return Err(profile_server_busy(
             &name,
             &snapshot.server_key,
-            "profile process, drainer, or socket absence is not proven",
+            "profile process group or log drainer absence is not proven",
         ));
     }
-    // The absence proof above must not run under any filesystem lock, so the
-    // authorizing hold is taken only once it is behind us and stays live
-    // across the state removal until the home lock replaces it.
+    // Revalidate the absence proof after taking the normal home -> server
+    // lifecycle lock prefix. A crashed stop may leave live membership behind;
+    // the recorded epoch is the authority for releasing it safely.
     let mut operator = parsed.authorize_operator("profile.state.reset")?;
-    let server_root = profile_root(&context, &snapshot);
-    let server_lock = lock_file(&server_root.join("server.lock"))?;
-    operator.handoff(&server_lock);
-    crate::global_runtime::GlobalMembershipStore::from_root(
+    let (home_lock, server_lock) = paths.lock()?;
+    operator.handoff(&home_lock);
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
+        &snapshot.profile_name,
         &snapshot.server_key,
-    )?
-    .require_quiescent_under_server_lock(&name, "state_reset")?;
-    let state_path = profile_state_path(&context, &snapshot);
-    if state_path.exists() {
-        fs::remove_file(&state_path).map_err(io_error)?;
-        sync_parent(&state_path)?;
+    )?;
+    if let Some(state) = read_state(&paths.state_path)? {
+        if !recorded_processes_absent(&state)? {
+            return Err(profile_server_busy(
+                &name,
+                &snapshot.server_key,
+                "profile process group or log drainer absence is not proven",
+            ));
+        }
+        let socket = Path::new(&state.socket_path);
+        if fs::symlink_metadata(socket).is_ok() {
+            verify_recorded_socket(&name, &state)?;
+            fs::remove_file(socket).map_err(io_error)?;
+            sync_parent(socket)?;
+        }
+        membership_store
+            .release_after_server_absence_under_lifecycle_locks(&paths.root, state.server_epoch)?;
+        fs::remove_file(&paths.state_path).map_err(io_error)?;
+        sync_parent(&paths.state_path)?;
+    } else {
+        membership_store.require_quiescent_under_server_lock(&name, "state_reset")?;
+        if socket_path(&snapshot.server_key)?.exists() {
+            return Err(profile_server_busy(
+                &name,
+                &snapshot.server_key,
+                "a Profile Server socket has no recorded state for an absence proof",
+            ));
+        }
     }
-    let successor_state_path = server_root.join("state.json");
-    if successor_state_path.exists() {
-        fs::remove_file(&successor_state_path).map_err(io_error)?;
-        sync_parent(&successor_state_path)?;
-    }
+    clear_home_active(
+        &snapshot.profile_name,
+        &paths.active_path,
+        &snapshot.server_key,
+    )?;
+    let migration_repaired =
+        repair_stale_migration_fence(&context, &paths.home_root, &snapshot.server_key)?;
     drop(server_lock);
-    let home = home_root(&context, &snapshot.canonical_codex_home)?;
-    let mut migration_repaired = false;
-    if home.exists() {
-        let home_lock = lock_file(&home.join("home.lock"))?;
-        operator.handoff(&home_lock);
-        clear_home_active(
-            &snapshot.profile_name,
-            &home.join("active.json"),
-            &snapshot.server_key,
-        )?;
-        migration_repaired = repair_stale_migration_fence(&context, &home, &snapshot.server_key)?;
-    }
+    drop(home_lock);
     operator.release();
     Ok(json!({"profile": name, "reset": true, "migration_repaired": migration_repaired}))
 }
@@ -1779,7 +2077,6 @@ fn context(workspace: Option<&Path>) -> Result<Context, MachineError> {
     }
     let dolgorae_home = DolgoraeHome::system()?;
     Ok(Context {
-        workspace_id: "global-profile-v1".to_owned(),
         registry_path: dolgorae_home.root().join("profiles.yaml"),
         dolgorae_home_root: dolgorae_home.root().to_path_buf(),
     })
@@ -1823,7 +2120,7 @@ fn snapshot_for(
     let canonical_codex_home = path_utf8(&canonical_codex_home)?.to_owned();
     let version = codex_version(name, profile, &canonical_executable)?;
     let schema_root = generate_schema(name, profile, &canonical_executable)?;
-    let result = (|| {
+    let result: Result<ProfileSnapshot, MachineError> = (|| {
         compare_required_subset(name, &schema_root.join("stable"))?;
         let schema_bundle_sha256 = directory_sha256(name, &schema_root.join("stable"))?;
         verify_exact_bundle_digests(name, &schema_root, &version, &schema_bundle_sha256)?;
@@ -1881,7 +2178,18 @@ fn snapshot_for(
         })
     })();
     let _ = fs::remove_dir_all(&schema_root);
-    result
+    let snapshot = result?;
+    let binding =
+        crate::global_runtime::ResolvedGlobalProfile::from_definition(name, profile.clone())?
+            .bind(snapshot.clone())?;
+    crate::global_profile::GlobalProfileStore::from_root(&context.dolgorae_home_root)
+        .record_binding(crate::global_profile::ProfileBindingRecord {
+            selected_name: binding.selected_name,
+            definition_sha256: binding.definition_sha256,
+            server_key: binding.server_key,
+            launch_snapshot_sha256: binding.launch_snapshot_sha256,
+        })?;
+    Ok(snapshot)
 }
 
 /// Prepare the launch snapshot for a definition already resolved from the
@@ -1894,7 +2202,6 @@ pub(crate) fn snapshot_for_global(
 ) -> Result<ProfileSnapshot, MachineError> {
     snapshot_for(
         &Context {
-            workspace_id: "global-profile-v1".to_owned(),
             registry_path: home.root().join("profiles.yaml"),
             dolgorae_home_root: home.root().to_path_buf(),
         },
@@ -2664,7 +2971,7 @@ impl LifecyclePaths {
         let home_root = home_root(context, &snapshot.canonical_codex_home)?;
         secure_dir(&home_root)?;
         Ok(Self {
-            state_path: root.join("runtime-state.json"),
+            state_path: root.join("state.json"),
             active_path: home_root.join("active.json"),
             root,
             home_root,
@@ -2676,10 +2983,6 @@ impl LifecyclePaths {
         let home_lock = lock_file(&self.home_root.join("home.lock"))?;
         let server_lock = lock_file(&self.root.join("server.lock"))?;
         Ok((home_lock, server_lock))
-    }
-
-    fn membership_path(&self) -> PathBuf {
-        self.root.join("runtime-membership.jsonl")
     }
 }
 
@@ -2724,6 +3027,16 @@ fn prepare_start(
     // The operator-authorized prefix is now complete, so the hold that
     // authorized this start can retire into the locks that replace it.
     operator.handoff(&home_lock);
+    let dolgorae_home_root = paths
+        .root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| internal("global Profile root has no home"))?;
+    crate::global_profile::require_recorded_binding_under_lifecycle_locks(
+        dolgorae_home_root,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
     verify_migration_fence(
         &paths.home_root.join("migration.json"),
         migration_id,
@@ -2770,17 +3083,58 @@ fn prepare_start(
             ));
         }
     }
-    crate::global_runtime::GlobalMembershipStore::from_root(
-        paths
-            .root
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| internal("global Profile root has no home"))?,
+    let dolgorae_home_root = paths
+        .root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| internal("global Profile root has no home"))?;
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        dolgorae_home_root,
+        &snapshot.profile_name,
         &snapshot.server_key,
-    )?
-    .require_quiescent_under_server_lock(&snapshot.profile_name, "start_generation")?;
+    )?;
+    let membership = membership_store.load_under_server_lock(&paths.root)?;
+    ensure_membership_manifests_valid(
+        dolgorae_home_root,
+        &MembershipScope {
+            profile: snapshot.profile_name.clone(),
+            server_key: snapshot.server_key.clone(),
+        },
+        &membership,
+    )?;
     let socket = socket_path(&snapshot.server_key)?;
+    let previous_state = read_state(&paths.state_path)?;
+    if let Some(state) = previous_state.as_ref()
+        && !recorded_processes_absent(state)?
+    {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &snapshot.server_key,
+            "the prior Profile Server process group or log drainer is still present",
+        ));
+    }
     clear_stale_socket(snapshot, &socket, &paths.state_path)?;
+    if let Some(state) = previous_state.as_ref() {
+        if Path::new(&state.socket_path).exists() || socket.exists() {
+            return Err(profile_server_busy(
+                &snapshot.profile_name,
+                &snapshot.server_key,
+                "the prior Profile Server socket is still present",
+            ));
+        }
+        membership_store
+            .release_after_server_absence_under_lifecycle_locks(&paths.root, state.server_epoch)?;
+    } else if active.is_some()
+        || membership.members.values().any(|member| {
+            member.disposition != crate::global_runtime::MembershipDisposition::Released
+        })
+    {
+        return Err(profile_membership_incomplete(
+            &snapshot.profile_name,
+            &snapshot.server_key,
+            "persisted Profile activity has no prior server state for an absence proof",
+        ));
+    }
     let epoch = reserve_epoch(&paths.root.join("epoch"))?;
     let token = Uuid::now_v7();
     write_home_active(
@@ -3085,6 +3439,11 @@ fn commit_start(
     applied: &StartApplied,
 ) -> Result<ServerState, MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
+    crate::global_profile::require_recorded_binding_under_lifecycle_locks(
+        &context.dolgorae_home_root,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
     require_reservation(paths, snapshot, reservation, "starting")?;
     // A record left by a lifetime that is provably over is what this start is
     // replacing; only a *live* one means another start won the race.
@@ -3136,23 +3495,23 @@ fn commit_start(
             }),
         ));
     }
-    let scope = MembershipScope {
-        profile: snapshot.profile_name.clone(),
-        server_key: snapshot.server_key.clone(),
-    };
-    let membership_path = paths.membership_path();
-    append_membership(
-        &membership_path,
-        "server_started",
-        &context.workspace_id,
-        None,
-        &scope,
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        &context.dolgorae_home_root,
+        &snapshot.profile_name,
+        &snapshot.server_key,
     )?;
-    let membership_revision = replay_membership(&membership_path, &scope)?
-        .last()
-        .map_or(0, |record| record.revision);
+    let membership = membership_store.load_under_server_lock(&paths.root)?;
+    ensure_membership_manifests_valid(
+        &context.dolgorae_home_root,
+        &MembershipScope {
+            profile: snapshot.profile_name.clone(),
+            server_key: snapshot.server_key.clone(),
+        },
+        &membership,
+    )?;
+    let membership_revision = membership.revision;
     let state = ServerState {
-        schema_version: 1,
+        schema_version: 2,
         server_key: snapshot.server_key.clone(),
         lifecycle: "ready".to_owned(),
         server_epoch: reservation.epoch,
@@ -3404,8 +3763,18 @@ fn stop_snapshot(
     snapshot: &ProfileSnapshot,
     interrupt: bool,
     operator: &mut OperatorHandoff,
+    authorize_phase: &mut impl FnMut() -> Result<OperatorHandoff, MachineError>,
+    member_quiescer: ProfileMemberQuiescer,
 ) -> Result<bool, MachineError> {
-    stop_snapshot_inner(context, snapshot, None, interrupt, operator)
+    stop_snapshot_inner(
+        context,
+        snapshot,
+        None,
+        interrupt,
+        operator,
+        authorize_phase,
+        member_quiescer,
+    )
 }
 
 fn stop_snapshot_for_migration(
@@ -3414,6 +3783,8 @@ fn stop_snapshot_for_migration(
     migration_id: Uuid,
     interrupt: bool,
     operator: &mut OperatorHandoff,
+    authorize_phase: &mut impl FnMut() -> Result<OperatorHandoff, MachineError>,
+    member_quiescer: ProfileMemberQuiescer,
 ) -> Result<bool, Box<MigrationStopFailure>> {
     let paths = LifecyclePaths::open(context, snapshot)
         .map_err(MigrationStopFailure::before_stop)
@@ -3424,9 +3795,17 @@ fn stop_snapshot_for_migration(
     else {
         return Ok(false);
     };
+    if interrupt {
+        quiesce_stop_members(&paths, snapshot, &reservation, member_quiescer)
+            .map_err(MigrationStopFailure::before_stop)
+            .map_err(Box::new)?;
+    }
+    prepare_shutdown_or_restore(&paths, snapshot, &reservation, authorize_phase)
+        .map_err(MigrationStopFailure::before_stop)
+        .map_err(Box::new)?;
     if let Err(error) = apply_stop(&reservation.state) {
         let process_stopped = !process_exists(reservation.state.pid);
-        if !process_stopped {
+        if !process_stopped && !interrupt {
             restore_stopping_reservation(&paths, snapshot, &reservation);
         }
         return Err(Box::new(MigrationStopFailure {
@@ -3435,7 +3814,14 @@ fn stop_snapshot_for_migration(
             process_stopped,
         }));
     }
-    commit_stop(&paths, snapshot, &reservation).map_err(|error| {
+    let mut commit_operator = authorize_phase().map_err(|error| {
+        Box::new(MigrationStopFailure {
+            error,
+            reservation: Some(reservation.clone()),
+            process_stopped: true,
+        })
+    })?;
+    commit_stop(&paths, snapshot, &reservation, &mut commit_operator).map_err(|error| {
         Box::new(MigrationStopFailure {
             error,
             reservation: Some(reservation),
@@ -3467,23 +3853,35 @@ fn stop_snapshot_inner(
     migration_id: Option<Uuid>,
     interrupt: bool,
     operator: &mut OperatorHandoff,
+    authorize_phase: &mut impl FnMut() -> Result<OperatorHandoff, MachineError>,
+    member_quiescer: ProfileMemberQuiescer,
 ) -> Result<bool, MachineError> {
     let paths = LifecyclePaths::open(context, snapshot)?;
     let Some(reservation) = prepare_stop(&paths, snapshot, migration_id, interrupt, operator)?
     else {
         return Ok(false);
     };
+    if interrupt {
+        quiesce_stop_members(&paths, snapshot, &reservation, member_quiescer)?;
+    }
+    prepare_shutdown_or_restore(&paths, snapshot, &reservation, authorize_phase)?;
     if let Err(error) = apply_stop(&reservation.state) {
-        restore_stopping_reservation(&paths, snapshot, &reservation);
+        if !interrupt {
+            restore_stopping_reservation(&paths, snapshot, &reservation);
+        }
         return Err(error);
     }
-    commit_stop(&paths, snapshot, &reservation).map(|()| true)
+    let mut commit_operator = authorize_phase()?;
+    commit_stop(&paths, snapshot, &reservation, &mut commit_operator).map(|()| true)
 }
 
 /// The stopping lifetime PREPARE reserved.
+#[derive(Clone)]
 struct StopReservation {
     state: ServerState,
     token: Uuid,
+    interrupt: bool,
+    members: Vec<crate::global_runtime::GlobalMembershipRecord>,
 }
 
 /// PREPARE: prove the recorded server, gate on live members, and mark the
@@ -3537,68 +3935,311 @@ fn prepare_stop(
     }
     verify_live_process_identity(&state)?;
     let active = read_home_active(&paths.active_path)?;
-    verify_stop_home_active(snapshot, &state, active.as_ref())?;
+    let resumed_token = resumable_stop_token(active.as_ref(), snapshot, &state, interrupt);
+    if resumed_token.is_none() {
+        verify_stop_home_active(snapshot, &state, active.as_ref())?;
+    }
     let scope = MembershipScope {
         profile: snapshot.profile_name.clone(),
         server_key: snapshot.server_key.clone(),
     };
-    let membership = replay_membership(&paths.membership_path(), &scope)?;
-    if membership.last().map_or(0, |record| record.revision) != state.membership_revision {
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
+    let membership = membership_store.load_under_server_lock(&paths.root)?;
+    if membership.revision != state.membership_revision {
         return Err(scope.incomplete("membership journal and server state revisions differ"));
     }
-    let index = derive_membership_index(&paths.root, &membership)?;
-    let members = live_member_evidence(&index);
+    let members = membership
+        .members
+        .values()
+        .filter(|member| {
+            member.disposition != crate::global_runtime::MembershipDisposition::Released
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let dolgorae_home_root = paths
+        .root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| internal("global Profile root has no home"))?;
+    ensure_membership_manifests_valid(dolgorae_home_root, &scope, &membership)?;
     if !interrupt {
-        crate::global_runtime::GlobalMembershipStore::from_root(
-            paths
-                .root
-                .parent()
-                .and_then(Path::parent)
-                .ok_or_else(|| internal("global Profile root has no home"))?,
-            &snapshot.server_key,
-        )?
-        .require_quiescent_under_server_lock(&snapshot.profile_name, "stop")?;
+        membership_store.require_quiescent_under_server_lock(&snapshot.profile_name, "stop")?;
     }
-    if !members.is_empty() && !interrupt {
-        return Err(scope.incomplete(format!(
-            "stopping this server would interrupt {} live run member(s); \
-             pass --interrupt with --confirm-server-key to authorize it",
-            members.len()
-        )));
+    let token = resumed_token.unwrap_or_else(Uuid::now_v7);
+    if resumed_token.is_none() {
+        write_home_active(
+            &paths.active_path,
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                server_key: snapshot.server_key.clone(),
+                server_epoch: state.server_epoch,
+                lifecycle: "stopping".to_owned(),
+                pid: Some(state.pid),
+                transition_token: Some(token),
+            },
+        )?;
     }
-    if interrupt {
-        // The interrupt is recorded with the members it actually interrupted,
-        // not as a bare flag: an operator reading the journal afterwards has
-        // to be able to see which Runs the confirmed server key cost. Those
-        // are Run identities, so the record is operator-projected and the
-        // minimal projection sees only that an interrupt happened.
+    drop(server_lock);
+    drop(home_lock);
+    Ok(Some(StopReservation {
+        state,
+        token,
+        interrupt,
+        members,
+    }))
+}
+
+fn resumable_stop_token(
+    active: Option<&HomeActive>,
+    snapshot: &ProfileSnapshot,
+    state: &ServerState,
+    interrupt: bool,
+) -> Option<Uuid> {
+    active.and_then(|active| {
+        (interrupt
+            && active.server_key == snapshot.server_key
+            && active.server_epoch == state.server_epoch
+            && active.lifecycle == "stopping"
+            && active.pid == Some(state.pid))
+        .then_some(active.transition_token)
+        .flatten()
+    })
+}
+
+/// Quiesce and durably classify every member named by PREPARE. No Profile
+/// lifecycle lock is held while a Run worker is interrupted or awaited.
+fn quiesce_stop_members(
+    paths: &LifecyclePaths,
+    snapshot: &ProfileSnapshot,
+    reservation: &StopReservation,
+    member_quiescer: ProfileMemberQuiescer,
+) -> Result<(), MachineError> {
+    let home_root = paths
+        .root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| internal("global Profile root has no home"))?;
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        home_root,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
+    let mut outcomes = Vec::with_capacity(reservation.members.len());
+    let mut changed = false;
+    for member in &reservation.members {
+        let outcome = if let Some(outcome) =
+            recorded_interrupt_outcome(member, reservation.state.server_epoch)
+        {
+            outcome.to_owned()
+        } else {
+            let outcome = member_quiescer(
+                home_root,
+                member,
+                &snapshot.profile_name,
+                &snapshot.server_key,
+                reservation.state.server_epoch,
+                reservation.token,
+            )?;
+            let lifecycle = match outcome.as_str() {
+                "terminal_observed" => "operator_interrupt_terminal",
+                "no_active_turn" => "operator_interrupt_quiescent",
+                "outcome_unknown" => "operator_interrupt_unknown",
+                _ => {
+                    return Err(internal(
+                        "profile member quiesce returned an unknown outcome",
+                    ));
+                }
+            };
+            membership_store.record_observed(
+                &member.workspace_id,
+                member.run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+                crate::global_runtime::GlobalMembershipFacts {
+                    controller_id: member.controller_id,
+                    worker_generation: member.worker_generation,
+                    thread_id: member.thread_id.clone(),
+                    connection_id: member.connection_id,
+                    lifecycle: lifecycle.to_owned(),
+                    writer: false,
+                    observed_epoch: Some(reservation.state.server_epoch),
+                    runtime_locator: member.runtime_locator.clone(),
+                },
+            )?;
+            changed = true;
+            outcome
+        };
+        outcomes.push(json!({
+            "workspace_id": member.workspace_id,
+            "run_id": member.run_id,
+            "outcome": outcome,
+        }));
+    }
+    if changed {
         append_diagnostic_record(
             &paths.root,
             "operator_interrupt",
             json!({
-                "pid": state.pid,
+                "pid": reservation.state.pid,
                 "confirmed_server_key": snapshot.server_key,
-                "interrupted_members": members,
+                "quiesce_revision": reservation.token,
+                "interrupted_members": outcomes,
             }),
             DiagnosticProjection::Operational,
         )?;
     }
-    let token = Uuid::now_v7();
-    write_home_active(
+    Ok(())
+}
+
+fn recorded_interrupt_outcome(
+    member: &crate::global_runtime::GlobalMembershipRecord,
+    server_epoch: u64,
+) -> Option<&'static str> {
+    if member.observed_epoch != Some(server_epoch) {
+        return None;
+    }
+    match member.lifecycle.as_str() {
+        "operator_interrupt_terminal" => Some("terminal_observed"),
+        "operator_interrupt_quiescent" => Some("no_active_turn"),
+        "operator_interrupt_unknown" => Some("outcome_unknown"),
+        _ => None,
+    }
+}
+
+/// Reauthorize and revalidate the durable stop fence after unlocked Run
+/// quiescence and immediately before the Profile Server is signalled.
+fn prepare_shutdown(
+    paths: &LifecyclePaths,
+    snapshot: &ProfileSnapshot,
+    reservation: &StopReservation,
+    operator: &mut OperatorHandoff,
+) -> Result<(), MachineError> {
+    let (home_lock, server_lock) = paths.lock()?;
+    operator.handoff(&home_lock);
+    require_transition(
         &paths.active_path,
-        &HomeActive {
-            schema_version: 1,
-            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+        snapshot,
+        reservation.state.server_epoch,
+        reservation.token,
+        "stopping",
+    )?;
+    let state = read_state(&paths.state_path)?.ok_or_else(|| {
+        profile_mismatch(
+            &snapshot.profile_name,
+            "server_epoch_identity",
+            json!(reservation.state.epoch_id),
+            Value::Null,
+        )
+    })?;
+    if state.epoch_id != reservation.state.epoch_id {
+        return Err(profile_mismatch(
+            &snapshot.profile_name,
+            "server_epoch_identity",
+            json!(reservation.state.epoch_id),
+            json!(state.epoch_id),
+        ));
+    }
+    verify_live_process_identity(&state)?;
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
+    let membership = membership_store.load_under_server_lock(&paths.root)?;
+    if membership.members.values().any(|observed| {
+        observed.disposition != crate::global_runtime::MembershipDisposition::Released
+            && !reservation.members.iter().any(|expected| {
+                expected.workspace_id == observed.workspace_id && expected.run_id == observed.run_id
+            })
+    }) {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &snapshot.server_key,
+            "a Run joined after the stop fence was prepared",
+        ));
+    }
+    ensure_membership_manifests_valid(
+        paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?,
+        &MembershipScope {
+            profile: snapshot.profile_name.clone(),
             server_key: snapshot.server_key.clone(),
-            server_epoch: state.server_epoch,
-            lifecycle: "stopping".to_owned(),
-            pid: Some(state.pid),
-            transition_token: Some(token),
         },
+        &membership,
+    )?;
+    for expected in &reservation.members {
+        let identity = format!("{}:{}", expected.workspace_id, expected.run_id);
+        let observed = membership.members.get(&identity).ok_or_else(|| {
+            profile_membership_incomplete(
+                &snapshot.profile_name,
+                &snapshot.server_key,
+                "a fenced member disappeared during quiescence",
+            )
+        })?;
+        if observed.disposition == crate::global_runtime::MembershipDisposition::Released {
+            continue;
+        }
+        if reservation.interrupt_required()
+            && !observed.lifecycle.starts_with("operator_interrupt_")
+        {
+            return Err(profile_membership_incomplete(
+                &snapshot.profile_name,
+                &snapshot.server_key,
+                "a fenced member lacks a durable operator override",
+            ));
+        }
+    }
+    append_diagnostic(
+        &paths.root,
+        "shutdown_prepared",
+        json!({
+            "epoch": reservation.state.server_epoch,
+            "quiesce_revision": reservation.token,
+            "membership_revision": membership.revision,
+        }),
     )?;
     drop(server_lock);
     drop(home_lock);
-    Ok(Some(StopReservation { state, token }))
+    Ok(())
+}
+
+/// Complete the last authorization and revalidation before APPLY. A
+/// non-interrupting stop has not changed any Run, so a failure may return the
+/// still-live singleton to `ready`; an interrupting stop retains its fence
+/// because member ledgers may already contain operator-override outcomes.
+fn prepare_shutdown_or_restore(
+    paths: &LifecyclePaths,
+    snapshot: &ProfileSnapshot,
+    reservation: &StopReservation,
+    authorize_phase: &mut impl FnMut() -> Result<OperatorHandoff, MachineError>,
+) -> Result<(), MachineError> {
+    let result = authorize_phase()
+        .and_then(|mut operator| prepare_shutdown(paths, snapshot, reservation, &mut operator));
+    if result.is_err() && !reservation.interrupt {
+        restore_stopping_reservation(paths, snapshot, reservation);
+    }
+    result
+}
+
+impl StopReservation {
+    fn interrupt_required(&self) -> bool {
+        self.interrupt
+    }
 }
 
 fn verify_stop_home_active(
@@ -3639,42 +4280,141 @@ fn verify_stop_home_active(
 
 /// The live members a stop would interrupt, as the evidence the interrupt
 /// diagnostic and the gate's message both name.
-fn live_member_evidence(index: &MembershipIndex) -> Vec<Value> {
-    run_members(index)
-        .into_iter()
-        .map(|member| json!({"workspace_id": member.workspace_id, "run_id": member.run_id}))
-        .collect()
-}
-
 /// APPLY: signal the process group and wait for it to go. No lock held.
 fn apply_stop(state: &ServerState) -> Result<(), MachineError> {
-    verify_live_process_identity(state)?;
-    DarwinSystem
-        .signal_process_group(state.pgid, libc::SIGTERM)
-        .map_err(transport)?;
-    if !wait_for_exit(state.pid, TERMINATE_BUDGET) {
-        verify_live_process_identity(state)?;
-        DarwinSystem
-            .signal_process_group(state.pgid, libc::SIGKILL)
-            .map_err(transport)?;
-        let _ = wait_for_exit(state.pid, KILL_BUDGET);
-    }
-    let _ = DarwinSystem.reap_child_nonblocking(state.pid);
-    if process_exists(state.pid) {
-        return Err(transport("profile process group did not terminate"));
-    }
+    terminate_recorded_process_group(
+        &state.snapshot.profile_name,
+        &state.server_key,
+        state.pid,
+        state.pgid,
+        state.uid,
+        &state.process_fingerprint,
+    )?;
     stop_drainer(state)
 }
 
-fn wait_for_exit(pid: u32, budget: Duration) -> bool {
+fn terminate_recorded_process_group(
+    profile: &str,
+    server_key: &str,
+    leader_pid: u32,
+    pgid: u32,
+    uid: u32,
+    fingerprint: &str,
+) -> Result<(), MachineError> {
+    let _ = DarwinSystem.reap_child_nonblocking(leader_pid);
+    let initial = DarwinSystem.process_group_pids(pgid).map_err(transport)?;
+    if initial.is_empty() {
+        let _ = DarwinSystem.reap_child_nonblocking(leader_pid);
+        return Ok(());
+    }
+    let leader = match DarwinSystem.live_process_identity(leader_pid) {
+        Ok(leader) => leader,
+        Err(_) => {
+            let survivors = DarwinSystem.process_group_pids(pgid).map_err(transport)?;
+            if survivors.is_empty() {
+                let _ = DarwinSystem.reap_child_nonblocking(leader_pid);
+                return Ok(());
+            }
+            return Err(profile_server_busy(
+                profile,
+                server_key,
+                format!(
+                    "process group {pgid} survived after its recorded leader disappeared; surviving PIDs {survivors:?}"
+                ),
+            ));
+        }
+    };
+    if leader.uid != uid || leader.process_group_id != pgid || leader.fingerprint != fingerprint {
+        return Err(profile_server_busy(
+            profile,
+            server_key,
+            format!("process group {pgid} no longer has its recorded leader identity"),
+        ));
+    }
+    let session_id = match DarwinSystem.bsd_process_identity(leader_pid) {
+        Ok(identity) => identity.session_id,
+        Err(_) => {
+            let survivors = DarwinSystem.process_group_pids(pgid).map_err(transport)?;
+            if survivors.is_empty() {
+                let _ = DarwinSystem.reap_child_nonblocking(leader_pid);
+                return Ok(());
+            }
+            return Err(profile_server_busy(
+                profile,
+                server_key,
+                format!(
+                    "process group {pgid} identity disappeared before shutdown; surviving PIDs {survivors:?}"
+                ),
+            ));
+        }
+    };
+    verify_recorded_group_members(profile, server_key, pgid, uid, session_id, &initial)?;
+    DarwinSystem
+        .signal_process_group(pgid, libc::SIGTERM)
+        .map_err(transport)?;
+    let survivors = wait_for_process_group_exit(leader_pid, pgid, TERMINATE_BUDGET)?;
+    if !survivors.is_empty() {
+        verify_recorded_group_members(profile, server_key, pgid, uid, session_id, &survivors)?;
+        DarwinSystem
+            .signal_process_group(pgid, libc::SIGKILL)
+            .map_err(transport)?;
+        let survivors = wait_for_process_group_exit(leader_pid, pgid, KILL_BUDGET)?;
+        if !survivors.is_empty() {
+            return Err(profile_server_busy(
+                profile,
+                server_key,
+                format!("process group {pgid} still has surviving PIDs {survivors:?}"),
+            ));
+        }
+    }
+    let _ = DarwinSystem.reap_child_nonblocking(leader_pid);
+    Ok(())
+}
+
+fn verify_recorded_group_members(
+    profile: &str,
+    server_key: &str,
+    pgid: u32,
+    uid: u32,
+    session_id: u32,
+    pids: &[u32],
+) -> Result<(), MachineError> {
+    for pid in pids {
+        let identity = match DarwinSystem.bsd_process_identity(*pid) {
+            Ok(identity) => identity,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) || !process_exists(*pid) => {
+                continue;
+            }
+            Err(error) => return Err(transport(error)),
+        };
+        if identity.uid != uid
+            || identity.process_group_id != pgid
+            || identity.session_id != session_id
+        {
+            return Err(profile_server_busy(
+                profile,
+                server_key,
+                format!("process group {pgid} contains an unverified PID {pid}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_process_group_exit(
+    leader_pid: u32,
+    pgid: u32,
+    budget: Duration,
+) -> Result<Vec<u32>, MachineError> {
     let deadline = Instant::now() + budget;
-    while process_exists(pid) && Instant::now() < deadline {
-        if DarwinSystem.reap_child_nonblocking(pid) {
-            return true;
+    loop {
+        let _ = DarwinSystem.reap_child_nonblocking(leader_pid);
+        let members = DarwinSystem.process_group_pids(pgid).map_err(transport)?;
+        if members.is_empty() || Instant::now() >= deadline {
+            return Ok(members);
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    !process_exists(pid)
 }
 
 /// COMMIT: retake both locks, prove the stopping reservation still holds and
@@ -3683,8 +4423,10 @@ fn commit_stop(
     paths: &LifecyclePaths,
     snapshot: &ProfileSnapshot,
     reservation: &StopReservation,
+    operator: &mut OperatorHandoff,
 ) -> Result<(), MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
+    operator.handoff(&home_lock);
     require_transition(
         &paths.active_path,
         snapshot,
@@ -3724,11 +4466,41 @@ fn commit_stop(
         verify_recorded_socket(&snapshot.profile_name, &reservation.state)?;
         fs::remove_file(&reservation.state.socket_path).map_err(io_error)?;
     }
-    fs::remove_file(&paths.state_path).map_err(io_error)?;
-    let successor_state = paths.root.join("state.json");
-    if successor_state.exists() {
-        fs::remove_file(&successor_state).map_err(io_error)?;
+    if !recorded_processes_absent(&reservation.state)? {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &snapshot.server_key,
+            "the Profile Server process group or log drainer is still present",
+        ));
     }
+    let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
+        paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?,
+        &snapshot.profile_name,
+        &snapshot.server_key,
+    )?;
+    let membership = membership_store.load_under_server_lock(&paths.root)?;
+    let dolgorae_home_root = paths
+        .root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| internal("global Profile root has no home"))?;
+    ensure_membership_manifests_valid(
+        dolgorae_home_root,
+        &MembershipScope {
+            profile: snapshot.profile_name.clone(),
+            server_key: snapshot.server_key.clone(),
+        },
+        &membership,
+    )?;
+    membership_store.release_after_server_absence_under_lifecycle_locks(
+        &paths.root,
+        reservation.state.server_epoch,
+    )?;
+    fs::remove_file(&paths.state_path).map_err(io_error)?;
     sync_parent(&paths.state_path)?;
     clear_home_active(
         &snapshot.profile_name,
@@ -3808,8 +4580,9 @@ fn settle_terminated_migration_stop(
     Ok(())
 }
 
-/// Puts the account home back to `ready` after an APPLY that failed to stop
-/// the server, so the record keeps telling the truth: the server is still up.
+/// Puts the account home back to `ready` after a pre-APPLY failure or an APPLY
+/// that failed to stop the server, so the record keeps telling the truth: the
+/// server is still up.
 ///
 /// Best effort and token-guarded, for the same reason
 /// [`release_reservation`] is.
@@ -3818,17 +4591,23 @@ fn restore_stopping_reservation(
     snapshot: &ProfileSnapshot,
     reservation: &StopReservation,
 ) {
-    let Ok(home_lock) = lock_file(&paths.home_root.join("home.lock")) else {
+    let Ok((home_lock, server_lock)) = paths.lock() else {
         return;
     };
-    if require_transition(
+    let transition_matches = require_transition(
         &paths.active_path,
         snapshot,
         reservation.state.server_epoch,
         reservation.token,
         "stopping",
     )
-    .is_ok()
+    .is_ok();
+    let state = read_state(&paths.state_path).ok().flatten();
+    if transition_matches
+        && let Some(state) = state
+        && state.epoch_id == reservation.state.epoch_id
+        && verify_live_process_identity(&state).is_ok()
+        && verify_recorded_socket(&snapshot.profile_name, &state).is_ok()
     {
         let _ = write_home_active(
             &paths.active_path,
@@ -3836,13 +4615,14 @@ fn restore_stopping_reservation(
                 schema_version: 1,
                 canonical_codex_home: snapshot.canonical_codex_home.clone(),
                 server_key: snapshot.server_key.clone(),
-                server_epoch: reservation.state.server_epoch,
+                server_epoch: state.server_epoch,
                 lifecycle: "ready".to_owned(),
-                pid: Some(reservation.state.pid),
+                pid: Some(state.pid),
                 transition_token: None,
             },
         );
     }
+    drop(server_lock);
     drop(home_lock);
 }
 
@@ -3929,41 +4709,14 @@ fn cleanup_verified_process(expected: &crate::darwin::LiveProcessIdentity) {
 }
 
 fn stop_drainer(state: &ServerState) -> Result<(), MachineError> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while process_exists(state.drainer_pid) && Instant::now() < deadline {
-        if DarwinSystem.reap_child_nonblocking(state.drainer_pid) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    if !process_exists(state.drainer_pid) {
-        return Ok(());
-    }
-    let live = DarwinSystem
-        .live_process_identity(state.drainer_pid)
-        .map_err(transport)?;
-    if live.uid != state.drainer_uid
-        || live.process_group_id != state.drainer_pgid
-        || live.fingerprint != state.drainer_fingerprint
-    {
-        return Err(profile_mismatch(
-            &state.snapshot.profile_name,
-            "drainer_identity",
-            json!({
-                "uid": state.drainer_uid,
-                "process_group_id": state.drainer_pgid,
-                "fingerprint": state.drainer_fingerprint,
-            }),
-            json!({
-                "uid": live.uid,
-                "process_group_id": live.process_group_id,
-                "fingerprint": live.fingerprint,
-            }),
-        ));
-    }
-    DarwinSystem
-        .signal_process_group(state.drainer_pgid, libc::SIGTERM)
-        .map_err(transport)
+    terminate_recorded_process_group(
+        &state.snapshot.profile_name,
+        &state.server_key,
+        state.drainer_pid,
+        state.drainer_pgid,
+        state.drainer_uid,
+        &state.drainer_fingerprint,
+    )
 }
 
 /// A profile server is "running" only when its recorded PID both exists and
@@ -3991,9 +4744,15 @@ fn read_state(path: &Path) -> Result<Option<ServerState>, MachineError> {
         return Ok(None);
     }
     let bytes = fs::read(path).map_err(io_error)?;
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))
+    let state: ServerState = serde_json::from_slice(&bytes)
+        .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))?;
+    if state.schema_version != 2 || state.server_key != state.snapshot.server_key {
+        return Err(MachineError::profile_config_invalid(
+            path,
+            "Profile Server state is not canonical v2",
+        ));
+    }
+    Ok(Some(state))
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -4032,24 +4791,32 @@ fn process_identity_matches_on_boot(
         && process_identity_matches(pid, uid, pgid, fingerprint)
 }
 
+fn recorded_processes_absent(state: &ServerState) -> Result<bool, MachineError> {
+    let current_boot = DarwinSystem
+        .boot_session_uuid()
+        .map_err(transport)
+        .and_then(|value| Uuid::parse_str(&value).map_err(transport))?;
+    if current_boot != state.boot_session_uuid {
+        return Ok(true);
+    }
+    let process_group = DarwinSystem
+        .process_group_pids(state.pgid)
+        .map_err(transport)?;
+    let drainer_group = DarwinSystem
+        .process_group_pids(state.drainer_pgid)
+        .map_err(transport)?;
+    Ok(process_group.is_empty() && drainer_group.is_empty())
+}
+
 /// Proves a recorded server_key's process, drainer, and socket are all
 /// absent — the "recorded lifetime absent" proof crash-recovery repair
 /// (`profile state reset`, migration-fence repair) requires before acting.
 fn server_lifetime_absent(context: &Context, server_key: &str) -> Result<bool, MachineError> {
     require_canonical_persisted_server_key(server_key)?;
     let root = context.dolgorae_home_root.join("profiles").join(server_key);
-    let state_path = root.join("runtime-state.json");
-    if read_state_if_running(&state_path)?.is_some() {
-        return Ok(false);
-    }
+    let state_path = root.join("state.json");
     if let Some(state) = read_state(&state_path)?
-        && (process_identity_matches_on_boot(
-            state.boot_session_uuid,
-            state.drainer_pid,
-            state.drainer_uid,
-            state.drainer_pgid,
-            &state.drainer_fingerprint,
-        ) || Path::new(&state.socket_path).exists())
+        && (!recorded_processes_absent(&state)? || Path::new(&state.socket_path).exists())
     {
         return Ok(false);
     }
@@ -4281,7 +5048,7 @@ fn profile_root(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
 }
 
 fn profile_state_path(context: &Context, snapshot: &ProfileSnapshot) -> PathBuf {
-    profile_root(context, snapshot).join("runtime-state.json")
+    profile_root(context, snapshot).join("state.json")
 }
 
 fn home_root(context: &Context, canonical_codex_home: &str) -> Result<PathBuf, MachineError> {
@@ -4361,393 +5128,6 @@ fn reserve_epoch(path: &Path) -> Result<u64, MachineError> {
     Ok(next)
 }
 
-fn append_membership(
-    path: &Path,
-    kind: &str,
-    workspace_id: &str,
-    run_id: Option<String>,
-    scope: &MembershipScope,
-) -> Result<u64, MachineError> {
-    if path.exists() {
-        verify_private_regular_file(path, 0o600)?;
-    }
-    let records = replay_membership(path, scope)?;
-    let revision = records.last().map_or(1, |record| record.revision + 1);
-    let previous = records
-        .last()
-        .map_or_else(|| "0".repeat(64), |record| record.record_sha256.clone());
-    let body = json!({"schema_version":1,"revision":revision,"kind":kind,"workspace_id":workspace_id,"run_id":run_id,"previous_sha256":previous});
-    let record = MembershipRecord {
-        schema_version: 1,
-        revision,
-        kind: kind.to_owned(),
-        workspace_id: workspace_id.to_owned(),
-        run_id: body["run_id"].as_str().map(str::to_owned),
-        previous_sha256: body["previous_sha256"].as_str().expect("string").to_owned(),
-        record_sha256: canonical_sha256(&body)?,
-    };
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(io_error)?;
-    serde_json::to_writer(&mut file, &record).map_err(internal)?;
-    file.write_all(b"\n").map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    sync_parent(path)?;
-    let records = replay_membership(path, scope)?;
-    let root = path
-        .parent()
-        .ok_or_else(|| transport("membership journal has no parent"))?;
-    let index = derive_membership_index(root, &records)?;
-    atomic_replace(
-        &root.join("runtime-members.json"),
-        &serde_json::to_vec_pretty(&index).map_err(internal)?,
-    )?;
-    Ok(revision)
-}
-
-fn derive_membership_index(
-    root: &Path,
-    records: &[MembershipRecord],
-) -> Result<MembershipIndex, MachineError> {
-    let mut active_members = BTreeMap::new();
-    for record in records {
-        let Some(run_id) = record.run_id.as_ref() else {
-            continue;
-        };
-        let identity = format!("{}:{run_id}", record.workspace_id);
-        match record.kind.as_str() {
-            "run_registered" | "run_state_changed" => {
-                active_members.insert(identity, record.clone());
-            }
-            "run_removed" | "run_closed" | "tombstone_orphan" | "run_migrated" => {
-                active_members.remove(&identity);
-            }
-            _ => {}
-        }
-    }
-    let journal = root.join("runtime-membership.jsonl");
-    let journal_sha256 = if journal.exists() {
-        file_sha256(&journal)?
-    } else {
-        sha256_hex(&[])
-    };
-    Ok(MembershipIndex {
-        schema_version: 1,
-        revision: records.last().map_or(0, |record| record.revision),
-        journal_sha256,
-        active_members,
-    })
-}
-
-fn verify_membership_index(
-    root: &Path,
-    expected: &MembershipIndex,
-    scope: &MembershipScope,
-) -> Result<(), MachineError> {
-    let path = root.join("runtime-members.json");
-    if !path.exists() {
-        if expected.revision == 0 {
-            return Ok(());
-        }
-        return Err(scope.incomplete("derived membership index is missing"));
-    }
-    verify_private_regular_file(&path, 0o600)?;
-    let actual: MembershipIndex = serde_json::from_slice(&fs::read(&path).map_err(io_error)?)
-        .map_err(|_| transport("derived membership index is invalid"))?;
-    if actual != *expected {
-        return Err(scope.incomplete("derived membership index disagrees with the journal"));
-    }
-    Ok(())
-}
-
-fn membership_orphans(
-    context: &Context,
-    snapshot: &ProfileSnapshot,
-    index: &MembershipIndex,
-) -> Result<Vec<Value>, MachineError> {
-    let mut orphans = Vec::new();
-    for record in index.active_members.values() {
-        let Some(run_id) = record.run_id.as_ref() else {
-            continue;
-        };
-        let manifest_path = context
-            .dolgorae_home_root
-            .join("workspaces")
-            .join(&record.workspace_id)
-            .join("runs")
-            .join(run_id)
-            .join("manifest.json");
-        let valid = fs::read(&manifest_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|manifest| {
-                manifest["workspace_id"] == record.workspace_id
-                    && manifest["run_id"] == *run_id
-                    && manifest["profile"]["initial_server_key"] == snapshot.server_key
-            });
-        if !valid {
-            orphans.push(json!({
-                "workspace_id": record.workspace_id,
-                "run_id": run_id,
-                "reason": "run authority is absent or disagrees",
-            }));
-        }
-    }
-    Ok(orphans)
-}
-
-/// One Run recorded as a live member of a profile server.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct RunMember {
-    pub workspace_id: String,
-    pub run_id: String,
-    pub revision: u64,
-}
-
-/// Why a Run stopped being a member of the server it joined.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunMemberRelease {
-    /// The Run reached a terminal state on this server.
-    Closed,
-    /// The Run moved to a different server key.
-    Migrated,
-}
-
-impl RunMemberRelease {
-    fn kind(self) -> &'static str {
-        match self {
-            Self::Closed => "run_closed",
-            Self::Migrated => "run_migrated",
-        }
-    }
-}
-
-/// What a membership mutation committed.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct MembershipReceipt {
-    pub server_key: String,
-    pub revision: u64,
-    pub live_members: Vec<RunMember>,
-}
-
-/// Records a Run as a live member of the profile server it is pinned to.
-///
-/// The membership journal already carries the vocabulary for this
-/// (`run_registered`, `run_closed`, `run_migrated`, and the operator's
-/// `tombstone_orphan`) and `profile server migrate` already refuses to move a
-/// home out from under live members, but nothing could put a Run *into* the
-/// journal: the only record any server ever wrote was its own
-/// `server_started`. Every membership gate was therefore gating on a set that
-/// was always empty. This is the registration side those gates were written
-/// for, exposed as a callable so the Run lifecycle can hold it without the
-/// profile module having to know how a Run starts.
-///
-/// Takes `home.lock` and then `server.lock`, matching lifecycle order. A new
-/// registration is admitted only while this exact home contract is ready and
-/// no migration fence is active; that makes the empty-membership proof and
-/// stop reservation atomic against Run admission.
-pub fn register_run_member(
-    workspace: Option<&Path>,
-    state: &ServerState,
-    run_id: &str,
-) -> Result<MembershipReceipt, MachineError> {
-    record_membership(workspace, state, run_id, "run_registered")
-}
-
-/// Records that a Run is no longer a live member of its profile server.
-///
-/// The counterpart of [`register_run_member`]: until a Run releases its
-/// membership, `profile server stop`, `restart`, and `migrate` all treat it as
-/// a live member and refuse to interrupt it without explicit operator
-/// evidence.
-pub fn release_run_member(
-    workspace: Option<&Path>,
-    state: &ServerState,
-    run_id: &str,
-    reason: RunMemberRelease,
-) -> Result<MembershipReceipt, MachineError> {
-    record_membership(workspace, state, run_id, reason.kind())
-}
-
-/// Releases a Run using the immutable profile identity pinned in its manifest.
-///
-/// A closed Run no longer owns the live [`ServerState`] value that was used at
-/// allocation time, but its manifest still pins the profile name and server
-/// key. Resolve the current state under that exact key and then reuse the same
-/// epoch-checked mutation path as [`release_run_member`].
-pub fn release_run_member_by_identity(
-    workspace: Option<&Path>,
-    profile_name: &str,
-    server_key: &str,
-    run_id: &str,
-    reason: RunMemberRelease,
-) -> Result<MembershipReceipt, MachineError> {
-    let context = context(workspace)?;
-    let root = context.dolgorae_home_root.join("profiles").join(server_key);
-    verify_private_directory(&root)?;
-    let state = read_state_if_running(&root.join("runtime-state.json"))?.ok_or_else(|| {
-        profile_server_busy(
-            profile_name,
-            server_key,
-            "the profile server this membership names is not running",
-        )
-    })?;
-    if state.server_key != server_key || state.snapshot.profile_name != profile_name {
-        return Err(profile_mismatch(
-            profile_name,
-            "membership_profile_identity",
-            json!({"profile": profile_name, "server_key": server_key}),
-            json!({
-                "profile": state.snapshot.profile_name,
-                "server_key": state.server_key,
-            }),
-        ));
-    }
-    record_membership(workspace, &state, run_id, reason.kind())
-}
-
-/// The Runs currently recorded as live members of a profile server.
-///
-/// Read under `server.lock` so a caller never observes a half-applied
-/// registration, and verified against the derived index the journal commits
-/// beside itself rather than trusting either copy alone.
-pub fn live_run_members(
-    workspace: Option<&Path>,
-    state: &ServerState,
-) -> Result<Vec<RunMember>, MachineError> {
-    let context = context(workspace)?;
-    let root = member_root(&context, state)?;
-    let _server_lock = lock_file(&root.join("server.lock"))?;
-    let scope = MembershipScope {
-        profile: state.snapshot.profile_name.clone(),
-        server_key: state.server_key.clone(),
-    };
-    let records = replay_membership(&root.join("runtime-membership.jsonl"), &scope)?;
-    let index = derive_membership_index(&root, &records)?;
-    verify_membership_index(&root, &index, &scope)?;
-    Ok(run_members(&index))
-}
-
-fn record_membership(
-    workspace: Option<&Path>,
-    state: &ServerState,
-    run_id: &str,
-    kind: &str,
-) -> Result<MembershipReceipt, MachineError> {
-    if run_id.is_empty() || run_id.contains(':') || run_id.contains('/') {
-        return Err(MachineError::invalid_argument(
-            "run_id",
-            "a membership run identity must be a nonempty path- and separator-free string",
-        ));
-    }
-    let context = context(workspace)?;
-    let root = member_root(&context, state)?;
-    let home = home_root(&context, &state.snapshot.canonical_codex_home)?;
-    verify_private_directory(&home)?;
-    let _home_lock = lock_file(&home.join("home.lock"))?;
-    let _server_lock = lock_file(&root.join("server.lock"))?;
-    let state_path = root.join("runtime-state.json");
-    // A membership record is only meaningful against the exact lifetime the
-    // caller joined: a server that has been restarted underneath it is a
-    // different epoch with a different journal position.
-    let current = read_state_if_running(&state_path)?.ok_or_else(|| {
-        profile_server_busy(
-            &state.snapshot.profile_name,
-            &state.server_key,
-            "the profile server this membership names is not running",
-        )
-    })?;
-    if current.epoch_id != state.epoch_id || current.server_key != state.server_key {
-        return Err(profile_mismatch(
-            &state.snapshot.profile_name,
-            "server_epoch_identity",
-            json!({"server_key": state.server_key, "epoch_id": state.epoch_id}),
-            json!({"server_key": current.server_key, "epoch_id": current.epoch_id}),
-        ));
-    }
-    if kind == "run_registered" {
-        verify_migration_fence(
-            &home.join("migration.json"),
-            None,
-            &state.snapshot.profile_name,
-            &state.server_key,
-        )?;
-        let active = read_home_active(&home.join("active.json"))?;
-        verify_stop_home_active(&state.snapshot, &current, active.as_ref())?;
-    }
-    let scope = MembershipScope {
-        profile: state.snapshot.profile_name.clone(),
-        server_key: state.server_key.clone(),
-    };
-    let journal = root.join("runtime-membership.jsonl");
-    let revision = append_membership(
-        &journal,
-        kind,
-        &context.workspace_id,
-        Some(run_id.to_owned()),
-        &scope,
-    )?;
-    // `stop_snapshot` refuses to act when the journal and the recorded server
-    // state disagree about the revision, so the two move together or not at
-    // all.
-    let mut updated = current;
-    updated.membership_revision = revision;
-    atomic_replace(
-        &state_path,
-        &serde_json::to_vec_pretty(&updated).map_err(internal)?,
-    )?;
-    let index = derive_membership_index(&root, &replay_membership(&journal, &scope)?)?;
-    Ok(MembershipReceipt {
-        server_key: state.server_key.clone(),
-        revision,
-        live_members: run_members(&index),
-    })
-}
-
-/// The profile directory a membership mutation works in, proven to be the one
-/// the caller's own recorded launch contract names.
-fn member_root(context: &Context, state: &ServerState) -> Result<PathBuf, MachineError> {
-    let root = context
-        .dolgorae_home_root
-        .join("profiles")
-        .join(&state.server_key);
-    let recorded = path_utf8(&root)?;
-    if recorded != state.snapshot.derived_launch_cwd {
-        return Err(profile_mismatch(
-            &state.snapshot.profile_name,
-            "derived_launch_cwd",
-            json!(state.snapshot.derived_launch_cwd),
-            json!(recorded),
-        ));
-    }
-    verify_private_directory(&root)?;
-    Ok(root)
-}
-
-fn run_members(index: &MembershipIndex) -> Vec<RunMember> {
-    index
-        .active_members
-        .values()
-        .filter_map(|record| {
-            record.run_id.as_ref().map(|run_id| RunMember {
-                workspace_id: record.workspace_id.clone(),
-                run_id: run_id.clone(),
-                revision: record.revision,
-            })
-        })
-        .collect()
-}
-
-/// The profile a membership journal belongs to.
-///
-/// `PROFILE_MEMBERSHIP_INCOMPLETE` names the profile, its server key, and the
-/// repair reason; a journal pathname alone proves none of the first two, so
-/// every reader of the journal carries them.
-#[derive(Clone, Debug)]
 struct MembershipScope {
     profile: String,
     server_key: String,
@@ -4755,45 +5135,13 @@ struct MembershipScope {
 
 impl MembershipScope {
     fn incomplete(&self, reason: impl Into<String>) -> MachineError {
-        profile_membership_incomplete(&self.profile, &self.server_key, reason)
+        MachineError::new(
+            "PROFILE_MEMBERSHIP_INCOMPLETE",
+            "profile membership evidence is incomplete",
+            false,
+            json!({"profile": self.profile, "server_key": self.server_key, "reason": reason.into()}),
+        )
     }
-}
-
-fn replay_membership(
-    path: &Path,
-    scope: &MembershipScope,
-) -> Result<Vec<MembershipRecord>, MachineError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = fs::read(path).map_err(io_error)?;
-    if bytes.len() as u64 > MAX_DIAGNOSTIC_BYTES {
-        return Err(transport("membership journal exceeds 8 MiB"));
-    }
-    let mut records = Vec::new();
-    let mut previous = "0".repeat(64);
-    for (index, line) in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .enumerate()
-    {
-        let record: MembershipRecord = serde_json::from_slice(line).map_err(|_| {
-            scope.incomplete(format!("membership journal line {} is invalid", index + 1))
-        })?;
-        let body = json!({"schema_version":record.schema_version,"revision":record.revision,"kind":record.kind,"workspace_id":record.workspace_id,"run_id":record.run_id,"previous_sha256":record.previous_sha256});
-        if record.revision != u64::try_from(index + 1).expect("bounded")
-            || record.previous_sha256 != previous
-            || record.record_sha256 != canonical_sha256(&body)?
-        {
-            return Err(scope.incomplete(format!(
-                "membership hash chain breaks at line {}",
-                index + 1
-            )));
-        }
-        previous = record.record_sha256.clone();
-        records.push(record);
-    }
-    Ok(records)
 }
 
 /// Drop the `details` of a record the operator gate owns from a projection
@@ -5681,38 +6029,6 @@ mod tests {
     }
 
     #[test]
-    fn membership_chain_rejects_rewritten_history() {
-        let root =
-            std::env::temp_dir().join(format!("dolgorae-membership-test-{}", Uuid::now_v7()));
-        secure_dir(&root).unwrap();
-        let path = root.join("runtime-membership.jsonl");
-        let scope = MembershipScope {
-            profile: "default".to_owned(),
-            server_key: "a".repeat(64),
-        };
-        append_membership(&path, "server_started", "workspace", None, &scope).unwrap();
-        append_membership(
-            &path,
-            "tombstone_orphan",
-            "workspace",
-            Some("run".to_owned()),
-            &scope,
-        )
-        .unwrap();
-        assert_eq!(replay_membership(&path, &scope).unwrap().len(), 2);
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[20] ^= 1;
-        fs::write(&path, bytes).unwrap();
-        let broken = replay_membership(&path, &scope).unwrap_err();
-        assert_eq!(broken.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
-        // The checked contract requires every member of `d_profile_server`.
-        assert_eq!(broken.details["profile"], "default");
-        assert_eq!(broken.details["server_key"], "a".repeat(64));
-        assert!(broken.details["reason"].is_string());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn configuration_classification_is_closed_and_separates_runtime_observation() {
         let root = std::env::temp_dir().join(format!("dolgorae-config-test-{}", Uuid::now_v7()));
         secure_dir(&root).unwrap();
@@ -5901,7 +6217,6 @@ mod tests {
     #[test]
     fn server_lifetime_absent_is_true_with_no_recorded_state() {
         let context = Context {
-            workspace_id: "test".to_owned(),
             registry_path: std::env::temp_dir().join("unused.yaml"),
             dolgorae_home_root: std::env::temp_dir()
                 .join(format!("dolgorae-lifetime-test-{}", Uuid::now_v7())),
@@ -5912,7 +6227,6 @@ mod tests {
     #[test]
     fn repair_stale_migration_fence_handles_absent_blocked_lifetimes() {
         let context = Context {
-            workspace_id: "test".to_owned(),
             registry_path: std::env::temp_dir().join("unused.yaml"),
             dolgorae_home_root: std::env::temp_dir()
                 .join(format!("dolgorae-repair-test-{}", Uuid::now_v7())),
@@ -6105,6 +6419,178 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn pre_apply_failure_restores_only_a_proven_non_interrupt_lifetime() {
+        let support = PathBuf::from(format!("/tmp/dolgorae-stop-rollback-{}", Uuid::now_v7()));
+        let root = support.join("profiles").join("a".repeat(64));
+        let home_root = support.join("homes").join("home");
+        secure_dir(&root).unwrap();
+        secure_dir(&home_root).unwrap();
+        let socket = support.join("live.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let socket_metadata = fs::symlink_metadata(&socket).unwrap();
+        let identity = DarwinSystem
+            .live_process_identity(std::process::id())
+            .unwrap();
+
+        let snapshot = stopped_snapshot();
+        let mut state = stopped_state();
+        state.snapshot = snapshot.clone();
+        state.pid = std::process::id();
+        state.pgid = identity.process_group_id;
+        state.uid = identity.uid;
+        state.process_fingerprint = identity.fingerprint;
+        state.socket_path = socket.to_str().unwrap().to_owned();
+        state.socket_device = socket_metadata.dev();
+        state.socket_inode = socket_metadata.ino();
+        let paths = LifecyclePaths {
+            state_path: root.join("state.json"),
+            active_path: home_root.join("active.json"),
+            root,
+            home_root,
+        };
+        atomic_replace(
+            &paths.state_path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+
+        let token = Uuid::now_v7();
+        write_home_active(
+            &paths.active_path,
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                server_key: snapshot.server_key.clone(),
+                server_epoch: state.server_epoch,
+                lifecycle: "stopping".to_owned(),
+                pid: Some(state.pid),
+                transition_token: Some(token),
+            },
+        )
+        .unwrap();
+        let reservation = StopReservation {
+            state: state.clone(),
+            token,
+            interrupt: false,
+            members: Vec::new(),
+        };
+        let error = prepare_shutdown_or_restore(&paths, &snapshot, &reservation, &mut || {
+            Err(operator_mismatch("profile.server.stop"))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "OPERATOR_MISMATCH");
+        let restored = read_home_active(&paths.active_path).unwrap().unwrap();
+        assert_eq!(restored.lifecycle, "ready");
+        assert_eq!(restored.transition_token, None);
+
+        let interrupt_token = Uuid::now_v7();
+        write_home_active(
+            &paths.active_path,
+            &HomeActive {
+                lifecycle: "stopping".to_owned(),
+                transition_token: Some(interrupt_token),
+                ..restored
+            },
+        )
+        .unwrap();
+        let interrupt_reservation = StopReservation {
+            token: interrupt_token,
+            interrupt: true,
+            ..reservation.clone()
+        };
+        prepare_shutdown_or_restore(&paths, &snapshot, &interrupt_reservation, &mut || {
+            Err(operator_mismatch("profile.server.stop"))
+        })
+        .unwrap_err();
+        let fenced = read_home_active(&paths.active_path).unwrap().unwrap();
+        assert_eq!(fenced.lifecycle, "stopping");
+        assert_eq!(fenced.transition_token, Some(interrupt_token));
+
+        let unknown_token = Uuid::now_v7();
+        write_home_active(
+            &paths.active_path,
+            &HomeActive {
+                lifecycle: "stopping".to_owned(),
+                transition_token: Some(unknown_token),
+                ..fenced
+            },
+        )
+        .unwrap();
+        let mut changed_state = state;
+        changed_state.epoch_id = Uuid::now_v7();
+        atomic_replace(
+            &paths.state_path,
+            &serde_json::to_vec_pretty(&changed_state).unwrap(),
+        )
+        .unwrap();
+        let unknown_reservation = StopReservation {
+            token: unknown_token,
+            interrupt: false,
+            ..reservation
+        };
+        prepare_shutdown_or_restore(&paths, &snapshot, &unknown_reservation, &mut || {
+            Err(operator_mismatch("profile.server.stop"))
+        })
+        .unwrap_err();
+        let still_fenced = read_home_active(&paths.active_path).unwrap().unwrap();
+        assert_eq!(still_fenced.lifecycle, "stopping");
+        assert_eq!(still_fenced.transition_token, Some(unknown_token));
+
+        drop(listener);
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn an_interrupt_stop_retry_reuses_only_its_exact_stopping_token() {
+        let snapshot = stopped_snapshot();
+        let state = stopped_state();
+        let token = Uuid::now_v7();
+        let stopping = HomeActive {
+            schema_version: 1,
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            server_key: snapshot.server_key.clone(),
+            server_epoch: state.server_epoch,
+            lifecycle: "stopping".to_owned(),
+            pid: Some(state.pid),
+            transition_token: Some(token),
+        };
+
+        assert_eq!(
+            resumable_stop_token(Some(&stopping), &snapshot, &state, true),
+            Some(token)
+        );
+        assert_eq!(
+            resumable_stop_token(Some(&stopping), &snapshot, &state, false),
+            None
+        );
+        assert_eq!(
+            resumable_stop_token(
+                Some(&HomeActive {
+                    server_epoch: state.server_epoch + 1,
+                    ..stopping.clone()
+                }),
+                &snapshot,
+                &state,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            resumable_stop_token(
+                Some(&HomeActive {
+                    transition_token: None,
+                    ..stopping
+                }),
+                &snapshot,
+                &state,
+                true,
+            ),
+            None
+        );
+    }
+
     /// The contract closes `OPERATION_TIMEOUT` to
     /// `{operation: replay|schema_generation|profile_doctor, budget_ms}` and
     /// pins its `retryable` to `true`. A socket bind is none of those three
@@ -6229,81 +6715,9 @@ mod tests {
         );
     }
 
-    fn membership_record(revision: u64, kind: &str, run_id: Option<&str>) -> MembershipRecord {
-        MembershipRecord {
-            schema_version: 1,
-            revision,
-            kind: kind.to_owned(),
-            workspace_id: "workspace".to_owned(),
-            run_id: run_id.map(str::to_owned),
-            previous_sha256: "0".repeat(64),
-            record_sha256: "0".repeat(64),
-        }
-    }
-
-    /// Every membership gate reads the derived index. Before a Run could be
-    /// registered, that index was always empty and every gate was vacuous, so
-    /// the registration kinds are what make the gates mean anything.
-    #[test]
-    fn run_registration_and_release_move_a_run_in_and_out_of_the_live_member_set() {
-        let root = std::env::temp_dir().join(format!("dolgorae-members-{}", Uuid::now_v7()));
-        secure_dir(&root).unwrap();
-
-        let registered = derive_membership_index(
-            &root,
-            &[
-                membership_record(1, "server_started", None),
-                membership_record(2, "run_registered", Some("run-a")),
-                membership_record(3, "run_registered", Some("run-b")),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            run_members(&registered)
-                .iter()
-                .map(|member| member.run_id.clone())
-                .collect::<Vec<_>>(),
-            ["run-a", "run-b"]
-        );
-        assert_eq!(live_member_evidence(&registered).len(), 2);
-
-        let released = derive_membership_index(
-            &root,
-            &[
-                membership_record(1, "server_started", None),
-                membership_record(2, "run_registered", Some("run-a")),
-                membership_record(3, "run_registered", Some("run-b")),
-                membership_record(4, "run_closed", Some("run-a")),
-                membership_record(5, "run_migrated", Some("run-b")),
-            ],
-        )
-        .unwrap();
-        assert!(run_members(&released).is_empty());
-
-        fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn a_release_kind_names_the_journal_vocabulary_the_index_already_understood() {
-        assert_eq!(RunMemberRelease::Closed.kind(), "run_closed");
-        assert_eq!(RunMemberRelease::Migrated.kind(), "run_migrated");
-    }
-
-    /// The membership run identity is a journal key, so a value that could
-    /// forge the `workspace:run` identity or escape the profile directory is
-    /// an invalid argument rather than a silently accepted record.
-    #[test]
-    fn a_membership_run_identity_may_not_forge_its_own_key() {
-        let state = stopped_state();
-        for candidate in ["", "workspace:run", "../run"] {
-            let error = record_membership(None, &state, candidate, "run_registered").unwrap_err();
-            assert_eq!(error.code, "INVALID_ARGUMENT", "accepted {candidate:?}");
-        }
-    }
-
     fn stopped_state() -> ServerState {
         ServerState {
-            schema_version: 1,
+            schema_version: 2,
             server_key: "a".repeat(64),
             lifecycle: "ready".to_owned(),
             server_epoch: 1,
@@ -6354,6 +6768,387 @@ mod tests {
             compatibility_verdict: CompatibilityVerdict::Tested,
             server_key: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn worker_start_fence_refuses_stopping_released_and_stale_members() {
+        let support =
+            std::env::temp_dir().join(format!("dolgorae-worker-start-fence-{}", Uuid::now_v7()));
+        secure_dir(&support).unwrap();
+        let codex_home = support.join("codex-home");
+        secure_dir(&codex_home).unwrap();
+        let definition = RuntimeProfile {
+            argv: vec!["/usr/bin/codex".to_owned()],
+            codex_home: codex_home.to_string_lossy().into_owned(),
+            environment: BTreeMap::new(),
+            native_subagents: NativeSubagents::Enabled,
+        };
+        let mut snapshot = stopped_snapshot();
+        snapshot.canonical_codex_home = definition.codex_home.clone();
+        snapshot.normalized_argv = vec![
+            "/usr/bin/codex".to_owned(),
+            "--strict-config".to_owned(),
+            "--enable".to_owned(),
+            "multi_agent".to_owned(),
+        ];
+        snapshot.enabled_features = vec!["multi_agent".to_owned()];
+        let binding =
+            crate::global_runtime::ResolvedGlobalProfile::from_definition("default", definition)
+                .unwrap()
+                .bind(snapshot.clone())
+                .unwrap();
+        let context = Context {
+            registry_path: support.join("profiles.yaml"),
+            dolgorae_home_root: support.clone(),
+        };
+        let paths = LifecyclePaths::open(&context, &snapshot).unwrap();
+        let workspace_id = "1".repeat(64);
+        let run_id = Uuid::now_v7();
+        let membership = crate::global_runtime::GlobalMembershipStore::from_root(
+            &support,
+            "default",
+            &snapshot.server_key,
+        )
+        .unwrap();
+        let facts = |observed_epoch| crate::global_runtime::GlobalMembershipFacts {
+            controller_id: None,
+            worker_generation: Some(1),
+            thread_id: None,
+            connection_id: None,
+            lifecycle: "idle".to_owned(),
+            writer: false,
+            observed_epoch,
+            runtime_locator: None,
+        };
+        let index = membership
+            .record_observed(
+                &workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+                facts(Some(1)),
+            )
+            .unwrap();
+        let mut state = stopped_state();
+        state.snapshot = snapshot.clone();
+        state.membership_revision = index.revision;
+        atomic_replace(
+            &paths.state_path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let active = |lifecycle: &str| HomeActive {
+            schema_version: 1,
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            server_key: snapshot.server_key.clone(),
+            server_epoch: state.server_epoch,
+            lifecycle: lifecycle.to_owned(),
+            pid: Some(state.pid),
+            transition_token: (lifecycle == "stopping").then(Uuid::now_v7),
+        };
+
+        write_home_active(&paths.active_path, &active("stopping")).unwrap();
+        assert_eq!(
+            fence_global_run_worker_start_in(&support, &binding, &state, &workspace_id, run_id,)
+                .unwrap_err()
+                .code,
+            "PROFILE_SERVER_BUSY"
+        );
+
+        write_home_active(&paths.active_path, &active("ready")).unwrap();
+        let released = membership
+            .record_observed(
+                &workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Released,
+                facts(Some(1)),
+            )
+            .unwrap();
+        state.membership_revision = released.revision;
+        atomic_replace(
+            &paths.state_path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fence_global_run_worker_start_in(&support, &binding, &state, &workspace_id, run_id,)
+                .unwrap_err()
+                .code,
+            "PROFILE_SERVER_BUSY"
+        );
+
+        let stale = membership
+            .record_observed(
+                &workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+                facts(Some(2)),
+            )
+            .unwrap();
+        state.membership_revision = stale.revision;
+        atomic_replace(
+            &paths.state_path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fence_global_run_worker_start_in(&support, &binding, &state, &workspace_id, run_id,)
+                .unwrap_err()
+                .code,
+            "PROFILE_SERVER_BUSY"
+        );
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn repeated_interrupt_observations_are_recognized_only_in_the_same_epoch() {
+        let mut member = crate::global_runtime::GlobalMembershipRecord {
+            schema_version: 2,
+            revision: 1,
+            workspace_id: "1".repeat(64),
+            run_id: Uuid::now_v7(),
+            disposition: crate::global_runtime::MembershipDisposition::Active,
+            controller_id: None,
+            worker_generation: None,
+            thread_id: None,
+            connection_id: None,
+            lifecycle: "operator_interrupt_unknown".to_owned(),
+            writer: false,
+            observed_epoch: Some(7),
+            runtime_locator: None,
+            previous_sha256: "0".repeat(64),
+            record_sha256: "1".repeat(64),
+        };
+        assert_eq!(
+            recorded_interrupt_outcome(&member, 7),
+            Some("outcome_unknown")
+        );
+        assert_eq!(recorded_interrupt_outcome(&member, 8), None);
+        member.lifecycle = "running".to_owned();
+        assert_eq!(recorded_interrupt_outcome(&member, 7), None);
+    }
+
+    #[test]
+    fn resumed_interrupt_quiesce_does_not_repeat_membership_or_diagnostics() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static QUIESCES: AtomicUsize = AtomicUsize::new(0);
+        fn quiescer(
+            _home_root: &Path,
+            _member: &crate::global_runtime::GlobalMembershipRecord,
+            _profile: &str,
+            _server_key: &str,
+            _server_epoch: u64,
+            _operation_id: Uuid,
+        ) -> Result<String, MachineError> {
+            QUIESCES.fetch_add(1, Ordering::SeqCst);
+            Ok("no_active_turn".to_owned())
+        }
+
+        QUIESCES.store(0, Ordering::SeqCst);
+        let support =
+            std::env::temp_dir().join(format!("dolgorae-interrupt-retry-{}", Uuid::now_v7()));
+        let server_key = "a".repeat(64);
+        let root = support.join("profiles").join(&server_key);
+        let home_root = support.join("homes").join("home");
+        secure_dir(&root).unwrap();
+        secure_dir(&home_root).unwrap();
+        let paths = LifecyclePaths {
+            state_path: root.join("state.json"),
+            active_path: home_root.join("active.json"),
+            root,
+            home_root,
+        };
+        let mut snapshot = stopped_snapshot();
+        snapshot.server_key = server_key.clone();
+        let mut state = stopped_state();
+        state.server_key = server_key.clone();
+        state.snapshot = snapshot.clone();
+        let workspace_id = "1".repeat(64);
+        let run_id = Uuid::now_v7();
+        let store = crate::global_runtime::GlobalMembershipStore::from_root(
+            &support,
+            "default",
+            &server_key,
+        )
+        .unwrap();
+        let first = store
+            .record_observed(
+                &workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+                crate::global_runtime::GlobalMembershipFacts {
+                    controller_id: None,
+                    worker_generation: Some(1),
+                    thread_id: None,
+                    connection_id: None,
+                    lifecycle: "idle".to_owned(),
+                    writer: false,
+                    observed_epoch: Some(1),
+                    runtime_locator: None,
+                },
+            )
+            .unwrap();
+        state.membership_revision = first.revision;
+        let token = Uuid::now_v7();
+        let reservation = StopReservation {
+            state: state.clone(),
+            token,
+            interrupt: true,
+            members: first.members.values().cloned().collect(),
+        };
+        quiesce_stop_members(&paths, &snapshot, &reservation, quiescer).unwrap();
+        let after_first = store.load().unwrap();
+        let diagnostics = fs::read_to_string(paths.root.join("diagnostics.jsonl")).unwrap();
+
+        let resumed = StopReservation {
+            members: after_first.members.values().cloned().collect(),
+            ..reservation
+        };
+        quiesce_stop_members(&paths, &snapshot, &resumed, quiescer).unwrap();
+        let after_retry = store.load().unwrap();
+        assert_eq!(QUIESCES.load(Ordering::SeqCst), 1);
+        assert_eq!(after_retry.revision, after_first.revision);
+        assert_eq!(
+            fs::read_to_string(paths.root.join("diagnostics.jsonl")).unwrap(),
+            diagnostics
+        );
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn current_process_group_blocks_recorded_lifetime_absence() {
+        let identity = DarwinSystem
+            .live_process_identity(std::process::id())
+            .unwrap();
+        let mut state = stopped_state();
+        state.pid = std::process::id();
+        state.pgid = identity.process_group_id;
+        state.uid = identity.uid;
+        state.process_fingerprint = identity.fingerprint.clone();
+        state.drainer_pid = std::process::id();
+        state.drainer_pgid = identity.process_group_id;
+        state.drainer_uid = identity.uid;
+        state.drainer_fingerprint = identity.fingerprint;
+        assert!(!recorded_processes_absent(&state).unwrap());
+    }
+
+    #[test]
+    fn stop_kills_a_same_session_survivor_after_its_group_leader_exits() {
+        use std::io::BufRead as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let script = r#"
+import os, signal, time
+if os.fork() == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    print("ready", flush=True)
+    time.sleep(30)
+else:
+    time.sleep(30)
+"#;
+        let mut child = Command::new("/usr/bin/python3")
+            .arg("-c")
+            .arg(script)
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+
+        let pid = child.id();
+        let identity = DarwinSystem.live_process_identity(pid).unwrap();
+        terminate_recorded_process_group(
+            "default",
+            &"a".repeat(64),
+            pid,
+            identity.process_group_id,
+            identity.uid,
+            &identity.fingerprint,
+        )
+        .unwrap();
+        assert!(
+            DarwinSystem
+                .process_group_pids(identity.process_group_id)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn stop_commit_preserves_the_reservation_while_any_recorded_group_survives() {
+        let support = std::env::temp_dir().join(format!("dolgorae-stop-census-{}", Uuid::now_v7()));
+        let server_key = "a".repeat(64);
+        let root = support.join("profiles").join(&server_key);
+        let home_root = support.join("homes").join("home");
+        secure_dir(&root).unwrap();
+        secure_dir(&home_root).unwrap();
+
+        let identity = DarwinSystem
+            .live_process_identity(std::process::id())
+            .unwrap();
+        let mut snapshot = stopped_snapshot();
+        snapshot.server_key = server_key.clone();
+        let mut state = stopped_state();
+        state.server_key = server_key.clone();
+        state.snapshot = snapshot.clone();
+        state.pid = std::process::id();
+        state.pgid = identity.process_group_id;
+        state.uid = identity.uid;
+        state.process_fingerprint = identity.fingerprint.clone();
+        state.drainer_pid = std::process::id();
+        state.drainer_pgid = identity.process_group_id;
+        state.drainer_uid = identity.uid;
+        state.drainer_fingerprint = identity.fingerprint;
+        state.socket_path = root.join("absent.sock").to_str().unwrap().to_owned();
+
+        let paths = LifecyclePaths {
+            state_path: root.join("state.json"),
+            active_path: home_root.join("active.json"),
+            root,
+            home_root,
+        };
+        atomic_replace(
+            &paths.state_path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let token = Uuid::now_v7();
+        write_home_active(
+            &paths.active_path,
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                server_key,
+                server_epoch: state.server_epoch,
+                lifecycle: "stopping".to_owned(),
+                pid: Some(state.pid),
+                transition_token: Some(token),
+            },
+        )
+        .unwrap();
+
+        let error = commit_stop(
+            &paths,
+            &snapshot,
+            &StopReservation {
+                state,
+                token,
+                interrupt: false,
+                members: Vec::new(),
+            },
+            &mut OperatorHandoff::none(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "PROFILE_SERVER_BUSY");
+        assert!(paths.state_path.exists());
+        assert!(paths.active_path.exists());
+
+        fs::remove_dir_all(support).unwrap();
     }
 
     #[test]
@@ -6592,7 +7387,6 @@ mod tests {
         let old_key = "a".repeat(64);
         let new_key = "b".repeat(64);
         let context = Context {
-            workspace_id: "test".to_owned(),
             registry_path: support.join("unused.yaml"),
             dolgorae_home_root: support.clone(),
         };
@@ -6620,7 +7414,7 @@ mod tests {
         state.socket_device = socket_metadata.dev();
         state.socket_inode = socket_metadata.ino();
         atomic_replace(
-            &new_root.join("runtime-state.json"),
+            &new_root.join("state.json"),
             &serde_json::to_vec_pretty(&state).unwrap(),
         )
         .unwrap();
@@ -6678,7 +7472,7 @@ mod tests {
         state.socket_device = socket_metadata.dev();
         state.socket_inode = socket_metadata.ino();
         atomic_replace(
-            &new_root.join("runtime-state.json"),
+            &new_root.join("state.json"),
             &serde_json::to_vec_pretty(&state).unwrap(),
         )
         .unwrap();
@@ -6710,7 +7504,6 @@ mod tests {
         )
         .unwrap();
         let context = Context {
-            workspace_id: "test".to_owned(),
             registry_path: support.join("unused.yaml"),
             dolgorae_home_root: support.clone(),
         };

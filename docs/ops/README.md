@@ -25,7 +25,7 @@ Dolgorae does not repair or migrate that state. The operator must:
    copy individual registry, Run, server, writer, engagement, or aggregate
    files into the replacement home.
 3. Run `dolgorae init` against one intended project to atomically establish a
-   fresh `global-profile-v1` home and register that workspace.
+   fresh `global-profile-v2` home and register that workspace.
 4. Recreate each Codex Profile explicitly with its native executable, canonical
    `CODEX_HOME`, arguments, environment, and capability policy.
 5. Run `dolgorae init` in each remaining compatible project. Existing tracked

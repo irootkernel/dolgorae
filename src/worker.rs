@@ -248,6 +248,26 @@ fn current_worker_identity(
     bootstrap: &WorkerBootstrap,
     process: crate::providers::ProcessIdentity,
 ) -> Result<WorkerIdentity, WorkerProtocolError> {
+    current_process_identity(
+        &bootstrap.workspace_id,
+        bootstrap.run_id,
+        bootstrap.run_generation,
+        bootstrap.boot_uuid,
+        process,
+        Some(&bootstrap.executable_sha256),
+    )
+    .map(|(identity, _)| identity)
+}
+
+#[cfg(target_os = "macos")]
+fn current_process_identity(
+    workspace_id: &str,
+    run_id: Uuid,
+    run_generation: u64,
+    boot_uuid: Uuid,
+    process: crate::providers::ProcessIdentity,
+    expected_executable_sha256: Option<&str>,
+) -> Result<(WorkerIdentity, String), WorkerProtocolError> {
     let before = DarwinSystem
         .bsd_process_identity(process.pid)
         .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
@@ -266,24 +286,56 @@ fn current_worker_identity(
     let after = DarwinSystem
         .bsd_process_identity(process.pid)
         .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
-    if before != after || executable_sha256 != bootstrap.executable_sha256 {
+    if before != after
+        || expected_executable_sha256.is_some_and(|expected| executable_sha256 != expected)
+    {
         return Err(WorkerProtocolError::InvalidIdentity);
     }
-    Ok(WorkerIdentity {
-        workspace_id: bootstrap.workspace_id.clone(),
-        run_id: bootstrap.run_id,
-        run_generation: bootstrap.run_generation,
-        boot_uuid: bootstrap.boot_uuid,
-        pid: process.pid,
-        process_group_id: process.process_group_id,
-        session_id: before.session_id,
-        uid: process.uid,
-        start_tvsec: before.start_tvsec,
-        start_tvusec: before.start_tvusec,
-        executable_path,
-        executable_device: metadata.dev(),
-        executable_inode: metadata.ino(),
-        executable_sha256,
+    let executable_path_sha256 =
+        HEXLOWER.encode(Sha256::digest(executable_path.as_os_str().as_encoded_bytes()).as_slice());
+    Ok((
+        WorkerIdentity {
+            workspace_id: workspace_id.to_owned(),
+            run_id,
+            run_generation,
+            boot_uuid,
+            pid: process.pid,
+            process_group_id: process.process_group_id,
+            session_id: before.session_id,
+            uid: process.uid,
+            start_tvsec: before.start_tvsec,
+            start_tvusec: before.start_tvusec,
+            executable_path,
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256,
+        },
+        executable_path_sha256,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub fn current_startup_owner(
+    workspace_id: &str,
+    run_id: Uuid,
+    run_generation: u64,
+) -> Result<StartupOwnerRecord, WorkerProtocolError> {
+    let uid = DarwinSystem.current_uid();
+    let (identity, executable_path_sha256) = current_process_identity(
+        workspace_id,
+        run_id,
+        run_generation,
+        boot_session_uuid(uid)?,
+        DarwinSystem
+            .current_process()
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?,
+        None,
+    )?;
+    Ok(StartupOwnerRecord {
+        schema_version: 1,
+        slot: 0,
+        identity,
+        executable_path_sha256,
     })
 }
 
@@ -813,6 +865,11 @@ pub struct StartupByteGuard<'a> {
 }
 
 impl StartupLockFile {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn open(path: &Path, uid: u32) -> Result<Self, WorkerProtocolError> {
         let parent = path
             .parent()
@@ -941,9 +998,11 @@ impl StartupLockFile {
     #[cfg(target_os = "macos")]
     pub fn release_startup_range(&self) -> Result<(), WorkerProtocolError> {
         let offset = startup_range_offset()?;
-        crate::darwin::DarwinSystem
+        let clear = self.clear_owner(0);
+        let unlock = crate::darwin::DarwinSystem
             .unlock_byte(&self.file, offset)
-            .map_err(|_| WorkerProtocolError::Io)
+            .map_err(|_| WorkerProtocolError::Io);
+        clear.and(unlock)
     }
 
     fn revalidate(&self) -> Result<(), WorkerProtocolError> {
@@ -4797,30 +4856,20 @@ fn startup_handoff_error(code: &str) -> WorkerProtocolError {
 }
 
 #[cfg(target_os = "macos")]
-pub fn spawn_hidden_worker(
+fn spawn_hidden_worker_inner(
     executable: &Path,
     bootstrap_path: &Path,
+    held_startup_range: StartupLockFile,
 ) -> Result<StartedWorker, WorkerProtocolError> {
-    if !executable.is_absolute() || !bootstrap_path.is_absolute() {
-        return Err(WorkerProtocolError::InvalidRuntimeRecord);
-    }
     let uid = DarwinSystem.current_uid();
-    let bootstrap = read_worker_bootstrap(bootstrap_path, uid)?;
-    let process = DarwinSystem
-        .current_process()
-        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
-    let election_identity = current_worker_identity(&bootstrap, process)?;
-    let startup_lock = StartupLockFile::open(&bootstrap.startup_lock_path, uid)?;
-    let election = startup_lock.claim(
-        &StartupOwnerRecord {
-            schema_version: 1,
-            slot: 0,
-            identity: election_identity,
-            executable_path_sha256: bootstrap.executable_path_sha256.clone(),
-        },
-        Duration::from_secs(10),
-    )?;
     let startup_result = (|| {
+        if !executable.is_absolute() || !bootstrap_path.is_absolute() {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        let bootstrap = read_worker_bootstrap(bootstrap_path, uid)?;
+        if held_startup_range.path != bootstrap.startup_lock_path {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
         let mut command = Command::new(executable);
         command
             .arg("__worker")
@@ -4830,10 +4879,10 @@ pub fn spawn_hidden_worker(
             .spawn_detached_with_fd3(&mut command)
             .map_err(|_| WorkerProtocolError::Io)?;
         let (reader, bound) = read_bound_handoff(startup)?;
-        Ok((child, reader, bound))
+        Ok((child, reader, bound, bootstrap))
     })();
-    let release = election.release();
-    let (mut child, mut reader, bound) = startup_result?;
+    let release = held_startup_range.release_startup_range();
+    let (mut child, mut reader, bound, bootstrap) = startup_result?;
     release?;
     if bound.identity.workspace_id != bootstrap.workspace_id
         || bound.identity.run_id != bootstrap.run_id
@@ -5167,11 +5216,23 @@ pub fn boot_session_uuid(uid: u32) -> Result<Uuid, WorkerProtocolError> {
     Uuid::parse_str(&value).map_err(|_| WorkerProtocolError::InvalidIdentity)
 }
 
-/// Publish the worker bootstrap and start the hidden worker for one Run.
+/// Start a worker after the caller acquired slot zero under the Profile
+/// lifecycle fence. The range is released only after the child has published
+/// its runtime record and `Bound` handoff.
 #[cfg(target_os = "macos")]
-pub fn start_run_worker(
+pub fn start_run_worker_with_startup_range(
     state_root: &Path,
     start: &RunWorkerStart,
+    startup_range: StartupLockFile,
+) -> Result<StartedRun, WorkerProtocolError> {
+    start_run_worker_inner(state_root, start, startup_range)
+}
+
+#[cfg(target_os = "macos")]
+fn start_run_worker_inner(
+    state_root: &Path,
+    start: &RunWorkerStart,
+    startup_range: StartupLockFile,
 ) -> Result<StartedRun, WorkerProtocolError> {
     let uid = DarwinSystem.current_uid();
     let runtime = runtime_root(state_root);
@@ -5202,7 +5263,7 @@ pub fn start_run_worker(
     let path = bootstrap_path(&runtime, start.run_id);
     let _ = fs::remove_file(&path);
     write_worker_bootstrap(&path, &bootstrap, uid)?;
-    let started = spawn_hidden_worker(&executable, &path)?;
+    let started = spawn_hidden_worker_inner(&executable, &path, startup_range)?;
     Ok(StartedRun {
         run_id: start.run_id,
         socket_path: started.record.socket_path.clone(),
@@ -6096,6 +6157,99 @@ mod tests {
             executable_inode: 1,
             executable_sha256: "22".repeat(32),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn held_startup_range_rejects_path_mismatch_and_releases_after_spawn_failure() {
+        let state_root =
+            std::env::temp_dir().join(format!("dolgorae-held-startup-{}", Uuid::now_v7()));
+        fs::create_dir(&state_root).unwrap();
+        fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = runtime_root(&state_root);
+        let uid = DarwinSystem.current_uid();
+        prepare_runtime_root(&runtime, uid).unwrap();
+        let run_id = Uuid::now_v7();
+        let expected_lock_path = startup_lock_path(&runtime, run_id);
+        let bootstrap = WorkerBootstrap {
+            schema_version: 1,
+            workspace_id: "1".repeat(64),
+            run_id,
+            run_generation: 1,
+            boot_uuid: boot_session_uuid(uid).unwrap(),
+            executable_sha256: "2".repeat(64),
+            executable_path_sha256: "3".repeat(64),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            control_socket_epoch: 1,
+            profile: "default".to_owned(),
+            state_root: state_root.clone(),
+            ledger_root: state_root.join("runs").join(run_id.to_string()),
+            runtime_record_path: runtime_record_path(&runtime, run_id).unwrap(),
+            startup_lock_path: expected_lock_path.clone(),
+            session: None,
+        };
+        let bootstrap_path = bootstrap_path(&runtime, run_id);
+        write_worker_bootstrap(&bootstrap_path, &bootstrap, uid).unwrap();
+
+        let other_lock_path = startup_lock_path(&runtime, Uuid::now_v7());
+        let other_lock = StartupLockFile::open(&other_lock_path, uid).unwrap();
+        other_lock
+            .hold_startup_range(Duration::from_secs(1))
+            .unwrap();
+        other_lock
+            .write_owner(
+                &current_startup_owner(&bootstrap.workspace_id, run_id, bootstrap.run_generation)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            spawn_hidden_worker_inner(
+                &std::env::current_exe().unwrap(),
+                &bootstrap_path,
+                other_lock
+            ),
+            Err(WorkerProtocolError::InvalidRuntimeRecord)
+        ));
+        assert_eq!(
+            StartupLockFile::open(&other_lock_path, uid)
+                .unwrap()
+                .read_owner(0)
+                .unwrap(),
+            None
+        );
+
+        let expected_lock = StartupLockFile::open(&expected_lock_path, uid).unwrap();
+        expected_lock
+            .hold_startup_range(Duration::from_secs(1))
+            .unwrap();
+        let owner =
+            current_startup_owner(&bootstrap.workspace_id, run_id, bootstrap.run_generation)
+                .unwrap();
+        assert_eq!(owner.slot, 0);
+        assert_eq!(owner.identity.run_id, run_id);
+        assert_eq!(owner.identity.pid, std::process::id());
+        owner.identity.validate().unwrap();
+        expected_lock.write_owner(&owner).unwrap();
+        assert!(matches!(
+            spawn_hidden_worker_inner(
+                Path::new("/definitely/missing/dolgorae-worker"),
+                &bootstrap_path,
+                expected_lock,
+            ),
+            Err(WorkerProtocolError::Io)
+        ));
+        assert_eq!(
+            StartupLockFile::open(&expected_lock_path, uid)
+                .unwrap()
+                .read_owner(0)
+                .unwrap(),
+            None
+        );
+        let contender = StartupLockFile::open(&expected_lock_path, uid).unwrap();
+        contender.hold_startup_range(Duration::ZERO).unwrap();
+        contender.release_startup_range().unwrap();
+        fs::remove_dir_all(state_root).unwrap();
     }
 
     #[cfg(target_os = "macos")]

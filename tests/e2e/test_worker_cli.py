@@ -1785,6 +1785,9 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
     stop` refuses them until their threadless close releases both memberships.
     """
     machine_schema = validator(REPOSITORY / "docs" / "protocol", "dolgorae-machine-v2.schema.json")
+    run_manifest_schema = validator(
+        REPOSITORY / "docs" / "protocol", "dolgorae-run-manifest-v2.schema.json"
+    )
     schema_source = native_codex.installed_codex()
     scenario = native_codex.scenario_path("run_start_model_list.json")
     with tempfile.TemporaryDirectory(prefix="dolgorae-epic002-runstart-") as temporary:
@@ -1842,9 +1845,12 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
             return dict(objects[0]["error"])  # type: ignore[arg-type]
 
         def membership_records() -> int:
-            verified = data(
-                ["profile", "membership", "verify", "default"], checked=False
-            )
+            binding_path = home / ".dolgorae" / "profile-bindings.json"
+            before = (binding_path.read_bytes(), binding_path.stat().st_ino)
+            verified = data(["profile", "membership", "verify", "default"])
+            after = (binding_path.read_bytes(), binding_path.stat().st_ino)
+            if after != before:
+                raise AssertionError("membership verification rewrote Profile binding history")
             return sum(
                 member["disposition"] != "released"
                 for member in verified["members"]  # type: ignore[union-attr]
@@ -1953,6 +1959,16 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 ]
             )
             started.append(str(accepted["run_id"]))
+            produced_manifest = json.loads(
+                (state_root / "runs" / started[0] / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert_valid(
+                produced_manifest,
+                run_manifest_schema,
+                "run start produced run-manifest/v2",
+            )
             # No `--model` and no `--effort` were given, so both come from the
             # fixture's pinned shapes: the one `isDefault` item in the whole
             # catalogue, and the first `reasoningEffort` that item advertises
@@ -2258,7 +2274,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
                 str(operator),
             ]
             gated = failure(stop, expect=4)
-            if gated["code"] != "PROFILE_MEMBERSHIP_INCOMPLETE":
+            if gated["code"] != "PROFILE_SERVER_BUSY":
                 raise AssertionError(f"a live member did not gate the stop: {gated!r}")
             if "3 live run member(s)" not in str(gated["details"]["reason"]):  # type: ignore[index]
                 raise AssertionError(f"the stop gate did not count its members: {gated!r}")

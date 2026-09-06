@@ -2223,11 +2223,18 @@ and Specialist creation selects a Profile explicitly; workspace initialization
 does not create or select an account.
 
 Mark the accepted home generation with strict mode-0600
-`~/.dolgorae/state.json` containing `global-profile-v1`. Reject every nonempty
+`~/.dolgorae/state.json` containing `global-profile-v2`, together with checked
+`profile-bindings.json` history that permits safe offline Profile removal.
+Reject every nonempty
 unmarked, legacy, partial, mixed, malformed, or unsupported home before a
 stateful read or mutation. Provide no automatic migration or compatibility
 decoder. Preserve changed v1 contracts as historical artifacts and introduce
-successor versions.
+successor versions. Initialization assembles the complete home in a private
+sibling directory and renames it into place under the parent-directory lock.
+Contracts introduced by this unreleased cutover, including
+`global-profile-registry/v1`, `profile-binding-history/v1`, and the v2 successor
+contracts, may be corrected in place before their first release because the
+`global-profile-v2` home marker rejects every earlier development generation.
 
 Prepare the new registry and consumers behind an inactive boundary in
 TASK-036 and TASK-037. TASK-038 activates the home gate, Profile CLI,

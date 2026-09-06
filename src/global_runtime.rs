@@ -5,9 +5,7 @@ use crate::global_profile::GlobalProfileStore;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
-use crate::profile::{
-    CompatibilityVerdict, ExecutableIdentity, ProfileCapabilityState, ProfileSnapshot, ServerState,
-};
+use crate::profile::{CompatibilityVerdict, ExecutableIdentity, ProfileSnapshot, ServerState};
 use crate::workspace::{
     RuntimeProfile, SystemWorkspacePlatform, atomic_create, create_directory, sync_directory,
     verify_secure_directory, verify_secure_file,
@@ -98,34 +96,6 @@ impl From<&ProfileSnapshot> for GlobalLaunchSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GlobalProfileServerState {
-    pub schema_version: u32,
-    pub server_key: String,
-    pub lifecycle: String,
-    pub server_epoch: u64,
-    pub epoch_id: Uuid,
-    pub boot_session_uuid: Uuid,
-    pub pid: u32,
-    pub pgid: u32,
-    pub uid: u32,
-    pub process_fingerprint: String,
-    pub drainer_pid: u32,
-    pub drainer_pgid: u32,
-    pub drainer_uid: u32,
-    pub drainer_fingerprint: String,
-    pub socket_path: String,
-    pub socket_device: u64,
-    pub socket_inode: u64,
-    pub membership_revision: u64,
-    pub default_model: String,
-    pub models: Vec<String>,
-    pub capabilities: BTreeMap<String, ProfileCapabilityState>,
-    pub launch_snapshot_sha256: String,
-    pub snapshot: GlobalLaunchSnapshot,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GlobalRuntimeDiscovery {
     pub schema_version: u32,
     pub selected_profile: String,
@@ -135,41 +105,11 @@ pub struct GlobalRuntimeDiscovery {
     pub binding_sha256: String,
 }
 
-impl GlobalProfileServerState {
-    pub fn from_prepared(state: &ServerState) -> Result<Self, MachineError> {
-        let snapshot = GlobalLaunchSnapshot::from(&state.snapshot);
-        Ok(Self {
-            schema_version: 2,
-            server_key: state.server_key.clone(),
-            lifecycle: state.lifecycle.clone(),
-            server_epoch: state.server_epoch,
-            epoch_id: state.epoch_id,
-            boot_session_uuid: state.boot_session_uuid,
-            pid: state.pid,
-            pgid: state.pgid,
-            uid: state.uid,
-            process_fingerprint: state.process_fingerprint.clone(),
-            drainer_pid: state.drainer_pid,
-            drainer_pgid: state.drainer_pgid,
-            drainer_uid: state.drainer_uid,
-            drainer_fingerprint: state.drainer_fingerprint.clone(),
-            socket_path: state.socket_path.clone(),
-            socket_device: state.socket_device,
-            socket_inode: state.socket_inode,
-            membership_revision: state.membership_revision,
-            default_model: state.default_model.clone(),
-            models: state.models.clone(),
-            capabilities: state.capabilities.clone(),
-            launch_snapshot_sha256: canonical_digest(&snapshot)?,
-            snapshot,
-        })
-    }
-
-    pub fn validate_for_restart(&self) -> Result<(), MachineError> {
+impl ServerState {
+    pub fn validate_for_global_restart(&self) -> Result<(), MachineError> {
         if self.schema_version != 2
             || self.server_epoch == 0
             || self.server_key != self.snapshot.server_key
-            || self.launch_snapshot_sha256 != canonical_digest(&self.snapshot)?
         {
             return Err(binding_invalid(
                 "global Profile Server state cannot reconstruct its launch generation",
@@ -178,14 +118,15 @@ impl GlobalProfileServerState {
         validate_server_key(&self.server_key)
     }
 
-    pub fn discover(
+    pub fn discover_global(
         &self,
         binding: &GlobalProfileBinding,
     ) -> Result<GlobalRuntimeDiscovery, MachineError> {
-        self.validate_for_restart()?;
+        self.validate_for_global_restart()?;
         binding.validate_for_recovery()?;
         if binding.server_key != self.server_key
-            || GlobalLaunchSnapshot::from(&binding.launch_snapshot) != self.snapshot
+            || GlobalLaunchSnapshot::from(&binding.launch_snapshot)
+                != GlobalLaunchSnapshot::from(&self.snapshot)
         {
             return Err(binding_invalid(
                 "Run binding does not name this Profile Server generation",
@@ -201,8 +142,8 @@ impl GlobalProfileServerState {
         })
     }
 
-    pub fn diagnostic(&self, binding: &GlobalProfileBinding) -> Result<Value, MachineError> {
-        let discovery = self.discover(binding)?;
+    pub fn global_diagnostic(&self, binding: &GlobalProfileBinding) -> Result<Value, MachineError> {
+        let discovery = self.discover_global(binding)?;
         Ok(json!({
             "schema_version": 2,
             "profile": discovery.selected_profile,
@@ -210,7 +151,7 @@ impl GlobalProfileServerState {
             "server_epoch": discovery.server_epoch,
             "lifecycle": self.lifecycle,
             "membership_revision": self.membership_revision,
-            "launch_snapshot_sha256": self.launch_snapshot_sha256,
+            "launch_snapshot_sha256": canonical_digest(&GlobalLaunchSnapshot::from(&self.snapshot))?,
         }))
     }
 }
@@ -368,7 +309,7 @@ pub struct GlobalMembershipFacts {
 }
 
 impl GlobalMembershipFacts {
-    fn for_disposition(disposition: MembershipDisposition) -> Self {
+    pub fn for_disposition(disposition: MembershipDisposition) -> Self {
         Self {
             controller_id: None,
             worker_generation: None,
@@ -399,92 +340,58 @@ pub struct GlobalMembershipIndex {
 
 pub struct GlobalMembershipStore {
     home_root: PathBuf,
+    profile: String,
     server_key: String,
 }
 
 /// Holds the server membership lock across a destructive lifecycle commit.
 /// Dropping the guard reopens admission.
 pub struct GlobalQuiescenceGuard {
-    _lock: File,
+    _lock: Option<File>,
     pub index: GlobalMembershipIndex,
-}
-
-pub struct GlobalServerStateStore {
-    membership: GlobalMembershipStore,
-}
-
-impl GlobalServerStateStore {
-    pub fn new(home: &DolgoraeHome, server_key: &str) -> Result<Self, MachineError> {
-        Self::from_root(home.root(), server_key)
-    }
-
-    pub(crate) fn from_root(root: &Path, server_key: &str) -> Result<Self, MachineError> {
-        Ok(Self {
-            membership: GlobalMembershipStore::from_root(root, server_key)?,
-        })
-    }
-
-    pub fn publish(&self, state: &GlobalProfileServerState) -> Result<PathBuf, MachineError> {
-        state.validate_for_restart()?;
-        if state.server_key != self.membership.server_key {
-            return Err(binding_invalid(
-                "server state store key disagrees with state",
-            ));
-        }
-        let root = self.membership.ensure_root()?;
-        let _lock = lock_file(&root.join("server.lock"))?;
-        let path = root.join("state.json");
-        let bytes = serde_json::to_vec_pretty(state).map_err(internal)?;
-        let temporary = root.join(format!(".state-{}.json", Uuid::now_v7()));
-        atomic_create(&SystemWorkspacePlatform, &temporary, &bytes, 0o600)
-            .map_err(|error| path_error(&temporary, error))?;
-        fs::rename(&temporary, &path).map_err(|error| path_error(&path, error))?;
-        sync_directory(&root).map_err(|error| path_error(&root, error))?;
-        Ok(path)
-    }
-
-    pub fn load_for_recovery(&self) -> Result<GlobalProfileServerState, MachineError> {
-        let root = self.membership.ensure_root()?;
-        let _lock = lock_file(&root.join("server.lock"))?;
-        let path = root.join("state.json");
-        verify_secure_file(&path, DarwinSystem.current_uid())?;
-        let state: GlobalProfileServerState =
-            serde_json::from_slice(&fs::read(&path).map_err(|error| path_error(&path, error))?)
-                .map_err(|_| binding_invalid("global Profile Server state is malformed"))?;
-        state.validate_for_restart()?;
-        if state.server_key != self.membership.server_key {
-            return Err(binding_invalid(
-                "persisted server state is stored under the wrong key",
-            ));
-        }
-        Ok(state)
-    }
 }
 
 /// Remove one selected alias only after global membership under its resolved
 /// server key is proven quiescent while the registry lock is still held.
 pub fn remove_global_profile(home: &DolgoraeHome, selected_name: &str) -> Result<(), MachineError> {
     GlobalProfileStore::new(home)
-        .remove_if(selected_name, |definition| {
-            let binding =
-                ResolvedGlobalProfile::from_definition(selected_name, definition.clone())?
-                    .prepare(home)?;
-            let _guard = GlobalMembershipStore::new(home, &binding.server_key)?
-                .acquire_quiescence_under_registry_lock("remove")?;
-            Ok(())
+        .remove_if(selected_name, |_definition| {
+            let server_keys = crate::global_profile::bound_server_keys_under_root_lock(
+                home.root(),
+                selected_name,
+            )?;
+            let mut guards = Vec::with_capacity(server_keys.len());
+            for server_key in server_keys {
+                guards.push(
+                    GlobalMembershipStore::new(home, selected_name, &server_key)?
+                        .acquire_quiescence_under_registry_lock(selected_name, "remove")?,
+                );
+            }
+            Ok(guards)
         })
         .map(|_| ())
 }
 
 impl GlobalMembershipStore {
-    pub fn new(home: &DolgoraeHome, server_key: &str) -> Result<Self, MachineError> {
-        Self::from_root(home.root(), server_key)
+    pub fn new(home: &DolgoraeHome, profile: &str, server_key: &str) -> Result<Self, MachineError> {
+        Self::from_root(home.root(), profile, server_key)
     }
 
-    pub(crate) fn from_root(root: &Path, server_key: &str) -> Result<Self, MachineError> {
+    pub(crate) fn from_root(
+        root: &Path,
+        profile: &str,
+        server_key: &str,
+    ) -> Result<Self, MachineError> {
+        if profile.is_empty() {
+            return Err(MachineError::invalid_argument(
+                "profile",
+                "a global Profile name is required",
+            ));
+        }
         validate_server_key(server_key)?;
         Ok(Self {
             home_root: root.to_path_buf(),
+            profile: profile.to_owned(),
             server_key: server_key.to_owned(),
         })
     }
@@ -522,15 +429,55 @@ impl GlobalMembershipStore {
         workspace_id: &str,
         run_id: Uuid,
         disposition: MembershipDisposition,
+        facts: GlobalMembershipFacts,
     ) -> Result<GlobalMembershipIndex, MachineError> {
         validate_member_identity(workspace_id)?;
-        self.record_under_server_lock(
-            root,
-            workspace_id,
-            run_id,
-            disposition,
-            GlobalMembershipFacts::for_disposition(disposition),
-        )
+        validate_membership_facts(&facts)?;
+        self.record_under_server_lock(root, workspace_id, run_id, disposition, facts)
+    }
+
+    /// Release every attachment after the exact physical server has been
+    /// proven absent. This does not invent a terminal Run result.
+    pub(crate) fn release_after_server_absence_under_lifecycle_locks(
+        &self,
+        root: &Path,
+        observed_epoch: u64,
+    ) -> Result<GlobalMembershipIndex, MachineError> {
+        let mut index = self.load_locked(root)?;
+        let members = index
+            .members
+            .values()
+            .filter(|member| member.disposition != MembershipDisposition::Released)
+            .cloned()
+            .collect::<Vec<_>>();
+        for member in members {
+            let lifecycle = if member.lifecycle == "operator_interrupt_unknown" {
+                "interrupted_unknown"
+            } else if member.lifecycle.starts_with("operator_interrupt_") {
+                member.lifecycle.as_str()
+            } else if member.observed_epoch == Some(observed_epoch) {
+                "interrupted_unknown"
+            } else {
+                "stale_generation_reconciled"
+            };
+            index = self.record_under_server_lock(
+                root,
+                &member.workspace_id,
+                member.run_id,
+                MembershipDisposition::Released,
+                GlobalMembershipFacts {
+                    controller_id: member.controller_id,
+                    worker_generation: member.worker_generation,
+                    thread_id: member.thread_id,
+                    connection_id: member.connection_id,
+                    lifecycle: lifecycle.to_owned(),
+                    writer: false,
+                    observed_epoch: member.observed_epoch,
+                    runtime_locator: member.runtime_locator,
+                },
+            )?;
+        }
+        Ok(index)
     }
 
     fn record_locked_root(
@@ -551,13 +498,31 @@ impl GlobalMembershipStore {
         workspace_id: &str,
         run_id: Uuid,
         disposition: MembershipDisposition,
-        facts: GlobalMembershipFacts,
+        mut facts: GlobalMembershipFacts,
     ) -> Result<GlobalMembershipIndex, MachineError> {
         let journal = root.join("membership.jsonl");
-        let mut records = replay(&journal, &self.server_key)?;
-        let revision = u64::try_from(records.len())
-            .map_err(|_| membership_incomplete(&self.server_key, "membership revision overflow"))?
-            + 1;
+        let mut records = replay(&journal, &self.profile, &self.server_key)?;
+        if let Some(previous) = records
+            .iter()
+            .rev()
+            .find(|record| record.workspace_id == workspace_id && record.run_id == run_id)
+        {
+            facts.controller_id = facts.controller_id.or(previous.controller_id);
+            facts.worker_generation = facts.worker_generation.or(previous.worker_generation);
+            facts.thread_id = facts.thread_id.or_else(|| previous.thread_id.clone());
+            facts.connection_id = facts.connection_id.or(previous.connection_id);
+            facts.observed_epoch = facts.observed_epoch.or(previous.observed_epoch);
+            facts.runtime_locator = facts
+                .runtime_locator
+                .or_else(|| previous.runtime_locator.clone());
+        }
+        let revision = u64::try_from(records.len()).map_err(|_| {
+            membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "membership revision overflow",
+            )
+        })? + 1;
         let previous_sha256 = records.last().map_or_else(
             || ZERO_HASH.to_owned(),
             |record| record.record_sha256.clone(),
@@ -599,6 +564,34 @@ impl GlobalMembershipStore {
         records.push(record);
         let index = derive_index(&self.server_key, &journal, &records)?;
         store_index(&root.join("members.json"), &index)?;
+        let state_path = root.join("state.json");
+        if state_path.exists() {
+            verify_secure_file(&state_path, DarwinSystem.current_uid())?;
+            let mut state: ServerState = serde_json::from_slice(
+                &fs::read(&state_path).map_err(|error| path_error(&state_path, error))?,
+            )
+            .map_err(|_| {
+                membership_incomplete(&self.profile, &self.server_key, "server state is malformed")
+            })?;
+            if state.server_key != self.server_key {
+                return Err(membership_incomplete(
+                    &self.profile,
+                    &self.server_key,
+                    "server state is stored under the wrong key",
+                ));
+            }
+            state.membership_revision = index.revision;
+            let temporary = root.join(format!(".state-{}.json", Uuid::now_v7()));
+            atomic_create(
+                &SystemWorkspacePlatform,
+                &temporary,
+                &serde_json::to_vec_pretty(&state).map_err(internal)?,
+                0o600,
+            )
+            .map_err(|error| path_error(&temporary, error))?;
+            fs::rename(&temporary, &state_path).map_err(|error| path_error(&state_path, error))?;
+            sync_directory(root).map_err(|error| path_error(root, error))?;
+        }
         Ok(index)
     }
 
@@ -608,17 +601,70 @@ impl GlobalMembershipStore {
         self.load_locked(&root)
     }
 
+    pub(crate) fn load_under_server_lock(
+        &self,
+        root: &Path,
+    ) -> Result<GlobalMembershipIndex, MachineError> {
+        self.load_locked(root)
+    }
+
+    pub fn tombstone_orphan<F>(
+        &self,
+        workspace_id: &str,
+        run_id: Uuid,
+        verify_orphan: F,
+    ) -> Result<GlobalMembershipIndex, MachineError>
+    where
+        F: FnOnce(&GlobalMembershipRecord) -> Result<bool, MachineError>,
+    {
+        validate_member_identity(workspace_id)?;
+        let root = self.ensure_root()?;
+        let _lock = lock_file(&root.join("server.lock"))?;
+        let index = self.load_locked(&root)?;
+        let identity = format!("{workspace_id}:{run_id}");
+        let member = index.members.get(&identity).ok_or_else(|| {
+            membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "confirmed orphan is not in membership",
+            )
+        })?;
+        if member.disposition == MembershipDisposition::Released || !verify_orphan(member)? {
+            return Err(membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "confirmed member is not the same live orphan",
+            ));
+        }
+        self.record_under_server_lock(
+            &root,
+            workspace_id,
+            run_id,
+            MembershipDisposition::Released,
+            GlobalMembershipFacts {
+                controller_id: member.controller_id,
+                worker_generation: member.worker_generation,
+                thread_id: member.thread_id.clone(),
+                connection_id: member.connection_id,
+                lifecycle: "tombstone_orphan".to_owned(),
+                writer: false,
+                observed_epoch: member.observed_epoch,
+                runtime_locator: member.runtime_locator.clone(),
+            },
+        )
+    }
+
     /// Verify quiescence when the caller already holds this server key's
     /// `server.lock` as part of the lifecycle lock hierarchy.
     pub fn require_quiescent_under_server_lock(
         &self,
         profile: &str,
-        _operation: &str,
+        operation: &str,
     ) -> Result<GlobalMembershipIndex, MachineError> {
         let root = self.home_root.join("profiles").join(&self.server_key);
         verify_secure_directory(&root, DarwinSystem.current_uid())?;
         let journal = root.join("membership.jsonl");
-        let records = replay(&journal, &self.server_key)?;
+        let records = replay(&journal, &self.profile, &self.server_key)?;
         let index = derive_index(&self.server_key, &journal, &records)?;
         self.verify_persisted_index(&root, &index)?;
         let blockers = index
@@ -628,13 +674,13 @@ impl GlobalMembershipStore {
             .collect::<Vec<_>>();
         if !blockers.is_empty() {
             return Err(MachineError::new(
-                "PROFILE_MEMBERSHIP_INCOMPLETE",
+                "PROFILE_SERVER_BUSY",
                 "global Profile membership blocks the lifecycle operation",
-                false,
+                true,
                 json!({
                     "server_key": self.server_key,
                     "profile": profile,
-                    "reason": format!("stopping this server would interrupt {} live run member(s)", blockers.len()),
+                    "reason": format!("{operation} would interrupt {} live run member(s); use the explicit operator interrupt flow", blockers.len()),
                 }),
             ));
         }
@@ -643,7 +689,7 @@ impl GlobalMembershipStore {
 
     fn load_locked(&self, root: &Path) -> Result<GlobalMembershipIndex, MachineError> {
         let journal = root.join("membership.jsonl");
-        let records = replay(&journal, &self.server_key)?;
+        let records = replay(&journal, &self.profile, &self.server_key)?;
         let index = derive_index(&self.server_key, &journal, &records)?;
         self.verify_persisted_index(root, &index)?;
         Ok(index)
@@ -660,9 +706,16 @@ impl GlobalMembershipStore {
             let actual: GlobalMembershipIndex = serde_json::from_slice(
                 &fs::read(&persisted).map_err(|error| path_error(&persisted, error))?,
             )
-            .map_err(|_| membership_incomplete(&self.server_key, "membership index is invalid"))?;
+            .map_err(|_| {
+                membership_incomplete(
+                    &self.profile,
+                    &self.server_key,
+                    "membership index is invalid",
+                )
+            })?;
             if actual != *index {
                 return Err(membership_incomplete(
+                    &self.profile,
                     &self.server_key,
                     "membership index disagrees with journal",
                 ));
@@ -671,29 +724,39 @@ impl GlobalMembershipStore {
         Ok(())
     }
 
-    pub fn require_quiescent(&self, operation: &str) -> Result<(), MachineError> {
-        self.acquire_quiescence(operation).map(|_| ())
+    pub fn require_quiescent(&self, profile: &str, operation: &str) -> Result<(), MachineError> {
+        self.acquire_quiescence(profile, operation).map(|_| ())
     }
 
     pub fn acquire_quiescence(
         &self,
+        profile: &str,
         operation: &str,
     ) -> Result<GlobalQuiescenceGuard, MachineError> {
         let root = self.ensure_root()?;
-        self.acquire_quiescence_locked_root(&root, operation)
+        self.acquire_quiescence_locked_root(&root, profile, operation)
     }
 
     fn acquire_quiescence_under_registry_lock(
         &self,
+        profile: &str,
         operation: &str,
     ) -> Result<GlobalQuiescenceGuard, MachineError> {
-        let root = self.ensure_root_under_home_lock()?;
-        self.acquire_quiescence_locked_root(&root, operation)
+        let root = self.home_root.join("profiles").join(&self.server_key);
+        if !root.exists() {
+            return Ok(GlobalQuiescenceGuard {
+                _lock: None,
+                index: derive_index(&self.server_key, &root.join("membership.jsonl"), &[])?,
+            });
+        }
+        verify_secure_directory(&root, DarwinSystem.current_uid())?;
+        self.acquire_quiescence_locked_root(&root, profile, operation)
     }
 
     fn acquire_quiescence_locked_root(
         &self,
         root: &Path,
+        profile: &str,
         operation: &str,
     ) -> Result<GlobalQuiescenceGuard, MachineError> {
         let lock = lock_file(&root.join("server.lock"))?;
@@ -711,13 +774,20 @@ impl GlobalMembershipStore {
             })
             .collect();
         if blockers.is_empty() {
-            Ok(GlobalQuiescenceGuard { _lock: lock, index })
+            Ok(GlobalQuiescenceGuard {
+                _lock: Some(lock),
+                index,
+            })
         } else {
             Err(MachineError::new(
                 "PROFILE_SERVER_BUSY",
                 "global Profile membership blocks the lifecycle operation",
-                false,
-                json!({"server_key": self.server_key, "operation": operation, "blockers": blockers}),
+                true,
+                json!({
+                    "server_key": self.server_key,
+                    "profile": profile,
+                    "reason": format!("{operation} would interrupt {} live run member(s); use the explicit operator interrupt flow", blockers.len()),
+                }),
             ))
         }
     }
@@ -775,7 +845,11 @@ fn derive_index(
     })
 }
 
-fn replay(path: &Path, server_key: &str) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
+fn replay(
+    path: &Path,
+    profile: &str,
+    server_key: &str,
+) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -783,6 +857,7 @@ fn replay(path: &Path, server_key: &str) -> Result<Vec<GlobalMembershipRecord>, 
     let bytes = fs::read(path).map_err(|error| path_error(path, error))?;
     if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
         return Err(membership_incomplete(
+            profile,
             server_key,
             "membership journal exceeds 8 MiB",
         ));
@@ -796,6 +871,7 @@ fn replay(path: &Path, server_key: &str) -> Result<Vec<GlobalMembershipRecord>, 
     {
         let record: GlobalMembershipRecord = serde_json::from_slice(line).map_err(|_| {
             membership_incomplete(
+                profile,
                 server_key,
                 format!("membership line {} is invalid", offset + 1),
             )
@@ -822,6 +898,7 @@ fn replay(path: &Path, server_key: &str) -> Result<Vec<GlobalMembershipRecord>, 
             || record.record_sha256 != canonical_value_digest(&body)?
         {
             return Err(membership_incomplete(
+                profile,
                 server_key,
                 format!("membership hash chain breaks at line {}", offset + 1),
             ));
@@ -930,12 +1007,16 @@ fn canonical_value_digest(value: &Value) -> Result<String, MachineError> {
     Ok(sha256_hex(&bytes))
 }
 
-fn membership_incomplete(server_key: &str, reason: impl Into<String>) -> MachineError {
+fn membership_incomplete(
+    profile: &str,
+    server_key: &str,
+    reason: impl Into<String>,
+) -> MachineError {
     MachineError::new(
         "PROFILE_MEMBERSHIP_INCOMPLETE",
         "global Profile membership cannot be proven",
         false,
-        json!({"server_key": server_key, "reason": reason.into()}),
+        json!({"profile": profile, "server_key": server_key, "reason": reason.into()}),
     )
 }
 
@@ -1039,7 +1120,7 @@ mod tests {
 
     fn server_state(snapshot: ProfileSnapshot) -> ServerState {
         ServerState {
-            schema_version: 1,
+            schema_version: 2,
             server_key: snapshot.server_key.clone(),
             lifecycle: "ready".to_owned(),
             server_epoch: 7,
@@ -1079,11 +1160,9 @@ mod tests {
         let second = second.bind(snapshot("codex-hsy", &profile, &key)).unwrap();
         assert_eq!(first.server_key, second.server_key);
         assert_ne!(first.selected_name, second.selected_name);
-        let state =
-            GlobalProfileServerState::from_prepared(&server_state(first.launch_snapshot.clone()))
-                .unwrap();
-        let first_discovery = state.discover(&first).unwrap();
-        let second_discovery = state.discover(&second).unwrap();
+        let state = server_state(first.launch_snapshot.clone());
+        let first_discovery = state.discover_global(&first).unwrap();
+        let second_discovery = state.discover_global(&second).unwrap();
         assert_eq!(first_discovery.server_key, second_discovery.server_key);
         assert_ne!(
             first_discovery.selected_profile,
@@ -1104,25 +1183,45 @@ mod tests {
             .unwrap();
         store.remove_if("selected", |_| Ok(())).unwrap();
         binding.validate_for_recovery().unwrap();
-        let state =
-            GlobalProfileServerState::from_prepared(&server_state(binding.launch_snapshot.clone()))
-                .unwrap();
-        let state_store = GlobalServerStateStore::new(&home, &binding.server_key).unwrap();
-        state_store.publish(&state).unwrap();
-        let recovered = state_store.load_for_recovery().unwrap();
-        assert_eq!(recovered, state);
+        let state = server_state(binding.launch_snapshot.clone());
+        state.validate_for_global_restart().unwrap();
         assert_eq!(
-            recovered.diagnostic(&binding).unwrap(),
-            recovered.diagnostic(&binding).unwrap()
+            state.global_diagnostic(&binding).unwrap(),
+            state.global_diagnostic(&binding).unwrap()
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn removal_uses_persisted_binding_without_reopening_the_executable() {
+        let (parent, home) = home();
+        let profile = definition(&parent);
+        let executable = PathBuf::from(&profile.argv[0]);
+        let store = GlobalProfileStore::new(&home);
+        store.add("offline".to_owned(), profile).unwrap();
+        let resolved = ResolvedGlobalProfile::resolve(&home, "offline").unwrap();
+        store
+            .record_binding(crate::global_profile::ProfileBindingRecord {
+                selected_name: "offline".to_owned(),
+                definition_sha256: resolved.definition_sha256,
+                server_key: "b".repeat(64),
+                launch_snapshot_sha256: "c".repeat(64),
+            })
+            .unwrap();
+        let server_root = home.root().join("profiles").join("b".repeat(64));
+        assert!(!server_root.exists());
+        fs::remove_file(executable).unwrap();
+        remove_global_profile(&home, "offline").unwrap();
+        assert!(store.load().unwrap().profiles.is_empty());
+        assert!(!server_root.exists());
         fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn membership_spans_workspaces_profiles_and_blocks_unknown_outcomes() {
         let (parent, home) = home();
-        let first = GlobalMembershipStore::new(&home, &"c".repeat(64)).unwrap();
-        let second = GlobalMembershipStore::new(&home, &"d".repeat(64)).unwrap();
+        let first = GlobalMembershipStore::new(&home, "default", &"c".repeat(64)).unwrap();
+        let second = GlobalMembershipStore::new(&home, "default", &"d".repeat(64)).unwrap();
         let run_a = Uuid::now_v7();
         let run_b = Uuid::now_v7();
         first
@@ -1146,9 +1245,17 @@ mod tests {
             "restart",
             "generation_change",
         ] {
-            let error = first.require_quiescent(operation).unwrap_err();
+            let error = first.require_quiescent("one", operation).unwrap_err();
             assert_eq!(error.code, "PROFILE_SERVER_BUSY");
-            assert_eq!(error.details["blockers"].as_array().unwrap().len(), 2);
+            assert!(error.retryable);
+            assert_eq!(error.details["profile"], "one");
+            assert_eq!(error.details["server_key"], "c".repeat(64));
+            assert!(
+                error.details["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("2 live run member(s)")
+            );
         }
         first
             .record(&"1".repeat(64), run_a, MembershipDisposition::Released)
@@ -1156,15 +1263,134 @@ mod tests {
         first
             .record(&"2".repeat(64), run_b, MembershipDisposition::Released)
             .unwrap();
-        first.require_quiescent("generation_change").unwrap();
-        assert!(second.require_quiescent("stop").is_err());
+        first.require_quiescent("one", "generation_change").unwrap();
+        assert!(second.require_quiescent("two", "stop").is_err());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn proven_server_absence_releases_old_epoch_without_inventing_a_run_result() {
+        let (parent, home) = home();
+        let store = GlobalMembershipStore::new(&home, "default", &"7".repeat(64)).unwrap();
+        let run_id = Uuid::now_v7();
+        let stale_run_id = Uuid::now_v7();
+        store
+            .record_observed(
+                &"1".repeat(64),
+                run_id,
+                MembershipDisposition::Active,
+                GlobalMembershipFacts {
+                    controller_id: Some(Uuid::now_v7()),
+                    worker_generation: Some(3),
+                    thread_id: Some("thread".to_owned()),
+                    connection_id: Some(Uuid::now_v7()),
+                    lifecycle: "running".to_owned(),
+                    writer: true,
+                    observed_epoch: Some(7),
+                    runtime_locator: Some("/tmp/run".to_owned()),
+                },
+            )
+            .unwrap();
+        store
+            .record_observed(
+                &"2".repeat(64),
+                stale_run_id,
+                MembershipDisposition::Active,
+                GlobalMembershipFacts {
+                    controller_id: None,
+                    worker_generation: Some(2),
+                    thread_id: None,
+                    connection_id: None,
+                    lifecycle: "idle".to_owned(),
+                    writer: false,
+                    observed_epoch: Some(6),
+                    runtime_locator: Some("/tmp/stale-run".to_owned()),
+                },
+            )
+            .unwrap();
+        let root = home.root().join("profiles").join("7".repeat(64));
+        let released = store
+            .release_after_server_absence_under_lifecycle_locks(&root, 7)
+            .unwrap();
+        let member = released
+            .members
+            .get(&format!("{}:{run_id}", "1".repeat(64)))
+            .unwrap();
+        assert_eq!(member.disposition, MembershipDisposition::Released);
+        assert_eq!(member.lifecycle, "interrupted_unknown");
+        assert_eq!(member.observed_epoch, Some(7));
+        let stale = released
+            .members
+            .get(&format!("{}:{stale_run_id}", "2".repeat(64)))
+            .unwrap();
+        assert_eq!(stale.disposition, MembershipDisposition::Released);
+        assert_eq!(stale.lifecycle, "stale_generation_reconciled");
+        assert_eq!(stale.observed_epoch, Some(6));
+        store.require_quiescent("default", "restart").unwrap();
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn reattachment_replaces_the_observed_epoch_before_a_later_absence() {
+        let (parent, home) = home();
+        let store = GlobalMembershipStore::new(&home, "default", &"6".repeat(64)).unwrap();
+        let workspace_id = "1".repeat(64);
+        let run_id = Uuid::now_v7();
+        store
+            .record_observed(
+                &workspace_id,
+                run_id,
+                MembershipDisposition::Active,
+                GlobalMembershipFacts {
+                    controller_id: None,
+                    worker_generation: Some(1),
+                    thread_id: Some("thread".to_owned()),
+                    connection_id: None,
+                    lifecycle: "running".to_owned(),
+                    writer: false,
+                    observed_epoch: Some(6),
+                    runtime_locator: Some("/tmp/run".to_owned()),
+                },
+            )
+            .unwrap();
+        let root = home.root().join("profiles").join("6".repeat(64));
+        store
+            .release_after_server_absence_under_lifecycle_locks(&root, 6)
+            .unwrap();
+        store
+            .record_observed(
+                &workspace_id,
+                run_id,
+                MembershipDisposition::Active,
+                GlobalMembershipFacts {
+                    controller_id: None,
+                    worker_generation: Some(2),
+                    thread_id: None,
+                    connection_id: None,
+                    lifecycle: "run_reattached".to_owned(),
+                    writer: false,
+                    observed_epoch: Some(7),
+                    runtime_locator: None,
+                },
+            )
+            .unwrap();
+        let released = store
+            .release_after_server_absence_under_lifecycle_locks(&root, 7)
+            .unwrap();
+        let member = released
+            .members
+            .get(&format!("{workspace_id}:{run_id}"))
+            .unwrap();
+        assert_eq!(member.observed_epoch, Some(7));
+        assert_eq!(member.lifecycle, "interrupted_unknown");
         fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn concurrent_membership_updates_form_one_complete_chain() {
         let (parent, home) = home();
-        let store = Arc::new(GlobalMembershipStore::new(&home, &"e".repeat(64)).unwrap());
+        let store =
+            Arc::new(GlobalMembershipStore::new(&home, "default", &"e".repeat(64)).unwrap());
         let workers: Vec<_> = (0..12)
             .map(|index| {
                 let store = Arc::clone(&store);
@@ -1191,7 +1417,7 @@ mod tests {
     #[test]
     fn corrupt_or_legacy_membership_never_becomes_quiescent() {
         let (parent, home) = home();
-        let store = GlobalMembershipStore::new(&home, &"f".repeat(64)).unwrap();
+        let store = GlobalMembershipStore::new(&home, "default", &"f".repeat(64)).unwrap();
         store
             .record(
                 &"1".repeat(64),
@@ -1205,17 +1431,18 @@ mod tests {
             .join("f".repeat(64))
             .join("membership.jsonl");
         fs::write(&journal, b"{\"schema_version\":1}\n").unwrap();
-        assert_eq!(
-            store.require_quiescent("restart").unwrap_err().code,
-            "PROFILE_MEMBERSHIP_INCOMPLETE"
-        );
+        let error = store.require_quiescent("default", "restart").unwrap_err();
+        assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
+        assert_eq!(error.details["profile"], "default");
+        assert_eq!(error.details["server_key"], "f".repeat(64));
+        assert!(error.details["reason"].is_string());
         fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn quiescence_rejects_a_persisted_index_that_disagrees_with_its_journal() {
         let (parent, home) = home();
-        let store = GlobalMembershipStore::new(&home, &"9".repeat(64)).unwrap();
+        let store = GlobalMembershipStore::new(&home, "default", &"9".repeat(64)).unwrap();
         let run_id = Uuid::now_v7();
         store
             .record(&"1".repeat(64), run_id, MembershipDisposition::Released)
@@ -1233,14 +1460,20 @@ mod tests {
             .require_quiescent_under_server_lock("selected", "stop")
             .unwrap_err();
         assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
+        assert_eq!(error.details["profile"], "default");
+        assert_eq!(error.details["server_key"], "9".repeat(64));
+        assert!(error.details["reason"].is_string());
         fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn quiescence_guard_serializes_admission_with_generation_change() {
         let (parent, home) = home();
-        let store = Arc::new(GlobalMembershipStore::new(&home, &"8".repeat(64)).unwrap());
-        let guard = store.acquire_quiescence("generation_change").unwrap();
+        let store =
+            Arc::new(GlobalMembershipStore::new(&home, "default", &"8".repeat(64)).unwrap());
+        let guard = store
+            .acquire_quiescence("default", "generation_change")
+            .unwrap();
         let contender = Arc::clone(&store);
         let handle = thread::spawn(move || {
             contender

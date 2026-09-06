@@ -178,66 +178,93 @@ def canonical_sha256(value: dict[str, object]) -> str:
 
 
 def append_membership(
-    profile_root: pathlib.Path, kind: str, workspace_id: str, run_id: str | None
+    profile_root: pathlib.Path,
+    kind: str,
+    workspace_id: str,
+    run_id: str,
+    observed_epoch: int = 2,
 ) -> int:
-    """Append one chained membership record and rewrite the derived index.
-
-    A Run joins a profile server through `profile::register_run_member`, a Rust
-    API with no CLI surface, so the black-box test writes the journal record
-    that call would have written. Doing it here keeps the gate under test the
-    product's own replay and index derivation rather than a stub.
-    """
-    journal = profile_root / "runtime-membership.jsonl"
+    """Append one canonical global membership-v2 record and index."""
+    journal = profile_root / "membership.jsonl"
     records = [
         json.loads(line)
         for line in journal.read_text(encoding="utf-8").splitlines()
         if line
-    ]
+    ] if journal.exists() else []
     revision = records[-1]["revision"] + 1 if records else 1
     previous = records[-1]["record_sha256"] if records else "0" * 64
+    disposition = "released" if kind in ("run_closed", "tombstone_orphan") else "active"
     body = {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": revision,
-        "kind": kind,
         "workspace_id": workspace_id,
         "run_id": run_id,
+        "disposition": disposition,
+        "controller_id": None,
+        "worker_generation": None,
+        "thread_id": None,
+        "connection_id": None,
+        "lifecycle": kind,
+        "writer": False,
+        "observed_epoch": observed_epoch,
+        "runtime_locator": None,
         "previous_sha256": previous,
     }
     record = dict(body, record_sha256=canonical_sha256(body))
     with journal.open("a", encoding="utf-8") as sink:
         sink.write(json.dumps(record, separators=(",", ":")) + "\n")
+    journal.chmod(0o600)
     records.append(record)
 
-    active: dict[str, dict[str, object]] = {}
+    members: dict[str, dict[str, object]] = {}
     for entry in records:
-        if entry["run_id"] is None:
-            continue
-        identity = f"{entry['workspace_id']}:{entry['run_id']}"
-        if entry["kind"] in ("run_registered", "run_state_changed"):
-            active[identity] = entry
-        elif entry["kind"] in ("run_removed", "run_closed", "tombstone_orphan", "run_migrated"):
-            active.pop(identity, None)
-    index_path = profile_root / "runtime-members.json"
+        members[f"{entry['workspace_id']}:{entry['run_id']}"] = entry
+    index_path = profile_root / "members.json"
     index_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "journal_sha256": hashlib.sha256(journal.read_bytes()).hexdigest(),
-                "active_members": active,
-            }
-        ),
+        json.dumps({
+            "schema_version": 2,
+            "server_key": profile_root.name,
+            "revision": revision,
+            "journal_sha256": hashlib.sha256(journal.read_bytes()).hexdigest(),
+            "members": members,
+        }),
         encoding="utf-8",
     )
     index_path.chmod(0o600)
 
-    state_path = profile_root / "runtime-state.json"
+    state_path = profile_root / "state.json"
     if state_path.is_file():
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["membership_revision"] = revision
         state_path.write_text(json.dumps(state), encoding="utf-8")
         state_path.chmod(0o600)
     return revision
+
+
+def write_bound_manifest(
+    home: pathlib.Path, profile_root: pathlib.Path, workspace_id: str, run_id: str
+) -> None:
+    """Create the minimal immutable identity proof checked by membership repair."""
+    run_root = home / ".dolgorae" / "workspaces" / workspace_id / "runs" / run_id
+    run_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    manifest = run_root / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "global_profile_binding": {
+                    "schema_version": 2,
+                    "server_key": profile_root.name,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    manifest.chmod(0o600)
 
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
@@ -288,6 +315,27 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         fake = bin_root / "codex"
         create_fake_codex(fake, real_codex)
         set_mode(fake)
+        for invalid_name in ("Default", "with space", "with:colon", "-leading", "a" * 129):
+            invalid_add = run(
+                binary,
+                home,
+                "profile",
+                "add",
+                invalid_name,
+                *add_arguments(codex_home, fake),
+            )
+            invalid_envelope = envelope(invalid_add)
+            if (
+                invalid_add.returncode != 3
+                or invalid_envelope["error"]["code"] != "PROFILE_CONFIG_INVALID"
+            ):
+                raise AssertionError(
+                    f"invalid profile name was accepted: {invalid_name!r}: {invalid_add.stdout}"
+                )
+            assert_valid(invalid_envelope, machine, "invalid-profile-name Machine envelope")
+        if envelope(run(binary, home, "profile", "list"))["data"]["profiles"]:
+            raise AssertionError("failed profile-name validation changed the registry")
+
         added = run(binary, home, "profile", "add", "default", *add_arguments(codex_home, fake))
         added_envelope = envelope(added)
         if added.returncode != 0 or added_envelope["data"]["name"] != "default":
@@ -367,6 +415,28 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(exact_envelope, machine, "profile-doctor Machine envelope")
         if exact_data["compatibility"] != "tested" or exact_data["codex_version"] != "0.149.0":
             raise AssertionError(f"exact compatibility returned wrong facts: {exact.stdout}")
+        never_started_root = home / ".dolgorae" / "profiles" / exact_data["server_key"]
+        never_started_verify = run(
+            binary, home, "profile", "membership", "verify", "default"
+        )
+        never_started_data = envelope(never_started_verify)["data"]
+        if (
+            never_started_verify.returncode != 0
+            or never_started_data["complete"] is not True
+            or never_started_data["revision"] != 0
+            or never_started_data["records"] != 0
+            or never_started_data["members"]
+            or never_started_data["orphans"]
+            or never_started_root.exists()
+        ):
+            raise AssertionError(
+                f"never-started membership verification was not empty and read-only: {never_started_verify.stdout}"
+            )
+        assert_valid(
+            envelope(never_started_verify),
+            machine,
+            "never-started-membership-verify Machine envelope",
+        )
         # Bare doctor never starts a singleton, so with none already running
         # its capability snapshot must be the closed, all-unverified baseline
         # rather than the empty map it used to report.
@@ -503,6 +573,14 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             )
         assert_valid(conflicting_carriers_envelope, machine, "conflicting-operator-carrier Machine envelope")
 
+        alias_added = run(binary, home, "profile", "add", "alias", *add_arguments(codex_home, fake))
+        if alias_added.returncode != 0:
+            raise AssertionError(f"same-contract profile alias was not preserved: {alias_added.stdout}")
+        alias_exact = run(binary, home, "profile", "doctor", "alias")
+        alias_data = envelope(alias_exact)["data"] if alias_exact.returncode == 0 else {}
+        if alias_exact.returncode != 0 or alias_data.get("server_key") != exact_data["server_key"]:
+            raise AssertionError(f"same-contract profile alias did not share the server key: {alias_exact.stdout}")
+
         started = run(binary, home, "profile", "server", "start", "default")
         started_data = envelope(started)["data"]
         if started.returncode != 0 or started_data["state"]["lifecycle"] != "ready":
@@ -539,31 +617,172 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError("server status did not reconnect to the singleton")
         assert_valid(status, machine, "profile-server-status Machine envelope")
 
+        # The journal-derived index and the running server state form one
+        # consistency boundary. Verification must reject a stale state
+        # revision instead of reporting a clean membership snapshot.
+        state_path = profile_root / "state.json"
+        current_state = json.loads(state_path.read_text(encoding="utf-8"))
+        current_state["membership_revision"] += 1
+        state_path.write_text(json.dumps(current_state), encoding="utf-8")
+        state_path.chmod(0o600)
+        revision_mismatch = run(
+            binary, home, "profile", "membership", "verify", "default"
+        )
+        revision_mismatch_envelope = envelope(revision_mismatch)
+        if (
+            revision_mismatch.returncode == 0
+            or revision_mismatch_envelope["error"]["code"]
+            != "PROFILE_MEMBERSHIP_INCOMPLETE"
+        ):
+            raise AssertionError(
+                f"membership revision mismatch was accepted: {revision_mismatch.stdout}"
+            )
+        assert_valid(
+            revision_mismatch_envelope,
+            machine,
+            "membership-revision-mismatch Machine envelope",
+        )
+        current_state["membership_revision"] -= 1
+        state_path.write_text(json.dumps(current_state), encoding="utf-8")
+        state_path.chmod(0o600)
+
+        # Verification classifies each manifest failure without mutating the
+        # journal. An operator-confirmed tombstone then releases only the exact
+        # orphan identity after rechecking it under the server lock.
+        orphan_ids = {
+            "manifest_missing": "01a071ba-0000-7000-8000-000000000003",
+            "manifest_malformed": "01a071ba-0000-7000-8000-000000000004",
+            "profile_binding_mismatch": "01a071ba-0000-7000-8000-000000000005",
+        }
+        for orphan_id in orphan_ids.values():
+            append_membership(profile_root, "run_registered", workspace_id, orphan_id)
+        malformed_root = (
+            home / ".dolgorae" / "workspaces" / workspace_id / "runs"
+            / orphan_ids["manifest_malformed"]
+        )
+        malformed_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        malformed_manifest = malformed_root / "manifest.json"
+        malformed_manifest.write_text("{", encoding="utf-8")
+        malformed_manifest.chmod(0o600)
+        write_bound_manifest(
+            home,
+            pathlib.Path("b" * 64),
+            workspace_id,
+            orphan_ids["profile_binding_mismatch"],
+        )
+        orphan_verification = envelope(
+            run(binary, home, "profile", "membership", "verify", "default")
+        )
+        if orphan_verification["data"]["complete"] is not False:
+            raise AssertionError("membership verification accepted orphan manifests")
+        reasons = {item["reason"] for item in orphan_verification["data"]["orphans"]}
+        if reasons != set(orphan_ids):
+            raise AssertionError(f"membership orphan reasons were incomplete: {reasons}")
+        assert_valid(orphan_verification, machine, "membership-orphans Machine envelope")
+        for orphan_id in orphan_ids.values():
+            tombstoned = run(
+                binary,
+                home,
+                "profile",
+                "membership",
+                "tombstone-orphan",
+                "default",
+                "--operator-file",
+                str(operator),
+                "--confirm-server-key",
+                exact_data["server_key"],
+                "--confirm-workspace-id",
+                workspace_id,
+                "--confirm-run-id",
+                orphan_id,
+            )
+            if tombstoned.returncode != 0 or envelope(tombstoned)["data"]["tombstoned"] is not True:
+                raise AssertionError(f"orphan tombstone failed: {tombstoned.stdout}")
+            assert_valid(envelope(tombstoned), machine, "membership-tombstone Machine envelope")
+
         # A Run registered as a live member of this server must not be
         # interrupted by an ordinary stop. Until registration existed the live
         # member set was always empty and every membership gate was vacuous.
-        append_membership(profile_root, "run_registered", workspace_id, "run-live-member")
+        live_member_id = "01a071ba-0000-7000-8000-000000000001"
+        write_bound_manifest(home, profile_root, workspace_id, live_member_id)
+        append_membership(profile_root, "run_registered", workspace_id, live_member_id)
+        gated_remove = run(binary, home, "profile", "remove", "default")
+        gated_remove_envelope = envelope(gated_remove)
+        if (
+            gated_remove.returncode != 4
+            or gated_remove_envelope["error"]["code"] != "PROFILE_SERVER_BUSY"
+            or gated_remove_envelope["error"]["retryable"] is not True
+        ):
+            raise AssertionError(f"a remove with a live member was not gated: {gated_remove.stdout}")
+        assert_valid(gated_remove_envelope, machine, "live-member remove gate Machine envelope")
         gated_stop = run(
             binary,
             home,
             "profile",
             "server",
             "stop",
-            "default",
+            "alias",
             "--operator-file",
             str(operator),
         )
         gated_stop_envelope = envelope(gated_stop)
         if (
             gated_stop.returncode != 4
-            or gated_stop_envelope["error"]["code"] != "PROFILE_MEMBERSHIP_INCOMPLETE"
+            or gated_stop_envelope["error"]["code"] != "PROFILE_SERVER_BUSY"
         ):
             raise AssertionError(f"a stop with a live member was not gated: {gated_stop.stdout}")
-        if "--interrupt" not in gated_stop_envelope["error"]["details"]["reason"]:
-            raise AssertionError(
-                f"the live-member gate did not name its interrupt evidence: {gated_stop.stdout}"
-            )
         assert_valid(gated_stop_envelope, machine, "live-member stop gate Machine envelope")
+
+        # The guard fixture above is deliberately only a minimal manifest. A
+        # real forced stop must write into a conformant Run ledger, so release
+        # the fixture member and allocate a genuine threadless Run for the
+        # operator-override path.
+        append_membership(profile_root, "run_closed", workspace_id, live_member_id)
+        controller = root / "profile-stop-controller"
+        created_controller = run(
+            binary,
+            home,
+            "controller",
+            "credential",
+            "create",
+            "--kind",
+            "human-cli",
+            "--instance-id",
+            "profile-stop-test",
+            "--output",
+            str(controller),
+        )
+        if created_controller.returncode != 0:
+            raise AssertionError(
+                f"profile stop controller creation failed: {created_controller.stdout}"
+            )
+        started_member = run(
+            binary,
+            home,
+            "run",
+            "start",
+            "--workspace",
+            str(workspace),
+            "--profile",
+            "alias",
+            "--controller-file",
+            str(controller),
+            "--control-mode",
+            "direct-interactive",
+            "--execution-lane",
+            "shared-readonly",
+            "--required-assurance",
+            "best-effort-personal-alpha",
+            "--purpose",
+            "implementation",
+            "--instructions",
+            "validate Profile operator interruption",
+            "--idempotency-key",
+            "profile-stop-member",
+        )
+        if started_member.returncode != 0:
+            raise AssertionError(f"profile stop Run allocation failed: {started_member.stdout}")
+        live_member_id = envelope(started_member)["data"]["run_id"]
 
         # A confirmed interrupt is the explicit evidence that authorizes it,
         # and the interrupt is recorded with the members it cost.
@@ -603,14 +822,344 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if not evidence:
             raise AssertionError("the interrupt was not recorded as a diagnostic")
         interrupted_members = evidence[-1]["details"]["interrupted_members"]
-        if [member["run_id"] for member in interrupted_members] != ["run-live-member"]:
+        if [member["run_id"] for member in interrupted_members] != [live_member_id]:
             raise AssertionError(
                 f"the interrupt diagnostic did not name the members it cost: {evidence[-1]}"
             )
+        run_audit = (
+            home
+            / ".dolgorae"
+            / "workspaces"
+            / workspace_id
+            / "runs"
+            / live_member_id
+            / "audit.jsonl"
+        )
+        overrides = [
+            record
+            for record in (
+                json.loads(line)
+                for line in run_audit.read_text(encoding="utf-8").splitlines()
+                if line
+            )
+            if record["kind"] == "profile_observed"
+            and record["payload"].get("observation") == "operator_override"
+        ]
+        if (
+            len(overrides) != 1
+            or overrides[0]["payload"]["profile"] != "default"
+            or overrides[0]["payload"]["server_key"] != exact_data["server_key"]
+            or overrides[0]["payload"]["outcome"] != "no_active_turn"
+        ):
+            raise AssertionError(
+                f"the forced stop did not append one Run-local operator override: {overrides}"
+            )
+        repeated_interrupt = run(
+            binary,
+            home,
+            "profile",
+            "server",
+            "stop",
+            "default",
+            "--operator-file",
+            str(operator),
+            "--interrupt",
+            "--confirm-server-key",
+            exact_data["server_key"],
+        )
+        if (
+            repeated_interrupt.returncode != 0
+            or envelope(repeated_interrupt)["data"]["stopped"] is not False
+            or sum(
+                1
+                for line in run_audit.read_text(encoding="utf-8").splitlines()
+                if line
+                and json.loads(line)["kind"] == "profile_observed"
+                and json.loads(line)["payload"].get("observation")
+                == "operator_override"
+            )
+            != 1
+        ):
+            raise AssertionError(
+                f"a completed forced-stop retry was not idempotent: {repeated_interrupt.stdout}"
+            )
+        released_index = json.loads(
+            (profile_root / "members.json").read_text(encoding="utf-8")
+        )
+        released_member = released_index["members"][f"{workspace_id}:{live_member_id}"]
+        if (
+            released_member["disposition"] != "released"
+            or released_member["lifecycle"] != "operator_interrupt_quiescent"
+        ):
+            raise AssertionError(
+                f"the confirmed quiescent result was overwritten during release: {released_member}"
+            )
 
-        # Release the member and bring the singleton back for the rest of the
-        # matrix, which needs a running old server to migrate away from.
-        append_membership(profile_root, "run_closed", workspace_id, "run-live-member")
+        # Exercise the same stop path against a real hidden worker with a live
+        # Turn. The fixture settles that Turn only after shutdown sends
+        # turn/interrupt, so terminal_observed cannot be inferred from an idle
+        # projection or from the Profile Server process exiting.
+        live_codex_home = root / "live-codex-home"
+        live_codex_home.mkdir(mode=0o700)
+        live_bin = bin_root / "live"
+        live_bin.mkdir(mode=0o700)
+        live_codex = live_bin / "codex"
+        live_transcript = root / "profile-live-interrupt.jsonl"
+        native_codex.create_native_codex(
+            live_codex,
+            scenario=native_codex.scenario_path("profile_live_interrupt.json"),
+            codex_home=live_codex_home,
+            schema_source=real_codex,
+            transcript=live_transcript,
+        )
+        live_added = run(
+            binary,
+            home,
+            "profile",
+            "add",
+            "live",
+            *add_arguments(live_codex_home, live_codex),
+        )
+        if live_added.returncode != 0:
+            raise AssertionError(f"live-worker profile add failed: {live_added.stdout}")
+        live_started = run(binary, home, "profile", "server", "start", "live")
+        if live_started.returncode != 0:
+            raise AssertionError(f"live-worker profile start failed: {live_started.stdout}")
+        live_server_key = envelope(live_started)["data"]["state"]["server_key"]
+        live_member = run(
+            binary,
+            home,
+            "run",
+            "start",
+            "--workspace",
+            str(workspace),
+            "--profile",
+            "live",
+            "--controller-file",
+            str(controller),
+            "--control-mode",
+            "direct-interactive",
+            "--execution-lane",
+            "shared-readonly",
+            "--required-assurance",
+            "best-effort-personal-alpha",
+            "--purpose",
+            "implementation",
+            "--instructions",
+            "validate live Profile interruption",
+            "--idempotency-key",
+            "profile-live-stop-member",
+        )
+        if live_member.returncode != 0:
+            raise AssertionError(f"live-worker Run allocation failed: {live_member.stdout}")
+        live_run_id = envelope(live_member)["data"]["run_id"]
+        submitted = run(
+            binary,
+            home,
+            "run",
+            "--controller-file",
+            str(controller),
+            "submit",
+            live_run_id,
+            "--workspace",
+            str(workspace),
+            "--message",
+            "remain live until Profile stop",
+            "--idempotency-key",
+            "profile-live-turn",
+        )
+        if (
+            submitted.returncode != 0
+            or envelope(submitted)["data"]["status"] != "accepted"
+        ):
+            raise AssertionError(f"live-worker Turn did not start: {submitted.stdout}")
+        live_stopped = run(
+            binary,
+            home,
+            "profile",
+            "server",
+            "stop",
+            "live",
+            "--operator-file",
+            str(operator),
+            "--interrupt",
+            "--confirm-server-key",
+            live_server_key,
+        )
+        if live_stopped.returncode != 0 or envelope(live_stopped)["data"]["stopped"] is not True:
+            raise AssertionError(f"live-worker Profile stop failed: {live_stopped.stdout}")
+        live_run_root = (
+            home / ".dolgorae" / "workspaces" / workspace_id / "runs" / live_run_id
+        )
+        live_overrides = [
+            json.loads(line)["payload"]
+            for line in (live_run_root / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+            if line
+            and json.loads(line)["kind"] == "profile_observed"
+            and json.loads(line)["payload"].get("observation") == "operator_override"
+        ]
+        if len(live_overrides) != 1 or live_overrides[0]["outcome"] != "terminal_observed":
+            raise AssertionError(
+                f"live worker did not durably record its terminal before Profile stop: {live_overrides}"
+            )
+        live_profile_root = home / ".dolgorae" / "profiles" / live_server_key
+        live_index = json.loads(
+            (live_profile_root / "members.json").read_text(encoding="utf-8")
+        )
+        live_record = live_index["members"][f"{workspace_id}:{live_run_id}"]
+        if (
+            live_record["disposition"] != "released"
+            or live_record["lifecycle"] != "operator_interrupt_terminal"
+        ):
+            raise AssertionError(f"live-worker membership outcome drifted: {live_record}")
+        live_calls = [
+            json.loads(line)
+            for line in live_transcript.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        if sum(call.get("method") == "turn/interrupt" for call in live_calls) != 1:
+            raise AssertionError("Profile stop did not interrupt the live worker exactly once")
+        live_removed = run(binary, home, "profile", "remove", "live")
+        if live_removed.returncode != 0:
+            raise AssertionError(f"live-worker profile removal failed: {live_removed.stdout}")
+
+        # Exercise the uncertain branch with a worker whose interrupted Turn
+        # never publishes terminal evidence. The stop must retain the observed
+        # Turn identity and durably quarantine the Run as outcome_unknown.
+        unknown_codex_home = root / "unknown-codex-home"
+        unknown_codex_home.mkdir(mode=0o700)
+        unknown_bin = bin_root / "unknown"
+        unknown_bin.mkdir(mode=0o700)
+        unknown_codex = unknown_bin / "codex"
+        unknown_transcript = root / "profile-interrupt-unknown.jsonl"
+        native_codex.create_native_codex(
+            unknown_codex,
+            scenario=native_codex.scenario_path("profile_interrupt_unknown.json"),
+            codex_home=unknown_codex_home,
+            schema_source=real_codex,
+            transcript=unknown_transcript,
+        )
+        unknown_added = run(
+            binary,
+            home,
+            "profile",
+            "add",
+            "unknown",
+            *add_arguments(unknown_codex_home, unknown_codex),
+        )
+        if unknown_added.returncode != 0:
+            raise AssertionError(f"unknown-worker profile add failed: {unknown_added.stdout}")
+        unknown_started = run(binary, home, "profile", "server", "start", "unknown")
+        if unknown_started.returncode != 0:
+            raise AssertionError(f"unknown-worker profile start failed: {unknown_started.stdout}")
+        unknown_server_key = envelope(unknown_started)["data"]["state"]["server_key"]
+        unknown_member = run(
+            binary,
+            home,
+            "run",
+            "start",
+            "--workspace",
+            str(workspace),
+            "--profile",
+            "unknown",
+            "--controller-file",
+            str(controller),
+            "--control-mode",
+            "direct-interactive",
+            "--execution-lane",
+            "shared-readonly",
+            "--required-assurance",
+            "best-effort-personal-alpha",
+            "--purpose",
+            "implementation",
+            "--instructions",
+            "validate uncertain Profile interruption",
+            "--idempotency-key",
+            "profile-unknown-stop-member",
+        )
+        if unknown_member.returncode != 0:
+            raise AssertionError(f"unknown-worker Run allocation failed: {unknown_member.stdout}")
+        unknown_run_id = envelope(unknown_member)["data"]["run_id"]
+        unknown_submit = run(
+            binary,
+            home,
+            "run",
+            "--controller-file",
+            str(controller),
+            "submit",
+            unknown_run_id,
+            "--workspace",
+            str(workspace),
+            "--message",
+            "never publish a terminal",
+            "--idempotency-key",
+            "profile-unknown-turn",
+        )
+        if unknown_submit.returncode != 0:
+            raise AssertionError(f"unknown-worker Turn did not start: {unknown_submit.stdout}")
+        unknown_stopped = run(
+            binary,
+            home,
+            "profile",
+            "server",
+            "stop",
+            "unknown",
+            "--operator-file",
+            str(operator),
+            "--interrupt",
+            "--confirm-server-key",
+            unknown_server_key,
+        )
+        if unknown_stopped.returncode != 0:
+            raise AssertionError(f"unknown-worker Profile stop failed: {unknown_stopped.stdout}")
+        unknown_run_root = (
+            home / ".dolgorae" / "workspaces" / workspace_id / "runs" / unknown_run_id
+        )
+        unknown_overrides = [
+            json.loads(line)["payload"]
+            for line in (unknown_run_root / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+            if line
+            and json.loads(line)["kind"] == "profile_observed"
+            and json.loads(line)["payload"].get("observation") == "operator_override"
+        ]
+        if (
+            len(unknown_overrides) != 1
+            or unknown_overrides[0]["outcome"] != "outcome_unknown"
+            or unknown_overrides[0]["turn_id"] != "turn-profile-unknown"
+        ):
+            raise AssertionError(
+                f"uncertain Profile stop lost its durable Turn outcome: {unknown_overrides}"
+            )
+        unknown_index = json.loads(
+            (
+                home
+                / ".dolgorae"
+                / "profiles"
+                / unknown_server_key
+                / "members.json"
+            ).read_text(encoding="utf-8")
+        )
+        unknown_record = unknown_index["members"][f"{workspace_id}:{unknown_run_id}"]
+        if (
+            unknown_record["disposition"] != "released"
+            or unknown_record["lifecycle"] != "interrupted_unknown"
+        ):
+            raise AssertionError(f"uncertain membership outcome drifted: {unknown_record}")
+        unknown_calls = [
+            json.loads(line)
+            for line in unknown_transcript.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        if sum(call.get("method") == "turn/interrupt" for call in unknown_calls) != 1:
+            raise AssertionError("uncertain Profile stop did not interrupt exactly once")
+        unknown_removed = run(binary, home, "profile", "remove", "unknown")
+        if unknown_removed.returncode != 0:
+            raise AssertionError(
+                f"unknown-worker profile removal failed: {unknown_removed.stdout}"
+            )
+
+        # Bring the singleton back for the rest of the matrix, which needs a
+        # running old server to migrate away from.
         restarted = run(
             binary, home, "profile", "server", "start", "default"
         )
@@ -660,13 +1209,15 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # A different launch contract cannot auto-roll a server that still
         # owns a live Run. The failed attempt must leave the old process and
         # active contract untouched.
-        append_membership(profile_root, "run_registered", workspace_id, "run-rollover-blocker")
+        rollover_member_id = "01a071ba-0000-7000-8000-000000000002"
+        write_bound_manifest(home, profile_root, workspace_id, rollover_member_id)
+        append_membership(profile_root, "run_registered", workspace_id, rollover_member_id)
         conflicting_start = run(
             binary, home, "profile", "server", "start", "conflict"
         )
         if (
             conflicting_start.returncode != 4
-            or envelope(conflicting_start)["error"]["code"] != "PROFILE_MEMBERSHIP_INCOMPLETE"
+            or envelope(conflicting_start)["error"]["code"] != "PROFILE_SERVER_BUSY"
         ):
             raise AssertionError(f"live same-home singleton was not preserved: {conflicting_start.stdout}")
         preserved = envelope(
@@ -678,7 +1229,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         # Once the source membership is empty, starting the new contract
         # retires only the Dolgorae-managed singleton and publishes the new
         # generation without an operator credential.
-        append_membership(profile_root, "run_closed", workspace_id, "run-rollover-blocker")
+        append_membership(profile_root, "run_closed", workspace_id, rollover_member_id)
         conflicting_start = run(
             binary, home, "profile", "server", "start", "conflict"
         )
@@ -704,6 +1255,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         )
         if conflicting_remove.returncode != 0:
             raise AssertionError(f"conflict profile cleanup failed: {conflicting_remove.stdout}")
+        assert_valid(envelope(conflicting_remove), machine, "profile-remove Machine envelope")
 
         set_mode(fake, version="0.150.0")
         migrated_snapshot = envelope(
@@ -741,10 +1293,20 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if stopped.returncode != 0 or envelope(stopped)["data"]["stopped"] is not True:
             raise AssertionError(f"server stop failed: {stopped.stdout}")
         assert_valid(envelope(stopped), machine, "profile-server-final-stop Machine envelope")
+        stopped_status = envelope(
+            run(binary, home, "profile", "server", "status", "default")
+        )
+        if stopped_status["data"]["lifecycle"] != "stopped":
+            raise AssertionError("stopped server status did not report stopped")
+        assert_valid(stopped_status, machine, "stopped profile-server-status Machine envelope")
         set_mode(fake)
         membership = envelope(run(binary, home, "profile", "membership", "verify", "default"))
-        if membership["data"]["complete"] is not True or membership["data"]["revision"] != 0:
-            raise AssertionError("legacy lifecycle membership leaked into global membership")
+        if (
+            membership["data"]["complete"] is not True
+            or membership["data"]["records"] != membership["data"]["revision"]
+            or membership["data"]["orphans"]
+        ):
+            raise AssertionError("canonical global membership did not verify cleanly")
         assert_valid(membership, machine, "profile-membership-verify Machine envelope")
 
         state = envelope(run(binary, home, "profile", "diagnostics", "list", "default"))
@@ -780,19 +1342,91 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"PROFILE_MISMATCH details were not exact: {mismatched_confirm.stdout}")
         assert_valid(mismatched_confirm_envelope, machine, "state-reset-confirm-mismatch Machine envelope")
 
-        # Fabricate a migration fence stuck in "prepared" phase, as a crash
-        # between PREPARE and COMMIT would leave it, naming this profile's
-        # own (now-stopped, so provably absent) server key as one side and a
-        # never-started server key as the other. `profile state reset`
-        # proving both recorded lifetimes absent must repair a blocked fence as a
-        # best-effort side effect rather than leaving the CODEX_HOME fenced
-        # forever with no operator recovery path.
         home_hash = hashlib.sha256(
             b"dolgorae-home-v1\0" + exact_data["expected_codex_home"].encode("utf-8")
         ).hexdigest()
         home_dir = home / ".dolgorae" / "homes" / home_hash
         home_dir.mkdir(parents=True, exist_ok=True)
         home_dir.chmod(0o700)
+
+        # Recreate the durable residue of a crash after interrupt-stop APPLY:
+        # the physical lifetime is gone, while state, the stopping reservation,
+        # and an attached Run remain. State reset must release that exact epoch
+        # as interrupted_unknown and clear both lifecycle records.
+        stranded_state = returned_data["state"]
+        state_path = profile_root / "state.json"
+        state_path.write_text(json.dumps(stranded_state), encoding="utf-8")
+        state_path.chmod(0o600)
+        stranded_member_id = "01a071ba-0000-7000-8000-000000000007"
+        write_bound_manifest(home, profile_root, workspace_id, stranded_member_id)
+        append_membership(
+            profile_root,
+            "run_registered",
+            workspace_id,
+            stranded_member_id,
+            stranded_state["server_epoch"],
+        )
+        active_path = home_dir / "active.json"
+        active_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "canonical_codex_home": exact_data["expected_codex_home"],
+                    "server_key": exact_data["server_key"],
+                    "server_epoch": stranded_state["server_epoch"],
+                    "lifecycle": "stopping",
+                    "pid": stranded_state["pid"],
+                    "transition_token": "00000000-0000-7000-8000-000000000001",
+                }
+            ),
+            encoding="utf-8",
+        )
+        active_path.chmod(0o600)
+        recovered_stop = run(
+            binary,
+            home,
+            "profile",
+            "state",
+            "reset",
+            "default",
+            "--operator-file",
+            str(operator),
+            "--confirm-server-key",
+            exact_data["server_key"],
+            "--require-server-absence",
+        )
+        if recovered_stop.returncode != 0:
+            raise AssertionError(
+                f"state reset did not recover a stranded interrupt stop: {recovered_stop.stdout}"
+            )
+        assert_valid(
+            envelope(recovered_stop), machine, "stranded-stop-state-reset Machine envelope"
+        )
+        if state_path.exists() or active_path.exists():
+            raise AssertionError("state reset left a stranded lifecycle record")
+        recovered_membership = envelope(
+            run(binary, home, "profile", "membership", "verify", "default")
+        )
+        recovered_member = next(
+            member
+            for member in recovered_membership["data"]["members"]
+            if member["workspace_id"] == workspace_id
+            and member["run_id"] == stranded_member_id
+        )
+        if (
+            recovered_member["disposition"] != "released"
+            or recovered_member["lifecycle"] != "interrupted_unknown"
+        ):
+            raise AssertionError(
+                f"state reset did not classify the stranded member: {recovered_member}"
+            )
+        assert_valid(
+            recovered_membership, machine, "recovered-stop-membership Machine envelope"
+        )
+
+        # Fabricate a blocked migration fence naming this now-absent server
+        # key and a never-started key. State reset proves both lifetimes absent
+        # and repairs the fence as a best-effort side effect.
         migration_path = home_dir / "migration.json"
         never_started_server_key = "f" * 64
         migration_path.write_text(
@@ -833,6 +1467,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         removed = run(binary, home, "profile", "remove", "default")
         if removed.returncode != 0 or envelope(removed)["data"]["removed"] is not True:
             raise AssertionError(f"profile remove failed: {removed.stdout}")
+        assert_valid(envelope(removed), machine, "final profile-remove Machine envelope")
 
 
 def main() -> int:

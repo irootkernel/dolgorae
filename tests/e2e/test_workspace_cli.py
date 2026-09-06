@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -58,7 +59,10 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     global_profiles = validator(
         protocol_root, "dolgorae-global-profile-registry-v1.schema.json"
     )
-    home_state = validator(protocol_root, "dolgorae-home-state-v1.schema.json")
+    home_state = validator(protocol_root, "dolgorae-home-state-v2.schema.json")
+    binding_history = validator(
+        protocol_root, "dolgorae-profile-binding-history-v1.schema.json"
+    )
 
     with tempfile.TemporaryDirectory(prefix="dolgorae-task002-validator-") as temporary:
         root = pathlib.Path(temporary)
@@ -158,6 +162,15 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             home_state,
             "Dolgorae home generation",
         )
+        assert_valid(
+            json.loads(
+                (home / ".dolgorae" / "profile-bindings.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            binding_history,
+            "global Profile binding history",
+        )
 
         for directory in [state_root, state_root / "runtime" / "locks", state_root / "orchestration"]:
             if stat.S_IMODE(directory.stat().st_mode) != 0o700:
@@ -165,10 +178,39 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         for file_path in [
             state_root / "workspace.json",
             home / ".dolgorae" / "profiles.yaml",
+            home / ".dolgorae" / "profile-bindings.json",
             home / ".dolgorae" / "state.json",
         ]:
             if stat.S_IMODE(file_path.stat().st_mode) != 0o600:
                 raise AssertionError(f"unsafe file mode: {file_path}")
+
+        policy_before_rediscovery = {
+            path.name: path.read_bytes()
+            for path in (repository / ".dolgorae").iterdir()
+            if path.is_file()
+        }
+        state_root = home / ".dolgorae" / "workspaces" / workspace_id
+        shutil.rmtree(state_root)
+        rediscovered = run(binary, ["init", str(repository)], home)
+        if rediscovered.returncode != 0 or rediscovered.stderr:
+            raise AssertionError(f"rediscovery init failed: {rediscovered.stdout}")
+        rediscovered_envelope = json.loads(rediscovered.stdout)
+        assert_valid(rediscovered_envelope, machine, "rediscovery-init Machine envelope")
+        if rediscovered_envelope["data"]["workspace_id"] != workspace_id:
+            raise AssertionError("rediscovery changed the deterministic workspace ID")
+        if rediscovered_envelope["data"]["created"] is not True:
+            raise AssertionError("rediscovery did not report created:true")
+        policy_after_rediscovery = {
+            path.name: path.read_bytes()
+            for path in (repository / ".dolgorae").iterdir()
+            if path.is_file()
+        }
+        if policy_after_rediscovery != policy_before_rediscovery:
+            raise AssertionError("rediscovery changed portable policy bytes")
+        rediscovered_repeat = run(binary, ["init", str(repository)], home)
+        if json.loads(rediscovered_repeat.stdout)["data"]["created"] is not False:
+            raise AssertionError("repeated rediscovery did not report created:false")
+
 
         uninitialized = root / "uninitialized"
         uninitialized.mkdir(mode=0o700)

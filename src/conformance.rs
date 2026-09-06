@@ -765,6 +765,72 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         self.verify()
     }
 
+    /// Append one idempotent Profile observation without changing Run
+    /// lifecycle. Profile-wide operator interruption uses the existing closed
+    /// audit-v1 `profile_observed` kind rather than inventing a new kind.
+    pub(crate) fn append_profile_observation(
+        &mut self,
+        timestamp: &str,
+        operation_id: Uuid,
+        payload: &serde_json::Value,
+    ) -> Result<bool, ConformanceError> {
+        let operation_id_text = operation_id.to_string();
+        let existing = self
+            .ledger
+            .payloads_of_kind(AuditKind::ProfileObserved)?
+            .into_iter()
+            .find(|value| {
+                value
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(operation_id_text.as_str())
+            });
+        if let Some(existing) = existing {
+            if existing == *payload {
+                return Ok(false);
+            }
+            return Err(ConformanceError::InvalidHistory(
+                "profile observation operation ID has conflicting durable input".to_owned(),
+            ));
+        }
+        let encoded = serde_json::to_string(payload)
+            .map_err(|error| ConformanceError::InvalidHistory(error.to_string()))?;
+        let lossless =
+            parse(&encoded).map_err(|error| ConformanceError::InvalidHistory(error.to_string()))?;
+        let record = self.next_record(timestamp, AuditKind::ProfileObserved, lossless)?;
+        self.append(record, AppendDurability::Required)?;
+        Ok(true)
+    }
+
+    /// Conservatively terminate an active lifecycle whose worker is already
+    /// absent and therefore cannot provide terminal evidence.
+    pub(crate) fn mark_profile_interrupt_outcome_unknown(
+        &mut self,
+        timestamp: &str,
+        operation_id: Uuid,
+    ) -> Result<(), ConformanceError> {
+        let report = self.verify()?;
+        if report.lifecycle == RunLifecycle::OutcomeUnknown {
+            return Ok(());
+        }
+        if !matches!(
+            report.lifecycle,
+            RunLifecycle::Running
+                | RunLifecycle::WaitingInteraction
+                | RunLifecycle::ReconciliationRequired
+        ) {
+            return Err(ConformanceError::InvalidHistory(
+                "profile interrupt cannot classify this lifecycle as outcome_unknown".to_owned(),
+            ));
+        }
+        let record = self.next_record(
+            timestamp,
+            AuditKind::OutcomeUnknown,
+            object(&[("operation_id", string(&operation_id.to_string()))]),
+        )?;
+        self.append(record, AppendDurability::Required)
+    }
+
     #[allow(
         dead_code,
         reason = "TASK-004 interrupt owner will call this sealed boundary"
@@ -1958,6 +2024,103 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
     const TIMESTAMP: &str = "2026-08-21T12:34:56.123456Z";
+
+    #[test]
+    fn profile_interrupt_outcome_and_observation_are_idempotent_and_conflict_checked() {
+        let run_id = Uuid::now_v7();
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-profile-observation-conformance-{}",
+            Uuid::now_v7()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let mut ledger = ConformantLedger::open(&root, run_id).unwrap();
+        ledger
+            .bootstrap(&BootstrapRequest {
+                timestamp: TIMESTAMP.to_owned(),
+                workspace_id: "a".repeat(64),
+                intent: IdempotencyIntent {
+                    schema_version: 1,
+                    operation: IdempotencyOperation::StartRun,
+                    idempotency_key: "profile-observation".to_owned(),
+                    normalized_identity_sha256: "b".repeat(64),
+                    run_id,
+                },
+                record_kind: BootstrapRecordKind::RunCreated,
+                initial_access: "read".to_owned(),
+                default_effort: Some("medium".to_owned()),
+            })
+            .unwrap();
+        for (previous, current) in [
+            (RunLifecycle::Starting, RunLifecycle::Idle),
+            (RunLifecycle::Idle, RunLifecycle::Running),
+        ] {
+            let transition = ledger
+                .next_record(
+                    TIMESTAMP,
+                    AuditKind::LifecycleTransition,
+                    transition_payload(previous, current, false),
+                )
+                .unwrap();
+            ledger
+                .append(transition, AppendDurability::Required)
+                .unwrap();
+        }
+
+        let operation_id = Uuid::now_v7();
+        ledger
+            .mark_profile_interrupt_outcome_unknown(TIMESTAMP, operation_id)
+            .unwrap();
+        let after_unknown = ledger.verify().unwrap().record_count;
+        ledger
+            .mark_profile_interrupt_outcome_unknown(TIMESTAMP, operation_id)
+            .unwrap();
+        assert_eq!(ledger.verify().unwrap().record_count, after_unknown);
+
+        let payload = serde_json::json!({
+            "observation": "operator_override",
+            "operation_id": operation_id,
+            "profile": "default",
+            "server_key": "c".repeat(64),
+            "server_epoch": 1,
+            "turn_id": "turn-1",
+            "outcome": "outcome_unknown",
+        });
+        assert!(
+            ledger
+                .append_profile_observation(TIMESTAMP, operation_id, &payload)
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .append_profile_observation(TIMESTAMP, operation_id, &payload)
+                .unwrap()
+        );
+        let conflict = serde_json::json!({
+            "observation": "operator_override",
+            "operation_id": operation_id,
+            "profile": "default",
+            "server_key": "c".repeat(64),
+            "server_epoch": 1,
+            "turn_id": "turn-1",
+            "outcome": "terminal_observed",
+        });
+        assert!(matches!(
+            ledger.append_profile_observation(TIMESTAMP, operation_id, &conflict),
+            Err(ConformanceError::InvalidHistory(message))
+                if message == "profile observation operation ID has conflicting durable input"
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn runtime_turn_intent_reopens_as_runtime_evidence() {

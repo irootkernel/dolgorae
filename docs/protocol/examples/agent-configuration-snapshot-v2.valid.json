@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "selected_profile": "codex-default",
+  "global_profile_binding_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "model": "gpt-5.6",
+  "default_effort": "high",
+  "purpose": { "kind": "review", "external_label": null },
+  "required_capabilities": [],
+  "role_reference": "reviewer",
+  "normalized_instructions": "Review the immutable target.",
+  "instructions": {
+    "schema": "dolgorae.instructions/v1",
+    "common_prefix_version": 1,
+    "mode_prefix_version": 1,
+    "purpose_prefix_version": 1,
+    "normalized_byte_length": 28,
+    "normalized_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "execution_lane": "shared_readonly",
+  "required_assurance": "best_effort_personal_alpha",
+  "native_subagent_policy": "enabled"
+}

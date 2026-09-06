@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/profile-binding-history/v1",
+  "title": "Dolgorae global Profile binding history v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bindings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "bindings": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]{0,127}:[0-9a-f]{64}$" },
+      "additionalProperties": { "$ref": "#/$defs/binding" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected_name", "definition_sha256", "server_key", "launch_snapshot_sha256"],
+      "properties": {
+        "selected_name": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+        "definition_sha256": { "$ref": "#/$defs/sha256" },
+        "server_key": { "$ref": "#/$defs/sha256" },
+        "launch_snapshot_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "x-invariants": ["each map key equals selected_name + ':' + server_key"]
+}

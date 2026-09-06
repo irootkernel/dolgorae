@@ -864,7 +864,8 @@ Specialist Policy JSON documents. A launch resolves one explicit name, validates
 all referenced Agent Configurations against current profile capabilities, and
 copies the complete policy plus JCS digest into the session before root Run
 allocation. Existing sessions never reread the registry.
-The mode-0600 `~/.dolgorae/state.json` generation marker is validated before
+The mode-0600 `~/.dolgorae/state.json` `global-profile-v2` generation marker
+and mode-0600 `profile-bindings.json` are validated before
 stateful access. Unmarked nonempty, malformed, unsupported, partial, and mixed
 homes fail closed as `LEGACY_STATE_UNSUPPORTED`; no legacy bytes are inspected
 for migration or changed. The gate is active for every production stateful
@@ -880,9 +881,9 @@ The affected-contract census is:
 
 | Contract | Successor decision |
 | --- | --- |
-| global registry | `global-profile-registry/v1` already has global meaning; unchanged |
+| global registry and binding history | `global-profile-registry/v1` plus `profile-binding-history/v1` |
 | Run manifest and binding | `run-manifest/v2` plus `global-profile-binding/v2` |
-| Profile Server state | `profile-server-state/v2` binds the global snapshot digest |
+| Profile Server state | `profile-server-state/v2` records the complete named launch snapshot, process/socket identity, epoch, and membership revision |
 | runtime discovery | new `runtime-discovery/v2` binds a Run to an exact server generation |
 | membership journal/index | new `profile-membership/v2`, global by `server_key` |
 | Agent Configuration | `agent-configuration/v2` binds the selected Profile and binding digest |
@@ -900,16 +901,19 @@ bytes return `PROFILE_MEMBERSHIP_INCOMPLETE` and also fail closed.
 
 The Dolgorae home contains a canonical-home coordinator at
 `homes/<home-key>/{home.lock,active.json}` and contract state at
-`profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,epoch,server.log,server.log.1}`.
-All components are current-uid-owned mode 0700/0600 and descriptor-relative.
+`profiles/<server-key>/{server.lock,state.json,membership.jsonl,members.json,diagnostics.jsonl,epoch,server.log,server.log.1}`.
+The server directory has only this lifecycle state and membership file set;
+there is no parallel `runtime-*` journal. All components are current-uid-owned
+mode 0700/0600 and descriptor-relative.
 The socket node uses the validated short path
 `/tmp/dolgorae-<uid>/p/<base32-first-160-server-key-bits>.sock`; its full path
 and device/inode are recorded in profile state.
 
-Profile state records the restorable immutable launch snapshot, accepted
-generation contracts, process/executable/log-drainer/socket identity, lifecycle,
-compatibility, migration/quiesce revision, epoch, start time and membership
-revision. The
+Profile state records the restorable immutable launch snapshot, server and
+launch-contract identity, canonical home, process/executable/log-drainer/socket
+identity, lifecycle, compatibility verdict, server epoch, and membership
+revision. Migration and quiesce revisions live in the home-authoritative
+`active.json` transition record. The
 hash-chained, directory-fsynced `membership.jsonl` is authoritative;
 `members.json` is an atomic derived snapshot bound to its revision/checksum.
 Membership records workspace/run/controller, worker generation, thread,
@@ -933,6 +937,16 @@ socket-inode absence before clearing state. Restart invalidates old connections
 and forces cross-epoch member reconciliation. Corrupt, missing, or unverifiable
 membership blocks the operation; an apparently empty partial index never
 authorizes termination.
+
+Worker startup acquires its Run startup range with the normal ten-second
+contention budget, then revalidates the home and server lifetime while retaining
+that range until the child publishes its runtime record.
+Unlocked quiesce shuts down each verified Run worker through its frozen
+identity-bound control path, then acquires that same range before opening its
+ledger. It records the result as the audit-v1 `profile_observed`
+operator-override payload keyed by the quiesce revision. Thus no Profile Server
+signal precedes the durable per-Run terminal, quiescent, or uncertain result,
+and an in-flight worker election cannot escape the Profile fence.
 
 Server-key migration is a home transaction. A generation-starting command may
 perform it without operator authority only after exact process/socket and
@@ -966,8 +980,12 @@ quiescence-to-stop admission race; release remains valid for shutdown cleanup.
 
 The global order is operator, home, server keys in binary order, handoff,
 writer, run startup locks in UUID-byte order, then in-process run mutation
-mutexes in the same order. Operations persist a revision-bound intent and drop
-file locks before process, network, turn, or user waits; no path acquires upward.
+mutexes in the same order. Worker startup admission is the sole inversion: it
+takes one Run startup range before home/server revalidation and retains it
+through `bound`; no path may hold a home or server lock while waiting to acquire
+a Run startup range. Operations persist a revision-bound intent and drop file
+locks before process, network, turn, or user waits; every other path follows the
+global order without acquiring upward.
 
 ### Persistent Run Store
 

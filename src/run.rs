@@ -1124,21 +1124,21 @@ fn validate_profile_snapshot(profile: &ProfileSnapshot) -> Result<(), &'static s
         || !is_sha256(&profile.launch_contract_sha256)
         || !is_sha256(&profile.initial_server_key)
     {
-        return Err("Runtime Profile snapshot is incomplete or invalid");
+        return Err("Codex Profile snapshot is incomplete or invalid");
     }
     let executable_path = profile
         .executable_identity
         .resolved_path
         .to_path_buf()
-        .map_err(|_| "Runtime Profile executable path encoding is invalid")?;
+        .map_err(|_| "Codex Profile executable path encoding is invalid")?;
     if !executable_path.is_absolute() {
-        return Err("Runtime Profile executable path must be absolute");
+        return Err("Codex Profile executable path must be absolute");
     }
     if profile.launch_contract_sha256 != launch_contract_digest(profile)? {
-        return Err("Runtime Profile launch-contract digest disagrees with its snapshot");
+        return Err("Codex Profile launch-contract digest disagrees with its snapshot");
     }
     if !canonical_round_trip_preserves(profile)? {
-        return Err("Runtime Profile snapshot contains a non-lossless JSON number");
+        return Err("Codex Profile snapshot contains a non-lossless JSON number");
     }
     Ok(())
 }

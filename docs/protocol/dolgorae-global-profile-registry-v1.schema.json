@@ -16,11 +16,18 @@
       "type": "object",
       "propertyNames": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
       },
       "additionalProperties": {
-        "$ref": "https://dolgorae.local/schema/local-profile-registry/v1#/$defs/profile"
+        "$ref": "#/$defs/profile"
       }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "$ref": "https://dolgorae.local/schema/local-profile-registry/v1#/$defs/profile"
     }
   }
 }
