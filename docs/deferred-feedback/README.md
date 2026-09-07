@@ -159,6 +159,45 @@ from current work. It is not a second roadmap or status authority.
   with direct schema-instance coverage.
 - Revisit condition: changing the manifest schema or expanding checked examples.
 
+## DF-016: Define a shared Run manifest size budget
+
+- Owner: Run persistence and Global Profile membership maintainers
+- Finding: Run recovery and membership orphan verification read complete
+  manifests without a shared byte ceiling, so an oversized user-owned manifest
+  can consume excess memory during inspection.
+- Reason for deferral: the current publisher has no total-manifest byte budget;
+  a limit only in orphan verification could reject a valid published Run.
+  Establish matching publication, recovery, and inspection limits together,
+  including compatibility with existing immutable snapshots. Hostile same-uid
+  mutation is outside the current threat model.
+- Revisit condition: adding a persisted Run size budget, changing snapshot
+  bounds, or extending the local-state threat model.
+
+## DF-017: Distinguish binding-history failures in home diagnostics
+
+- Owner: Global Profile home and Machine error-contract maintainers
+- Finding: malformed, oversized, or inconsistent binding history is reported
+  under the existing `malformed_marker` classification, which does not identify
+  the failing artifact precisely.
+- Reason for deferral: the current classification correctly blocks admission;
+  a more specific classification needs coordinated error-contract and operator
+  runbook changes rather than silently altering a checked response.
+- Revisit condition: introducing a home-diagnostic contract successor or the
+  journal-maintenance candidate in the TODO index.
+
+## DF-018: Extend defensive home and Machine projection regressions
+
+- Owner: Global Profile and CLI validation maintainers
+- Finding: explicit negative fixtures could additionally pin non-v1 registry
+  removal and symlinked workspace-entry rejection; schema assertions could
+  also be extended to remaining non-engagement Machine test helpers.
+- Reason for deferral: existing production guards reject those filesystem and
+  schema states, and current command/schema tests establish no divergence.
+  These cases are independent regression expansion, beyond the exercised
+  marker encoding/size, registry limits, and home-admission classifications.
+- Revisit condition: changing registry removal, workspace-entry traversal, or
+  the affected Machine test helpers.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

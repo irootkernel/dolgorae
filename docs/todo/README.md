@@ -5,7 +5,21 @@ active Epics. It does not own roadmap identity, order, status, or dependencies.
 
 ## Future candidates
 
-None.
+### Global Profile journal capacity and operator maintenance
+
+- Owner: Global Profile persistence and operator-recovery maintainers
+- Problem: binding history and membership journals have finite read ceilings.
+  Sustained growth can reach those ceilings and block ordinary admission or
+  lifecycle repair; existing recovery never compacts or deletes history.
+- Candidate: define capacity diagnostics and an explicitly authorized
+  maintenance operation that preserves immutable Run bindings, active or
+  unknown membership, revision/checksum continuity, and auditability. Specify
+  locking, interrupted-maintenance recovery, and how over-cap state is admitted
+  before introducing pruning, compaction, or a persisted-contract successor.
+- Reason for separate design: maintenance adds operator authority and retention
+  semantics beyond the current fail-closed storage contract.
+- Revisit condition: sustained deployment approaches the 1 MiB binding-history
+  or 8 MiB membership-journal ceiling, or storage maintenance is adopted.
 
 ## Adopted active-Epic dossiers
 
