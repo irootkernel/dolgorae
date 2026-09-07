@@ -3,7 +3,7 @@
 SPEC-013 requires `argv[0]` to be a direct Codex executable: a `#!` script is
 refused outright, because the kernel would exec an interpreter and the spawn
 image could never be the configured one.  So the controllable behaviour lives
-in Python but is reached through a compiled native image named `codex`, which
+in embedded Python inside a compiled native image named `codex`, which
 is what the registry validates and what `wait_for_app_identity` later observes.
 
 The image answers three launches, and nothing else:
@@ -18,18 +18,20 @@ The image answers three launches, and nothing else:
   socket.  Every `model/list` page a Run resolves against therefore comes from
   the independent fixture, never from the installed release.
 
-The exec shim keeps the original argv, so the launched process still carries
-`app-server` in its command line: the profile lifecycle waits for exactly that
-fingerprint before it believes a server is up.
+The native image remains resident and keeps the original argv, so both the
+process executable identity and the `app-server` command-line fingerprint
+remain valid throughout profile lifecycle and workload-absence checks.
 """
 
 from __future__ import annotations
 
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 
 PINNED_CODEX_VERSION = "0.149.0"
 PINNED_CODEX_ENV = "DOLGORAE_TEST_CODEX_BIN"
@@ -39,8 +41,8 @@ FAKE_APP_SERVER = REPOSITORY / "tools" / "fake_app_server"
 SCENARIO_ROOT = FAKE_APP_SERVER / "scenarios"
 
 SHIM_SOURCE = """
+#include <Python.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 int main(int argc, char **argv) {
     char **next = malloc(sizeof(char *) * (size_t)(argc + 2));
@@ -53,12 +55,13 @@ int main(int argc, char **argv) {
         next[index + 1] = argv[index];
     }
     next[argc + 1] = NULL;
-    execv(DRIVER_INTERPRETER, next);
-    return 127;
+    int result = Py_BytesMain(argc + 1, next);
+    free(next);
+    return result;
 }
 """
 
-DRIVER_SOURCE = '''"""The behaviour behind the native image, reached through execv."""
+DRIVER_SOURCE = '''"""The behaviour hosted inside the resident native image."""
 
 import pathlib
 import subprocess
@@ -211,6 +214,14 @@ def create_native_codex(
     driver.chmod(0o644)
     source = path.with_name(f"{path.name}-shim.c")
     source.write_text(SHIM_SOURCE, encoding="utf-8")
+    python_config = pathlib.Path(sysconfig.get_config_var("BINDIR")) / (
+        f"python{sysconfig.get_config_var('VERSION')}-config"
+    )
+    embedding_flags = shlex.split(
+        subprocess.check_output(
+            [str(python_config), "--embed", "--cflags", "--ldflags"], text=True
+        )
+    )
     compiled = subprocess.run(
         [
             compiler,
@@ -220,6 +231,7 @@ def create_native_codex(
             "-o",
             str(path),
             str(source),
+            *embedding_flags,
         ],
         check=False,
         capture_output=True,
