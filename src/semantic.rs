@@ -721,14 +721,18 @@ fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineErro
             }),
         ));
     }
-    let reason_matches = match reason {
-        "shared_readonly_source" => source.execution_lane == ExecutionLane::SharedReadonly,
-        _ => source.execution_lane == ExecutionLane::Dedicated,
-    };
+    let reason_matches = continuation_reason_matches(
+        source.execution_lane,
+        source
+            .profile_capability_snapshot
+            .capabilities
+            .get("access_policy_transition"),
+        reason,
+    );
     if !reason_matches {
         return Err(MachineError::new(
             "WRITE_CONTINUATION_LINEAGE_INVALID",
-            "the creation reason does not match the source execution lane",
+            "the creation reason does not match the recorded source lane and transition verdict",
             false,
             json!({"source_run_id": source_run_id, "reason": reason}),
         ));
@@ -1157,13 +1161,21 @@ fn run_history_reconciliation(
     let run_id = positional_run_id(args)?;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     let projection = store.load_state_projection(run_id)?;
-    if !matches!(
-        projection.lifecycle,
-        RunLifecycle::Running
-            | RunLifecycle::WaitingInteraction
-            | RunLifecycle::ReconciliationRequired
-            | RunLifecycle::OutcomeUnknown
-    ) {
+    let runtime_path =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, &state_root))?;
+    let control_recovery =
+        crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid())
+            .is_ok_and(|record| record.control_recovery_required);
+    if !control_recovery
+        && !matches!(
+            projection.lifecycle,
+            RunLifecycle::Running
+                | RunLifecycle::WaitingInteraction
+                | RunLifecycle::ReconciliationRequired
+                | RunLifecycle::OutcomeUnknown
+        )
+    {
         return Err(run_state_conflict_error(
             run_id,
             projection.lifecycle,
@@ -1173,6 +1185,21 @@ fn run_history_reconciliation(
     let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
     let binding = load_reconciled_controller_binding(&state_root, run_id)?;
     authorize_controller(run_id, operation, &binding, &carrier)?;
+    if control_recovery {
+        crate::worker::recover_control_runtime(&runtime_path, DarwinSystem.current_uid())
+            .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+        if matches!(
+            projection.lifecycle,
+            RunLifecycle::Idle
+                | RunLifecycle::Paused
+                | RunLifecycle::Closed
+                | RunLifecycle::StartFailed
+        ) {
+            let sources = RunSources::load(&state_root, run_id, 0)?;
+            let terminal = durable_last_terminal(&state_root, run_id, &sources)?;
+            return Ok(sources.run_value("Absent", terminal));
+        }
+    }
     let control_socket_epoch = ensure_run_worker(&view, &state_root, run_id)?;
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
@@ -1297,6 +1324,37 @@ fn validate_external_specialist_manifest(
         ));
     }
     Ok(())
+}
+
+fn continuation_reason_matches(
+    lane: ExecutionLane,
+    verdict: Option<&crate::run::CapabilityState>,
+    reason: &str,
+) -> bool {
+    match reason {
+        "shared_readonly_source" => lane == ExecutionLane::SharedReadonly,
+        "access_transition_unavailable" => {
+            lane == ExecutionLane::Dedicated
+                && verdict == Some(&crate::run::CapabilityState::Unavailable)
+        }
+        "access_transition_unverified" => {
+            lane == ExecutionLane::Dedicated
+                && verdict == Some(&crate::run::CapabilityState::Unverified)
+        }
+        _ => false,
+    }
+}
+
+fn continuation_request_identity(
+    provenance: &WriteContinuationProvenance,
+) -> Result<String, MachineError> {
+    let mut identity =
+        serde_json::to_value(provenance).map_err(|error| internal(error.to_string()))?;
+    identity
+        .as_object_mut()
+        .ok_or_else(|| internal("continuation provenance must be an object"))?
+        .remove("created_at");
+    serde_json::to_string(&identity).map_err(|error| internal(error.to_string()))
 }
 
 struct ContinuationStartContext<'a> {
@@ -1445,8 +1503,7 @@ fn run_start_with_context(
         normalized_identity_sha256 = sha256_hex(
             format!(
                 "write-continuation-v1\0{normalized_identity_sha256}\0{}",
-                serde_json::to_string(context.provenance)
-                    .map_err(|error| internal(error.to_string()))?
+                continuation_request_identity(context.provenance)?
             )
             .as_bytes(),
         );
@@ -3206,7 +3263,26 @@ fn commit_writer_handoff(
             }
         };
     }
-    writer.transact_handoff(|record| record.commit_acquire(handoff_id, destination_generation))?;
+    let destination_runtime = crate::worker::runtime_record_path(
+        &crate::worker::runtime_root(state_root),
+        handoff.destination_run_id,
+    )
+    .map_err(|error| error.machine_error(handoff.destination_run_id, state_root))?;
+    let destination_worker =
+        crate::worker::read_runtime_record(&destination_runtime, DarwinSystem.current_uid())
+            .map_err(|error| {
+                error.machine_error(handoff.destination_run_id, &destination_runtime)
+            })?;
+    writer.transact_handoff(|record| {
+        record.bind_reserved_generation(
+            handoff_id,
+            destination_worker.identity.run_generation,
+            destination_worker
+                .app_server_epoch
+                .ok_or_else(|| internal("destination server epoch is missing"))?,
+        )?;
+        record.commit_acquire(handoff_id, destination_generation)
+    })?;
     Ok(handoff_value(&handoff, "committed"))
 }
 
@@ -3248,7 +3324,8 @@ fn cancel_writer_handoff(
     let runs = RunStore::new(SystemWorkspacePlatform, state_root);
     let writer =
         crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
-    let handoff = writer.load()?.handoff.filter(|value| value.handoff_id == handoff_id)
+    let current = writer.load()?;
+    let handoff = current.handoff.or(current.cancelled_handoff).filter(|value| value.handoff_id == handoff_id && value.expected_writer_generation == current.writer_generation)
         .ok_or_else(|| MachineError::new(
             "WRITER_HANDOFF_NOT_ALLOWED",
             "writer handoff is not prepared",
@@ -3256,6 +3333,17 @@ fn cancel_writer_handoff(
             json!({"source_run_id": Value::Null, "destination_run_id": Value::Null, "blockers": ["handoff_not_prepared"]}),
         ))?;
     let binding = runs.load_controller_binding(handoff.source_run_id)?;
+    if binding.identity.controller_id != handoff.controller_id
+        || binding.identity.generation != handoff.controller_generation
+    {
+        return Err(MachineError::new(
+            "WRITER_HANDOFF_NOT_ALLOWED",
+            "handoff controller generation changed",
+            false,
+            json!({"source_run_id":handoff.source_run_id, "destination_run_id":handoff.destination_run_id,
+            "blockers":["controller_generation_changed"]}),
+        ));
+    }
     authorize_controller(
         handoff.source_run_id,
         "workspace.writer.handoff_cancel",
@@ -3413,6 +3501,7 @@ const fn worker_unreachable(error: crate::worker::WorkerProtocolError) -> bool {
         crate::worker::WorkerProtocolError::InvalidRuntimeRecord
             | crate::worker::WorkerProtocolError::InvalidOwnerRecord
             | crate::worker::WorkerProtocolError::SocketIdentityMismatch
+            | crate::worker::WorkerProtocolError::ControlRecoveryRequired { .. }
             | crate::worker::WorkerProtocolError::Io
     )
 }
@@ -4037,6 +4126,19 @@ impl RunSources {
             },
             |value| json!(value),
         );
+        let mut recovery = recovery_value(manifest, lifecycle);
+        if self
+            .runtime_record
+            .as_ref()
+            .is_some_and(|record| record.control_recovery_required)
+        {
+            recovery["status"] = json!("recovery_required");
+            recovery["reason"] = json!("control_socket_recovery_failed");
+            recovery["safe_actions"] =
+                json!(["run.status", "run.events", "run.recover", "run.reconcile"]);
+            recovery["unsafe_actions"] =
+                json!(["run.send", "run.submit", "run.respond", "run.interrupt"]);
+        }
         json!({
             "workspace_id": manifest.workspace_id,
             "run_id": manifest.run_id,
@@ -4101,7 +4203,7 @@ impl RunSources {
             "event_cursor": self.event_cursor(),
             "pending_count": projection.pending_requests.len(),
             "identity_verdict": identity_verdict,
-            "recovery": recovery_value(manifest, lifecycle),
+            "recovery": recovery,
             // Observed evidence or nothing: the durable projection records
             // which Turn was last active, not its response, usage, or measured
             // changes, so a verb that did not read a terminal publishes null
@@ -4109,6 +4211,19 @@ impl RunSources {
             "last_terminal": last_terminal,
         })
     }
+}
+
+pub(crate) fn writer_run_status(state_root: &Path, run_id: Uuid) -> Result<Value, MachineError> {
+    let sources = RunSources::load(state_root, run_id, 0)?;
+    let verdict = sources.runtime_record.as_ref().map_or("Absent", |record| {
+        match crate::worker::classify_worker_identity(record) {
+            crate::worker::ProcessIdentityVerdict::Match => "Match",
+            crate::worker::ProcessIdentityVerdict::Absent => "Absent",
+            crate::worker::ProcessIdentityVerdict::Mismatch => "Mismatch",
+            crate::worker::ProcessIdentityVerdict::Unverifiable => "Unverifiable",
+        }
+    });
+    Ok(sources.run_value(verdict, Value::Null))
 }
 
 /// What a caller may safely do next, derived from the Run's own lifecycle.
@@ -4934,6 +5049,14 @@ fn ensure_run_worker(
     if runtime_record.exists() {
         let record = crate::worker::read_runtime_record(&runtime_record, uid)
             .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+        if record.control_recovery_required {
+            return Err(
+                crate::worker::WorkerProtocolError::ControlRecoveryRequired {
+                    generation: record.identity.run_generation,
+                }
+                .machine_error(run_id, &runtime_record),
+            );
+        }
         match crate::worker::classify_worker_identity(&record) {
             crate::worker::ProcessIdentityVerdict::Match => {
                 return Ok(record.control_socket_epoch);
@@ -5763,6 +5886,67 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
 
+    #[test]
+    fn continuation_requires_the_named_recorded_verdict_and_stable_request_identity() {
+        use crate::run::CapabilityState;
+        for (reason, expected) in [
+            (
+                "access_transition_unavailable",
+                CapabilityState::Unavailable,
+            ),
+            ("access_transition_unverified", CapabilityState::Unverified),
+        ] {
+            assert!(!continuation_reason_matches(
+                ExecutionLane::Dedicated,
+                None,
+                reason
+            ));
+            assert!(!continuation_reason_matches(
+                ExecutionLane::Dedicated,
+                Some(&CapabilityState::Supported),
+                reason
+            ));
+            assert!(continuation_reason_matches(
+                ExecutionLane::Dedicated,
+                Some(&expected),
+                reason
+            ));
+            assert!(!continuation_reason_matches(
+                ExecutionLane::SharedReadonly,
+                Some(&expected),
+                reason
+            ));
+        }
+        assert!(continuation_reason_matches(
+            ExecutionLane::SharedReadonly,
+            None,
+            "shared_readonly_source"
+        ));
+        let mut provenance = WriteContinuationProvenance {
+            source_run_id: Uuid::now_v7(),
+            source_turn_id: "turn".to_owned(),
+            source_thread_id: "thread".to_owned(),
+            creation_reason: "shared_readonly_source".to_owned(),
+            source_controller_kind: "human_cli".to_owned(),
+            destination_controller_kind: "human_cli".to_owned(),
+            handoff_summary_sha256: None,
+            artifact_refs: vec![],
+            workspace_baseline_sha256: "a".repeat(64),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        let expected = continuation_request_identity(&provenance).unwrap();
+        provenance.created_at = "2026-01-02T00:00:00Z".to_owned();
+        assert_eq!(
+            continuation_request_identity(&provenance).unwrap(),
+            expected
+        );
+        provenance.source_turn_id = "different".to_owned();
+        assert_ne!(
+            continuation_request_identity(&provenance).unwrap(),
+            expected
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn profile_quiesce_classifies_every_durable_worker_outcome() {
@@ -5861,6 +6045,9 @@ mod tests {
             profile_server_epoch: 1,
             thread_id: Some("thread".to_owned()),
             lifecycle: RunLifecycle::Idle,
+            active_turn_id: None,
+            pending_interaction_count: 0,
+            last_event_cursor: None,
         }
     }
 
@@ -6320,6 +6507,9 @@ mod tests {
             profile_server_epoch: 1,
             thread_id: None,
             lifecycle: RunLifecycle::OutcomeUnknown,
+            active_turn_id: None,
+            pending_interaction_count: 0,
+            last_event_cursor: None,
         };
         let state_root = std::env::temp_dir().join(format!("dlg-reset-missing-{run_id}"));
 

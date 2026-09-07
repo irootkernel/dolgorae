@@ -53,6 +53,12 @@ pub struct WriterHolder {
     pub profile_server_epoch: u64,
     pub thread_id: Option<String>,
     pub lifecycle: RunLifecycle,
+    #[serde(default)]
+    pub active_turn_id: Option<String>,
+    #[serde(default)]
+    pub pending_interaction_count: usize,
+    #[serde(default)]
+    pub last_event_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -82,6 +88,8 @@ pub struct WriterRecord {
     pub transaction_id: Option<Uuid>,
     pub holder: Option<WriterHolder>,
     pub handoff: Option<WriterHandoff>,
+    #[serde(default)]
+    pub cancelled_handoff: Option<WriterHandoff>,
     pub recovery_action: Option<String>,
     pub writer_lock_device: u64,
     pub writer_lock_inode: u64,
@@ -101,6 +109,7 @@ impl WriterRecord {
             transaction_id: None,
             holder: None,
             handoff: None,
+            cancelled_handoff: None,
             recovery_action: None,
             writer_lock_device: 0,
             writer_lock_inode: 0,
@@ -316,10 +325,17 @@ impl WriterRecord {
         self.state = WriterAuthorityState::HandoffPrepared;
         self.transaction_id = Some(handoff.handoff_id);
         self.handoff = Some(handoff);
+        self.cancelled_handoff = None;
         Ok(())
     }
 
     pub fn cancel_handoff(&mut self, handoff_id: Uuid) -> Result<(), MachineError> {
+        if self.cancelled_handoff.as_ref().is_some_and(|handoff| {
+            handoff.handoff_id == handoff_id
+                && handoff.expected_writer_generation == self.writer_generation
+        }) {
+            return Ok(());
+        }
         if self.state != WriterAuthorityState::HandoffPrepared
             || self.transaction_id != Some(handoff_id)
         {
@@ -341,7 +357,7 @@ impl WriterRecord {
         if self.state != WriterAuthorityState::BlockedUnknown {
             self.transaction_id = None;
         }
-        self.handoff = None;
+        self.cancelled_handoff = self.handoff.take();
         Ok(())
     }
 
@@ -583,9 +599,54 @@ impl WriterStore {
         result
     }
 
+    /// Refresh only observations under the writer lock; authority generations
+    /// and revisions are unchanged by an observer projection update.
+    pub fn refresh_observation(&self) -> Result<(), MachineError> {
+        let lock = self.open_lock(LOCK_NAME)?;
+        match crate::darwin::DarwinSystem.lock_exclusive_nonblocking(&lock) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(path_error(&self.lock_path(LOCK_NAME), error)),
+        }
+        self.revalidate_lock(&lock, LOCK_NAME)?;
+        let result = (|| {
+            let mut record = self.load()?;
+            let Some(holder) = record.holder.as_mut() else {
+                return Ok(());
+            };
+            let projection = crate::run::RunStore::new(
+                crate::workspace::SystemWorkspacePlatform,
+                &self.state_root,
+            )
+            .load_state_projection(holder.run_id)?;
+            if projection.run_generation != holder.run_generation {
+                return Ok(());
+            }
+            let before = holder.clone();
+            holder.thread_id = projection.thread_id;
+            holder.lifecycle = projection.lifecycle;
+            holder.active_turn_id = projection.active_turn_id;
+            holder.pending_interaction_count = projection.pending_requests.len();
+            holder.last_event_cursor = projection.last_event_cursor;
+            if *holder != before {
+                self.replace(&record)?;
+            }
+            Ok(())
+        })();
+        crate::darwin::DarwinSystem
+            .unlock(&lock)
+            .map_err(|error| path_error(&self.lock_path(LOCK_NAME), error))?;
+        result
+    }
+
     pub fn status_value(&self) -> Result<Value, MachineError> {
+        self.refresh_observation()?;
         let record = self.load()?;
         let holder = record.holder.as_ref();
+        let run = holder
+            .map(|holder| crate::semantic::writer_run_status(&self.state_root, holder.run_id))
+            .transpose()?
+            .unwrap_or(Value::Null);
         Ok(json!({
             "workspace_id": record.workspace_id,
             "authority_state": record.state.as_str(),
@@ -596,22 +657,25 @@ impl WriterStore {
             "worker_generation": holder.map(|value| value.worker_generation),
             "profile_server_key": holder.map(|value| value.profile_server_key.clone()),
             "profile_server_epoch": holder.map(|value| value.profile_server_epoch),
-            "thread_id": holder.and_then(|value| value.thread_id.clone()),
-            "active_turn_id": Value::Null,
-            "lifecycle_state": holder.map(|value| value.lifecycle.as_str()),
-            "pending_interaction_count": 0,
-            "last_event_cursor": "0",
-            "recovery_state": if record.state == WriterAuthorityState::None { "ready" } else { "unverifiable" },
+            "thread_id": run.get("thread_id").cloned().unwrap_or(Value::Null),
+            "active_turn_id": run.get("active_turn_id").cloned().unwrap_or(Value::Null),
+            "lifecycle_state": run.get("state").cloned().unwrap_or(Value::Null),
+            "pending_interaction_count": run.get("pending_count").cloned().unwrap_or(json!(0)),
+            "last_event_cursor": run.get("event_cursor").cloned().unwrap_or(json!("0")),
+            "recovery_state": if holder.is_none() { "ready" }
+                else if run["state"] == "outcome_unknown" { "outcome_unknown" }
+                else if record.state == WriterAuthorityState::BlockedUnknown { "reconciliation_required" }
+                else if run["identity_verdict"] == "Match" { "ready" } else { "unverifiable" },
             "execution_lane": "dedicated",
-            "dedicated_lane": Value::Null,
-            "workload_background_state": {
+            "dedicated_lane": run.get("server_lane").cloned().unwrap_or(Value::Null),
+            "workload_background_state": run.get("workload_background_state").cloned().unwrap_or_else(|| json!({
                 "state": "unverified",
                 "mechanism": "dedicated_lane_process_census",
                 "census_revision": record.authority_revision,
                 "observed_process_count": 0,
                 "quiescent_since": Value::Null,
                 "consecutive_empty_samples": 0
-            },
+            })),
             "handoff": record.handoff.as_ref().map(|handoff| json!({
                 "handoff_id": handoff.handoff_id,
                 "status": "prepared",
@@ -649,6 +713,9 @@ impl WriterStore {
             profile_server_epoch,
             thread_id,
             lifecycle,
+            active_turn_id: None,
+            pending_interaction_count: 0,
+            last_event_cursor: None,
         }
     }
 
@@ -676,9 +743,16 @@ impl WriterStore {
         let descriptor = file.metadata().map_err(|error| path_error(&path, error))?;
         let pathname = fs::symlink_metadata(&path).map_err(|error| path_error(&path, error))?;
         if descriptor.dev() != pathname.dev() || descriptor.ino() != pathname.ino() {
-            return Err(MachineError::runtime_path_invalid(
+            return Err(MachineError::runtime_path_collision(
                 &path,
-                "held descriptor and lock pathname differ",
+                crate::workspace::FileIdentity {
+                    device: descriptor.dev(),
+                    inode: descriptor.ino(),
+                },
+                crate::workspace::FileIdentity {
+                    device: pathname.dev(),
+                    inode: pathname.ino(),
+                },
             ));
         }
         Ok(())
@@ -694,9 +768,13 @@ impl WriterStore {
         let path = self.lock_path(name);
         let metadata = fs::symlink_metadata(&path).map_err(|error| path_error(&path, error))?;
         if metadata.dev() != device || metadata.ino() != inode {
-            return Err(MachineError::runtime_path_invalid(
+            return Err(MachineError::runtime_path_collision(
                 &path,
-                "permanent lock pathname identity changed",
+                crate::workspace::FileIdentity { device, inode },
+                crate::workspace::FileIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
             ));
         }
         Ok(())
@@ -896,6 +974,9 @@ mod tests {
                     profile_server_epoch: 1,
                     thread_id: Some("thread".to_owned()),
                     lifecycle: RunLifecycle::Idle,
+                    active_turn_id: None,
+                    pending_interaction_count: 0,
+                    last_event_cursor: None,
                 });
                 record.recovery_action = Some("operator_repair".to_owned());
                 Ok(())
@@ -903,6 +984,50 @@ mod tests {
             .unwrap();
         assert_eq!(record.authority_revision, 1);
         assert_eq!(store.load().unwrap(), record);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_holder_observations_follow_the_matching_run_generation() {
+        let root = root();
+        let workspace = "c".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+        let store = WriterStore::new(&root, &workspace, uid);
+        let run_id = Uuid::now_v7();
+        let transaction = Uuid::now_v7();
+        store
+            .transact(|record| {
+                let (_, generation) =
+                    record.prepare_acquire(run_id, holder(run_id), transaction)?;
+                record.commit_acquire(transaction, generation)
+            })
+            .unwrap();
+        let revision = store.load().unwrap().authority_revision;
+        let run_root = root.join("runs").join(run_id.to_string());
+        fs::create_dir_all(&run_root).unwrap();
+        let mut projection = crate::projection::RunStateProjection::starting(run_id);
+        projection.run_generation = 1;
+        projection.thread_id = Some("bound-thread".to_owned());
+        projection.lifecycle = RunLifecycle::OutcomeUnknown;
+        projection.pending_requests = vec!["9".to_owned()];
+        projection.last_event_cursor = Some("37".to_owned());
+        let path = run_root.join("state.json");
+        fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        store.refresh_observation().unwrap();
+        let observed = store.load().unwrap();
+        assert_eq!(observed.authority_revision, revision);
+        let observed = observed.holder.unwrap();
+        assert_eq!(observed.thread_id.as_deref(), Some("bound-thread"));
+        assert_eq!(observed.lifecycle, RunLifecycle::OutcomeUnknown);
+        assert_eq!(observed.pending_interaction_count, 1);
+        assert_eq!(observed.last_event_cursor.as_deref(), Some("37"));
+        projection.run_generation = 2;
+        projection.lifecycle = RunLifecycle::Idle;
+        fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        store.refresh_observation().unwrap();
+        assert_eq!(store.load().unwrap().holder.unwrap(), observed);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -918,7 +1043,7 @@ mod tests {
         fs::rename(&lock, &displaced).unwrap();
         create_permanent_lock(&lock, uid).unwrap();
         let error = store.load().unwrap_err();
-        assert_eq!(error.code, "RUNTIME_PATH_INVALID");
+        assert_eq!(error.code, "RUNTIME_PATH_COLLISION");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -934,7 +1059,7 @@ mod tests {
         fs::rename(&lock, &displaced).unwrap();
         create_permanent_lock(&lock, uid).unwrap();
         let error = store.load().unwrap_err();
-        assert_eq!(error.code, "RUNTIME_PATH_INVALID");
+        assert_eq!(error.code, "RUNTIME_PATH_COLLISION");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1069,6 +1194,19 @@ mod tests {
             .transact_handoff(|record| record.cancel_handoff(prepared.handoff_id))
             .unwrap();
         assert_eq!(store.load().unwrap().state, WriterAuthorityState::Active);
+        let reopened = WriterStore::new(&root, &workspace, uid);
+        reopened
+            .transact_handoff(|record| record.cancel_handoff(prepared.handoff_id))
+            .unwrap();
+        assert_eq!(
+            reopened.load().unwrap().cancelled_handoff,
+            Some(prepared.clone())
+        );
+        assert!(
+            reopened
+                .transact_handoff(|record| record.cancel_handoff(Uuid::now_v7()))
+                .is_err()
+        );
 
         store
             .transact_handoff(|record| record.prepare_handoff(prepared.clone()))

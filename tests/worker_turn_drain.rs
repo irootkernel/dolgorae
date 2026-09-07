@@ -1152,6 +1152,123 @@ fn an_interaction_pauses_a_blocked_caller_and_its_answer_resumes_the_turn() {
 }
 
 #[test]
+fn pinned_file_change_snapshot_reaches_a_durable_approval_and_upstream_answer() {
+    let run = Run::start(Behaviour::default());
+    let turn_id = accepted(&run.call(&run.submit("file-change")));
+    run.server.emit(&json!({"method":"item/started","params":{
+        "threadId":"thread-1","turnId":turn_id,"startedAtMs":1000,
+        "item":{"type":"fileChange","id":"file-1","status":"inProgress","changes":[{
+            "path":"qa.txt","kind":{"type":"update","move_path":null},
+            "diff":"@@ -1 +1 @@\n-old\n+new\n"
+        }]}
+    }}));
+    run.server.emit(
+        &json!({"id":7100,"method":"item/fileChange/requestApproval","params":{
+            "threadId":"thread-1","turnId":turn_id,"itemId":"file-1","reason":null,"grantRoot":null
+        }}),
+    );
+    run.await_lifecycle("waiting_interaction");
+    let kinds = run.recorded_kinds();
+    assert!(
+        kinds
+            .iter()
+            .position(|kind| *kind == AuditKind::AppServerNotification)
+            .unwrap()
+            < kinds
+                .iter()
+                .position(|kind| *kind == AuditKind::ApprovalRequested)
+                .unwrap()
+    );
+    assert_eq!(
+        run.call(&ControlRequestV1::Respond {
+            caller: None,
+            expected: run.identity.clone(),
+            request_id: 7100,
+            idempotency_key: "file-answer".to_owned(),
+            response: json!({"decision":"accept_once"})
+        }),
+        ControlResponseV1::Responded {
+            request_id: 7100,
+            resolution_receipt_id: None
+        }
+    );
+    let deadline = Instant::now() + SETTLE;
+    while !run
+        .server
+        .replies()
+        .iter()
+        .any(|reply| reply["id"] == 7100 && reply["result"]["decision"] == "accept")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "approved response never reached upstream"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    run.server.complete_turn(&turn_id, "completed", "changed");
+    run.await_lifecycle("idle");
+}
+
+#[test]
+fn a_quarantined_pending_response_cannot_restore_the_run_or_reach_upstream() {
+    let run = Run::start(Behaviour::default());
+    let turn_id = accepted(&run.call(&run.submit("quarantine")));
+    run.server.open_approval(7200, &turn_id);
+    run.await_lifecycle("waiting_interaction");
+    run.server.emit(&json!({"method":"item/started","params":{
+        "threadId":"thread-1","turnId":"wrong-turn","startedAtMs":1000,
+        "item":{"type":"fileChange","id":"file-1","status":"inProgress","changes":[]}
+    }}));
+    run.await_lifecycle("outcome_unknown");
+    assert_eq!(
+        failure_code(&run.call(&ControlRequestV1::Respond {
+            caller: None,
+            expected: run.identity.clone(),
+            request_id: 7200,
+            idempotency_key: "late".to_owned(),
+            response: json!({"decision":"accept_once"})
+        })),
+        "OUTCOME_UNKNOWN"
+    );
+    assert_eq!(run.status().0, "outcome_unknown");
+    assert!(!run.server.replies().iter().any(|reply| reply["id"] == 7200));
+    assert_eq!(
+        run.ledger.lock().unwrap().projection().unwrap().lifecycle,
+        dolgorae::domain::RunLifecycle::OutcomeUnknown
+    );
+}
+
+#[test]
+fn terminal_pending_requests_are_durably_stale_and_never_answered() {
+    let run = Run::start(Behaviour::default());
+    let turn_id = accepted(&run.call(&run.submit("terminal-pending")));
+    run.server.open_approval(7300, &turn_id);
+    run.await_lifecycle("waiting_interaction");
+    run.server.complete_turn(&turn_id, "interrupted", "");
+    run.await_lifecycle("idle");
+    assert!(
+        run.ledger
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap()
+            .pending_requests
+            .is_empty()
+    );
+    assert_eq!(
+        failure_code(&run.call(&ControlRequestV1::Respond {
+            caller: None,
+            expected: run.identity.clone(),
+            request_id: 7300,
+            idempotency_key: "late".to_owned(),
+            response: json!({"decision":"accept_once"})
+        })),
+        "INTERACTION_STALE"
+    );
+    assert!(!run.server.replies().iter().any(|reply| reply["id"] == 7300));
+}
+
+#[test]
 fn a_caller_that_disconnects_mid_turn_does_not_stop_the_drain() {
     let run = Run::start(Behaviour::default());
     let turn_id = accepted(&run.call(&run.submit("abandoned")));

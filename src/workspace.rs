@@ -1648,6 +1648,31 @@ pub(crate) fn verify_secure_directory(path: &Path, uid: u32) -> Result<(), Machi
     Ok(())
 }
 
+pub(crate) fn open_secure_file_if_present(
+    path: &Path,
+    uid: u32,
+) -> Result<Option<File>, MachineError> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MachineError::runtime_path_invalid(path, error.to_string())),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| MachineError::runtime_path_invalid(path, error.to_string()))?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o600 {
+        return Err(MachineError::runtime_path_invalid(
+            path,
+            "file must be current-uid-owned mode 0600 without symlink traversal",
+        ));
+    }
+    Ok(Some(file))
+}
+
 pub(crate) fn verify_secure_file(path: &Path, uid: u32) -> Result<(), MachineError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| MachineError::runtime_path_invalid(path, error.to_string()))?;

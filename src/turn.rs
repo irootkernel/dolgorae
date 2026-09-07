@@ -674,6 +674,20 @@ fn append_journal_payload<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     payload: &Value,
     run_generation: u64,
 ) -> Result<(), TurnError> {
+    if kind == AuditKind::AppServerNotification {
+        let raw =
+            serde_json::to_vec(payload).map_err(|error| TurnError::Journal(error.to_string()))?;
+        return ledger
+            .append_app_server_message(
+                kind,
+                "item/fileChange/patchUpdated",
+                &raw,
+                run_generation,
+                crate::ledger::AppendDurability::Required,
+            )
+            .map(|_| ())
+            .map_err(|error| TurnError::Journal(error.to_string()));
+    }
     let outcome = if matches!(
         kind,
         AuditKind::CleanupResult | AuditKind::LifecycleTransition
@@ -2606,9 +2620,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if raw.len() > MAX_INTERACTION_PAYLOAD_BYTES {
             return Err(TurnError::InteractionResponseInvalid { request_id });
         }
-        let interaction = if let Some(interaction) = self.pending.get(&request_id) {
-            interaction.clone()
-        } else if let Some(resolved) = self.resolved_interactions.get(&request_id) {
+        if let Some(resolved) = self.resolved_interactions.get(&request_id) {
             if resolved.stale {
                 return Err(TurnError::InteractionStale { request_id });
             }
@@ -2622,9 +2634,15 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 }
             }
             return Ok(resolved.resolution_receipt_id);
-        } else {
-            return Err(TurnError::InteractionNotFound { request_id });
-        };
+        }
+        if self.state == CoordinatorState::OutcomeUnknown {
+            return Err(TurnError::OutcomeUnknown);
+        }
+        let interaction = self
+            .pending
+            .get(&request_id)
+            .cloned()
+            .ok_or(TurnError::InteractionNotFound { request_id })?;
         let (mut wire_response, contains_secret) =
             validate_interaction_response(&interaction, &response.0)?;
         let response_sha256 = (!contains_secret)
@@ -2670,6 +2688,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         );
         self.journal
             .append_and_sync(JournalEntry::InteractionResolved { request_id })?;
+        self.pending.remove(&request_id);
         let delivered = if contains_secret {
             self.server
                 .respond_sensitive_result(request_id, &mut wire_response)
@@ -2781,6 +2800,29 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let inline_response = inline_items
             .as_ref()
             .map(|items| self.extract_final_response(&thread_id, &turn_id, items));
+        for request_id in self.pending.keys().copied().collect::<Vec<_>>() {
+            self.journal
+                .append_and_sync(JournalEntry::ApprovalDecided {
+                    request_id,
+                    idempotency_key: String::new(),
+                    response_sha256: None,
+                    resolution_receipt_id: None,
+                    resolved_at: SystemLedgerClock::default().timestamp(),
+                    resolution: serde_json::json!({"outcome":"stale", "reason":"terminal_turn"}),
+                })?;
+            self.journal
+                .append_and_sync(JournalEntry::InteractionResolved { request_id })?;
+            self.resolved_interactions.insert(
+                request_id,
+                InteractionResolution {
+                    idempotency_key: String::new(),
+                    response_sha256: None,
+                    resolution_receipt_id: None,
+                    stale: true,
+                },
+            );
+            self.pending.remove(&request_id);
+        }
         self.journal.append_and_sync(JournalEntry::Terminal {
             turn_id: turn_id.clone(),
             status: status.clone(),
@@ -3170,8 +3212,12 @@ fn normalize_file_changes(changes: &[Value], workspace: &Path) -> Result<Vec<Val
                     .and_then(Value::as_str)
                     .ok_or(TurnError::CorrelationMismatch)?,
             )?;
-            let kind = object
+            let kind_object = object
                 .get("kind")
+                .and_then(Value::as_object)
+                .ok_or(TurnError::CorrelationMismatch)?;
+            let kind = kind_object
+                .get("type")
                 .and_then(Value::as_str)
                 .filter(|kind| matches!(*kind, "add" | "update" | "delete"))
                 .ok_or(TurnError::CorrelationMismatch)?;
@@ -3188,9 +3234,8 @@ fn normalize_file_changes(changes: &[Value], workspace: &Path) -> Result<Vec<Val
             if total_diff > 8 * 1024 * 1024 {
                 return Err(TurnError::CorrelationMismatch);
             }
-            let move_path = object
-                .get("movePath")
-                .or_else(|| object.get("move_path"))
+            let move_path = kind_object
+                .get("move_path")
                 .filter(|value| !value.is_null())
                 .map(|value| {
                     value
@@ -3285,6 +3330,7 @@ mod tests {
         messages: VecDeque<Value>,
         calls: Vec<(String, Value)>,
         responses: Vec<(u64, Value)>,
+        fail_response: bool,
     }
     impl AppServer for FakeServer {
         fn request(&mut self, method: &str, params: Value) -> Result<Value, TurnError> {
@@ -3305,6 +3351,12 @@ mod tests {
         }
         fn respond_result(&mut self, id: u64, result: Value) -> Result<(), TurnError> {
             self.responses.push((id, result));
+            if self.fail_response {
+                return Err(TurnError::transport(
+                    TransportStage::Write,
+                    "uncertain response write",
+                ));
+            }
             Ok(())
         }
         fn respond_error(&mut self, id: u64, code: i64, message: &str) -> Result<(), TurnError> {
@@ -3617,6 +3669,85 @@ mod tests {
         coordinator
     }
 
+    fn input_request() -> Value {
+        serde_json::json!({"id":9,"method":"item/tool/requestUserInput","params":{
+            "threadId":"thread-1","turnId":"turn-1","questions":[{
+                "id":"q","header":"Input","question":"Choose","isOther":true,
+                "isSecret":false,"options":[{"label":"yes","description":"Use yes"}]
+            }]
+        }})
+    }
+
+    #[test]
+    fn quarantine_rejects_unresolved_answers_and_uncertain_delivery_never_replays() {
+        let answer = serde_json::json!({"answers":{"q":{"answers":["yes"]}}});
+        let mut pending =
+            running_turn_with(&RecordingDiagnostics::default(), vec![input_request()]);
+        pending.next_event().unwrap();
+        pending
+            .mark_unknown(pending.active_operation_id.unwrap())
+            .unwrap();
+        assert_eq!(
+            pending.respond(9, "answer".to_owned(), answer.clone()),
+            Err(TurnError::OutcomeUnknown)
+        );
+        assert!(pending.server.responses.is_empty());
+        assert_eq!(pending.state(), &CoordinatorState::OutcomeUnknown);
+
+        let mut uncertain =
+            running_turn_with(&RecordingDiagnostics::default(), vec![input_request()]);
+        uncertain.next_event().unwrap();
+        uncertain.server.fail_response = true;
+        assert_eq!(
+            uncertain.respond(9, "answer".to_owned(), answer.clone()),
+            Err(TurnError::OutcomeUnknown)
+        );
+        assert_eq!(uncertain.respond(9, "answer".to_owned(), answer), Ok(None));
+        assert_eq!(uncertain.server.responses.len(), 1);
+        assert_eq!(uncertain.state(), &CoordinatorState::OutcomeUnknown);
+        assert!(uncertain.pending_interactions().is_empty());
+    }
+
+    #[test]
+    fn terminal_turn_durably_stales_pending_interactions() {
+        let mut coordinator = running_turn_with(
+            &RecordingDiagnostics::default(),
+            vec![
+                input_request(),
+                serde_json::json!({"method":"turn/completed","params":{
+                    "threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted","items":[]}
+                }}),
+            ],
+        );
+        coordinator.next_event().unwrap();
+        coordinator.next_event().unwrap();
+        assert!(coordinator.pending_interactions().is_empty());
+        assert_eq!(
+            coordinator.respond(9, "late".to_owned(), serde_json::json!({})),
+            Err(TurnError::InteractionStale { request_id: 9 })
+        );
+        assert!(coordinator.journal.entries.iter().any(|entry| matches!(entry,
+            JournalEntry::ApprovalDecided {request_id:9, resolution, ..} if resolution["outcome"]=="stale")));
+        assert!(coordinator.server.responses.is_empty());
+    }
+
+    #[test]
+    fn file_change_kinds_preserve_pinned_add_delete_update_and_move() {
+        let changes = serde_json::json!([
+            {"path":"a","kind":{"type":"add"},"diff":"+a"},
+            {"path":"b","kind":{"type":"delete"},"diff":"-b"},
+            {"path":"c","kind":{"type":"update","move_path":"d"},"diff":"-c\n+d"}
+        ]);
+        let normalized =
+            normalize_file_changes(changes.as_array().unwrap(), Path::new("/tmp/workspace"))
+                .unwrap();
+        assert_eq!(normalized[0]["kind"], "add");
+        assert_eq!(normalized[1]["kind"], "delete");
+        assert_eq!(normalized[2]["kind"], "update");
+        assert_eq!(normalized[2]["move_path"], "d");
+        assert!(normalized[0]["move_path"].is_null());
+    }
+
     #[test]
     fn a_foreign_thread_request_is_recorded_durably_and_never_answered() {
         let sink = RecordingDiagnostics::default();
@@ -3917,7 +4048,7 @@ mod tests {
                 "item": {
                     "id": "item-1",
                     "type": "fileChange",
-                    "changes": [{"path":"src/lib.rs","kind":"update","diff":"@@ -1 +1 @@\n-old\n+new\n"}]
+                    "changes": [{"path":"src/lib.rs","kind":{"type":"update","move_path":null},"diff":"@@ -1 +1 @@\n-old\n+new\n"}]
                 }
             }
         }));
@@ -3932,7 +4063,7 @@ mod tests {
                 "threadId":"thread-1",
                 "turnId":"turn-1",
                 "itemId":"item-1",
-                "changes":[{"path":"src/lib.rs","kind":"update","diff":"@@ -1 +1 @@\n-old\n+newer\n"}]
+                "changes":[{"path":"src/lib.rs","kind":{"type":"update","move_path":null},"diff":"@@ -1 +1 @@\n-old\n+newer\n"}]
             }
         }));
         let mut coordinator = coordinator(server);
@@ -4413,8 +4544,23 @@ mod tests {
                 }))
                 .unwrap();
         }
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        LedgerTurnJournal::new(&mut ledger, 1)
+            .append_and_sync(JournalEntry::FileChangeSnapshot {
+                thread_id: "thread".to_owned(),
+                turn_id: "turn".to_owned(),
+                item_id: "item".to_owned(),
+                revision: 0,
+                snapshot_sha256: "c".repeat(64),
+            })
+            .unwrap();
+        drop(ledger);
         let ledger = Ledger::open(&root, run_id).unwrap();
-        assert_eq!(ledger.durable_records().unwrap().len(), 1);
+        assert_eq!(ledger.durable_records().unwrap().len(), 2);
+        assert_eq!(
+            ledger.durable_records().unwrap()[1].kind(),
+            AuditKind::AppServerNotification
+        );
         assert_eq!(
             ledger.durable_records().unwrap()[0].kind(),
             AuditKind::IdempotencyReserved

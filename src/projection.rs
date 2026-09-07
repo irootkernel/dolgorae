@@ -174,15 +174,17 @@ fn apply_record(
                 return Err("resolved interaction exceeds its projection bound".to_owned());
             }
             pending.remove(&request);
-            state.lifecycle = if pending.is_empty() {
-                if state.active_turn_id.is_some() {
-                    RunLifecycle::Running
+            if state.lifecycle != RunLifecycle::OutcomeUnknown {
+                state.lifecycle = if pending.is_empty() {
+                    if state.active_turn_id.is_some() {
+                        RunLifecycle::Running
+                    } else {
+                        RunLifecycle::Idle
+                    }
                 } else {
-                    RunLifecycle::Idle
-                }
-            } else {
-                RunLifecycle::WaitingInteraction
-            };
+                    RunLifecycle::WaitingInteraction
+                };
+            }
         }
         AuditKind::WriterAcquired => {
             state.writer_authority = ProjectedWriterAuthority::Active;

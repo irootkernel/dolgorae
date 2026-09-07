@@ -181,8 +181,15 @@ Writer transaction/startup lock paths are permanent. V1 provides no force overri
 dirty workspaces and record their start baseline. Provide
 no transactional rollback.
 
-Every multi-resource transition follows operator, home, server, handoff,
-writer, canonical run-startup, then canonical run-mutex order. Writer
+Multi-resource transitions follow operator, home, server, handoff, writer,
+canonical run-startup, then canonical run-mutex order, except worker startup
+admission. That admission retains one Run startup range while revalidating
+home/server state to close the worker-election versus Profile-quiescence race.
+It releases home/server locks before spawn, retains only the startup range
+through the bounded `bound` handoff, and releases that range before `ready`
+or on failure. No home/server holder may wait for a Run startup range.
+The exception is restricted to this admission path; all other transitions
+retain the global hierarchy and external-wait prohibition. Writer
 activation and release use revision-bound prepare/apply/verify/commit phases so
 no WebSocket or process wait occurs under a global file lock. A threadless
 `acquire-write` is rejected; only its first `send|submit --write` may create a
@@ -258,7 +265,7 @@ proves process absence.
 
 ## ADR-005: Snapshot Profile Identity and Use CODEX_HOME as Account Boundary
 
-Status: Accepted, amended by ADR-024 and ADR-025
+Status: Accepted, amended by ADR-024, ADR-025, and ADR-035
 
 ### Context
 
@@ -268,8 +275,8 @@ thread between account homes or launch contracts.
 
 ### Decision
 
-Store Runtime Profile definitions in mode-0600
-`~/.dolgorae/workspaces/<workspace-id>/local.yaml`.
+Store user-global Profile definitions in mode-0600
+`~/.dolgorae/profiles.yaml`, as defined by ADR-035.
 Snapshot the complete restorable non-secret launch contract into each run:
 profile name, direct executable identity, normalized global argv, deterministic
 launch cwd and `PWD`, sanitized environment, closed-classified process-static
@@ -1491,7 +1498,7 @@ move state ownership back to Gul.
 
 ## ADR-024: Separate Runtime Profile From Agent Configuration
 
-Status: Accepted, amended by ADR-033
+Status: Accepted, amended by ADR-033 and ADR-035
 
 ### Context
 
@@ -1530,7 +1537,7 @@ snapshot digests are the Dolgorae-owned role authority.
 
 ## ADR-025: Keep Mutable Authority Outside the Agent-Writable Workspace
 
-Status: Accepted, amended by ADR-033
+Status: Accepted, amended by ADR-033 and ADR-035
 
 ### Context
 
@@ -1542,8 +1549,10 @@ prevent accidental deletion or corruption of the control plane.
 ### Decision
 
 Keep only portable tracked policy in `<workspace>/.dolgorae/`. Store
-machine-local configuration and every mutable authority below
-`~/.dolgorae/workspaces/<workspace-id>/`. Bind the
+per-workspace mutable authority below
+`~/.dolgorae/workspaces/<workspace-id>/`. Global Profile definitions and shared
+Profile runtime authority live under the user-private Dolgorae home according
+to ADR-035, outside every agent-writable workspace. Bind the
 roots through the canonical workspace ID and lossless path record. Never include
 the Dolgorae-home workspace state root in Codex writable roots or
 model-visible path projections.

@@ -241,6 +241,24 @@ def write_private(path: pathlib.Path, payload: bytes) -> None:
     path.chmod(0o600)
 
 
+def prepare_writer_record(root: pathlib.Path, workspace_id: str) -> None:
+    record = root / "runtime" / "writer.json"
+    if record.exists():
+        return
+    locks = root / "runtime" / "locks"
+    for name in ("writer.lock", "handoff.lock"):
+        write_private(locks / name, b"")
+    writer = (locks / "writer.lock").stat()
+    handoff = (locks / "handoff.lock").stat()
+    write_private(record, jcs({
+        "schema_version": 1, "workspace_id": workspace_id, "authority_revision": 0,
+        "state": "none", "writer_generation": 0, "transaction_id": None,
+        "holder": None, "handoff": None, "recovery_action": None,
+        "writer_lock_device": writer.st_dev, "writer_lock_inode": writer.st_ino,
+        "handoff_lock_device": handoff.st_dev, "handoff_lock_inode": handoff.st_ino,
+    }))
+
+
 def prepare(
     root: pathlib.Path,
     binary: pathlib.Path,
@@ -266,6 +284,7 @@ def prepare(
     ):
         if not directory.exists():
             private_directory(directory)
+    prepare_writer_record(root, WORKSPACE_ID)
     audit = ledger_root / "audit.jsonl"
     audit.touch(mode=0o600)
     audit.chmod(0o600)
@@ -519,6 +538,22 @@ def validate(binary: pathlib.Path) -> None:
             status = call(socket_path, "status", identity)
             if status["result"] != "status" or status["active_turn"] is not None:
                 raise AssertionError(f"reconnection status failed: {status!r}")
+        # A live byte-1 owner restores its lost locator without a generation change.
+        previous_epoch = record["control_socket_epoch"]
+        socket_path.unlink()
+        deadline = time.monotonic() + 5
+        runtime_record = root / "runtime" / "runs" / f"{RUN_ID}.json"
+        while time.monotonic() < deadline:
+            latest = json.loads(runtime_record.read_text())
+            if latest["control_socket_epoch"] > previous_epoch and socket_path.exists():
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("live worker failed to publish a replacement socket epoch")
+        if latest["identity"] != identity or latest["socket_identity"] == record["socket_identity"]:
+            raise AssertionError("socket recovery changed the process or reused stale socket identity")
+        if call(socket_path, "status", identity)["result"] != "status":
+            raise AssertionError("replacement socket did not serve the same live worker")
         foreign = dict(identity)
         foreign["run_id"] = "018f22e2-79b0-7cc3-a24c-78c48f28bbd0"
         rejected = call(socket_path, "status", foreign)
@@ -546,6 +581,35 @@ def validate(binary: pathlib.Path) -> None:
         os.kill(process.pid, 15)
         if process.wait(timeout=5) != 0:
             raise AssertionError("SIGTERM did not use the clean worker shutdown path")
+
+        # A foreign inode is never unlinked or adopted by the live owner.
+        process, channel = start(binary, bootstrap)
+        handoff(channel)
+        occupied_ready = handoff(channel)
+        channel.close()
+        occupied_path = pathlib.Path(occupied_ready["record"]["socket_path"])
+        foreign_path = occupied_path.with_name(f"fixture-{fresh_run_id()}.sock")
+        foreign_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        foreign_identity = None
+        try:
+            foreign_listener.bind(str(foreign_path))
+            foreign_path.chmod(0o600)
+            foreign_identity = (foreign_path.stat().st_dev, foreign_path.stat().st_ino)
+            foreign_path.replace(occupied_path)
+            if process.wait(timeout=5) == 0:
+                raise AssertionError("foreign socket replacement did not fail closed")
+            observed = occupied_path.lstat()
+            if (observed.st_dev, observed.st_ino) != foreign_identity:
+                raise AssertionError("worker removed or replaced the foreign socket")
+            failed_record = json.loads(pathlib.Path(json.loads(bootstrap.read_text())["runtime_record_path"]).read_text())
+            if not failed_record.get("control_recovery_required"):
+                raise AssertionError("control recovery refusal was not durable")
+        finally:
+            foreign_listener.close()
+            if occupied_path.exists() and (occupied_path.stat().st_dev, occupied_path.stat().st_ino) == foreign_identity:
+                occupied_path.unlink()
+            if foreign_path.exists():
+                foreign_path.unlink()
 
 
 def validate_session(binary: pathlib.Path) -> None:
@@ -1189,6 +1253,7 @@ def publish_run_for_cli(
         if not directory.exists():
             directory.mkdir(mode=0o700, parents=True)
         directory.chmod(0o700)
+    prepare_writer_record(state_root, workspace_id)
     audit = ledger_root / "audit.jsonl"
     audit.touch(mode=0o600)
     audit.chmod(0o600)

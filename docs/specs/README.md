@@ -988,7 +988,13 @@ replace the runtime record without restarting its active App Server connection
 or turn. Existing
 accepted connections remain valid. A foreign occupant, unsafe root, or failed
 rebind MUST interrupt an active turn and enter `RECOVERY_REQUIRED`; it MUST NOT
-unlink an unverified socket.
+unlink an unverified socket. The owning runtime record persists
+`control_recovery_required` before shutdown; this flag does not replace known
+Turn outcomes. Ordinary worker mutations refuse the flagged generation. An
+authorized `run recover` or `run reconcile` may clear it only after proving the
+old process scope absent and validating the private socket root; foreign socket
+occupants remain untouched. Known idle, paused, or closed outcomes need no
+history reconciliation to clear this control-plane failure.
 
 Run IDs are UUIDv7 values. V1 has no run aliases and no current-run pointer.
 Every run-scoped command MUST receive the run ID explicitly.
@@ -3283,8 +3289,8 @@ dolgorae specialist review \
 
 It uses
 [`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
-`--scope working-tree` remains the exact v1 carrier and rejects v2-only
-options. A commit or range revision is bounded to 1024 UTF-8 bytes. The v2
+`--scope working-tree` retains the original working-tree request shape and
+rejects scoped-target-only options; its current result uses the v2 contract. A commit or range revision is bounded to 1024 UTF-8 bytes. The v2
 deadline is one Reviewer lifecycle budget beginning after immutable capture;
 Turn execution and the following terminal wait share the remaining budget.
 The v2 result omits the immutable root and settlement credential
@@ -3775,9 +3781,20 @@ operator.lock
 -> in-process run mutation mutexes (same UUID order)
 ```
 
-No operation acquires upward or waits for an external process, WebSocket
-response, turn completion, approval/user input, compatibility probe, process
-spawn/exit or signal/absence proof while holding a filesystem lock. Every
+Worker startup admission is the sole exception to upward acquisition. It
+acquires exactly one Run startup range with the ten-second contention budget,
+then revalidates the home and server lifetime while retaining that range.
+Home and server locks MUST be released before spawning the worker. The startup
+range alone remains held through the bounded `bound` handoff, and MUST be
+released before waiting for `ready` or on any startup failure. No operation may
+hold a home or server lock while waiting to acquire a Run startup range.
+This exception preserves the Profile quiescence fence across worker election;
+it does not authorize upward acquisition or external waits in other operations.
+
+Apart from that bounded startup admission, no operation acquires upward or
+waits for an external process, WebSocket response, turn completion,
+approval/user input, compatibility probe, process spawn/exit or signal/absence
+proof while holding a filesystem lock. Every
 multi-stage operation uses `prepared`, `applying`, and terminal
 `committed|failed|blocked_unknown|reconciliation_required` states. PREPARE
 persists a UUIDv7 operation token, expected revisions/generations/epochs and
@@ -3804,8 +3821,9 @@ token never restores a prior assumption or creates two authorities.
 | Profile stop/restart | Operator, home, server | None during quiesce/termination/absence proof |
 | Profile migration | Operator, home, old/new server locks in server-key order | None during old absence/new start/reconciliation |
 
-Lock-order inversion is an implementation invariant failure and deterministic
-test failure, not a public `LOCK_ORDER_VIOLATION` error.
+Any lock-order inversion outside the worker startup admission exception is an
+implementation invariant failure and deterministic test failure, not a public
+`LOCK_ORDER_VIOLATION` error.
 
 `run controller reset` is an exceptional same-user correctness override, not a
 security boundary. It requires the operator capability, an exact run-ID

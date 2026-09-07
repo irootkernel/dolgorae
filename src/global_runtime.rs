@@ -7,8 +7,8 @@ use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::profile::{CompatibilityVerdict, ExecutableIdentity, ProfileSnapshot, ServerState};
 use crate::workspace::{
-    RuntimeProfile, SystemWorkspacePlatform, atomic_create, create_directory, sync_directory,
-    verify_secure_directory, verify_secure_file,
+    RuntimeProfile, SystemWorkspacePlatform, atomic_create, create_directory,
+    open_secure_file_if_present, sync_directory, verify_secure_directory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -688,19 +688,12 @@ impl GlobalMembershipStore {
     ) -> Result<Option<ServerState>, MachineError> {
         self.verify_persisted_index(root, index)?;
         let path = root.join("state.json");
-        if !path.exists() {
+        let Some(file) = open_secure_file_if_present(&path, DarwinSystem.current_uid())? else {
             return Ok(None);
-        }
-        verify_secure_file(&path, DarwinSystem.current_uid())?;
-        let state: ServerState =
-            serde_json::from_slice(&fs::read(&path).map_err(|error| path_error(&path, error))?)
-                .map_err(|_| {
-                    membership_incomplete(
-                        &self.profile,
-                        &self.server_key,
-                        "server state is malformed",
-                    )
-                })?;
+        };
+        let state: ServerState = serde_json::from_reader(file).map_err(|_| {
+            membership_incomplete(&self.profile, &self.server_key, "server state is malformed")
+        })?;
         if state.schema_version != 2
             || state.server_key != self.server_key
             || state.snapshot.server_key != self.server_key
@@ -721,12 +714,8 @@ impl GlobalMembershipStore {
         index: &GlobalMembershipIndex,
     ) -> Result<(), MachineError> {
         let persisted = root.join("members.json");
-        if persisted.exists() {
-            verify_secure_file(&persisted, DarwinSystem.current_uid())?;
-            let actual: GlobalMembershipIndex = serde_json::from_slice(
-                &fs::read(&persisted).map_err(|error| path_error(&persisted, error))?,
-            )
-            .map_err(|_| {
+        if let Some(file) = open_secure_file_if_present(&persisted, DarwinSystem.current_uid())? {
+            let actual: GlobalMembershipIndex = serde_json::from_reader(file).map_err(|_| {
                 membership_incomplete(
                     &self.profile,
                     &self.server_key,
@@ -763,7 +752,7 @@ impl GlobalMembershipStore {
         operation: &str,
     ) -> Result<GlobalQuiescenceGuard, MachineError> {
         let root = self.home_root.join("profiles").join(&self.server_key);
-        if !root.exists() {
+        if !path_present(&root)? {
             return Ok(GlobalQuiescenceGuard {
                 _lock: None,
                 index: derive_index(&self.server_key, &root.join("membership.jsonl"), &[])?,
@@ -824,18 +813,26 @@ impl GlobalMembershipStore {
 
     fn ensure_root_under_home_lock(&self) -> Result<PathBuf, MachineError> {
         let profiles = self.home_root.join("profiles");
-        if !profiles.exists() {
+        if !path_present(&profiles)? {
             create_directory(&profiles, 0o700).map_err(|error| path_error(&profiles, error))?;
             sync_directory(&self.home_root).map_err(|error| path_error(&self.home_root, error))?;
         }
         verify_secure_directory(&profiles, DarwinSystem.current_uid())?;
         let root = profiles.join(&self.server_key);
-        if !root.exists() {
+        if !path_present(&root)? {
             create_directory(&root, 0o700).map_err(|error| path_error(&root, error))?;
             sync_directory(&profiles).map_err(|error| path_error(&profiles, error))?;
         }
         verify_secure_directory(&root, DarwinSystem.current_uid())?;
         Ok(root)
+    }
+}
+
+fn path_present(path: &Path) -> Result<bool, MachineError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(path_error(path, error)),
     }
 }
 
@@ -852,8 +849,7 @@ fn derive_index(
         );
     }
     let mut journal_digest = Sha256::new();
-    if journal.exists() {
-        let mut file = File::open(journal).map_err(|error| path_error(journal, error))?;
+    if let Some(mut file) = open_secure_file_if_present(journal, DarwinSystem.current_uid())? {
         let mut buffer = [0_u8; 64 * 1024];
         loop {
             let count = file
@@ -879,13 +875,12 @@ fn replay(
     profile: &str,
     server_key: &str,
 ) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
-    if !path.exists() {
+    let Some(file) = open_secure_file_if_present(path, DarwinSystem.current_uid())? else {
         return Ok(Vec::new());
-    }
-    verify_secure_file(path, DarwinSystem.current_uid())?;
+    };
     let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(MAX_MEMBERSHIP_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_MEMBERSHIP_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| path_error(path, error))?;
     if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
         return Err(membership_incomplete(
@@ -1284,6 +1279,59 @@ mod tests {
         assert!(store.load().unwrap().profiles.is_empty());
         assert!(!server_root.exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn dangling_membership_authorities_reject_load_append_and_quiescence() {
+        for name in ["membership.jsonl", "members.json", "state.json"] {
+            let (parent, home) = home();
+            let server_key = "c".repeat(64);
+            let store = GlobalMembershipStore::new(&home, "default", &server_key).unwrap();
+            store.load().unwrap();
+            let root = home.root().join("profiles").join(&server_key);
+            let path = root.join(name);
+            let target = root.join("absent");
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert_eq!(
+                store.load().unwrap_err().code,
+                "RUNTIME_PATH_INVALID",
+                "{name}"
+            );
+            assert_eq!(
+                store
+                    .record(
+                        &"1".repeat(64),
+                        Uuid::now_v7(),
+                        MembershipDisposition::Active
+                    )
+                    .unwrap_err()
+                    .code,
+                "RUNTIME_PATH_INVALID",
+                "{name}"
+            );
+            assert_eq!(
+                store
+                    .acquire_quiescence("default", "profile.remove")
+                    .err()
+                    .unwrap()
+                    .code,
+                "RUNTIME_PATH_INVALID",
+                "{name}"
+            );
+            assert!(
+                fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(!target.exists());
+            for other in ["membership.jsonl", "members.json", "state.json"] {
+                if other != name {
+                    assert!(!root.join(other).exists());
+                }
+            }
+            fs::remove_dir_all(parent).unwrap();
+        }
     }
 
     #[test]

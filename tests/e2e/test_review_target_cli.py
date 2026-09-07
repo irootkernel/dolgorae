@@ -16,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from schema_support import assert_valid, validator
 
+MACHINE_SCHEMA = validator(pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol", "dolgorae-machine-v2.schema.json")
+
 
 def git(repository: pathlib.Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -45,7 +47,10 @@ def invoke(
     )
     if completed.stderr:
         raise AssertionError(f"unexpected stderr for {arguments}: {completed.stderr!r}")
-    return completed, json.loads(completed.stdout)
+    envelope = json.loads(completed.stdout)
+    if completed.returncode != 0:
+        assert_valid(envelope, MACHINE_SCHEMA, f"failure Machine envelope for {arguments[:2]}")
+    return completed, envelope
 
 
 def capture(

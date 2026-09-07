@@ -13,7 +13,26 @@
     "SPECIALIST_TASK_NOT_FOUND": 4,
     "SPECIALIST_RESULT_INVALID": 4,
     "SPECIALIST_WRITER_CONFLICT": 4,
-    "ENGAGEMENT_STATE_CONFLICT": 4
+    "ENGAGEMENT_STATE_CONFLICT": 4,
+    "REVIEW_TARGET_CARRIER_INVALID": 4,
+    "REVIEW_TARGET_CONFLICT": 4,
+    "REVIEW_TARGET_FOREIGN_OWNER": 4,
+    "REVIEW_TARGET_GIT_FAILED": 4,
+    "REVIEW_TARGET_IO_FAILURE": 4,
+    "REVIEW_TARGET_LIFECYCLE_MISMATCH": 4,
+    "REVIEW_TARGET_LIMIT_EXCEEDED": 4,
+    "REVIEW_TARGET_MUTATED": 4,
+    "REVIEW_TARGET_REVISION_INVALID": 4,
+    "REVIEW_TARGET_SECRET_DETECTED": 4,
+    "REVIEW_TARGET_SETTLEMENT_CONCURRENT": 4,
+    "REVIEW_TARGET_SETTLEMENT_CONFLICT": 4,
+    "REVIEW_TARGET_SOURCE_DRIFT": 4,
+    "REVIEW_TARGET_STALE_REVISION": 4,
+    "REVIEW_TARGET_STATE_INVALID": 4,
+    "REVIEW_TARGET_TERMINAL_EVIDENCE_INVALID": 4,
+    "REVIEW_TARGET_TIMEOUT": 4,
+    "REVIEW_TARGET_UNSAFE_FILE": 4,
+    "REVIEW_TARGET_UNSAFE_PATH": 4
   },
   "oneOf": [
     {
@@ -66,6 +85,93 @@
     },
     {
       "$ref": "#/$defs/engagement_error"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "REVIEW_TARGET_CARRIER_INVALID",
+            "REVIEW_TARGET_CONFLICT",
+            "REVIEW_TARGET_FOREIGN_OWNER",
+            "REVIEW_TARGET_GIT_FAILED",
+            "REVIEW_TARGET_LIFECYCLE_MISMATCH",
+            "REVIEW_TARGET_LIMIT_EXCEEDED",
+            "REVIEW_TARGET_MUTATED",
+            "REVIEW_TARGET_REVISION_INVALID",
+            "REVIEW_TARGET_SECRET_DETECTED",
+            "REVIEW_TARGET_SETTLEMENT_CONCURRENT",
+            "REVIEW_TARGET_SETTLEMENT_CONFLICT",
+            "REVIEW_TARGET_SOURCE_DRIFT",
+            "REVIEW_TARGET_STALE_REVISION",
+            "REVIEW_TARGET_STATE_INVALID",
+            "REVIEW_TARGET_TERMINAL_EVIDENCE_INVALID",
+            "REVIEW_TARGET_TIMEOUT",
+            "REVIEW_TARGET_UNSAFE_FILE",
+            "REVIEW_TARGET_UNSAFE_PATH"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required_action"
+          ],
+          "properties": {
+            "required_action": {
+              "const": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "REVIEW_TARGET_IO_FAILURE"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invariant"
+          ],
+          "properties": {
+            "invariant": {
+              "type": "string"
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {

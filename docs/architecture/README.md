@@ -174,7 +174,7 @@ effects.
 
 The External Specialist Facade is a private CLI or MCP adapter over the shared
 semantic service. Its checked payload contract is
-[`dolgorae-external-specialist-facade-v1.schema.json`](../protocol/dolgorae-external-specialist-facade-v1.schema.json).
+[`dolgorae-external-specialist-facade-v2.schema.json`](../protocol/dolgorae-external-specialist-facade-v2.schema.json).
 It supports explicit engagement open and safe get, Specialist hire, task
 assignment, bounded await, result collection, cancellation, release, and
 engagement close. It does not add a planner, task graph, or autonomous scheduling
@@ -249,7 +249,7 @@ The One-Shot Specialist Review Coordinator is a convenience adapter over the
 External Specialist Facade. It is shared by the `dolgorae specialist review`
 Machine CLI command and the external stdio MCP tool `dolgorae_review`. Its
 checked model-visible shape is
-[`dolgorae-specialist-review-tool-v1.schema.json`](../protocol/dolgorae-specialist-review-tool-v1.schema.json).
+[`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
 
 The Coordinator binds the canonical workspace, Reviewer Codex Profile,
 aggregate-owner and per-Run Controller credentials, external provenance,
@@ -997,9 +997,12 @@ writer, run startup locks in UUID-byte order, then in-process run mutation
 mutexes in the same order. Worker startup admission is the sole inversion: it
 takes one Run startup range before home/server revalidation and retains it
 through `bound`; no path may hold a home or server lock while waiting to acquire
-a Run startup range. Operations persist a revision-bound intent and drop file
-locks before process, network, turn, or user waits; every other path follows the
-global order without acquiring upward.
+a Run startup range. Home/server locks are released before spawn; only that
+startup range spans the bounded `bound` wait and is released before `ready`
+or on failure. This is also the sole exception to the external-wait prohibition.
+Every other operation persists a revision-bound intent and drops file locks
+before process, network, turn, or user waits, following the global order
+without acquiring upward.
 
 ### Persistent Run Store
 
@@ -1235,7 +1238,11 @@ binds a replacement listener at the deterministic path, records its inode,
 increments `control_socket_epoch`, and atomically replaces the runtime record.
 Accepted CLI connections and the App Server WebSocket are independent of that listener
 replacement. An occupied or unsafe replacement path is fail-closed: the worker
-interrupts an active turn, records bounded evidence, and requires recovery.
+persists `control_recovery_required` in its own identity-matching runtime record,
+interrupts an active turn, and stops. The flag survives worker exit without
+overwriting the durable Turn outcome. Ordinary mutations refuse it; authorized
+recovery removes the locator only after process-absence proof and private-root
+validation, preserving every foreign socket occupant.
 
 The actual socket path and process identity are discoverable from
 `~/.dolgorae/workspaces/<workspace-id>/runtime/runs/<run-id>.json`; discovery never recomputes a path from

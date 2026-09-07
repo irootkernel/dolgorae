@@ -357,6 +357,8 @@ pub struct WorkerRuntimeRecord {
     #[serde(default)]
     pub app_server_epoch: Option<u64>,
     #[serde(default)]
+    pub control_recovery_required: bool,
+    #[serde(default)]
     pub dedicated_server_identity: Option<DedicatedServerIdentity>,
     pub dolgorae_version: String,
     pub mutation_protocol_version: u32,
@@ -613,6 +615,7 @@ pub fn classify_dedicated_server_identity(
     {
         return ProcessIdentityVerdict::Mismatch;
     }
+    let live_path = DarwinSystem.live_process_path(identity.pid);
     let mut executable = match File::open(&identity.executable_path) {
         Ok(file) => file,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
@@ -632,6 +635,9 @@ pub fn classify_dedicated_server_identity(
         }
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
+    if DarwinSystem.live_process_path(identity.pid) != live_path {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
     if after != before {
         return ProcessIdentityVerdict::Unverifiable;
     }
@@ -640,7 +646,10 @@ pub fn classify_dedicated_server_identity(
         Ok(false) => {}
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     }
-    if metadata.dev() != identity.executable_device
+    if live_path
+        .as_ref()
+        .is_some_and(|path| path != &identity.executable_path)
+        || metadata.dev() != identity.executable_device
         || metadata.ino() != identity.executable_inode
         || digest != identity.executable_sha256
     {
@@ -744,6 +753,7 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
     {
         return ProcessIdentityVerdict::Mismatch;
     }
+    let live_path = DarwinSystem.live_process_path(record.identity.pid);
     let mut executable = match File::open(&record.identity.executable_path) {
         Ok(file) => file,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
@@ -763,6 +773,9 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
         }
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
+    if DarwinSystem.live_process_path(record.identity.pid) != live_path {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
     if after != before {
         return ProcessIdentityVerdict::Unverifiable;
     }
@@ -771,7 +784,10 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
         Ok(false) => {}
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     }
-    if metadata.dev() != record.identity.executable_device
+    if live_path
+        .as_ref()
+        .is_some_and(|path| path != &record.identity.executable_path)
+        || metadata.dev() != record.identity.executable_device
         || metadata.ino() != record.identity.executable_inode
         || digest != record.identity.executable_sha256
     {
@@ -1842,6 +1858,7 @@ pub struct WorkerControlServer {
     stopping: Arc<AtomicBool>,
     run: Arc<Mutex<RunHandles>>,
     authority: Arc<RunControllerAuthority>,
+    ready_runtime_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl WorkerControlServer {
@@ -1859,6 +1876,7 @@ impl WorkerControlServer {
             stopping: Arc::new(AtomicBool::new(false)),
             run: Arc::new(Mutex::new(RunHandles::default())),
             authority: Arc::new(authority),
+            ready_runtime_path: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1940,10 +1958,105 @@ impl WorkerControlServer {
         Ok(())
     }
 
+    fn persist_control_recovery(&self) -> Result<(), WorkerProtocolError> {
+        let Some(path) = self
+            .ready_runtime_path
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?
+            .clone()
+        else {
+            return Ok(());
+        };
+        let mut record = read_runtime_record(&path, self.hello.identity.uid)?;
+        // Never overwrite another generation's locator or a newer socket epoch.
+        if record.identity != self.hello.identity
+            || record.control_socket_epoch != self.hello.control_socket_epoch
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        record.control_recovery_required = true;
+        write_runtime_record(&path, &record)
+    }
+
+    fn maintain_runtime(
+        &mut self,
+        lease: &WorkerSocketLease,
+    ) -> Result<Option<WorkerSocketLease>, WorkerProtocolError> {
+        let Some(path) = self
+            .ready_runtime_path
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?
+            .clone()
+        else {
+            return Ok(None);
+        };
+        let mut record = read_runtime_record(&path, self.hello.identity.uid)?;
+        if record.identity != self.hello.identity
+            || record.control_socket_epoch != self.hello.control_socket_epoch
+            || record.socket_identity != lease.identity
+            || record.socket_path != lease.path
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        let parent = lease
+            .path
+            .parent()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        // Validate every short-root component even when the socket still exists.
+        prepare_socket_root(self.hello.identity.uid, parent)?;
+        let replacement = match fs::symlink_metadata(&lease.path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.uid() == self.hello.identity.uid
+                    && metadata.mode() & 0o777 == 0o600
+                    && metadata.dev() == lease.identity.device
+                    && metadata.ino() == lease.identity.inode =>
+            {
+                None
+            }
+            Ok(_) => return Err(WorkerProtocolError::SocketIdentityMismatch),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if classify_worker_identity(&record) != ProcessIdentityVerdict::Match {
+                    return Err(WorkerProtocolError::InvalidIdentity);
+                }
+                let replacement = bind_worker_socket(&record.identity, None)?;
+                replacement
+                    .listener
+                    .set_nonblocking(true)
+                    .map_err(|_| WorkerProtocolError::Io)?;
+                record.control_socket_epoch = record
+                    .control_socket_epoch
+                    .checked_add(1)
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                record.socket_identity = replacement.identity.clone();
+                write_runtime_record(&path, &record)?;
+                self.hello.control_socket_epoch = record.control_socket_epoch;
+                Some(replacement)
+            }
+            Err(_) => return Err(WorkerProtocolError::Io),
+        };
+        let writer = crate::writer::WriterStore::new(
+            &self.authority.state_root,
+            &self.hello.identity.workspace_id,
+            self.hello.identity.uid,
+        );
+        if writer
+            .load()
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?
+            .holder
+            .is_some_and(|holder| holder.run_id == self.facts.run_id)
+        {
+            writer
+                .refresh_observation()
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+        }
+        Ok(replacement)
+    }
+
     /// Serve independent bounded connections until an identity-authorized
     /// shutdown request is accepted. Each caller owns a thread, so an observer
     /// that stops reading cannot block unrelated mutation or event draining.
-    pub fn serve(self, lease: &WorkerSocketLease) -> Result<(), WorkerProtocolError> {
+    pub fn serve(mut self, lease: &WorkerSocketLease) -> Result<(), WorkerProtocolError> {
         self.hello.identity.validate()?;
         lease
             .listener
@@ -1951,8 +2064,23 @@ impl WorkerControlServer {
             .map_err(|_| WorkerProtocolError::Io)?;
         let stopping = Arc::clone(&self.stopping);
         let mut callers = Vec::new();
+        let mut replacement = None;
+        let mut next_maintenance = std::time::Instant::now();
         while !stopping.load(Ordering::Acquire) {
-            match lease.listener.accept() {
+            if std::time::Instant::now() >= next_maintenance {
+                match self.maintain_runtime(replacement.as_ref().unwrap_or(lease)) {
+                    Ok(Some(new_lease)) => replacement = Some(new_lease),
+                    Ok(None) => {}
+                    Err(error) => {
+                        let persisted = self.persist_control_recovery();
+                        let _ = self.terminate();
+                        persisted?;
+                        return Err(error);
+                    }
+                }
+                next_maintenance = std::time::Instant::now() + Duration::from_millis(100);
+            }
+            match replacement.as_ref().unwrap_or(lease).listener.accept() {
                 Ok((stream, _)) => {
                     // Darwin propagates the listener's non-blocking flag to
                     // every accepted socket, which would make the per-caller
@@ -4484,6 +4612,9 @@ pub enum WorkerProtocolError {
         actual_protocol: u32,
     },
     SocketIdentityMismatch,
+    ControlRecoveryRequired {
+        generation: u64,
+    },
     StartupBusy,
     LedgerReplay,
     WorkerStartFailed,
@@ -4501,6 +4632,7 @@ impl WorkerProtocolError {
             Self::SocketIdentityMismatch
             | Self::InvalidRuntimeRecord
             | Self::InvalidOwnerRecord => "RUNTIME_PATH_COLLISION",
+            Self::ControlRecoveryRequired { .. } => "RECOVERY_REQUIRED",
             Self::StartupBusy => "RUN_BUSY",
             Self::LedgerReplay => "AUDIT_INTEGRITY_FAILURE",
             Self::WorkerStartFailed
@@ -4557,6 +4689,15 @@ impl WorkerProtocolError {
             Self::InvalidOwnerRecord => (
                 "private worker runtime identity is unsafe or inconsistent",
                 runtime_collision_details(&path, "startup_owner_record"),
+            ),
+            Self::ControlRecoveryRequired { generation } => (
+                "the worker control plane requires explicit recovery",
+                serde_json::json!({
+                    "run_id": run_id,
+                    "generation": generation,
+                    "identity_verdict": "Unverifiable",
+                    "reason": "control_socket_recovery_failed",
+                }),
             ),
             Self::StartupBusy => (
                 "another process owns worker startup",
@@ -4963,6 +5104,7 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
             .session
             .as_ref()
             .map(|session| session.server_epoch),
+        control_recovery_required: false,
         dedicated_server_identity: None,
         dolgorae_version: bootstrap.dolgorae_version,
         mutation_protocol_version: bootstrap.mutation_protocol_version,
@@ -5050,6 +5192,11 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
             DarwinSystem
                 .close_startup_fd3()
                 .map_err(|_| WorkerProtocolError::Io)?;
+            *control
+                .ready_runtime_path
+                .lock()
+                .map_err(|_| WorkerProtocolError::Io)? =
+                Some(bootstrap.runtime_record_path.clone());
             Ok(ledger)
         })();
         let ledger = match startup {
@@ -5289,6 +5436,11 @@ pub fn call_run_worker(
 ) -> Result<ControlResponseV1, WorkerProtocolError> {
     let runtime = runtime_root(state_root);
     let record = read_runtime_record(&runtime_record_path(&runtime, run_id)?, uid)?;
+    if record.control_recovery_required {
+        return Err(WorkerProtocolError::ControlRecoveryRequired {
+            generation: record.identity.run_generation,
+        });
+    }
     let observed = record.observe_socket()?;
     if observed != record.socket_identity {
         return Err(WorkerProtocolError::SocketIdentityMismatch);
@@ -5429,6 +5581,22 @@ pub fn read_runtime_record(
         serde_json::from_slice(&bytes).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
     record.validate()?;
     Ok(record)
+}
+
+/// Explicit recovery retains the failure marker until safe locator cleanup succeeds.
+pub fn recover_control_runtime(path: &Path, uid: u32) -> Result<(), WorkerProtocolError> {
+    let record = read_runtime_record(path, uid)?;
+    if !record.control_recovery_required {
+        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+    }
+    prepare_socket_root(
+        uid,
+        record
+            .socket_path
+            .parent()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+    )?;
+    remove_verified_absent_runtime(path, uid)
 }
 
 /// Remove one stale worker locator only after the recorded generation and its
@@ -6288,6 +6456,7 @@ mod tests {
             },
             control_socket_epoch: 1,
             app_server_epoch: None,
+            control_recovery_required: false,
             dedicated_server_identity: None,
             dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
             mutation_protocol_version: WORKER_PROTOCOL_VERSION,
@@ -6314,6 +6483,118 @@ mod tests {
             classify_worker_identity(&record),
             ProcessIdentityVerdict::Absent
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_exec_invalidates_worker_and_dedicated_identity_without_pid_reuse() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf ready; read ready; exec /bin/sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = DarwinSystem.spawn_detached(&mut command).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut ready = [0_u8; 5];
+            std::io::Read::read_exact(child.stdout.as_mut().unwrap(), &mut ready).unwrap();
+            assert_eq!(&ready, b"ready");
+            let executable_path = DarwinSystem.live_process_path(child.id()).unwrap();
+            let before = DarwinSystem.bsd_process_identity(child.id()).unwrap();
+            let metadata = fs::metadata(&executable_path).unwrap();
+            let dedicated = DedicatedServerIdentity {
+                pid: before.pid,
+                process_group_id: before.process_group_id,
+                session_id: before.session_id,
+                uid: before.uid,
+                start_tvsec: before.start_tvsec,
+                start_tvusec: before.start_tvusec,
+                executable_device: metadata.dev(),
+                executable_inode: metadata.ino(),
+                executable_sha256: file_sha256(&executable_path).unwrap(),
+                executable_path: executable_path.clone(),
+            };
+            let identity = WorkerIdentity {
+                workspace_id: "11".repeat(32),
+                run_id: Uuid::now_v7(),
+                run_generation: 1,
+                boot_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap(),
+                pid: before.pid,
+                process_group_id: before.process_group_id,
+                session_id: before.session_id,
+                uid: before.uid,
+                start_tvsec: before.start_tvsec,
+                start_tvusec: before.start_tvusec,
+                executable_device: metadata.dev(),
+                executable_inode: metadata.ino(),
+                executable_sha256: dedicated.executable_sha256.clone(),
+                executable_path,
+            };
+            let record = WorkerRuntimeRecord {
+                schema_version: 1,
+                socket_path: worker_socket_path(
+                    identity.uid,
+                    &identity.workspace_id,
+                    identity.run_id,
+                )
+                .unwrap(),
+                identity,
+                socket_identity: SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                dedicated_server_identity: Some(dedicated.clone()),
+                dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+                mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                binary_sha256: "a".repeat(64),
+            };
+            assert_eq!(
+                classify_worker_identity(&record),
+                ProcessIdentityVerdict::Match
+            );
+            assert_eq!(
+                classify_dedicated_server_identity(&dedicated),
+                ProcessIdentityVerdict::Match
+            );
+            child.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+            let sleep_path = DarwinSystem.realpath(Path::new("/bin/sleep")).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while DarwinSystem.live_process_path(child.id()).as_ref() != Some(&sleep_path) {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(10));
+            }
+            let after = DarwinSystem.bsd_process_identity(child.id()).unwrap();
+            assert_eq!(
+                (
+                    before.pid,
+                    before.start_tvsec,
+                    before.start_tvusec,
+                    before.process_group_id
+                ),
+                (
+                    after.pid,
+                    after.start_tvsec,
+                    after.start_tvusec,
+                    after.process_group_id
+                )
+            );
+            assert_eq!(
+                classify_worker_identity(&record),
+                ProcessIdentityVerdict::Mismatch
+            );
+            assert_eq!(
+                classify_dedicated_server_identity(&dedicated),
+                ProcessIdentityVerdict::Mismatch
+            );
+        }));
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
@@ -6375,7 +6656,7 @@ mod tests {
         let worker_process = DarwinSystem.bsd_process_identity(worker.id()).unwrap();
         let server_process = DarwinSystem.bsd_process_identity(server.id()).unwrap();
         let (worker_path, worker_device, worker_inode, worker_digest) =
-            executable_identity(Path::new("/bin/sh"));
+            executable_identity(&DarwinSystem.live_process_path(worker.id()).unwrap());
         let (server_path, server_device, server_inode, server_digest) =
             executable_identity(Path::new("/bin/sleep"));
         let identity = WorkerIdentity {
@@ -6405,6 +6686,7 @@ mod tests {
             },
             control_socket_epoch: 1,
             app_server_epoch: Some(1),
+            control_recovery_required: false,
             dedicated_server_identity: Some(DedicatedServerIdentity {
                 pid: server_process.pid,
                 process_group_id: server_process.process_group_id,
@@ -6422,23 +6704,30 @@ mod tests {
             binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
         };
 
-        assert_eq!(
-            classify_worker_identity(&record),
-            ProcessIdentityVerdict::Match
-        );
-        assert_eq!(
-            classify_dedicated_server_identity(record.dedicated_server_identity.as_ref().unwrap()),
-            ProcessIdentityVerdict::Match
-        );
-        assert_eq!(
-            prove_worker_workload_absent(&record),
-            Err(WorkerProtocolError::InvalidIdentity)
-        );
+        let checked = std::panic::catch_unwind(|| {
+            assert_eq!(
+                classify_worker_identity(&record),
+                ProcessIdentityVerdict::Match
+            );
+            assert_eq!(
+                classify_dedicated_server_identity(
+                    record.dedicated_server_identity.as_ref().unwrap()
+                ),
+                ProcessIdentityVerdict::Match
+            );
+            assert_eq!(
+                prove_worker_workload_absent(&record),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+        });
 
         let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
         let _ = DarwinSystem.signal_process_group(server.id(), libc::SIGKILL);
         let _ = worker.wait();
         let _ = server.wait();
+        if let Err(error) = checked {
+            std::panic::resume_unwind(error);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -6508,6 +6797,7 @@ mod tests {
             },
             control_socket_epoch: 1,
             app_server_epoch: Some(1),
+            control_recovery_required: false,
             dedicated_server_identity: Some(server_identity.clone()),
             dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
             mutation_protocol_version: WORKER_PROTOCOL_VERSION,
@@ -6586,6 +6876,7 @@ mod tests {
             },
             control_socket_epoch: 1,
             app_server_epoch: None,
+            control_recovery_required: false,
             dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,
@@ -6907,6 +7198,7 @@ mod tests {
             },
             control_socket_epoch: base.control_socket_epoch,
             app_server_epoch: None,
+            control_recovery_required: false,
             dedicated_server_identity: None,
             dolgorae_version: base.dolgorae_version.clone(),
             mutation_protocol_version: base.mutation_protocol_version,
@@ -7099,6 +7391,7 @@ mod tests {
             socket_identity: stale_identity.clone(),
             control_socket_epoch: 1,
             app_server_epoch: None,
+            control_recovery_required: false,
             dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,
@@ -7110,6 +7403,58 @@ mod tests {
         assert_ne!(replacement.identity(), &record.socket_identity);
         drop(replacement);
         assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn control_recovery_survives_reopen_and_preserves_foreign_socket() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-control-recovery-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut identity = identity();
+        identity.uid = DarwinSystem.current_uid();
+        let runtime = runtime_root(&root);
+        prepare_runtime_root(&runtime, identity.uid).unwrap();
+        let path = runtime_record_path(&runtime, identity.run_id).unwrap();
+        let lease = bind_worker_socket(&identity, None).unwrap();
+        let record = WorkerRuntimeRecord {
+            schema_version: 1,
+            identity: identity.clone(),
+            socket_path: lease.path.clone(),
+            socket_identity: lease.identity.clone(),
+            control_socket_epoch: 7,
+            app_server_epoch: None,
+            control_recovery_required: true,
+            dedicated_server_identity: None,
+            dolgorae_version: "0.1.0".to_owned(),
+            mutation_protocol_version: 1,
+            binary_sha256: "33".repeat(32),
+        };
+        write_runtime_record(&path, &record).unwrap();
+        drop(lease);
+        assert!(
+            read_runtime_record(&path, identity.uid)
+                .unwrap()
+                .control_recovery_required
+        );
+        assert_eq!(
+            call_run_worker(&root, identity.run_id, identity.uid, None, |expected| {
+                ControlRequestV1::Status { expected }
+            }),
+            Err(WorkerProtocolError::ControlRecoveryRequired {
+                generation: identity.run_generation
+            })
+        );
+        fs::write(&record.socket_path, b"foreign occupant").unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(recover_control_runtime(&path, identity.uid).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&record.socket_path).unwrap(), b"foreign occupant");
+        fs::remove_file(&record.socket_path).unwrap();
+        recover_control_runtime(&path, identity.uid).unwrap();
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

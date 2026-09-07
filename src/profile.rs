@@ -4740,10 +4740,13 @@ fn read_state_if_running(path: &Path) -> Result<Option<ServerState>, MachineErro
 }
 
 fn read_state(path: &Path) -> Result<Option<ServerState>, MachineError> {
-    if !path.exists() {
+    let Some(mut file) =
+        crate::workspace::open_secure_file_if_present(path, DarwinSystem.current_uid())?
+    else {
         return Ok(None);
-    }
-    let bytes = fs::read(path).map_err(io_error)?;
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(io_error)?;
     let state: ServerState = serde_json::from_slice(&bytes)
         .map_err(|error| MachineError::profile_config_invalid(path, error.to_string()))?;
     if state.schema_version != 2 || state.server_key != state.snapshot.server_key {
@@ -4888,6 +4891,24 @@ fn wait_for_socket(path: &Path, pid: u32) -> Result<(), MachineError> {
     ))
 }
 
+fn validate_account_readiness(profile_name: &str, account: &Value) -> Result<(), MachineError> {
+    if !account["requiresOpenaiAuth"].is_boolean() {
+        return Err(compatibility(
+            profile_name,
+            "app_server_probe",
+            "account/read lacks requiresOpenaiAuth",
+        ));
+    }
+    if account["requiresOpenaiAuth"] == true && account["account"].is_null() {
+        return Err(compatibility(
+            profile_name,
+            "app_server_probe",
+            "account/read requires login",
+        ));
+    }
+    Ok(())
+}
+
 fn probe_server(
     profile_name: &str,
     socket: &Path,
@@ -4918,13 +4939,7 @@ fn probe_server(
     let account = connection
         .request("account/read", json!({"refreshToken":false}))
         .map_err(transport)?;
-    if !account["requiresOpenaiAuth"].is_boolean() {
-        return Err(compatibility(
-            profile_name,
-            "app_server_probe",
-            "account/read lacks requiresOpenaiAuth",
-        ));
-    }
+    validate_account_readiness(profile_name, &account)?;
     let mut cursor = Value::Null;
     let mut request_id = 3_u64;
     let mut models = BTreeSet::new();
@@ -6713,6 +6728,65 @@ mod tests {
             redacted_log_body(b"{\"a\":1,\"a\":2}\n"),
             DROPPED_LOG_MARKER
         );
+    }
+
+    #[test]
+    fn login_readiness_rejects_logged_out_auth_but_allows_accountless_api_keys() {
+        let rejected = validate_account_readiness(
+            "default",
+            &json!({"requiresOpenaiAuth":true,"account":null}),
+        )
+        .unwrap_err();
+        assert_eq!(rejected.code, "COMPATIBILITY_REJECTED");
+        assert!(
+            validate_account_readiness(
+                "default",
+                &json!({"requiresOpenaiAuth":false,"account":null})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_account_readiness(
+                "default",
+                &json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt"}})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_account_readiness(
+                "default",
+                &json!({"requiresOpenaiAuth":"true","account":null})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn state_read_rejects_insecure_and_symlink_files_without_modification() {
+        let root = std::env::temp_dir().join(format!("dolgorae-state-read-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("state.json");
+        let bytes = serde_json::to_vec(&stopped_state()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_state(&path).unwrap_err().code, "RUNTIME_PATH_INVALID");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_state(&path).unwrap().is_some());
+        let link = root.join("link.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(read_state(&link).unwrap_err().code, "RUNTIME_PATH_INVALID");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(read_state(&link).unwrap_err().code, "RUNTIME_PATH_INVALID");
+        assert!(read_state(&path).unwrap().is_none());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn stopped_state() -> ServerState {

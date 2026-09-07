@@ -28,6 +28,8 @@ development commits.
 
 ### Changed
 
+- Release the Operator lock explicitly after fork inheritance and retry interrupted
+  lock operations without misclassifying contention.
 - Bound global Profile home and registry reads before rejecting oversized files.
 - Bound membership replay reads and stream journal checksums without changing
   membership limits or persisted hashes.
@@ -56,6 +58,16 @@ development commits.
 
 ### Fixed
 
+- Reject changed live worker executables and restore missing control sockets;
+  persist explicit recovery requirements when safe restoration fails.
+- Preserve interaction quarantine and terminal staleness, and durably accept
+  pinned Codex file-change approvals.
+- Report current Writer activity and destination server epochs, preserve
+  handoff-cancellation retries, and stabilize write-continuation retries while
+  requiring evidence for access-transition failure reasons.
+- Reject insecure Profile state and membership authority files, including
+  dangling symlinks, and refuse logged-out Profiles that require authentication.
+- Align immutable review-target failures with the checked machine error contract.
 - Reject FIFO files during worktree capture without blocking.
 - Reject unterminated membership journals before reading or appending authority.
 

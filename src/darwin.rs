@@ -44,6 +44,7 @@ struct ProcBsdInfo {
 
 #[link(name = "proc")]
 unsafe extern "C" {
+    fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, buffer_size: u32) -> libc::c_int;
     fn proc_pidinfo(
         pid: libc::c_int,
         flavor: libc::c_int,
@@ -916,6 +917,24 @@ impl DarwinSystem {
             }
         }
         Ok(())
+    }
+
+    /// A missing live path alone permits the recorded-image fallback.
+    pub fn live_process_path(self, pid: u32) -> Option<PathBuf> {
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let mut bytes = vec![0_u8; 4096];
+        // SAFETY: the buffer is writable for the declared capacity and the PID
+        // is passed by value. proc_pidpath does not retain the pointer.
+        let count = unsafe { proc_pidpath(pid, bytes.as_mut_ptr().cast(), 4096) };
+        if count <= 0 {
+            return None;
+        }
+        let end = bytes.iter().position(|byte| *byte == 0)?;
+        if end == 0 {
+            return None;
+        }
+        bytes.truncate(end);
+        Some(PathBuf::from(OsString::from_vec(bytes)))
     }
 
     pub fn live_process_identity(self, pid: u32) -> Result<LiveProcessIdentity, std::io::Error> {

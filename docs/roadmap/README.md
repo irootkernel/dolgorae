@@ -453,7 +453,7 @@ dolgorae specialist review \
 The command is an adapter composition, not a third use case. It performs open,
 hire, assign, await, collect, release, and close against the shared External
 Specialist Engagement service. Add the checked
-`dolgorae-specialist-review-tool-v1.schema.json` request, success, finding, and
+`dolgorae-specialist-review-tool-v2.schema.json` request, success, finding, and
 error shapes. Register `specialist.review` in the checked machine-output schema
 and place the successful checked review result in the envelope's `data` field.
 JSON is the canonical machine result; human output is a rendering of that
@@ -995,7 +995,7 @@ Status: `COMPLETE`
 Canonical Outcomes: [external engagement specification](../specs/README.md#external-specialist-engagement),
 [facade architecture](../architecture/README.md#external-specialist-facade),
 [ADR-034](../architecture-decision-records/README.md#adr-034-delegate-external-member-control-through-the-aggregate-owner),
-[checked facade protocol](../protocol/dolgorae-external-specialist-facade-v1.schema.json),
+[checked facade protocol](../protocol/dolgorae-external-specialist-facade-v2.schema.json),
 [implementation](../../src/external_engagement.rs), and
 [black-box contract tests](../../tests/e2e/test_external_engagement_cli.py)
 
