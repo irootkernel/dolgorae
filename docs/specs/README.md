@@ -603,6 +603,11 @@ or recovery of legacy Profiles, Runs, Profile Servers, engagements, writers, or
 aggregates. Stateless help, version, and capability discovery remain available.
 The operator recovery procedure is owned by the operations guide.
 
+Home admission and global registry reads retain their existing limits: 4096
+bytes for the home marker and 1 MiB each for the registry and binding history.
+Readers consume at most the limit plus one byte before rejecting oversized
+input with the existing error classification, without changing stored state.
+
 The global Profile generation is active across the home gate, global Profile
 commands, account-neutral workspace initialization, Run admission, and both
 Specialist consumers. No supported command reads or writes both Profile

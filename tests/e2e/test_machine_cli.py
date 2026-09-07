@@ -139,38 +139,59 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         )
     assert_valid(uninitialized_envelope, machine, "uninitialized-home failure")
 
-    with tempfile.TemporaryDirectory(prefix="dolgorae-legacy-admission-") as temporary:
-        legacy_home = pathlib.Path(temporary) / "home"
-        legacy_root = legacy_home / ".dolgorae"
-        legacy_root.mkdir(parents=True, mode=0o700)
-        marker = legacy_root / "legacy-evidence"
-        marker.write_bytes(b"preserve legacy state")
-        workspace = pathlib.Path(temporary) / "workspace"
-        workspace.mkdir(mode=0o700)
-        environment = os.environ.copy()
-        environment["HOME"] = str(legacy_home)
-        requests = (
-            ["run", "start", "--workspace", str(workspace), "--profile", "selected",
-             "--control-mode", "direct-interactive", "--execution-lane", "shared-readonly",
-             "--required-assurance", "best-effort-personal-alpha", "--purpose", "implementation",
-             "--idempotency-key", "legacy-admission"],
-            ["engagement", "call", "--workspace", str(workspace),
-             "--controller-file", str(legacy_home / "absent-controller"), "--request-fd", "0"],
-        )
-        for arguments in requests:
-            completed = subprocess.run(
-                [str(binary), *arguments], input="", check=False, capture_output=True,
-                text=True, env=environment,
+    generation = b'{"schema_version":2,"state_generation":"global-profile-v2"}'
+    for classification, files in (
+        ("unmarked_nonempty", {"legacy-evidence": b"preserve legacy state"}),
+        ("malformed_marker", {"state.json": b"{invalid"}),
+        ("unsupported_generation", {"state.json": b'{"schema_version":1,"state_generation":"old"}'}),
+        ("partial_generation", {"state.json": generation}),
+        ("mixed_generation", {
+            "state.json": generation,
+            "profiles.yaml": b"schema_version: 1\nprofiles: {}\n",
+            "profile-bindings.json": b'{"schema_version":1,"bindings":{}}',
+            "workspaces/legacy/local.yaml": b"preserve legacy profiles",
+        }),
+    ):
+        with tempfile.TemporaryDirectory(prefix="dolgorae-legacy-admission-") as temporary:
+            legacy_home = pathlib.Path(temporary) / "home"
+            legacy_root = legacy_home / ".dolgorae"
+            legacy_root.mkdir(parents=True, mode=0o700)
+            for relative, content in files.items():
+                path = legacy_root / relative
+                path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                path.write_bytes(content)
+                path.chmod(0o600)
+            def snapshot():
+                return {
+                    str(path.relative_to(legacy_root)): (path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+                    for path in legacy_root.rglob("*")
+                }
+            before = snapshot()
+            workspace = pathlib.Path(temporary) / "workspace"
+            workspace.mkdir(mode=0o700)
+            environment = os.environ.copy()
+            environment["HOME"] = str(legacy_home)
+            requests = (
+                ["run", "start", "--workspace", str(workspace), "--profile", "selected",
+                 "--control-mode", "direct-interactive", "--execution-lane", "shared-readonly",
+                 "--required-assurance", "best-effort-personal-alpha", "--purpose", "implementation",
+                 "--idempotency-key", "legacy-admission"],
+                ["engagement", "call", "--workspace", str(workspace),
+                 "--controller-file", str(legacy_home / "absent-controller"), "--request-fd", "0"],
             )
-            envelope = json.loads(completed.stdout)
-            assert_valid(envelope, machine, "legacy-home admission failure")
-            if (completed.returncode != 5 or completed.stderr
-                    or envelope["error"]["code"] != "LEGACY_STATE_UNSUPPORTED"):
-                raise AssertionError(f"legacy-home admission was not blocked: {completed!r}")
-            if (list(legacy_root.iterdir()) != [marker]
-                    or marker.read_bytes() != b"preserve legacy state"
-                    or list(workspace.iterdir())):
-                raise AssertionError("legacy-home rejection mutated home or workspace state")
+            for arguments in requests:
+                completed = subprocess.run(
+                    [str(binary), *arguments], input="", check=False, capture_output=True,
+                    text=True, env=environment,
+                )
+                envelope = json.loads(completed.stdout)
+                assert_valid(envelope, machine, "legacy-home admission failure")
+                if (completed.returncode != 5 or completed.stderr
+                        or envelope["error"]["code"] != "LEGACY_STATE_UNSUPPORTED"
+                        or envelope["error"]["details"]["classification"] != classification):
+                    raise AssertionError(f"legacy-home admission was not blocked: {completed!r}")
+                if snapshot() != before or list(workspace.iterdir()):
+                    raise AssertionError("legacy-home rejection mutated home or workspace state")
 
     bootstrap = home.parent / "machine-bootstrap"
     bootstrap.mkdir(mode=0o700)

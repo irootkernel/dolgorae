@@ -13,13 +13,14 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const HOME_STATE_BYTES: &[u8] =
     b"{\n  \"schema_version\": 2,\n  \"state_generation\": \"global-profile-v2\"\n}\n";
+const MAX_HOME_STATE_BYTES: u64 = 4096;
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_BINDING_HISTORY_BYTES: u64 = 1024 * 1024;
 
@@ -377,9 +378,9 @@ fn inspect_root(root: &Path) -> Result<HomeGenerationStatus, MachineError> {
         };
     }
     verify_secure_file(&marker, DarwinSystem.current_uid())?;
-    let bytes = fs::read(&marker)
+    let bytes = read_prefix(&marker, MAX_HOME_STATE_BYTES)
         .map_err(|error| MachineError::runtime_path_invalid(&marker, error.to_string()))?;
-    if bytes.len() > 4096 {
+    if bytes.len() as u64 > MAX_HOME_STATE_BYTES {
         return Err(legacy_state_unsupported(root, "malformed_marker"));
     }
     let text = std::str::from_utf8(&bytes)
@@ -436,10 +437,18 @@ fn lock_initialized_home(root: &Path) -> Result<File, MachineError> {
     Ok(directory)
 }
 
+fn read_prefix(path: &Path, maximum: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(maximum + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn load_registry(root: &Path) -> Result<GlobalProfileRegistry, MachineError> {
     let path = root.join("profiles.yaml");
     verify_secure_file(&path, DarwinSystem.current_uid())?;
-    let bytes = fs::read(&path)
+    let bytes = read_prefix(&path, MAX_REGISTRY_BYTES)
         .map_err(|error| MachineError::profile_config_invalid(&path, error.to_string()))?;
     if bytes.len() as u64 > MAX_REGISTRY_BYTES {
         return Err(MachineError::profile_config_invalid(
@@ -453,7 +462,7 @@ fn load_registry(root: &Path) -> Result<GlobalProfileRegistry, MachineError> {
 fn load_registry_for_removal(root: &Path) -> Result<GlobalProfileRegistry, MachineError> {
     let path = root.join("profiles.yaml");
     verify_secure_file(&path, DarwinSystem.current_uid())?;
-    let bytes = fs::read(&path)
+    let bytes = read_prefix(&path, MAX_REGISTRY_BYTES)
         .map_err(|error| MachineError::profile_config_invalid(&path, error.to_string()))?;
     if bytes.len() as u64 > MAX_REGISTRY_BYTES {
         return Err(MachineError::profile_config_invalid(
@@ -521,7 +530,7 @@ fn store_registry(root: &Path, registry: &GlobalProfileRegistry) -> Result<(), M
 fn load_binding_history(root: &Path) -> Result<ProfileBindingHistory, MachineError> {
     let path = root.join("profile-bindings.json");
     verify_secure_file(&path, DarwinSystem.current_uid())?;
-    let bytes = fs::read(&path)
+    let bytes = read_prefix(&path, MAX_BINDING_HISTORY_BYTES)
         .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
     if bytes.len() as u64 > MAX_BINDING_HISTORY_BYTES {
         return Err(legacy_state_unsupported(root, "malformed_marker"));
@@ -1146,6 +1155,66 @@ mod tests {
     }
 
     #[test]
+    fn persisted_file_limits_accept_the_boundary_and_reject_without_mutation() {
+        for (name, maximum) in [
+            ("state.json", MAX_HOME_STATE_BYTES),
+            ("profiles.yaml", MAX_REGISTRY_BYTES),
+            ("profile-bindings.json", MAX_BINDING_HISTORY_BYTES),
+        ] {
+            let (parent, home) = test_home();
+            initialize_generation(&home).unwrap();
+            let path = home.root().join(name);
+            let original = fs::read(&path).unwrap();
+            for length in [maximum - 1, maximum, maximum + 1] {
+                let mut bytes = original.clone();
+                bytes.resize(usize::try_from(length).unwrap(), b' ');
+                fs::write(&path, &bytes).unwrap();
+                let result = GlobalProfileStore::new(&home).load();
+                if length <= maximum {
+                    assert!(result.is_ok(), "{name} at {length}: {result:?}");
+                    assert!(load_registry_for_removal(home.root()).is_ok());
+                } else {
+                    let error = result.unwrap_err();
+                    if name == "profiles.yaml" {
+                        assert_eq!(error.code, "PROFILE_CONFIG_INVALID");
+                        assert_eq!(
+                            load_registry_for_removal(home.root()).unwrap_err().code,
+                            "PROFILE_CONFIG_INVALID"
+                        );
+                    } else {
+                        assert_eq!(error.code, "LEGACY_STATE_UNSUPPORTED");
+                        assert_eq!(error.details["classification"], "malformed_marker");
+                    }
+                }
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+            }
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+
+    #[test]
+    fn oversized_file_reads_stop_after_the_overflow_byte() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let marker = home.root().join("state.json");
+        File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let prefix = read_prefix(&marker, MAX_HOME_STATE_BYTES).unwrap();
+        assert_eq!(prefix.len() as u64, MAX_HOME_STATE_BYTES + 1);
+        assert!(prefix.starts_with(HOME_STATE_BYTES));
+        assert_eq!(
+            inspect_generation(&home).unwrap_err().details["classification"],
+            "malformed_marker"
+        );
+        assert_eq!(fs::metadata(&marker).unwrap().len(), 64 * 1024 * 1024);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn malformed_and_insecure_markers_fail_closed() {
         let (parent, home) = test_home();
         initialize_generation(&home).unwrap();
@@ -1155,6 +1224,12 @@ mod tests {
             inspect_generation(&home).unwrap_err().details["classification"],
             "malformed_marker"
         );
+        fs::write(&marker, [0xff]).unwrap();
+        assert_eq!(
+            inspect_generation(&home).unwrap_err().details["classification"],
+            "malformed_marker"
+        );
+        assert_eq!(fs::read(&marker).unwrap(), [0xff]);
         fs::write(&marker, HOME_STATE_BYTES).unwrap();
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
