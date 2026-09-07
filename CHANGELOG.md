@@ -5,6 +5,8 @@ Dolgorae. Releases receive a version and date only when the repository has
 corresponding release authority; historical releases are not inferred from
 development commits.
 
+## v0.1.3 - Unreleased
+
 ## v0.1.2 - 2026-09-08
 
 ### Added
