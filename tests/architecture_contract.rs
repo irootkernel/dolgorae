@@ -248,9 +248,19 @@ fn source_module_dependencies_match_the_approved_graph() {
             "workspace",
             &["darwin", "jcs", "machine", "paths", "writer"][..],
         ),
+        // Writer status reuses the semantic Run status projection; its local
+        // regression fixture also constructs a RunStateProjection directly.
         (
             "writer",
-            &["darwin", "domain", "machine", "run", "workspace"][..],
+            &[
+                "darwin",
+                "domain",
+                "machine",
+                "projection",
+                "run",
+                "semantic",
+                "workspace",
+            ][..],
         ),
         // `worker` names `controller` because ADR-016 makes the hidden worker
         // the authoritative consumer of a Controller credential: it rereads
@@ -265,6 +275,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         // Run's coordinator and, from its own session bootstrap, which Runtime
         // Profile the Run is pinned to. `turn` stays free of it: the
         // coordinator is handed a writer rather than deriving one.
+        // It names `writer` to refresh the current holder after control-socket
+        // recovery, within the worker's writer-authority transaction boundary.
         (
             "worker",
             &[
@@ -283,6 +295,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "run",
                 "turn",
                 "workspace",
+                "writer",
             ][..],
         ),
     ]);
