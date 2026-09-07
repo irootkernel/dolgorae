@@ -3110,6 +3110,44 @@ mod tests {
     use crate::workspace::LosslessPath;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn store_error_projections_preserve_closed_contract_details() {
+        let run_id = Uuid::now_v7();
+        for (error, code, details) in [
+            (
+                conflict("invalid transition"),
+                "STATE_CONFLICT",
+                serde_json::json!({"required_action":"inspect_engagement"}),
+            ),
+            (
+                policy_denied("access mismatch"),
+                "SPECIALIST_POLICY_DENIED",
+                serde_json::json!({"required_action":"change_specialist_or_access"}),
+            ),
+            (
+                specialist_not_member(run_id),
+                "SPECIALIST_NOT_MEMBER",
+                serde_json::json!({"specialist_run_id":run_id}),
+            ),
+            (
+                not_found(),
+                "ENGAGEMENT_NOT_FOUND",
+                serde_json::json!({"required_action":"use_existing_engagement"}),
+            ),
+        ] {
+            assert_eq!(error.code, code);
+            assert!(!error.retryable);
+            assert_eq!(error.details, details);
+            let projected = serde_json::to_value(&error).unwrap();
+            assert_eq!(projected.as_object().unwrap().len(), 4);
+            assert!(
+                projected["message"]
+                    .as_str()
+                    .is_some_and(|message| !message.is_empty())
+            );
+        }
+    }
+
     struct FailAt(EngagementBarrier);
 
     impl EngagementFaultInjector for FailAt {
@@ -5651,12 +5689,14 @@ mod tests {
         let opened = store
             .open_engagement("workspace", &"a".repeat(64), "open")
             .unwrap();
+        let error = store
+            .await_terminal(opened.engagement_id, Duration::from_millis(1))
+            .unwrap_err();
+        assert_eq!(error.code, "ENGAGEMENT_TIMEOUT");
+        assert!(!error.retryable);
         assert_eq!(
-            store
-                .await_terminal(opened.engagement_id, Duration::from_millis(1))
-                .unwrap_err()
-                .code,
-            "ENGAGEMENT_TIMEOUT"
+            error.details,
+            serde_json::json!({"required_action":"cancel_or_await_again"})
         );
         let cancelled = store.cancel(opened.engagement_id, "cancel").unwrap();
         assert_eq!(cancelled.state, "cancelled");

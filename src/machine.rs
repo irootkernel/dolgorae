@@ -263,6 +263,21 @@ mod tests {
     }
 
     #[test]
+    fn current_error_exit_statuses_match_the_checked_contract() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-error-contract-v2.json"
+        ))
+        .unwrap();
+        for (code, expected) in contract["x-exit-status"].as_object().unwrap() {
+            assert_eq!(
+                u64::from(exit_status_for(code)),
+                expected.as_u64().unwrap(),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn every_exit_class_is_representable() {
         let cases = [
             ("INVALID_ARGUMENT", 2),

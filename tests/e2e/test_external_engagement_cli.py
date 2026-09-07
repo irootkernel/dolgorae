@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -399,6 +400,21 @@ def validate(binary: pathlib.Path) -> None:
                 {"operation": "get_external_engagement", "engagement_id": engagement_id},
                 expected_error="CONTROLLER_MISMATCH",
             )
+            missing_id = "01990000-0000-7000-8000-000000000001"
+            for request, code, details in (
+                ({"operation": "get_external_engagement", "engagement_id": missing_id},
+                 "ENGAGEMENT_NOT_FOUND", {"required_action": "use_existing_engagement"}),
+                ({"operation": "release_external_specialist", "engagement_id": engagement_id,
+                  "specialist_run_id": missing_id, "reason": "unknown member",
+                  "idempotency_key": "release-unknown"},
+                 "SPECIALIST_NOT_MEMBER", {"specialist_run_id": missing_id}),
+                ({"operation": "cancel_external_specialist_task", "engagement_id": engagement_id,
+                  "task_id": missing_id, "reason": "unknown task", "idempotency_key": "cancel-unknown"},
+                 "SPECIALIST_TASK_NOT_FOUND", {"task_id": missing_id}),
+            ):
+                error = call(binary, home, workspace, owner, request, expected_error=code)
+                if error["details"] != details or error["retryable"]:
+                    raise AssertionError(f"incorrect unknown-identity error: {error!r}")
             hire_request = {
                 "operation": "hire_external_specialist",
                 "engagement_id": engagement_id,
@@ -469,6 +485,40 @@ def validate(binary: pathlib.Path) -> None:
             replayed_hire = call(binary, home, workspace, owner, hire_request, child)
             if replayed_hire["specialist_run_id"] != run_id:
                 raise AssertionError("hire replay changed Specialist identity")
+            database = state_root / "orchestration" / "orchestration.sqlite3"
+            with sqlite3.connect(database) as connection:
+                original_state = connection.execute(
+                    "SELECT state FROM members WHERE specialist_run_id=?", (run_id,)
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE members SET state='provisioning' WHERE specialist_run_id=?", (run_id,)
+                )
+            try:
+                for request in (
+                    {"operation": "release_external_specialist", "engagement_id": engagement_id,
+                     "specialist_run_id": run_id, "reason": "still provisioning",
+                     "idempotency_key": "release-provisioning"},
+                    {"operation": "close_external_engagement", "engagement_id": engagement_id,
+                     "mode": "abort", "reason": "still provisioning",
+                     "idempotency_key": "close-provisioning"},
+                ):
+                    error = call(binary, home, workspace, owner, request,
+                                 expected_error="ENGAGEMENT_STATE_CONFLICT")
+                    if not error["retryable"] or error["details"] != {
+                        "specialist_run_id": run_id, "required_action": "retry_after_reconciliation"
+                    }:
+                        raise AssertionError(f"incorrect provisioning-lease error: {error!r}")
+            finally:
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        "UPDATE members SET state=? WHERE specialist_run_id=?", (original_state, run_id)
+                    )
+            error = call(binary, home, workspace, owner, {
+                "operation": "close_external_engagement", "engagement_id": engagement_id,
+                "mode": "complete", "reason": "unreleased member", "idempotency_key": "close-unreleased",
+            }, expected_error="STATE_CONFLICT")
+            if error["retryable"] or error["details"] != {"required_action": "inspect_engagement"}:
+                raise AssertionError(f"incorrect close conflict: {error!r}")
             changed_hire = dict(hire_request)
             changed_hire["objective"] = "Changed input under the same key"
             call(
@@ -856,7 +906,7 @@ def validate(binary: pathlib.Path) -> None:
             )
             if assigned["state"] != "running":
                 raise AssertionError(f"abort fixture did not remain running: {assigned!r}")
-            call(
+            active_error = call(
                 binary,
                 home,
                 workspace,
@@ -870,6 +920,8 @@ def validate(binary: pathlib.Path) -> None:
                 },
                 expected_error="ENGAGEMENT_STATE_CONFLICT",
             )
+            if active_error["retryable"] or active_error["details"] != {"specialist_run_id": abort_run_id}:
+                raise AssertionError(f"incorrect active-task error: {active_error!r}")
             cancel_request = {
                 "operation": "cancel_external_specialist_task",
                 "engagement_id": abort_engagement_id,
@@ -909,6 +961,24 @@ def validate(binary: pathlib.Path) -> None:
                 raise AssertionError(
                     f"interaction engagement did not close: {interaction_closed!r}"
                 )
+
+            database = state_root / "orchestration" / "orchestration.sqlite3"
+            with sqlite3.connect(database) as connection:
+                original_schema = connection.execute(
+                    "SELECT value FROM metadata WHERE key='schema_version'"
+                ).fetchone()[0]
+                connection.execute("UPDATE metadata SET value='unsupported' WHERE key='schema_version'")
+            try:
+                error = call(binary, home, workspace, owner, {
+                    "operation": "get_external_engagement", "engagement_id": engagement_id,
+                }, expected_error="ORCHESTRATION_SCHEMA_UNSUPPORTED")
+                if error["details"] != {"observed": "unsupported"} or error["retryable"]:
+                    raise AssertionError(f"incorrect unsupported-schema error: {error!r}")
+            finally:
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        "UPDATE metadata SET value=? WHERE key='schema_version'", (original_schema,)
+                    )
 
         finally:
             invoke(binary, home, [

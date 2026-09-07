@@ -2165,6 +2165,60 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn failure_projections_preserve_contract_details_and_retryability() {
+        let task_id = Uuid::now_v7();
+        let error = outcome_unknown(task_id);
+        assert_eq!(error.code, "OUTCOME_UNKNOWN");
+        assert!(error.retryable);
+        assert_eq!(
+            error.details,
+            json!({"task_id":task_id,"required_action":"retry_reconciliation"})
+        );
+        for (code, retryable) in [("WRITER_BUSY", true), ("RUN_STATE_CONFLICT", false)] {
+            let error = map_writer_conflict(MachineError::new(
+                code,
+                "writer refusal",
+                retryable,
+                json!({"private_context":"must not be projected"}),
+            ));
+            assert_eq!(error.code, "SPECIALIST_WRITER_CONFLICT");
+            assert_eq!(error.retryable, retryable);
+            assert_eq!(error.details, json!({"cause_code":code}));
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-error-projections-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let error = capture_isolated_change(&root, task_id).unwrap_err();
+        assert_eq!(error.code, "SPECIALIST_RESULT_INVALID");
+        assert!(!error.retryable);
+        assert_eq!(error.details, json!({"task_id":task_id}));
+
+        let engagement_id = Uuid::now_v7();
+        let run_id = Uuid::now_v7();
+        let isolated = isolated_root(&root, engagement_id, run_id);
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::set_permissions(&isolated, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = prepare_launch_root(
+            &root,
+            WorkspaceMode::Git,
+            &root,
+            engagement_id,
+            run_id,
+            "isolated_write",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert!(!error.retryable);
+        assert_eq!(
+            error.details,
+            json!({"run_id":run_id,"required_action":"restore_isolated_worktree"})
+        );
+        assert!(isolated.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn only_an_isolated_member_starts_with_a_write_sandbox() {
         assert_eq!(initial_specialist_sandbox("read_only"), "read-only");
         assert_eq!(
