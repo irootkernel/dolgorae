@@ -296,7 +296,7 @@ evidence.
 ### Consequences
 
 - Existing runs remain bound to the account that created them.
-- Per-workspace Dolgorae-home profile edits affect only future Runs
+- User-global Profile definition edits affect only future Runs
   unless an Operator explicitly migrates the shared server contract.
 - Executable or process-static updates require a server-key migration and do
   not change the expected home.
