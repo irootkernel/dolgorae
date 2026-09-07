@@ -894,6 +894,13 @@ fn replay(
             "membership journal exceeds 8 MiB",
         ));
     }
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership journal has an unterminated final record",
+        ));
+    }
     let mut records = Vec::new();
     let mut previous = ZERO_HASH.to_owned();
     for (offset, line) in bytes
@@ -1324,6 +1331,66 @@ mod tests {
             sha256_hex(&oversized)
         );
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn unterminated_membership_rejects_reads_and_appends_without_mutation() {
+        for partial_tail in [false, true] {
+            for missing_index in [false, true] {
+                let (parent, home) = home();
+                let key = "c".repeat(64);
+                let store = GlobalMembershipStore::new(&home, "selected", &key).unwrap();
+                assert_eq!(store.load().unwrap().revision, 0);
+                let root = home.root().join("profiles").join(&key);
+                let state = server_state(snapshot("selected", &definition(&parent), &key));
+                atomic_create(
+                    &SystemWorkspacePlatform,
+                    &root.join("state.json"),
+                    &serde_json::to_vec(&state).unwrap(),
+                    0o600,
+                )
+                .unwrap();
+                let run_id = Uuid::now_v7();
+                store
+                    .record(&"1".repeat(64), run_id, MembershipDisposition::Active)
+                    .unwrap();
+                assert_eq!(store.load().unwrap().revision, 1);
+                let paths = [
+                    root.join("membership.jsonl"),
+                    root.join("members.json"),
+                    root.join("state.json"),
+                ];
+                let mut bytes = fs::read(&paths[0]).unwrap();
+                assert_eq!(bytes.last(), Some(&b'\n'));
+                if partial_tail {
+                    bytes.extend_from_slice(b"{\"schema_version\":");
+                } else {
+                    bytes.pop();
+                }
+                fs::write(&paths[0], bytes).unwrap();
+                if missing_index {
+                    fs::remove_file(&paths[1]).unwrap();
+                }
+                let before = paths.each_ref().map(|path| fs::read(path).ok());
+                let error = store.load().unwrap_err();
+                assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
+                assert_eq!(
+                    error.details["reason"],
+                    "membership journal has an unterminated final record"
+                );
+                assert_eq!(paths.each_ref().map(|path| fs::read(path).ok()), before);
+                let error = store
+                    .record(&"1".repeat(64), run_id, MembershipDisposition::Released)
+                    .unwrap_err();
+                assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
+                assert_eq!(
+                    error.details["reason"],
+                    "membership journal has an unterminated final record"
+                );
+                assert_eq!(paths.each_ref().map(|path| fs::read(path).ok()), before);
+                fs::remove_dir_all(parent).unwrap();
+            }
+        }
     }
 
     #[test]

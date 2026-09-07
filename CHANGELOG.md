@@ -56,6 +56,9 @@ development commits.
 
 ### Fixed
 
+- Reject FIFO files during worktree capture without blocking.
+- Reject unterminated membership journals before reading or appending authority.
+
 - Reject duplicate Profile and environment keys before reading or changing the global registry.
 - Reject inconsistent membership history before Profile lifecycle operations or membership updates.
 - Validate workspace compatibility before creating global home state during initialization.

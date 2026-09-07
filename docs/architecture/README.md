@@ -931,6 +931,9 @@ rejects missing/corrupt/revision-mismatched history; it does not rebuild by
 scanning incidental project directories. The common membership reader and
 appender compare the derived index and persisted server-state identity/revision
 before any append, so an ordinary write cannot conceal an earlier inconsistency.
+Replay rejects any nonempty journal without a terminal LF before either reads
+or appends can change the journal, derived index, or server state; it never
+normalizes an unterminated tail.
 Operator repair verifies the valid
 prefix and exact confirmed orphan and appends a tombstone/new revision. A
 startup transaction holds

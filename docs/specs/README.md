@@ -855,6 +855,10 @@ only when no persisted index or server state contradicts it; a missing derived
 index alone does not erase the journal's authority.
 Global membership replay bounds input at its existing 8 MiB ceiling plus one
 overflow byte and retains `PROFILE_MEMBERSHIP_INCOMPLETE` on excess.
+Every record must end with LF. A nonempty journal without a terminal LF is
+incomplete and blocks both reads and appends with
+`PROFILE_MEMBERSHIP_INCOMPLETE`, without changing the journal, derived index,
+or server state. Replay never normalizes or repairs an unterminated tail.
 Membership checksums cover the full journal through bounded-memory reads.
 A membership append updates `members.json` and the `state.json`
 membership revision under the same server lock. It is repairable only through the operator procedure below; there

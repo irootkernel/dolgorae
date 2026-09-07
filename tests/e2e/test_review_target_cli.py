@@ -30,6 +30,8 @@ def invoke(
     binary: pathlib.Path,
     home: pathlib.Path,
     arguments: list[str],
+    *,
+    timeout: float | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
@@ -39,6 +41,7 @@ def invoke(
         capture_output=True,
         text=True,
         env=environment,
+        timeout=timeout,
     )
     if completed.stderr:
         raise AssertionError(f"unexpected stderr for {arguments}: {completed.stderr!r}")
@@ -52,6 +55,8 @@ def capture(
     kind: str,
     owner: pathlib.Path,
     revision: str | None = None,
+    *,
+    timeout: float | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     arguments = [
         "review-target", "capture", "--workspace", str(repository),
@@ -61,7 +66,7 @@ def capture(
     ]
     if revision is not None:
         arguments.extend(["--revision", revision])
-    return invoke(binary, home, arguments)
+    return invoke(binary, home, arguments, timeout=timeout)
 
 
 def receipt(path: pathlib.Path, lifecycle: str, state: str = "completed") -> None:
@@ -288,6 +293,28 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 raise AssertionError(f"Git-object contrast capture failed for {kind}: {envelope}")
         nested.unlink()
         retained_nested.rename(nested)
+
+        fifo = nested / "tracked.txt"
+        original_bytes = fifo.read_bytes()
+        fifo.unlink()
+        os.mkfifo(fifo, 0o600)
+        source_before = git(repository, "status", "--porcelain=v1").stdout
+        for kind in ("workspace", "dirty"):
+            owner = root / f"fifo-{kind}-owner"
+            completed, envelope = capture(binary, home, repository, kind, owner, timeout=5)
+            if completed.returncode == 0 or envelope["error"]["code"] != "REVIEW_TARGET_UNSAFE_FILE":
+                raise AssertionError(f"FIFO was accepted for {kind}: {envelope}")
+            if owner.exists() or not stat.S_ISFIFO(fifo.lstat().st_mode):
+                raise AssertionError(f"FIFO capture changed source or created an owner for {kind}")
+            if git(repository, "status", "--porcelain=v1").stdout != source_before:
+                raise AssertionError(f"FIFO capture changed Git state for {kind}")
+        for kind in ("head", "staged"):
+            owner = root / f"fifo-object-{kind}-owner"
+            completed, envelope = capture(binary, home, repository, kind, owner, timeout=5)
+            if completed.returncode != 0:
+                raise AssertionError(f"FIFO Git-object capture failed for {kind}: {envelope}")
+        fifo.unlink()
+        fifo.write_bytes(original_bytes)
 
         oversized_committed = repository / "oversized-committed.bin"
         oversized_committed.write_bytes(b"x" * (8 * 1024 * 1024 + 1))

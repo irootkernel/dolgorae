@@ -157,6 +157,10 @@ impl DarwinSystem {
         let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
         if require_directory {
             flags |= libc::O_DIRECTORY;
+        } else {
+            // Open special leaves without waiting so the caller can reject
+            // non-regular files through descriptor metadata.
+            flags |= libc::O_NONBLOCK;
         }
         // SAFETY: directory is a live descriptor, name is a NUL-terminated
         // component, and a successful result transfers one new descriptor.

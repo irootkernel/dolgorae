@@ -20,16 +20,19 @@ persistent-Run, or Specialist Policy workflow.
 
    ```sh
    command -v dolgorae
-   dolgorae --version
+   dolgorae version --json
    dolgorae runtime capabilities
    ```
 
-   Dolgorae emits its canonical machine envelope by default. Do not add an
-   invented `--json` flag. Use `--human` only for interactive presentation and
-   never parse it. If the executable is absent, report that fact; do not install
-   or upgrade it automatically.
-3. Compare the version envelope with `data.dolgorae_version` from capabilities
-   and with any version or artifact identity pinned by the caller repository.
+   `version --json` returns exactly `{name, version}`, without the machine
+   envelope; `--version` returns compact human text. Other commands emit the
+   canonical machine envelope by default; do not add `--json` to them. Use
+   `--human` only for interactive presentation and never parse it. If the
+   executable is absent, report that fact; do not install or upgrade it
+   automatically.
+3. Require version JSON `name` to equal `dolgorae`, remove one leading `v`
+   from its `version`, and compare it with capabilities
+   `data.dolgorae_version` and any version pinned by the caller repository.
    Treat a checkout build, an installed binary, and a released artifact as
    separate identities. Stop on a mismatch instead of mixing their evidence.
 4. Read `supported_transports`, `features`, `assurance`, `execution_lanes`,
@@ -118,8 +121,12 @@ planner; do not infer a task graph, retry unknown work, attach an existing Run,
 or let a Specialist hire or contact another Specialist.
 
 1. Read the checked
-   `docs/protocol/dolgorae-external-specialist-facade-v1.schema.json` contract
-   from the exact version-matched source or package. Construct exactly one
+   `docs/protocol/dolgorae-external-specialist-facade-v2.schema.json` contract
+   from the exact version-matched source or package. For hire requests, follow
+   `docs/protocol/examples/external-engagement-v2-hire.valid.json`: use
+   `agent_configuration.schema_version: 2` and `selected_profile`. Supply the
+   optional optimistic `global_profile_binding_sha256` only from the actual
+   selected Profile binding; never invent a digest. Construct exactly one
    request variant and pass it through a protected regular non-TTY descriptor:
 
    ```sh
