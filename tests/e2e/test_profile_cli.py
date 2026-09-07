@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import pathlib
-import shutil
 import stat
 import subprocess
 import sys
@@ -57,43 +56,41 @@ def envelope(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
     return json.loads(completed.stdout)
 
 
-# SPEC-013 requires argv[0] to be a direct Codex executable and rejects shell
-# interpreters and arbitrary wrappers, so the fixture Codex can no longer be a
-# `#!`-prefixed script: the kernel would exec an interpreter and the spawn
-# image could never be the configured executable. The controllable behaviour
-# still lives in Python, but it is reached through a compiled native image
-# named `codex`, which is what the registry validates.
-SHIM_SOURCE = """
-#include <stdlib.h>
-#include <unistd.h>
-
-int main(int argc, char **argv) {
-    char **next = malloc(sizeof(char *) * (size_t)(argc + 2));
-    if (next == NULL) {
-        return 127;
-    }
-    next[0] = (char *)DRIVER_INTERPRETER;
-    next[1] = (char *)DRIVER_SCRIPT;
-    for (int index = 1; index < argc; index++) {
-        next[index + 1] = argv[index];
-    }
-    next[argc + 1] = NULL;
-    execv(DRIVER_INTERPRETER, next);
-    return 127;
-}
-"""
-
-
-def create_fake_codex(path: pathlib.Path, real_codex: pathlib.Path) -> None:
-    compiler = shutil.which("cc")
-    if compiler is None:
-        raise AssertionError(
-            "a C compiler is required: the profile fixture Codex must be a native "
-            "executable now that argv[0] rejects interpreter scripts"
-        )
+def create_fake_codex(
+    path: pathlib.Path, real_codex: pathlib.Path, codex_home: pathlib.Path
+) -> None:
+    # Only schema generation uses the pinned local Codex. Bootstrap RPCs use
+    # the independent fixture and must not depend on a real account login.
+    scenario = path.with_name("profile-probe.json")
+    scenario.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "name": "profile-probe",
+            "steps": [
+                {"method": "initialize", "respond": {"result": {
+                    "codexHome": "${codex_home}",
+                    "userAgent": "fake-app-server/1",
+                    "capabilities": {"experimentalApi": False},
+                }}},
+                {"method": "account/read", "respond": {"result": {
+                    "requiresOpenaiAuth": False,
+                }}},
+                {"method": "model/list", "respond": {"result": {
+                    "data": [{
+                        "model": "gpt-5.6", "isDefault": True,
+                        "supportedReasoningEfforts": [{"reasoningEffort": "medium"}],
+                    }],
+                    "nextCursor": None,
+                }}},
+                {"method": "thread/read", "respond": {"error": {
+                    "code": -32600, "message": "thread not found",
+                }}},
+            ],
+        }),
+        encoding="utf-8",
+    )
     driver = path.with_name("codex-driver.py")
     program = f"""import json
-import os
 import pathlib
 import subprocess
 import sys
@@ -117,29 +114,29 @@ if "generate-json-schema" in args:
         value["required"] = []
         target.write_text(json.dumps(value), encoding="utf-8")
     raise SystemExit(0)
-os.execve({json.dumps(str(real_codex))}, [{json.dumps(str(real_codex))}, *args], os.environ)
+if "app-server" in args and "--listen" in args:
+    target = args[args.index("--listen") + 1]
+    if not target.startswith("unix://"):
+        raise SystemExit(2)
+    sys.path.insert(0, {json.dumps(str(native_codex.FAKE_APP_SERVER))})
+    from scenario import Scenario
+    from server import FakeAppServer
+    fake = FakeAppServer(
+        pathlib.Path(target[len("unix://"):]),
+        Scenario.load(pathlib.Path({json.dumps(str(scenario))}),
+                      {{"codex_home": {json.dumps(str(codex_home.resolve()))}}}),
+        None,
+        None,
+    )
+    fake.bind()
+    print("Profile probe fixture ready", flush=True)
+    fake.serve_forever()
+    raise SystemExit(0)
+raise SystemExit(2)
 """
     driver.write_text(program, encoding="utf-8")
     driver.chmod(0o644)
-    source = path.with_name("codex-shim.c")
-    source.write_text(SHIM_SOURCE, encoding="utf-8")
-    compiled = subprocess.run(
-        [
-            compiler,
-            "-O0",
-            f'-DDRIVER_INTERPRETER="{sys.executable}"',
-            f'-DDRIVER_SCRIPT="{driver}"',
-            "-o",
-            str(path),
-            str(source),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if compiled.returncode != 0:
-        raise AssertionError(f"fixture Codex shim failed to compile: {compiled.stderr}")
-    path.chmod(0o755)
+    native_codex.compile_native_driver(path, driver)
 
 
 def create_script_codex(path: pathlib.Path) -> None:
@@ -313,7 +310,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             )
 
         fake = bin_root / "codex"
-        create_fake_codex(fake, real_codex)
+        create_fake_codex(fake, real_codex, codex_home)
         set_mode(fake)
         for invalid_name in ("Default", "with space", "with:colon", "-leading", "a" * 129):
             invalid_add = run(
@@ -520,6 +517,8 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError("profile log drainer did not create a private server log")
         if server_log.stat().st_size > 1024 * 1024:
             raise AssertionError("profile server log exceeded its rotation bound")
+        if "Profile probe fixture ready" not in server_log.read_text(encoding="utf-8"):
+            raise AssertionError("profile log drainer lost the fixture diagnostic")
         # An app-server writes plain diagnostic text, not JSON. Treating "not
         # JSON" as "could not be redacted" turned every captured line into a
         # drop marker and left the operator with a log of nothing. The marker

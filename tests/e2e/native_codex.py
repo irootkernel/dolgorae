@@ -189,12 +189,6 @@ def create_native_codex(
     conversation actually reached the fixture rather than inferring it from the
     answers alone.
     """
-    compiler = shutil.which("cc")
-    if compiler is None:
-        raise AssertionError(
-            "a C compiler is required: argv[0] rejects interpreter scripts, so the "
-            "fixture Codex must be a native executable"
-        )
     driver = path.with_name(f"{path.name}-driver.py")
     driver.write_text(
         DRIVER_SOURCE.format(
@@ -212,6 +206,17 @@ def create_native_codex(
         encoding="utf-8",
     )
     driver.chmod(0o644)
+    compile_native_driver(path, driver)
+
+
+def compile_native_driver(path: pathlib.Path, driver: pathlib.Path) -> None:
+    """Keep a fixture Python driver inside its configured native process image."""
+    compiler = shutil.which("cc")
+    if compiler is None:
+        raise AssertionError(
+            "a C compiler is required: argv[0] rejects interpreter scripts, so the "
+            "fixture Codex must be a native executable"
+        )
     source = path.with_name(f"{path.name}-shim.c")
     source.write_text(SHIM_SOURCE, encoding="utf-8")
     python_config = pathlib.Path(sysconfig.get_config_var("BINDIR")) / (
