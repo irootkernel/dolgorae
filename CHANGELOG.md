@@ -29,6 +29,8 @@ development commits.
 ### Changed
 
 - Bound global Profile home and registry reads before rejecting oversized files.
+- Bound membership replay reads and stream journal checksums without changing
+  membership limits or persisted hashes.
 - Reject null or mixed-version Profile fields and missing required fields in
   immutable Agent Configuration snapshots.
 - Align External Specialist v2 error projections with the Machine error contract,

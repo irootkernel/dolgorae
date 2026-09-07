@@ -12,9 +12,10 @@ use crate::workspace::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -850,16 +851,25 @@ fn derive_index(
             record.clone(),
         );
     }
-    let bytes = if journal.exists() {
-        fs::read(journal).map_err(|error| path_error(journal, error))?
-    } else {
-        Vec::new()
-    };
+    let mut journal_digest = Sha256::new();
+    if journal.exists() {
+        let mut file = File::open(journal).map_err(|error| path_error(journal, error))?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|error| path_error(journal, error))?;
+            if count == 0 {
+                break;
+            }
+            journal_digest.update(&buffer[..count]);
+        }
+    }
     Ok(GlobalMembershipIndex {
         schema_version: 2,
         server_key: server_key.to_owned(),
         revision: records.last().map_or(0, |record| record.revision),
-        journal_sha256: sha256_hex(&bytes),
+        journal_sha256: format!("{:x}", journal_digest.finalize()),
         members,
     })
 }
@@ -873,7 +883,10 @@ fn replay(
         return Ok(Vec::new());
     }
     verify_secure_file(path, DarwinSystem.current_uid())?;
-    let bytes = fs::read(path).map_err(|error| path_error(path, error))?;
+    let mut bytes = Vec::new();
+    File::open(path)
+        .and_then(|file| file.take(MAX_MEMBERSHIP_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| path_error(path, error))?;
     if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
         return Err(membership_incomplete(
             profile,
@@ -1263,6 +1276,53 @@ mod tests {
         remove_global_profile(&home, "offline").unwrap();
         assert!(store.load().unwrap().profiles.is_empty());
         assert!(!server_root.exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn membership_read_limit_preserves_replay_hashes_and_rejects_before_append() {
+        let (parent, home) = home();
+        let server_key = "c".repeat(64);
+        let workspace_id = "1".repeat(64);
+        let run_id = Uuid::now_v7();
+        let store = GlobalMembershipStore::new(&home, "default", &server_key).unwrap();
+        store
+            .record(&workspace_id, run_id, MembershipDisposition::Active)
+            .unwrap();
+        let root = home.root().join("profiles").join(&server_key);
+        let journal = root.join("membership.jsonl");
+        let original = fs::read(&journal).unwrap();
+        let index_before = fs::read(root.join("members.json")).unwrap();
+        for length in [MAX_MEMBERSHIP_BYTES - 1, MAX_MEMBERSHIP_BYTES] {
+            let mut bytes = original.clone();
+            bytes.resize(usize::try_from(length).unwrap(), b'\n');
+            fs::write(&journal, &bytes).unwrap();
+            let records = replay(&journal, "default", &server_key).unwrap();
+            assert_eq!(records.len(), 1);
+            let index = derive_index(&server_key, &journal, &records).unwrap();
+            assert_eq!(index.journal_sha256, sha256_hex(&bytes));
+            assert_eq!(index.revision, 1);
+            assert_eq!(index.members.len(), 1);
+            assert_eq!(fs::read(&journal).unwrap(), bytes);
+        }
+        let mut oversized = original;
+        oversized.resize(usize::try_from(MAX_MEMBERSHIP_BYTES).unwrap() + 1, b'\n');
+        fs::write(&journal, &oversized).unwrap();
+        let error = store
+            .record(&workspace_id, run_id, MembershipDisposition::Released)
+            .unwrap_err();
+        assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
+        assert_eq!(error.details["reason"], "membership journal exceeds 8 MiB");
+        assert_eq!(fs::read(&journal).unwrap(), oversized);
+        assert_eq!(fs::read(root.join("members.json")).unwrap(), index_before);
+        // Index derivation must hash every byte, including an append crossing
+        // the replay ceiling; it must never publish a truncated-prefix hash.
+        assert_eq!(
+            derive_index(&server_key, &journal, &[])
+                .unwrap()
+                .journal_sha256,
+            sha256_hex(&oversized)
+        );
         fs::remove_dir_all(parent).unwrap();
     }
 

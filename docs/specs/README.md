@@ -853,6 +853,9 @@ and any server state's v2 identity and membership revision against the journal
 before using or changing membership. An absent journal represents revision zero
 only when no persisted index or server state contradicts it; a missing derived
 index alone does not erase the journal's authority.
+Global membership replay bounds input at its existing 8 MiB ceiling plus one
+overflow byte and retains `PROFILE_MEMBERSHIP_INCOMPLETE` on excess.
+Membership checksums cover the full journal through bounded-memory reads.
 A membership append updates `members.json` and the `state.json`
 membership revision under the same server lock. It is repairable only through the operator procedure below; there
 is no automatic or force rebuild.
