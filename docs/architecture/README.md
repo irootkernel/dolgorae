@@ -366,6 +366,34 @@ executing or accepted work to `interrupted_unknown` and preserves a ready
 result as `completed_not_delivered`; both migration steps rebuild their tables
 transactionally without losing rows.
 
+### Role Source and Policy Resolver
+
+TASK-024 adds a bounded resolver for the specification's
+[Specialist Role Sources](../specs/README.md#specialist-role-sources).
+Role sources are authoring inputs; they are neither an execution registry nor
+authority for a model-originated request. Common Role files are protected
+user-local inputs, and project Role files are portable project policy.
+The existing strict `config.yaml` shape and immutable workspace identity remain
+unchanged; optional Role directories do not gate earlier workspace admission.
+
+The policy-admission service resolves explicit scope/name references, captures
+each source once using safe descriptors, validates the bounded source objects,
+and compiles their character into the explicitly supplied execution and policy
+controls. It owns the create-exclusive installation of the expanded policy
+into the protected workspace registry. The read-only validate path uses the
+same compiler but publishes nothing. No model-facing tool loads a source file,
+selects a source scope, or bypasses policy installation.
+
+The Aggregate Bootstrap Coordinator reads only the installed policy, resolves
+current global Profile bindings into Agent Configuration snapshots, and commits
+the resolved session-policy snapshot and digest with the prepared bootstrap.
+The broker subsequently uses that immutable session snapshot. Recovery never
+reconstructs character from current source files, the current registry, or a
+Profile name. Installed-policy and session-snapshot contracts are distinct;
+TASK-024 publishes their global-Profile successors and synchronizes affected
+exported state and validators before activation, retaining the old checked v1
+design as historical input rather than silently changing its meaning.
+
 ### Orchestration Broker
 
 The Orchestration Broker is an internal Dolgorae control-plane component used
@@ -407,8 +435,8 @@ The bridge binds session, Primary Run, source Turn, tool-call ID, inherited root
 priority, Controller authority, and idempotency outside model arguments. The
 model cannot provide or override those fields. `request_specialist` resolves a
 role only from the session's immutable, schema-validated Specialist Policy
-snapshot in
-[`dolgorae-specialist-policy-v1.schema.json`](../protocol/dolgorae-specialist-policy-v1.schema.json).
+snapshot, whose global-Profile successor is defined by
+[Specialist Role Sources](../specs/README.md#specialist-role-sources).
 The model cannot choose Codex Profile, model, credential, priority, or access
 outside that policy.
 
@@ -1343,6 +1371,7 @@ policy:
 <workspace>/.dolgorae/
   .gitignore
   config.yaml
+  roles/  # optional shared Role sources; TASK-024
 ```
 
 All machine-local configuration and mutable authority are outside the workspace:
@@ -1351,6 +1380,7 @@ All machine-local configuration and mutable authority are outside the workspace:
 ~/.dolgorae/
   state.json
   profiles.yaml
+  roles/  # optional common Role sources; TASK-024
   rpc/
   controller-carriers/
   operator/

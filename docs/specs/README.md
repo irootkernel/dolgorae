@@ -441,6 +441,7 @@ The agent-writable workspace contains only portable project policy:
 <canonical-workspace>/.dolgorae/
   .gitignore
   config.yaml
+  roles/  # optional shared Role sources; TASK-024
 ```
 
 `config.yaml` is strict YAML and contains exactly `schema_version: 1` and
@@ -620,6 +621,84 @@ commands, account-neutral workspace initialization, Run admission, and both
 Specialist consumers. No supported command reads or writes both Profile
 generations.
 
+### Specialist Role Sources
+
+The following Role-source contract is the target for TASK-024. It does not
+activate Role loading or Specialist Policy commands in earlier releases.
+
+A Specialist Role source defines reusable character, not an account or mutation
+authority. Common sources live at `~/.dolgorae/roles/<role-name>.json`;
+project sources live at the canonical workspace's
+`.dolgorae/roles/<role-name>.json` and MAY be tracked and shared through Git.
+The optional directories are not a new requirement for existing home or
+workspace admission, and `init` MUST NOT populate or rewrite Role files.
+
+Each source is a UTF-8 JSON object with exactly `schema_version: 1`, `name`,
+`display_name`, `description`, and `instructions`. Unknown or duplicate fields,
+wrong types and unsupported versions are invalid. `name` matches
+`^[a-z0-9][a-z0-9._-]{0,63}$` and the filename stem. The other fields are
+nonempty strings bounded respectively to 128, 1,024 and 65,536 UTF-8 bytes.
+The complete file is bounded to 1 MiB. Sources contain no Profile selection,
+model, access, approval mode, credential, executable, or external include.
+
+Policy authoring binds each policy-local `role_ref` to an explicit
+`role_source` object with exactly `scope: common|project` and `name`.
+The name obeys the source-name rule. There is no default scope, name-based
+fallback, parent-directory search, merge, include or environment expansion.
+Policy-local role references remain unique; source identity and the policy-local
+reference are separate so both scopes can be bound without ambiguous lookup.
+The model sees only admitted policy-local references, never source paths.
+
+Source traversal MUST be descriptor-relative and no-follow under the selected
+root. Reject missing files, escaping paths, symlink ancestry or leaves,
+non-regular files, wrong owners, unsafe permissions and oversized content
+before installing a policy. Common directories and files are current-uid-owned
+mode 0700 and 0600. Project source directories and files are current-uid-owned
+and not group- or other-writable; ordinary Git file modes remain acceptable.
+Read each source once through the validated descriptor, validate and hash those
+same bounded bytes, and never reopen its pathname to install different bytes.
+Repeated references to one source in one policy compilation use one captured
+source object. Invalid input returns `CONFIG_INVALID` with a bounded safe
+diagnostic and no installed-policy change.
+
+`specialist policy validate --file` and `specialist policy add --file` resolve
+the selected sources against the explicit or discovered canonical workspace.
+Validation is read-only, while add validates its own capture and installs one
+complete policy through the registry's existing create-exclusive transaction.
+An earlier validation result is not authority for a later, changed input.
+The caller must authorize installation of project-authored instructions;
+tracking, reading or editing a source file never authorizes its execution.
+
+Policy input supplies explicit execution configuration and all admission
+controls separately from the Role source: selected global Profile, model,
+effort, purpose, required capabilities, lane, assurance, native delegation,
+instance limits, reuse, access, activation, request and collaboration flags.
+It MUST NOT supply a second Role instruction body. Compilation takes display
+metadata and instructions from the captured source; normal Dolgorae instruction
+invariants still apply. Profile identity does not infer Role character.
+
+The installed policy stores the complete captured Role objects, their scope,
+name and JCS SHA-256 digests, the policy-local bindings, and complete explicit
+execution inputs. It contains no live source-path dependency. Session bootstrap
+resolves global Profile bindings and Agent Configurations, validates current
+capabilities, and stores the complete resolved policy snapshot and digest before
+root Run allocation. Source edits or removal do not change installed policies;
+policy edits, removal or Profile registry changes do not rewrite existing
+session snapshots. Existing Run binding and recovery rules continue to reject
+unavailable or incompatible runtime state rather than silently selecting it anew.
+
+TASK-024 owns checked Role-source and policy-authoring schemas and the
+installed-policy/session-snapshot successors that express this separation.
+The existing [policy v1 schema](../protocol/dolgorae-specialist-policy-v1.schema.json)
+embeds pre-cutover Agent Configuration v1 and remains a historical design
+baseline, not the global-Profile successor. Before activating these commands,
+TASK-024 MUST synchronize schemas, references, positive/negative examples,
+Machine projections and Rust semantic validators with the
+[Agent Configuration v2 input](../protocol/dolgorae-agent-configuration-input-v2.schema.json)
+and [snapshot](../protocol/dolgorae-agent-configuration-v2.schema.json)
+contracts. Do not reinterpret existing v1 bytes or change public Protobuf fields
+to carry private Role source data.
+
 ### Specialist Policy Registry
 
 The machine-local Specialist Policy Registry lives at:
@@ -628,10 +707,10 @@ The machine-local Specialist Policy Registry lives at:
 ~/.dolgorae/workspaces/<workspace-id>/specialist-policies/
 ```
 
-Each entry is a create-exclusive `<policy-name>.json` file that validates
-against
-[`dolgorae-specialist-policy-v1.schema.json`](../protocol/dolgorae-specialist-policy-v1.schema.json)
-and its executable semantic validator. The content `policy_name` MUST match the
+Each entry is a create-exclusive `<policy-name>.json` file containing the
+fully expanded installed policy defined under Specialist Role Sources. It
+validates against the TASK-024 checked successor schema and its Rust semantic
+validator before admission. The content `policy_name` MUST match the
 filename exactly. Files are current-uid-owned mode 0600, no-symlink regular
 files, at most 1 MiB, and installed through a descriptor-relative temporary
 file, file `fsync`, rename, and directory `fsync`. Unknown schema versions,
@@ -2943,8 +3022,9 @@ UX, and any remote authentication boundary.
 The internal Orchestration Broker may accept a Primary Agent's advisory request
 for configured Specialist work only under the session's explicit approval
 policy and immutable Specialist Policy snapshot. The snapshot validates against
-`protocol/dolgorae-specialist-policy-v1.schema.json`; its complete JCS SHA-256 is
-recorded on the session, and role references resolve only against that snapshot.
+the checked session-policy successor defined under Specialist Role Sources;
+its complete JCS SHA-256 is recorded on the session, and role references resolve
+only against that snapshot.
 Codex Profile identity never selects role character.
 
 The broker owns a distinct internal Controller credential for every Specialist

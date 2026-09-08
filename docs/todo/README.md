@@ -23,7 +23,10 @@ active Epics. It does not own roadmap identity, order, status, or dependencies.
 
 ## Adopted active-Epic dossiers
 
-None.
+- [Orchestration control plane execution dossier](TODO-orchestration-control-plane.md)
+  maps the requirements, task boundaries, verification and closeout for
+  [EPIC-007](../roadmap/README.md#epic-007-dolgorae-orchestration-control-plane-and-brokered-hierarchy-core).
+  Delivery status remains exclusively in the roadmap.
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the

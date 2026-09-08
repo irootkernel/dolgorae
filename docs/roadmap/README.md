@@ -1172,6 +1172,8 @@ remains ineligible until all three Tasks complete.
 
 Status: `PLANNED`
 
+Detailed SOT: [Orchestration control plane execution dossier](../todo/TODO-orchestration-control-plane.md).
+
 Goal: Add Dolgorae's own Primary orchestration authority and durable Brokered
 Hierarchy over the hardened independent Run and Specialist foundations.
 
