@@ -4,7 +4,7 @@ CARGO ?= cargo
 PYTHON_BIN ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 DOLGORAE_BIN ?= $(CURDIR)/target/debug/dolgorae
 TEST_THREADS ?= 4
-BUF_VERSION := 1.66.1
+BUF_VERSION := 1.69.0
 
 INT_TESTS := \
 	--test conformance_contract \

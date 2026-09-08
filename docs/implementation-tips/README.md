@@ -8,7 +8,7 @@ changes.
 
 ## Development setup
 
-Install Rust 1.97.1, Buf 1.66.1, and Python 3. Then create an isolated Python
+Install Rust 1.97.1, Buf 1.69.0, and Python 3. Then create an isolated Python
 environment for the small repository checks:
 
 ```sh

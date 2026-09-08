@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-validation-v2
-version: "6"
+version: "9"
 name: Aquarium Validation
 purpose: Audit one completed epic through bounded remediation, confirmation, and explicit finding disposition.
 description: A bounded Podway procedure for epic-wide audit, one automatic confirmation, user-directed follow-up, and validation closeout.
@@ -163,7 +163,7 @@ node_definitions:
     items:
       - id: review-round
         type: integer
-        prompt: Record the positive whole-epic root-review ordinal for the current validation goal revision.
+        prompt: Record the positive whole-epic review ordinal, counting each original root once for the current validation goal revision.
         required: true
         minimum: 1
       - id: review-mode
@@ -175,7 +175,7 @@ node_definitions:
           - confirmation-only
       - id: review-run-id
         type: text
-        prompt: Record the exact committed Mulgae root review run ID.
+        prompt: Record the exact committed Mulgae root or verified composite review run ID; verify the original root and role sources through review_composition for a composite.
         required: true
         min_length: 1
         max_length: 128
@@ -216,24 +216,46 @@ node_definitions:
         prompt: Record the number of unresolved valid findings.
         required: true
         minimum: 0
+      - id: reported-severity-summary
+        type: text
+        prompt: Record finding IDs and provider-reported severities before local adjudication, or none.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: confirmation-needed-findings
+        type: integer
+        prompt: Record the number of findings whose validity still needs confirmation.
+        required: true
+        minimum: 0
+      - id: medium-or-higher-findings
+        type: integer
+        prompt: Record the number of valid findings with effective priority Blocker, Critical, High, or Medium.
+        required: true
+        minimum: 0
+      - id: blocker-findings
+        type: integer
+        prompt: Record the number of locally verified findings with effective priority Blocker.
+        required: true
+        minimum: 0
       - id: critical-findings
         type: integer
-        prompt: Record the number of locally verified Critical findings.
+        prompt: Record the number of locally verified findings with effective priority Critical.
         required: true
         minimum: 0
       - id: high-findings
         type: integer
-        prompt: Record the number of locally verified High findings.
+        prompt: Record the number of locally verified findings with effective priority High.
         required: true
         minimum: 0
       - id: medium-findings
         type: integer
-        prompt: Record the number of locally verified Medium findings.
+        prompt: Record the number of locally verified findings with effective priority Medium.
         required: true
         minimum: 0
       - id: low-findings
         type: integer
-        prompt: Record the number of locally verified Low findings.
+        prompt: Record the number of locally verified findings with effective priority Low.
         required: true
         minimum: 0
       - id: valid-finding-ids
@@ -243,18 +265,27 @@ node_definitions:
         min_length: 1
         max_length: 4000
         multiline: true
+      - id: finding-disposition-summary
+        type: text
+        prompt: Record validity, effective priority, disposition, owner, verification state, and stale-review status for each finding, or none.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
   final-review-decision:
     type: decision
     title: Evaluate final validation
-    objective: Route the first review to one remediation, a clean review to closeout, incomplete evidence to a stop, and confirmation findings to user direction.
+    objective: Route Medium-or-higher findings to correction and re-review, Low findings to local disposition, a clean review to closeout, and incomplete evidence to a stop.
     prompt: Is the latest epic snapshot ready for validation closeout?
     evidence_guidance:
       - Read the final audit, required checks, review ordinal and mode, exact Mulgae run, and roadmap states.
-      - Use rework-required only for a remediation-eligible review; a confirmation-only finding requires user-direction.
+      - Select no option while confirmation-needed-findings is non-zero.
+      - Resolve each finding to Valid or Invalid with authorized evidence or bounded confirmation authority, then manually rework final-review and evaluate this decision again.
+      - Use rework-required only for a remediation-eligible Medium-or-higher finding; confirmation-only Medium-or-higher work requires user-direction.
     options:
       - id: validated
         label: Validation supported
-        criteria: The fresh audit is clean, the root review is operationally complete with passing CI, and no unresolved valid finding remains.
+        criteria: The fresh audit is clean, the root or verified composite review is operationally complete with passing CI, and no unresolved valid finding remains.
         guards:
           - evidence:
               node: final-review
@@ -265,9 +296,13 @@ node_definitions:
               node: final-review
               item: unresolved-valid-findings
             equals: 0
+          - evidence:
+              node: final-review
+              item: confirmation-needed-findings
+            equals: 0
       - id: rework-required
         label: Rework required
-        criteria: A remediation-eligible review has at least one locally verified valid finding and owns exactly one remediation plus confirmation review.
+        criteria: A remediation-eligible review has at least one valid Medium-or-higher finding and owns exactly one remediation plus confirmation review.
         guards:
           - evidence:
               node: final-review
@@ -280,11 +315,36 @@ node_definitions:
             equals: remediation-eligible
           - evidence:
               node: final-review
-              item: unresolved-valid-findings
+              item: medium-or-higher-findings
             at_least: 1
+          - evidence:
+              node: final-review
+              item: confirmation-needed-findings
+            equals: 0
+      - id: low-disposition
+        label: Complete Low dispositions
+        criteria: No valid Medium-or-higher finding remains and at least one valid Low finding can take a shared local disposition without another provider review.
+        guards:
+          - evidence:
+              node: final-review
+              item: final-review-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: final-review
+              item: medium-or-higher-findings
+            equals: 0
+          - evidence:
+              node: final-review
+              item: low-findings
+            at_least: 1
+          - evidence:
+              node: final-review
+              item: confirmation-needed-findings
+            equals: 0
       - id: user-direction
         label: User direction required
-        criteria: A confirmation-only review has at least one locally verified valid finding and no later action has yet been authorized.
+        criteria: A confirmation-only review has at least one valid Medium-or-higher finding and no later correction-and-review round has yet been authorized.
         guards:
           - evidence:
               node: final-review
@@ -297,8 +357,12 @@ node_definitions:
             equals: confirmation-only
           - evidence:
               node: final-review
-              item: unresolved-valid-findings
+              item: medium-or-higher-findings
             at_least: 1
+          - evidence:
+              node: final-review
+              item: confirmation-needed-findings
+            equals: 0
       - id: incomplete
         label: Validation incomplete
         criteria: Review evidence, CI, coverage, publication, findings query, or another required prerequisite is incomplete or failed operationally.
@@ -313,39 +377,30 @@ node_definitions:
       prompt: Explain the selection using the final validation evidence.
   review-direction-decision:
     type: decision
-    title: Choose the next finding disposition
-    objective: Record one explicit user choice without converting it into an unbounded remediation or review loop.
-    prompt: What did the user explicitly authorize for the current findings?
+    title: Choose the next Medium-or-higher action
+    objective: Record one explicit user choice without accepting risk, deferring required correction, or creating an unbounded review loop.
+    prompt: What did the user explicitly authorize for the current Medium-or-higher findings?
     evidence_guidance:
-      - Read the latest audit, review mode, severity counts, exact finding IDs, and the user's current instruction.
+      - Read the latest audit, review mode, effective priorities, exact finding IDs, and the user's current instruction.
       - Leave this decision unset until the user explicitly selects the next action.
     options:
       - id: fix-and-review
         label: Fix and review once
         criteria: The user authorized exactly one remediation pass and one next-ordinal whole-epic confirmation review.
-      - id: accept-low
-        label: Accept Low findings
-        criteria: Critical, High, and Medium counts are zero and the user accepted every exact Low finding ID.
-      - id: micro-fix
-        label: Apply a micro correction
-        criteria: Only Low findings remain and the user selected an exact eligible micro correction with focused verification and no further review.
-      - id: accept-medium-risk
-        label: Accept Medium risk
-        criteria: Critical and High counts are zero and the user explicitly accepted every exact remaining Medium and Low finding ID.
       - id: stop
         label: Stop validation
         criteria: The user directed validation to stop without another correction or review.
     reason:
       required: true
       prompt: Record the exact user authority, finding IDs, and bounded next action.
-  micro-remediation-record:
+  low-disposition-record:
     type: action
-    title: Record a user-authorized micro correction
-    intent: Record one focused Low-only correction without claiming that the prior review covered its resulting bytes.
+    title: Record completed Low dispositions
+    intent: Record proportionate Low handling without claiming that the provider reviewed corrected or newly recorded bytes.
     items:
-      - id: micro-remediation-summary
+      - id: low-disposition-summary
         type: text
-        prompt: Record the selected finding IDs, exact correction, focused checks, commit, and the preceding review run that predates the correction.
+        prompt: Record each finding ID, selected shared disposition, exact correction or canonical owner, impact or reason, re-entry condition, focused checks, commit when applicable, and the preceding review that predates changed bytes.
         required: true
         min_length: 1
         max_length: 5000
@@ -372,7 +427,7 @@ node_definitions:
     options:
       - id: achieved
         label: Goal achieved
-        criteria: This assessment was reached from validated, record-accepted-low, record-accepted-medium-risk, or micro-remediate; the review is operationally complete; no Critical or High finding remains; and every lower-severity finding has clean evidence, an explicit accepted-risk disposition, or a focused user-authorized micro-fix record.
+        criteria: This assessment was reached from validated or record-low-disposition; the review is operationally complete; no valid Medium-or-higher finding remains; and every Low finding has one completed shared disposition with its required local evidence.
       - id: not-achieved
         label: Goal not achieved
         criteria: Fresh evidence does not support the current validation goal, including every path reached from record-stopped or record-incomplete; those dispositions can never select achieved.
@@ -395,7 +450,7 @@ node_definitions:
     items:
       - id: closeout-summary
         type: text
-        prompt: Record validation outcome, any required lifecycle, accepted-risk, or actionable-handoff commit, or the verified reason no repository record is required.
+        prompt: Record validation outcome, any required lifecycle or actionable-handoff commit, or the verified reason no repository record is required.
         required: true
         min_length: 1
         max_length: 4000
@@ -496,11 +551,19 @@ graph:
             - final-review-result
             - final-review-observations
             - unresolved-valid-findings
+            - reported-severity-summary
+            - confirmation-needed-findings
+            - medium-or-higher-findings
+            - blocker-findings
             - critical-findings
             - high-findings
             - medium-findings
             - low-findings
             - valid-finding-ids
+        - node: final-review
+          required: true
+          items:
+            - finding-disposition-summary
       routes:
         validated:
           to: assess-goal
@@ -508,6 +571,9 @@ graph:
         rework-required:
           to: audit
           effect: rework
+        low-disposition:
+          to: record-low-disposition
+          effect: advance
         user-direction:
           to: await-user-direction
           effect: advance
@@ -521,36 +587,32 @@ graph:
           required: true
           items:
             - review-mode
-            - unresolved-valid-findings
+            - medium-or-higher-findings
+            - blocker-findings
             - critical-findings
             - high-findings
             - medium-findings
             - low-findings
             - valid-finding-ids
+            - confirmation-needed-findings
+            - finding-disposition-summary
       routes:
         fix-and-review:
           to: audit
           effect: rework
-        accept-low:
-          to: record-accepted-low
-          effect: advance
-        micro-fix:
-          to: micro-remediate
-          effect: advance
-        accept-medium-risk:
-          to: record-accepted-medium-risk
-          effect: advance
         stop:
           to: record-stopped
           effect: advance
-    - id: micro-remediate
-      use: micro-remediation-record
-      next: assess-goal
-    - id: record-accepted-low
-      use: disposition-record
-      next: assess-goal
-    - id: record-accepted-medium-risk
-      use: disposition-record
+    - id: record-low-disposition
+      use: low-disposition-record
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - review-run-id
+            - medium-or-higher-findings
+            - low-findings
+            - finding-disposition-summary
       next: assess-goal
     - id: record-stopped
       use: disposition-record
@@ -570,24 +632,20 @@ graph:
           items:
             - final-review-result
             - unresolved-valid-findings
+            - confirmation-needed-findings
+            - medium-or-higher-findings
+            - blocker-findings
             - critical-findings
             - high-findings
             - medium-findings
             - low-findings
+            - finding-disposition-summary
         - node: await-user-direction
           required: false
-        - node: micro-remediate
+        - node: record-low-disposition
           required: false
           items:
-            - micro-remediation-summary
-        - node: record-accepted-low
-          required: false
-          items:
-            - disposition-summary
-        - node: record-accepted-medium-risk
-          required: false
-          items:
-            - disposition-summary
+            - low-disposition-summary
         - node: record-stopped
           required: false
           items:
@@ -615,4 +673,4 @@ manual_rework:
     - remediate
     - re-audit
     - final-review
-    - micro-remediate
+    - record-low-disposition
