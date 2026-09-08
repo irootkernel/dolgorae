@@ -23,8 +23,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const MANIFEST: &str = include_str!("../docs/protocol/codex-0.149.0-required-subset.json");
-const SUPPORTED_CODEX_VERSION: &str = "0.149.0";
+const MANIFEST: &str = include_str!("../docs/protocol/codex-0.153.4-required-subset.json");
+const SUPPORTED_CODEX_VERSION: &str = "0.153.4";
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 /// One diagnostic record is bounded so a single observation can never
@@ -6005,15 +6005,15 @@ mod tests {
     #[test]
     fn version_policy_is_exact_tested_and_newer_unverified() {
         assert_eq!(
-            version_verdict("default", "0.149.0").unwrap(),
+            version_verdict("default", "0.153.4").unwrap(),
             CompatibilityVerdict::Tested
         );
         assert_eq!(
-            version_verdict("default", "0.150.0").unwrap(),
+            version_verdict("default", "0.154.0").unwrap(),
             CompatibilityVerdict::Unverified
         );
         assert_eq!(
-            version_verdict("default", "0.148.9").unwrap_err().code,
+            version_verdict("default", "0.153.3").unwrap_err().code,
             "COMPATIBILITY_REJECTED"
         );
     }

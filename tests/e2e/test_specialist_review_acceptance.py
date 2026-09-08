@@ -41,10 +41,10 @@ def main() -> int:
         )
         (workspace / "change.txt").write_text("nontrivial working-tree change\n", encoding="utf-8")
         codex = root / "codex"
-        executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.149.0\\n'\n")
+        executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.153.4\\n'\n")
         fake = root / "dolgorae"
         success = {
-            "schema_version": 1,
+            "schema_version": 2,
             "ok": True,
             "command": "specialist.review",
             "invocation_id": "018f0000-0000-7000-8000-000000006010",
@@ -69,7 +69,7 @@ def main() -> int:
             },
         }
         failure = {
-            "schema_version": 1,
+            "schema_version": 2,
             "ok": False,
             "command": "specialist.review",
             "invocation_id": "018f0000-0000-7000-8000-000000006011",
@@ -100,7 +100,10 @@ def main() -> int:
             encoding="utf-8",
         )
         (reviewer_state / "manifest.json").write_text(
-            json.dumps({"profile": {"process_static_configuration": {"mcp_servers": {}}}}),
+            json.dumps({
+                "profile": {"process_static_configuration": {"mcp_servers": {}}},
+                "agent_configuration": {"model": "gpt-5.6-luna", "default_effort": "low"},
+            }),
             encoding="utf-8",
         )
         canary = "parent-only-canary"
@@ -108,6 +111,21 @@ def main() -> int:
         assert good["finding_count"] == 1
         assert good["workspace_fingerprint_before"] == good["workspace_fingerprint_after"]
         assert all(good["observable_scan"].values())
+        manifest_path = reviewer_state / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["profile"]["process_static_configuration"]["mcp_servers"] = None
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        assert MODULE.success_evidence(fake, workspace, "reviewer", codex, canary)["reviewer_isolation"]["effort"] == "low"
+        manifest["agent_configuration"]["default_effort"] = "medium"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        try:
+            MODULE.success_evidence(fake, workspace, "reviewer", codex, canary)
+        except ValueError as error:
+            assert "gpt-5.6-luna / low" in str(error)
+        else:
+            raise AssertionError("a substituted live effort was accepted")
+        manifest["agent_configuration"]["default_effort"] = "low"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         failed = MODULE.failure_evidence(fake, workspace, codex, canary)
         assert failed["error_code"] == "PROFILE_NOT_FOUND"
         assert failed["retryable"] is False

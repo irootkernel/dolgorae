@@ -832,7 +832,7 @@ the parent Run's thread tree, policy, and authority, and never become aggregate
 members, Independent Specialist Runs, peer Workers, or Dedicated Lane Servers.
 The selected Codex Profile must explicitly acknowledge
 `native_subagents: enabled`; v1 does not claim disable enforcement for the
-Codex 0.149.0 production pin. The original negative probe remains historical
+Codex 0.153.4 production pin. The original negative probe remains historical
 0.147.0 evidence.
 
 Instruction composition is split into a generation-immutable role and behavior
@@ -1778,7 +1778,7 @@ proved.
   exits. Confirmed terminal evidence moves an unknown
   run to `paused`; later bare resume uses read access.
 - Every history-copying fork scans newest-to-oldest and uses the latest
-  status listed as forkable in the checked manifest; terminal-but-rejected
+  status permitted by Dolgorae's completed-only policy in the checked manifest; terminal-but-rejected
   statuses are skipped. Confirmed history with no accepted boundary returns
   `COMPATIBILITY_REJECTED`; only the no-confirmed-turn outcome-unknown fallback
   takes the fresh-thread provenance path after prior generation absence is
@@ -1929,11 +1929,13 @@ The protocol adapter is a strict subset client. Its checked JSON manifest lists
 the source schema bundle SHA, resolved JSON Pointers, methods, responses,
 notifications, server requests, type/const/requiredness, required enum values,
 response-schema IDs, absent-thread errors, forkable statuses, and the early-ID
-behavioral observation. Compatibility doctor resolves `$ref`, performs the
-normative structural comparison, then runs handshake, paginated model,
-codexHome, history, sandbox, early-ID, and server-request probes.
+behavioral observation. Offline compatibility doctor resolves `$ref` and
+performs the normative structural comparison. An explicit launch probe checks
+handshake, paginated models, codexHome, and absent-thread errors. The opt-in
+compatibility, access-safety, and review acceptance gates separately check
+history, sandbox, early-ID, server requests, and review lifecycle behavior.
 
-The tested 0.149.0 manifest is `tested`. A newer compatible version is
+The tested 0.153.4 manifest is `tested`. A newer compatible version is
 `unverified` and that verdict is written to every run generation. Older or
 otherwise unlisted versions are rejected unless a future SOT revision adds
 them to the tested set.

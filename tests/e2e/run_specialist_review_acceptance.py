@@ -20,7 +20,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
-PINNED_CODEX_VERSION = "codex-cli 0.149.0"
+PINNED_CODEX_VERSION = "codex-cli 0.153.4"
 LIVE_OPT_IN = "DOLGORAE_RUN_LIVE_SPECIALIST_REVIEW"
 MAX_OUTPUT_BYTES = 1_048_576
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,8 +179,8 @@ def parse_envelope(output: bytes) -> dict[str, Any]:
     if len(output) > MAX_OUTPUT_BYTES:
         raise ValueError("machine output exceeds the 1 MiB acceptance bound")
     value = json.loads(output)
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise ValueError("machine output is not a v1 object envelope")
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise ValueError("machine output is not a v2 object envelope")
     return value
 
 
@@ -246,6 +246,9 @@ def reviewer_isolation_evidence(state_root: Path, reviewer_run_id: str) -> dict[
         raise ValueError("exactly one Reviewer Run state record is required")
     state = json.loads(matches[0].read_text(encoding="utf-8"))
     manifest = json.loads(matches[0].with_name("manifest.json").read_text(encoding="utf-8"))
+    configuration = manifest.get("agent_configuration", {})
+    if (configuration.get("model"), configuration.get("default_effort")) != ("gpt-5.6-luna", "low"):
+        raise ValueError("live review did not use gpt-5.6-luna / low")
     reviewer_thread = state.get("thread_id")
     host_thread = os.environ.get("CODEX_THREAD_ID")
     if not isinstance(reviewer_thread, str) or not reviewer_thread or not host_thread:
@@ -259,6 +262,8 @@ def reviewer_isolation_evidence(state_root: Path, reviewer_run_id: str) -> dict[
         .get("process_static_configuration", {})
         .get("mcp_servers", {})
     )
+    if mcp_servers is None:
+        mcp_servers = {}
     if not isinstance(mcp_servers, dict) or any(
         name == "dolgorae_review" or "dolgorae_review" in json.dumps(configuration)
         for name, configuration in mcp_servers.items()
@@ -269,6 +274,8 @@ def reviewer_isolation_evidence(state_root: Path, reviewer_run_id: str) -> dict[
         "reviewer_thread_ref_sha256": reviewer_digest,
         "separate_codex_thread": True,
         "recursive_review_adapter_absent": True,
+        "model": configuration["model"],
+        "effort": configuration["default_effort"],
     }
 
 

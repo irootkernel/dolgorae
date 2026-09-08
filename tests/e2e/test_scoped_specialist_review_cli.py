@@ -113,6 +113,25 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     .replace("thread-scope-1", f"thread-case-{index}"),
                     encoding="utf-8",
                 )
+                if index == 0:
+                    configuration = case_home / "config.toml"
+                    configuration.write_text(
+                        'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n',
+                        encoding="utf-8",
+                    )
+                    configuration.chmod(0o600)
+                    fixture = json.loads(scenario.read_text(encoding="utf-8"))
+                    for step in fixture["steps"]:
+                        if step.get("method") == "model/list":
+                            step["respond"]["result"]["data"].append({
+                                "model": "gpt-5.6-luna",
+                                "isDefault": False,
+                                "supportedReasoningEfforts": [
+                                    {"reasoningEffort": "medium"},
+                                    {"reasoningEffort": "low"},
+                                ],
+                            })
+                    scenario.write_text(json.dumps(fixture), encoding="utf-8")
                 transcript = root / f"app-server-transcript-{index}.jsonl"
                 transcripts.append(transcript)
                 codex = case_bin / "codex"
@@ -219,6 +238,16 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 if len(starts) != 1:
                     raise AssertionError("Reviewer did not start exactly one thread")
                 start_params = starts[0]["params"]
+                if index == 0:
+                    turns = [message for message in messages if message.get("method") == "turn/start"]
+                    if (
+                        result["reviewer"]["model"] != "gpt-5.6-luna"
+                        or result["reviewer"]["effort"] != "low"
+                        or start_params["model"] != "gpt-5.6-luna"
+                        or not turns
+                        or any(turn["params"]["effort"] != "low" for turn in turns)
+                    ):
+                        raise AssertionError("Reviewer substituted the default model or effort")
                 if (
                     pathlib.Path(start_params["cwd"]) != capture_root / "source"
                     or start_params["sandbox"] != "read-only"

@@ -89,7 +89,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - The supported toolchain is Rust 1.97.1, Buf 1.69.0, and Python 3 with the validation dependencies in `tools/validation/requirements.txt`.
 - The complete repository gate is `make PYTHON_BIN=.venv/bin/python test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.
 - `make test-prepare` runs `cargo fmt` and may rewrite Rust source. Use `make format-check` when a read-only formatting check is required.
-- `make test-live-specialist-review`, `make test-live-scoped-specialist-review`, and `make test-live-access-safety` contact an external Codex runtime and require explicit authorization plus their documented opt-in environment. They are not part of the default complete gate.
+- `make test-live-specialist-review`, `make test-live-scoped-specialist-review`, `make test-live-access-safety`, and `make test-live-codex-compatibility` contact an external Codex runtime and require explicit authorization plus their documented opt-in environment. They are not part of the default complete gate.
 
 ### Commit Messages
 

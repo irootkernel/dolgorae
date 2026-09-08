@@ -1155,7 +1155,7 @@ mod tests {
                 inode: 1,
                 sha256: "1".repeat(64),
             },
-            codex_version: "0.149.0".to_owned(),
+            codex_version: "0.153.4".to_owned(),
             schema_bundle_sha256: "2".repeat(64),
             compatibility_manifest_sha256: "3".repeat(64),
             launch_contract_sha256: "4".repeat(64),

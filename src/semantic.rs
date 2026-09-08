@@ -599,9 +599,20 @@ pub(crate) fn prepare_reviewer(
     let global_profile_binding =
         ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare(&home)?;
     let state = crate::profile::ensure_global_server(&global_profile_binding)?;
-    let model = state.default_model.clone();
+    let configuration = &global_profile_binding
+        .launch_snapshot
+        .process_static_configuration;
+    let model = configuration
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.default_model)
+        .to_owned();
     let efforts = advertised_efforts(&state, profile_name, &model)?;
-    let effort = default_effort(&efforts);
+    let effort = reviewer_effort(
+        profile_name,
+        configuration.get("model_reasoning_effort"),
+        &efforts,
+    )?;
     let profile_snapshot = global_profile_binding.launch_snapshot.clone();
     let profile = run_profile_snapshot(&profile_snapshot)?;
     let mut plan = ReviewerRuntimePlan::resolve(
@@ -4730,6 +4741,24 @@ fn advertised_effort_names(profile: &str, item: &Value) -> Result<Vec<String>, M
     Ok(efforts)
 }
 
+fn reviewer_effort(
+    profile: &str,
+    configured: Option<&Value>,
+    efforts: &[String],
+) -> Result<String, MachineError> {
+    match configured {
+        None | Some(Value::Null) => Ok(default_effort(efforts)),
+        Some(Value::String(effort)) if efforts.contains(effort) => Ok(effort.clone()),
+        Some(value) => Err(compatibility_rejected(
+            profile,
+            "reasoning_effort",
+            json!(efforts),
+            value.clone(),
+            "configured Reviewer effort is not advertised by the selected model",
+        )),
+    }
+}
+
 /// The effort an omitted `--effort` selects at Run creation.
 ///
 /// docs/specs/README.md: "Omitted `--effort` at run creation selects the first advertised
@@ -5885,6 +5914,29 @@ impl RunMutationLock for RunStartupLock {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn reviewer_honors_explicit_effort_without_substitution() {
+        let efforts = vec!["medium".to_owned(), "low".to_owned()];
+        assert_eq!(
+            reviewer_effort("reviewer", Some(&json!("low")), &efforts).unwrap(),
+            "low"
+        );
+        assert_eq!(
+            reviewer_effort("reviewer", None, &efforts).unwrap(),
+            "medium"
+        );
+        assert_eq!(
+            reviewer_effort("reviewer", Some(&Value::Null), &efforts).unwrap(),
+            "medium"
+        );
+        assert_eq!(
+            reviewer_effort("reviewer", Some(&json!("high")), &efforts)
+                .unwrap_err()
+                .code,
+            "COMPATIBILITY_REJECTED"
+        );
+    }
 
     #[test]
     fn continuation_requires_the_named_recorded_verdict_and_stable_request_identity() {

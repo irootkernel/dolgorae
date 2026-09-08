@@ -89,7 +89,7 @@
       "additionalProperties": false,
       "required": ["version", "file_identity", "sha256", "capability_result"],
       "properties": {
-        "version": { "const": "0.149.0" },
+        "version": { "const": "0.153.4" },
         "file_identity": { "$ref": "#/$defs/executable_identity" },
         "sha256": { "$ref": "#/$defs/sha256" },
         "capability_result": {

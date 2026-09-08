@@ -1554,7 +1554,7 @@ evidence without secrets or unbounded logs.
 Status: `PLANNED`
 
 Run opt-in live smoke tests against prepared primary and secondary profiles
-using the checked 0.149.0 compatibility baseline (or a separately migrated
+using the checked 0.153.4 compatibility baseline (or a separately migrated
 compatible version). Profile
 names and local wrapper paths are runner inputs and are not normative fixtures.
 Cover profile-home isolation, singleton sharing within a profile, separation

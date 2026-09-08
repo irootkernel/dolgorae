@@ -7,6 +7,12 @@ development commits.
 
 ## v0.1.3 - Unreleased
 
+### Changed
+
+- Set the Codex compatibility baseline to 0.153.4 while retaining completed-only forks.
+- Honor explicit Profile model and reasoning-effort settings for one-shot
+  Specialist Review, rejecting unavailable selections without substitution.
+
 ## v0.1.2 - 2026-09-08
 
 ### Added

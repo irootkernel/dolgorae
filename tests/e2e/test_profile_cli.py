@@ -99,7 +99,7 @@ args = sys.argv[1:]
 control_path = pathlib.Path(__file__).with_name("codex-mode.json")
 control = json.loads(control_path.read_text(encoding="utf-8")) if control_path.exists() else {{}}
 if args == ["--version"]:
-    print("codex-cli " + control.get("version", "0.149.0"))
+    print("codex-cli " + control.get("version", "0.153.4"))
     raise SystemExit(0)
 if "generate-json-schema" in args:
     if control.get("schema") == "command-missing":
@@ -145,7 +145,7 @@ def create_script_codex(path: pathlib.Path) -> None:
     path.chmod(0o755)
 
 
-def set_mode(path: pathlib.Path, *, version: str = "0.149.0", schema: str = "ok") -> None:
+def set_mode(path: pathlib.Path, *, version: str = "0.153.4", schema: str = "ok") -> None:
     path.with_name("codex-mode.json").write_text(
         json.dumps({"version": version, "schema": schema}), encoding="utf-8"
     )
@@ -410,7 +410,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"exact compatibility failed: {exact.stdout}")
         exact_data = exact_envelope["data"]
         assert_valid(exact_envelope, machine, "profile-doctor Machine envelope")
-        if exact_data["compatibility"] != "tested" or exact_data["codex_version"] != "0.149.0":
+        if exact_data["compatibility"] != "tested" or exact_data["codex_version"] != "0.153.4":
             raise AssertionError(f"exact compatibility returned wrong facts: {exact.stdout}")
         never_started_root = home / ".dolgorae" / "profiles" / exact_data["server_key"]
         never_started_verify = run(
@@ -443,7 +443,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if any(state != "unverified" for state in bare_capabilities.values()):
             raise AssertionError(f"bare doctor fabricated a non-unverified capability: {bare_capabilities}")
 
-        set_mode(fake, version="0.150.0")
+        set_mode(fake, version="0.154.0")
         newer = run(
             binary,
             home,
@@ -454,7 +454,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if newer.returncode != 0 or envelope(newer)["data"]["compatibility"] != "unverified":
             raise AssertionError(f"newer compatible version failed: {newer.stdout}")
 
-        set_mode(fake, version="0.148.0")
+        set_mode(fake, version="0.153.3")
         older = run(
             binary,
             home,
@@ -1256,7 +1256,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"conflict profile cleanup failed: {conflicting_remove.stdout}")
         assert_valid(envelope(conflicting_remove), machine, "profile-remove Machine envelope")
 
-        set_mode(fake, version="0.150.0")
+        set_mode(fake, version="0.154.0")
         migrated_snapshot = envelope(
             run(binary, home, "profile", "doctor", "default")
         )["data"]

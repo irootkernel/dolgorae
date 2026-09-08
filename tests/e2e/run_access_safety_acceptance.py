@@ -14,7 +14,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-PINNED_VERSION = "codex-cli 0.149.0"
+PINNED_VERSION = "codex-cli 0.153.4"
+TARGET_MODEL = "gpt-5.6-luna"
+TARGET_EFFORT = "low"
 OPT_IN = "DOLGORAE_RUN_LIVE_ACCESS_SAFETY"
 REQUIRED_REQUESTS = {
     "item/commandExecution/requestApproval",
@@ -40,6 +42,7 @@ class AppServer:
         self.selector.register(self.process.stderr, selectors.EVENT_READ, "stderr")
         self.next_id = 1
         self.messages: list[dict[str, Any]] = []
+        self.last_frame = b""
         self.buffers = {"stdout": bytearray(), "stderr": bytearray()}
 
     def send(self, value: dict[str, Any]) -> None:
@@ -70,6 +73,7 @@ class AppServer:
         while time.monotonic() < deadline:
             if b"\n" in self.buffers["stdout"]:
                 encoded, _, remainder = self.buffers["stdout"].partition(b"\n")
+                self.last_frame = bytes(encoded)
                 self.buffers["stdout"] = bytearray(remainder)
                 value = json.loads(encoded)
                 if not isinstance(value, dict):
@@ -152,27 +156,26 @@ def schema_methods(codex: Path, root: Path) -> set[str]:
     return {method for method in REQUIRED_REQUESTS if method in text}
 
 
-def default_model(server: AppServer) -> tuple[str, str]:
+def target_model(server: AppServer) -> tuple[str, str]:
     cursor: str | None = None
     selected: tuple[str, str] | None = None
     while True:
         page = server.request("model/list", {"cursor": cursor, "limit": 100})
         for item in page.get("data", []):
-            if not isinstance(item, dict) or item.get("isDefault") is not True:
+            if not isinstance(item, dict) or item.get("model") != TARGET_MODEL:
                 continue
             efforts = item.get("supportedReasoningEfforts", [])
             if not isinstance(item.get("model"), str) or not efforts:
                 continue
-            effort = efforts[0].get("reasoningEffort")
-            if isinstance(effort, str):
-                selected = (item["model"], effort)
+            if any(entry.get("reasoningEffort") == TARGET_EFFORT for entry in efforts):
+                selected = (TARGET_MODEL, TARGET_EFFORT)
         cursor = page.get("nextCursor")
         if cursor is None:
             break
         if not isinstance(cursor, str):
             raise RuntimeError("model/list returned an invalid cursor")
     if selected is None:
-        raise RuntimeError("model/list returned no usable default model")
+        raise RuntimeError(f"model/list does not support {TARGET_MODEL} / {TARGET_EFFORT}")
     return selected
 
 
@@ -200,7 +203,7 @@ def run_acceptance(codex: Path) -> dict[str, Any]:
                 },
             )
             server.send({"method": "initialized", "params": {}})
-            model, effort = default_model(server)
+            model, effort = target_model(server)
             thread = server.request(
                 "thread/start",
                 {
@@ -298,6 +301,7 @@ def run_acceptance(codex: Path) -> dict[str, Any]:
                 "codex_version": PINNED_VERSION,
                 "codex_home": initialized.get("codexHome"),
                 "model": model,
+                "effort": effort,
                 "sandbox_policy": sandbox,
                 "workspace_write": True,
                 "os_temp_write": True,

@@ -16,6 +16,7 @@ INT_TESTS := \
 
 .PHONY: test test-prepare test-unit test-int test-e2e validate-agent-skills \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
+	test-live-codex-compatibility \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
 
@@ -112,7 +113,8 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_specialist_review_acceptance.py
+		$(PYTHON_BIN) tests/e2e/test_specialist_review_acceptance.py; \
+		$(PYTHON_BIN) tests/e2e/test_codex_compatibility.py
 	@echo "[test-e2e] completed"
 
 test-live-specialist-review:
@@ -150,4 +152,12 @@ test-live-access-safety:
 		exit 2; \
 	}
 	$(PYTHON_BIN) tests/e2e/run_access_safety_acceptance.py \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
+
+test-live-codex-compatibility:
+	@test "$${DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY=1 is required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_codex_compatibility.py \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"

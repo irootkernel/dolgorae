@@ -16,7 +16,7 @@ from referencing import Registry, Resource
 from run_specialist_review_acceptance import digest, run, workspace_fingerprint
 
 OPT_IN = "DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW"
-PINNED_VERSION = "codex-cli 0.149.0"
+PINNED_VERSION = "codex-cli 0.153.4"
 PROTOCOL = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol"
 
 
@@ -91,12 +91,18 @@ def main() -> int:
     completed = run(command, cwd=workspace, env=os.environ.copy())
     after = workspace_fingerprint(workspace)
     if completed.returncode != 0:
-        raise ValueError(f"live scoped review failed with exit {completed.returncode}")
+        failure = json.loads(completed.stdout)
+        raise ValueError(
+            f"live scoped review failed with exit {completed.returncode}: "
+            f"{json.dumps(failure.get('error'), sort_keys=True)}"
+        )
     envelope = json.loads(completed.stdout)
     resources = registry()
     validate("dolgorae-machine-v2.schema.json", envelope, resources)
     result = envelope["data"]
     validate("dolgorae-specialist-review-tool-v2.schema.json", result, resources)
+    if (result["reviewer"]["model"], result["reviewer"]["effort"]) != ("gpt-5.6-luna", "low"):
+        raise ValueError("live review did not use gpt-5.6-luna / low")
     observed = result["reviewer"]["executable"]
     if observed["version"] != expected_executable["version"]:
         raise ValueError("live result bound the wrong Codex version")
@@ -117,6 +123,8 @@ def main() -> int:
         "requested_revision": arguments.revision,
         "codex": expected_executable,
         "capability_result": observed["capability_result"],
+        "model": result["reviewer"]["model"],
+        "effort": result["reviewer"]["effort"],
         "capture": {
             "manifest_digest": result["target"]["manifest_digest"],
             "whole_target_digest": result["target"]["whole_target_digest"],

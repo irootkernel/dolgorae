@@ -165,9 +165,10 @@ validator explicitly named by this specification are also normative.
 - **Writer**: the single Run named by durable Dolgorae writer authority for a
   canonical workspace and whose Turns may use workspace-write sandbox policy.
 - **Terminal Turn**: a Turn confirmed as completed, interrupted, or failed.
-- **Forkable Turn**: a terminal Turn whose exact status is listed in the checked
-  Codex required-subset manifest as accepted for `lastTurnId` by the pinned
-  profile. Terminal and forkable are intentionally not synonyms.
+- **Forkable Turn**: a terminal Turn whose exact status is permitted by the
+  Dolgorae policy in the checked Codex required-subset manifest. This policy
+  permits only `completed`, even when Codex accepts a wider set of `lastTurnId`
+  boundaries. Terminal and forkable are intentionally not synonyms.
 
 ### Canonical User-Case Mapping
 
@@ -344,9 +345,15 @@ installers, and automatic updates are not supported release targets. Empirical
 release evidence is valid only for the recorded OS build and MUST be refreshed
 on a new macOS major version.
 
-Dolgorae depends on user-prepared Codex Profiles. Codex App Server 0.149.0 is
-the current compatibility baseline. Background-process safety is owned by each
-Sticky Dedicated logical lane across its successive physical generations and
+Dolgorae depends on user-prepared Codex Profiles. The compatibility validation
+target is `gpt-5.6-luna` with reasoning effort `low`. One-shot Specialist
+Review selects the Profile configuration's explicit `model` and
+`model_reasoning_effort`, validates both against `model/list`, and rejects an
+unavailable selection without substitution. If either setting is absent,
+its existing server-default model or first-advertised-effort rule applies.
+
+Codex App Server 0.153.4 is the current compatibility baseline.
+Background-process safety is owned by each Sticky Dedicated logical lane across its successive physical generations and
 by the macOS process census; it MUST NOT depend on a future Codex terminal-
 management API. A newer native API MAY supply additional evidence but never
 replaces lane-generation identity, census, or cleanup.
@@ -545,7 +552,7 @@ and cleanup, so it advertises lifecycle observation and quiescence tracking as
 native state still blocks pause, physical-generation replacement, profile stop,
 and shutdown. A disabled diagnostic result is recorded as `unverified`; it can
 never be published as a usable profile capability.
-For the 0.149.0 production profile, initialize MUST send
+For the 0.153.4 production profile, initialize MUST send
 `optOutNotificationMethods:[]`. It MUST NOT suppress `item/started`,
 `item/completed`, `thread/started`, turn lifecycle, or correlation methods.
 Observed lifecycle suppression downgrades `native_subagents` to `unverified`
@@ -2356,10 +2363,12 @@ run-specific instructions. A cross-profile fork is forbidden.
 
 Every history-copying fork scans confirmed history newest first and
 selects the latest status listed as forkable in the checked profile manifest.
-Rejected interrupted/failed statuses are skipped rather than treated as generic
-terminal boundaries. If confirmed history exists but no forkable boundary is
+Policy-rejected interrupted/failed statuses are skipped rather than treated
+as generic terminal boundaries. If confirmed history exists but no forkable boundary is
 accepted, the command returns `COMPATIBILITY_REJECTED`; only the separately
 defined outcome-unknown/no-confirmed-turn fallback creates a fresh thread.
+Codex 0.153.4 accepts an interrupted `lastTurnId`; that observation does not
+expand Dolgorae's completed-only fork policy.
 
 Any fork that must copy confirmed history requires the source Codex thread to
 exist in the pinned `CODEX_HOME`; the Dolgorae transcript is not a substitute.
@@ -2448,7 +2457,7 @@ explicit context or artifact handoff.
 
 ## SPEC-009: Pending Requests and Approvals
 
-The checked [Codex required-subset manifest](../protocol/codex-0.149.0-required-subset.json)
+The checked [Codex required-subset manifest](../protocol/codex-0.153.4-required-subset.json)
 maps stable server requests as follows:
 
 - `item/commandExecution/requestApproval` and
@@ -2552,7 +2561,7 @@ For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `decline`, and `cancel`.
 
 The opt-in access-safety acceptance carrier is `make test-live-access-safety`.
-It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.149.0
+It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.153.4
 executable. It verifies the complete writer `sandboxPolicy`, successful writes
 to both the canonical workspace and the OS temporary directory, and live
 command-execution and file-change approval requests against the pinned schema.
@@ -2751,7 +2760,7 @@ Reasoning text, reasoning summaries, reasoning deltas, and internal planning
 streams MUST NOT be persisted in the ledger, projections, logs, diagnostics, or
 exports. The worker MUST independently filter every reasoning method before
 representation. Initialization-time suppression is not available on the pinned
-0.149.0 production profile, whose SPEC-003 launch contract requires
+0.153.4 production profile, whose SPEC-003 launch contract requires
 `optOutNotificationMethods:[]` because reasoning-only methods cannot be
 isolated from required native lifecycle evidence. Receipt-side filtering is
 therefore the sole normative mechanism for that profile; a future pin that
@@ -3582,7 +3591,7 @@ Dolgorae uses the stable app-server API surface plus the narrowly pinned
 `item/tool/requestUserInput` capability. A connection that requires tested
 user-input may advertise `experimentalApi`; all other experimental requests
 remain unsupported and are not implied by that carrier. Dolgorae validates the
-0.149.0 required schema subset and TASK-005 profile handshake/lifecycle surface
+0.153.4 required schema subset and TASK-005 profile handshake/lifecycle surface
 as tested. Production-runtime eligibility and native/dedicated-lane behavioral
 observations remain separately gated and cannot inherit 0.147.0 evidence. For an
 unlisted newer version, Dolgorae may run the version as `unverified` only when:
@@ -3596,9 +3605,18 @@ unlisted newer version, Dolgorae may run the version as `unverified` only when:
 3. live initialize, `initialized`, paginated `model/list`, actual `codexHome`,
    absent-thread `thread/read`, persisted resume/read, early response-ID,
    sandbox, terminal notification/status, fork-boundary, pending-restart,
-   effort, and required server-request probes pass. Every
-   `behavioral_observations` entry MUST be re-measured or the version is
-   rejected, and each probe reads its expected value from the checked manifest.
+   effort, and required server-request probes pass. Every supported behavioral
+   observation MUST be re-measured or the version is rejected. Historical and
+   explicitly unverified observations never confer support. Probes read their
+   expected version-dependent values from the checked manifest.
+
+The explicit `make test-live-codex-compatibility` gate requires
+`DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY=1` and a prepared `CODEX_HOME`. It uses
+`gpt-5.6-luna` / `low` to check history, early response identity, completed and
+interrupted native forks, interruption, and unanswered-approval restart/resume.
+The access-safety and Specialist Review live gates independently cover sandbox,
+approval requests, selected model/effort, result delivery, cancellation, and
+settlement. These gates are outside the default offline repository gate.
 
 Missing generation support, required schema, lifecycle behavior, or identity
 causes fail-closed rejection. Unknown additive fields and notifications are
@@ -3662,7 +3680,7 @@ native item families, child identity, parent relationship, ordered
 active-to-terminal lifecycle, persisted history, restart behavior, and cleanup.
 A binary-level query without a profile reports lifecycle and quiescence as
 `unverified`. The exact 0.147.0 enabled probe passed that complete gate; the
-0.149.0 profile reports those native lifecycle and quiescence capabilities as
+0.153.4 profile reports those native lifecycle and quiescence capabilities as
 `unverified` until the same gate is rerun. Disable
 enforcement is `unavailable` because the diagnostic disabled case still created
 a child. A later pin must rerun the same gate; a policy change still
@@ -3991,9 +4009,9 @@ Assurance levels are ordered `best_effort_personal_alpha`,
 `verified_thread_scoped_control`, and `strong_process_containment`. Run creation
 MUST compare `required_assurance` with the profile snapshot before allocating a
 Run ID, lane, thread, or server. Failure is `ASSURANCE_LEVEL_UNAVAILABLE`.
-Requested and achieved levels are durable Run state. Codex 0.149.0 is capped at
+Requested and achieved levels are durable Run state. Codex 0.153.4 is capped at
 `best_effort_personal_alpha` conservatively; it does not inherit the following
-historical 0.147.0 campaign as 0.149.0 evidence. In that historical campaign,
+historical 0.147.0 campaign as 0.153.4 evidence. In that historical campaign,
 same-home, policy transition, multi-workspace, closed-generation history, and
 Dolgorae process-census cleanup tests passed, while background-terminal
 completeness failed. The prior native-subagent semantic
