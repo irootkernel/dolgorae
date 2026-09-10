@@ -591,10 +591,68 @@ heartbeat and stream-end variants are non-durable and do not consume cursor
 values. No business decision depends on parsing diagnostic text or private
 worker state.
 
+The shared projection capture owns the SPEC-015 revision mapping: Run revision
+is the durable audit head, Writer revision is the persisted authority revision,
+and Interaction revision is the last durable record changing the complete
+Run-scoped Interaction view. The capture validates every consumed record and
+identity together, including Writer observation updates without an authority
+revision change. Gateway-local locking cannot serialize a worker. Capture
+contention returns a state conflict rather than mixed projections.
+
+The event append owner durably binds the historical projection stamp to each
+new event. Replay reads that binding and never substitutes current state. Old
+audit records without reconstructable historical stamps remain readable by
+the existing Machine event path; the public stamped stream requires an explicit
+fresh-snapshot rebase before it crosses that legacy boundary. No startup or
+read path upgrades history by rewriting it. Expected Run revision checks belong
+to the mutation owner, after authenticated exact idempotency replay lookup and
+before admission of a new operation, including Writer acquire/release.
+
+The `gateway` module owns transport admission and bounded async delivery;
+`gateway_socket` owns the singleton record, peer identity, and socket lifetime.
+`gateway_service` translates checked requests into shared semantic operations.
+`machine` owns the current registered error-code vocabulary; `gateway` owns its
+gRPC status, retry, and recovery mapping.
+The `controller` module owns the descriptor-relative confined carrier walk;
+the adapter supplies only the checked path and expected public identity.
+`interaction` owns the normalized durable Interaction record and observer-safe
+summary policy shared by Machine CLI and public gRPC, plus the protected response
+byte bound. `interaction_payload` owns the normalized payload DTOs and their
+transport-neutral field validation; both adapters validate the complete payload
+there before formatting it. The adapters retain their output formatting and
+observation filters.
+`snapshot` owns current Controller authorization against its captured binding;
+protected readers call it before and after reading protected material.
+`gateway_observation` reads bounded events and Interactions from a captured
+durable prefix and applies that shared Controller authorization. It delegates
+artifact metadata and byte ranges to `artifact`, the same immutable artifact
+reader used by Machine CLI `run artifact show` and `run artifact read`. That shared
+reader owns immutable file-change reference validation, visibility authorization,
+retention, safe file access, full-digest verification, and range bounds. Run enumeration likewise enters the shared
+semantic service; the adapter cannot define a different filtering policy.
+`gateway_projection` formats typed snapshots and `gateway_event` formats
+historical client-safe events; neither chooses product transitions. `snapshot`
+performs bounded cross-owner durable capture for both adapters, including the
+Run, Controller, Writer, worker identity, and Interaction observation. An accepted
+Turn response instead uses its committed receipt and immutable manifest without
+recapturing live state; this historical projection carries no current Controller
+authorization snapshot. The ledger owner supplies common canonical-cursor
+parsing and observation-integrity errors to both adapters. Audit and
+event modules validate the hash-bound persisted event representation together;
+transport modules never reconstruct authority from diagnostic text.
+
 The adapter preserves `recognized_unsupported` as a distinct Interaction
 support value. Profile model normalization rejects duplicate IDs, duplicate or
 empty effort tokens, and zero or multiple defaults before either adapter emits
 a profile; `ModelCapability.is_default` is the only default-model source.
+
+Profile observation may execute the existing finite Codex version and schema
+probes in disposable output to validate the registered launch definition. It
+does not persist a new Profile binding or start, stop, or migrate a Profile
+Server. A live model catalog is read only from an already-running server after
+process, socket, and account-home identity validation and is revalidated against
+the same generation before publication. Stopped servers expose an unavailable
+blocker and no invented model catalog.
 
 ### Per-Run Worker
 
@@ -1308,7 +1366,15 @@ proceeding, then clears and fsyncs the slot immediately before releasing.
 queried for both ranges; `l_pid <= 0` is `Unverifiable`, while a positive
 `l_pid` is only a hint and is always checked against
 the matching owner record. Normal attachment to an answering socket takes
-neither byte. Byte-range acquisition uses `F_SETLKWTIMEOUT` with the Darwin
+neither byte. The shared semantic core also excludes overlapping startup-file
+users for one Run within a process, before opening the file and until its
+last descriptor is closed: POSIX range locks do not exclude sibling threads,
+and a sibling descriptor close would release the process's held ranges. This
+transient process guard returns `RUN_BUSY` on contention and retains only active
+claims; it never replaces the kernel locks or durable identity checks. Lazy
+worker election takes the startup range before reading runtime/projection state
+or preparing membership and a dedicated epoch, then carries that same descriptor
+through the worker handoff. Byte-range acquisition uses `F_SETLKWTIMEOUT` with the Darwin
 `flocktimeout` layout and a ten-second relative timeout. After timeout, a
 contender may terminate only an exact byte-0 transient starter bound by kqueue
 and revalidation. A byte-1 owner is a serving reader or writer worker and
@@ -1416,7 +1482,13 @@ index: one mode-0600 record per `run start` key, named by the key's digest
 rather than the key itself, holding the normalized allocation digest and the Run
 identity it is bound to. It is fsynced before the Run directory is published, so
 a response lost after allocation is reconciled by retrying the identical key
-instead of allocating a second Run. Both the canonical workspace and its Dolgorae-home
+instead of allocating a second Run. A permanent mode-0600 flock file beside the
+record, named by the same key digest and scoped to the allocation operation,
+serializes reservation lookup, publication, membership admission or failure
+cleanup, and receipt capture. The shared semantic core holds it across that
+whole allocation; a concurrent identical caller rechecks the published Run
+before performing effects. Different allocation keys remain independent. This
+lock is distinct from Writer authority and POSIX worker startup locks. Both the canonical workspace and its Dolgorae-home
 state root must satisfy the v1 local-APFS requirement. The state root is
 current-uid-owned mode 0700, mutable files are mode 0600, and no path below it
 is included in a Codex writable root or model-visible projection.

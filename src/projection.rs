@@ -152,7 +152,10 @@ fn apply_record(
                 parse_lifecycle(&required_payload_string(record.payload(), "current")?)?;
             if matches!(
                 state.lifecycle,
-                RunLifecycle::Closed | RunLifecycle::StartFailed | RunLifecycle::OutcomeUnknown
+                RunLifecycle::Paused
+                    | RunLifecycle::Closed
+                    | RunLifecycle::StartFailed
+                    | RunLifecycle::OutcomeUnknown
             ) {
                 state.active_turn_id = None;
             }
@@ -217,6 +220,9 @@ fn apply_record(
             state.active_turn_id = None;
         }
         _ => {}
+    }
+    if let Some(projected) = record.client_projection() {
+        state.last_event_cursor = Some(projected.record.cursor.clone());
     }
     state.ledger_head = LedgerHead {
         sequence: record.sequence(),

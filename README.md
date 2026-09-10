@@ -35,6 +35,19 @@ cargo build --locked
 ./target/debug/dolgorae --human --help
 ```
 
+After initializing the Dolgorae home, a foreground local gateway can serve the
+[public v1 API](docs/protocol/dolgorae/public/v1/dolgorae.proto):
+
+```sh
+dolgorae serve --socket /absolute/private-directory/dolgorae.sock
+```
+
+The socket's parent must be owned by the current user with mode 0700. Startup
+prints one checked readiness result; `--ready-fd <fd>` sends it to an inherited
+descriptor instead. Clients negotiate with `GetCapabilities` and use its
+advertised methods and Controller carrier policy. Stopping or replacing the
+gateway preserves durable Runs and their workers.
+
 ## Agent skill
 
 The source tree distributes the optional complete

@@ -18,7 +18,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::fd::RawFd;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
 use zeroize::{Zeroize as _, Zeroizing};
@@ -152,6 +152,7 @@ struct FileSnapshot {
 pub struct CredentialCarrier {
     file: File,
     snapshot: FileSnapshot,
+    expected_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -940,6 +941,72 @@ impl CredentialCarrier {
         Self::from_file(file)
     }
 
+    /// Capture a protected client carrier beneath the advertised private root.
+    pub(crate) fn open_confined(root: &Path, path: &Path) -> Result<Self, MachineError> {
+        let relative = path.strip_prefix(root).map_err(|_| {
+            MachineError::invalid_argument(
+                "controller.absolute_file_path",
+                "carrier must be beneath the advertised root",
+            )
+        })?;
+        let components = relative.components().collect::<Vec<_>>();
+        if components.len() < 3
+            || components
+                .iter()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(MachineError::invalid_argument(
+                "controller.absolute_file_path",
+                "carrier must be in a client descendant directory",
+            ));
+        }
+        let uid = DarwinSystem.current_uid();
+        let mut directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open("/")
+            .map_err(|_| {
+                MachineError::invalid_argument("controller", "carrier directory cannot be opened")
+            })?;
+        for part in root.components() {
+            if let Component::Normal(name) = part {
+                directory = DarwinSystem
+                    .openat_nofollow(&directory, name, true)
+                    .map_err(|_| {
+                        MachineError::invalid_argument("controller", "carrier root is unsafe")
+                    })?;
+            }
+        }
+        for (index, part) in components.iter().enumerate() {
+            let metadata = directory.metadata().map_err(|_| {
+                MachineError::invalid_argument(
+                    "controller",
+                    "carrier directory cannot be inspected",
+                )
+            })?;
+            if metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+                return Err(MachineError::invalid_argument(
+                    "controller",
+                    "carrier directories require same-owner mode 0700",
+                ));
+            }
+            let Component::Normal(name) = part else {
+                unreachable!()
+            };
+            let leaf = index + 1 == components.len();
+            let file = DarwinSystem
+                .openat_nofollow(&directory, name, !leaf)
+                .map_err(|_| {
+                    MachineError::invalid_argument("controller", "carrier path is unsafe")
+                })?;
+            if leaf {
+                return Self::from_received_fd(file.into());
+            }
+            directory = file;
+        }
+        unreachable!()
+    }
+
     pub fn duplicate_fd(fd: RawFd) -> Result<Self, MachineError> {
         let owned = DarwinSystem.duplicate_fd_cloexec(fd).map_err(|_| {
             credential_invalid(
@@ -956,7 +1023,20 @@ impl CredentialCarrier {
 
     fn from_file(file: File) -> Result<Self, MachineError> {
         let snapshot = secure_snapshot(&file)?;
-        Ok(Self { file, snapshot })
+        Ok(Self {
+            file,
+            snapshot,
+            expected_generation: None,
+        })
+    }
+
+    pub fn with_expected_generation(mut self, generation: u64) -> Self {
+        self.expected_generation = Some(generation);
+        self
+    }
+
+    pub fn expected_generation(&self) -> Option<u64> {
+        self.expected_generation
     }
 
     #[must_use]
@@ -1332,7 +1412,11 @@ pub fn authorize_controller(
     let identity_matches = secret.public.controller_id == binding.identity.controller_id;
     let capability_matches =
         constant_time_equal(observed.as_bytes(), binding.capability_sha256.as_bytes());
-    if !(identity_matches & capability_matches) {
+    if !(identity_matches & capability_matches)
+        || carrier
+            .expected_generation
+            .is_some_and(|generation| generation != binding.identity.generation)
+    {
         return Err(controller_mismatch(run_id, operation));
     }
     Ok(binding.identity.clone())

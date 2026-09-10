@@ -1,4 +1,16 @@
 use serde::{Deserialize, Serialize};
+
+pub const MAX_JCS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// A durable Run-scoped capture boundary shared by all public projections.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionStamp {
+    pub captured_head_cursor: String,
+    pub run_state_revision: u64,
+    pub writer_state_revision: u64,
+    pub interaction_state_revision: u64,
+}
 use uuid::Uuid;
 
 macro_rules! string_enum {

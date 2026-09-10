@@ -202,13 +202,25 @@ impl RuntimeFeatures {
         features.worker_controller_revalidation = true;
         features.operator_capability = true;
         features.operator_controller_reset = true;
-        // safe_client_projection stays false: ADR-016 defines it as the
-        // *complete* client-safe projection an unauthenticated same-uid
-        // observer may read, including Controller metadata and pending
-        // interactions. `SafeRunObservation` still has no production
-        // constructor, and pending interactions cannot be served without
-        // extending the frozen control-v1 `status` response or adding a new
-        // observer operation. Flip true only once that observer read exists.
+        // TASK-007 leaves safe_client_projection false. TASK-023 enables it
+        // only after the public gateway supplies the complete observer-safe
+        // Run, event, timeline, and pending-interaction projections required
+        // by ADR-016 without extending the frozen control-v1 response.
+        features
+    }
+
+    #[must_use]
+    pub const fn task_023() -> Self {
+        let mut features = Self::task_007();
+        features.persistent_runs = true;
+        features.first_write_via_submit_turn = true;
+        features.durable_writer_authority = true;
+        features.sticky_dedicated_lanes = true;
+        features.control_modes = true;
+        features.event_replay = true;
+        features.artifact_retrieval = true;
+        features.safe_client_projection = true;
+        features.public_local_socket = true;
         features
     }
 }
@@ -226,7 +238,32 @@ pub fn capabilities() -> RuntimeCapabilities {
         "minimum_rpc_client_version": 1,
         "maximum_rpc_client_version": 1,
         "rpc_descriptor_sha256": PUBLIC_V1_DESCRIPTOR_SHA256,
-        "grpc_methods": ["RuntimeService.GetCapabilities"],
+        "grpc_methods": [
+            "ArtifactService.GetArtifact",
+            "ArtifactService.ReadArtifactChunk",
+            "ControllerService.VerifyController",
+            "InteractionService.GetControllerInteraction",
+            "InteractionService.ListPendingInteractions",
+            "InteractionService.ResolveInteraction",
+            "ObservationService.WatchRunEvents",
+            "RunService.CloseRun",
+            "RunService.GetRun",
+            "RunService.InterruptTurn",
+            "RunService.ListRuns",
+            "RunService.PauseRun",
+            "RunService.ReconcileRun",
+            "RunService.RecoverRun",
+            "RunService.ResumeRun",
+            "RunService.StartRun",
+            "RunService.SubmitTurn",
+            "RuntimeService.GetCapabilities",
+            "RuntimeService.GetProfile",
+            "RuntimeService.InspectWorkspace",
+            "RuntimeService.ListProfiles",
+            "WriterService.AcquireWriter",
+            "WriterService.GetWorkspaceWriterStatus",
+            "WriterService.ReleaseWriter"
+],
         "controller_carrier_root": "home/.dolgorae/controller-carriers",
         "controller_credential": {
             "schema_id": "https://dolgorae.local/schema/controller-credential/v1",
@@ -254,7 +291,7 @@ pub fn capabilities() -> RuntimeCapabilities {
             "exact_byte_length": true,
             "visibility_classes": ["observer", "controller_only"]
         },
-        "supported_transports": ["machine_cli"],
+        "supported_transports": ["machine_cli", "local_grpc"],
         "app_server_transport": "direct_websocket_unix",
         "profile_launch_mode": "dolgorae_owned_direct_executable",
         "projection_profiles": ["minimal", "operational"],
@@ -288,14 +325,14 @@ pub fn capabilities() -> RuntimeCapabilities {
             "storage_and_long_duration": "unverified",
             "resource_warning_live_dedicated": 6
         },
-        "features": RuntimeFeatures::task_007(),
+        "features": RuntimeFeatures::task_023(),
         "interactions": {
-            "command_execution_approval": "unavailable",
-            "file_change_approval": "unavailable",
-            "permission_request": "unavailable",
-            "user_input": "unavailable",
-            "mcp_elicitation": "unavailable",
-            "connector_approval": "unavailable",
+            "command_execution_approval": "supported",
+            "file_change_approval": "supported",
+            "permission_request": "recognized_unsupported",
+            "user_input": "supported",
+            "mcp_elicitation": "recognized_unsupported",
+            "connector_approval": "recognized_unsupported",
             "maximum_response_bytes": 1048576,
             "maximum_safe_payload_bytes": 8388608
         },
@@ -321,14 +358,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_007_advertises_only_genuinely_implemented_authority_behavior() {
-        // worker_controller_revalidation is true because src/worker.rs refuses
-        // every mutating control request whose SCM_RIGHTS credential does not
-        // authorize the Run's current binding; safe_client_projection stays
-        // false because no production caller reads a complete client-safe
-        // observation yet.
+    fn task_023_advertises_the_implemented_public_surface() {
         let capabilities = serde_json::to_value(capabilities()).unwrap();
-        assert_eq!(capabilities["features"]["persistent_runs"], false);
+        assert_eq!(capabilities["features"]["persistent_runs"], true);
         assert_eq!(
             capabilities["features"]["brokered_independent_subagent_runs"],
             false
@@ -342,8 +374,11 @@ mod tests {
         );
         assert_eq!(capabilities["features"]["operator_capability"], true);
         assert_eq!(capabilities["features"]["operator_controller_reset"], true);
-        assert_eq!(capabilities["features"]["safe_client_projection"], false);
-        assert_eq!(capabilities["features"]["public_local_socket"], false);
-        assert_eq!(capabilities["supported_transports"], json!(["machine_cli"]));
+        assert_eq!(capabilities["features"]["safe_client_projection"], true);
+        assert_eq!(capabilities["features"]["public_local_socket"], true);
+        assert_eq!(
+            capabilities["supported_transports"],
+            json!(["machine_cli", "local_grpc"])
+        );
     }
 }

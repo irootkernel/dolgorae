@@ -13,7 +13,8 @@ use crate::workspace::{
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -401,6 +402,19 @@ pub struct StartReservationStore<P> {
     state_root: PathBuf,
 }
 
+/// Held through allocation publication and its membership/receipt boundary.
+/// The permanent inode is never removed on release.
+#[must_use = "allocation is serialized only while this guard is alive"]
+pub(crate) struct AllocationLock {
+    file: File,
+}
+
+impl Drop for AllocationLock {
+    fn drop(&mut self) {
+        let _ = crate::darwin::DarwinSystem.unlock(&self.file);
+    }
+}
+
 impl<P: WorkspacePlatform> StartReservationStore<P> {
     #[must_use]
     pub fn new(platform: P, state_root: impl Into<PathBuf>) -> Self {
@@ -412,6 +426,69 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
 
     fn root(&self, operation: &str) -> PathBuf {
         self.state_root.join("idempotency").join(operation)
+    }
+
+    fn ensure_root(&self, directory: &str) -> Result<PathBuf, MachineError> {
+        let uid = self.platform.current_uid();
+        verify_secure_directory(&self.state_root, uid)?;
+        let root = self.root(directory);
+        for directory in [self.state_root.join("idempotency"), root.clone()] {
+            match create_directory(&directory, 0o700) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(run_path_error(&directory, error.to_string())),
+            }
+            verify_secure_directory(&directory, uid)?;
+        }
+        Ok(root)
+    }
+
+    pub(crate) fn lock_allocation(
+        &self,
+        directory: &str,
+        key: &str,
+    ) -> Result<AllocationLock, MachineError> {
+        let root = self.ensure_root(directory)?;
+        let path = root.join(format!("{}.lock", sha256_hex(key.as_bytes())));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        let verify = || -> Result<(), MachineError> {
+            verify_secure_directory(&self.state_root, self.platform.current_uid())?;
+            verify_secure_directory(
+                &self.state_root.join("idempotency"),
+                self.platform.current_uid(),
+            )?;
+            verify_secure_directory(&root, self.platform.current_uid())?;
+            verify_secure_file(&path, self.platform.current_uid())?;
+            let held = file
+                .metadata()
+                .map_err(|error| run_path_error(&path, error.to_string()))?;
+            let named = fs::symlink_metadata(&path)
+                .map_err(|error| run_path_error(&path, error.to_string()))?;
+            if !held.is_file()
+                || held.nlink() != 1
+                || (held.dev(), held.ino()) != (named.dev(), named.ino())
+            {
+                return Err(run_path_error(&path, "allocation lock identity changed"));
+            }
+            Ok(())
+        };
+        verify()?;
+        crate::darwin::DarwinSystem
+            .lock_exclusive(&file)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        verify()?;
+        file.sync_all()
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        sync_directory(&root).map_err(|error| run_path_error(&root, error.to_string()))?;
+        Ok(AllocationLock { file })
     }
 
     /// The file one key is recorded in.
@@ -472,22 +549,12 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         &self,
         reservation: &StartReservation,
     ) -> Result<StartReservation, MachineError> {
-        let uid = self.platform.current_uid();
-        verify_secure_directory(&self.state_root, uid)?;
         let directory = match reservation.operation.as_str() {
             "start_run" => "run-start",
             "fork_run" => "run-fork",
             _ => return Err(reservation_invalid("reservation operation is invalid")),
         };
-        let root = self.root(directory);
-        for directory in [self.state_root.join("idempotency"), root.clone()] {
-            match create_directory(&directory, 0o700) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(run_path_error(&directory, error.to_string())),
-            }
-            verify_secure_directory(&directory, uid)?;
-        }
+        self.ensure_root(directory)?;
         let path = self.path(directory, &reservation.idempotency_key);
         let mut bytes = canonicalize(
             &parse(

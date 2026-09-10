@@ -1,11 +1,10 @@
 use crate::audit::is_microsecond_utc_timestamp;
+use crate::domain::MAX_JCS_SAFE_INTEGER;
 use crate::jcs::{LosslessJson, canonicalize};
 use crate::workspace::LosslessPath;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-const MAX_JCS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -204,6 +203,37 @@ pub struct EventDelivery {
     pub projection: EventProjection,
     pub replay: bool,
     pub record: ClientEventRecord,
+}
+
+/// Client-safe event and its immutable append-time observation boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StampedClientEvent {
+    pub record: ClientEventRecord,
+    pub stamp: crate::domain::ProjectionStamp,
+}
+
+impl StampedClientEvent {
+    pub(crate) fn validate(
+        &self,
+        run_id: Uuid,
+        sequence: u64,
+        timestamp: &str,
+    ) -> Result<(), EventError> {
+        self.record.validate(run_id, sequence)?;
+        if self.record.timestamp != timestamp
+            || sequence > MAX_JCS_SAFE_INTEGER
+            || self.stamp.run_state_revision != sequence
+            || self.stamp.captured_head_cursor != sequence.to_string()
+            || self.stamp.interaction_state_revision > sequence
+            || self.stamp.writer_state_revision > MAX_JCS_SAFE_INTEGER
+        {
+            return Err(invalid(
+                "event stamp does not identify its durable append boundary",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -557,4 +587,199 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Provenance captured while the caller holds the workspace Writer observation lock.
+#[derive(Clone, Debug)]
+pub struct EventAppendContext {
+    pub workspace_id: String,
+    pub server_key: String,
+    pub server_epoch: u64,
+    pub writer_state_revision: u64,
+}
+
+pub(crate) fn project_audit_event(
+    audit: &crate::audit::AuditRecord,
+    prior: &crate::projection::RunStateProjection,
+    context: &EventAppendContext,
+    interaction_revision: u64,
+    history: &[crate::audit::AuditRecord],
+) -> Result<Option<StampedClientEvent>, EventError> {
+    use crate::audit::AuditKind;
+    let bytes = canonicalize(audit.payload()).map_err(|error| invalid(&error.to_string()))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| invalid(&error.to_string()))?;
+    let string = |name: &str| {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| invalid("semantic event is missing a typed field"))
+    };
+    let data = match audit.kind() {
+        AuditKind::RunCreated | AuditKind::WriteContinuationCreated => {
+            ClientEventData::RunStateChanged(RunStateEventPayload {
+                previous: None,
+                current: "starting".to_owned(),
+            })
+        }
+        AuditKind::LifecycleTransition => ClientEventData::RunStateChanged(RunStateEventPayload {
+            previous: Some(string("previous")?),
+            current: string("current")?,
+        }),
+        AuditKind::TurnStarted => ClientEventData::TurnStateChanged(TurnStateEventPayload {
+            previous: None,
+            current: "running".to_owned(),
+        }),
+        AuditKind::TurnTerminal => ClientEventData::TurnStateChanged(TurnStateEventPayload {
+            previous: None,
+            current: string("status")?,
+        }),
+        AuditKind::ApprovalRequested => {
+            let normalized = &payload["interaction"];
+            let Some(kind) = normalized["kind"].as_str() else {
+                return Ok(None);
+            };
+            ClientEventData::InteractionOpened(InteractionOpenedPayload {
+                request_id: public_interaction_id(normalized)?,
+                interaction_kind: kind.to_owned(),
+            })
+        }
+        AuditKind::InteractionResolved => {
+            let Some(normalized) = recorded_interaction(history, &string("request_id")?)? else {
+                return Ok(None);
+            };
+            if normalized["resolution"]["outcome"].as_str() != Some("method_not_found") {
+                return Ok(None);
+            }
+            ClientEventData::InteractionResolved(InteractionResolvedPayload {
+                request_id: public_interaction_id(&normalized)?,
+                outcome: "method_not_found".to_owned(),
+            })
+        }
+        AuditKind::ApprovalDecided => {
+            let resolution = &payload["resolution"];
+            let outcome = match resolution["outcome"].as_str() {
+                Some("answered") => "answered",
+                Some("stale") => "stale",
+                Some("approval") => match resolution["decision"].as_str() {
+                    Some("accept_once") => "accepted",
+                    Some("decline") => "declined",
+                    Some("cancel") => "cancelled",
+                    _ => return Err(invalid("approval event has an unsupported decision")),
+                },
+                _ => return Err(invalid("approval event has an unsupported outcome")),
+            };
+            let normalized = recorded_interaction(history, &string("request_id")?)?
+                .ok_or_else(|| invalid("resolved interaction lacks durable public identity"))?;
+            ClientEventData::InteractionResolved(InteractionResolvedPayload {
+                request_id: public_interaction_id(&normalized)?,
+                outcome: outcome.to_owned(),
+            })
+        }
+        AuditKind::WriterAcquired | AuditKind::WriterReleased => {
+            let active = audit.kind() == AuditKind::WriterAcquired;
+            ClientEventData::WriterStateChanged(WriterEventPayload {
+                previous: serde_json::to_value(&prior.writer_authority)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .ok_or_else(|| invalid("writer state cannot be serialized"))?,
+                current: if active { "active" } else { "none" }.to_owned(),
+                writer_run_id: active.then_some(audit.run_id()),
+                writer_generation: payload["writer_generation"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("writer event is missing its generation"))?,
+            })
+        }
+        AuditKind::OutcomeUnknown => ClientEventData::RecoveryRequired(RecoveryEventPayload {
+            reason: "turn_outcome_unknown".to_owned(),
+        }),
+        AuditKind::RunGenerationStarted | AuditKind::RunGenerationStopped => {
+            ClientEventData::GenerationChanged(GenerationPayload {
+                run_generation: audit.run_generation(),
+                server_epoch: context.server_epoch,
+            })
+        }
+        AuditKind::ClientEvent => {
+            return Ok(Some(StampedClientEvent {
+                record: from_payload(audit.payload())?,
+                stamp: crate::domain::ProjectionStamp {
+                    captured_head_cursor: audit.sequence().to_string(),
+                    run_state_revision: audit.sequence(),
+                    writer_state_revision: context.writer_state_revision,
+                    interaction_state_revision: interaction_revision,
+                },
+            }));
+        }
+        _ => return Ok(None),
+    };
+    let record = ClientEventRecord {
+        schema_version: 1,
+        event_schema_version: 1,
+        cursor: audit.sequence().to_string(),
+        event_id: Uuid::now_v7(),
+        timestamp: audit.timestamp().to_owned(),
+        workspace_id: context.workspace_id.clone(),
+        run_id: audit.run_id(),
+        thread_id: payload
+            .get("interaction")
+            .unwrap_or(&payload)
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| prior.thread_id.clone()),
+        turn_id: payload
+            .get("interaction")
+            .unwrap_or(&payload)
+            .get("turn_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| prior.active_turn_id.clone())
+            .or_else(|| prior.latest_turn_id.clone()),
+        server_key: context.server_key.clone(),
+        server_epoch: context.server_epoch,
+        data,
+    };
+    let event = StampedClientEvent {
+        record,
+        stamp: crate::domain::ProjectionStamp {
+            captured_head_cursor: audit.sequence().to_string(),
+            run_state_revision: audit.sequence(),
+            writer_state_revision: context.writer_state_revision,
+            interaction_state_revision: interaction_revision,
+        },
+    };
+    event.validate(audit.run_id(), audit.sequence(), audit.timestamp())?;
+    Ok(Some(event))
+}
+
+fn public_interaction_id(normalized: &serde_json::Value) -> Result<String, EventError> {
+    let identity = normalized["request_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .filter(|value| value.get_version_num() == 7)
+        .ok_or_else(|| invalid("normalized interaction lacks public UUIDv7"))?;
+    Ok(identity.to_string())
+}
+
+fn recorded_interaction(
+    history: &[crate::audit::AuditRecord],
+    upstream: &str,
+) -> Result<Option<serde_json::Value>, EventError> {
+    let upstream: u64 = upstream
+        .parse()
+        .map_err(|_| invalid("interaction lacks numeric upstream binding"))?;
+    for record in history
+        .iter()
+        .rev()
+        .filter(|record| record.kind() == crate::audit::AuditKind::ApprovalRequested)
+    {
+        let bytes = canonicalize(record.payload()).map_err(|error| invalid(&error.to_string()))?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|error| invalid(&error.to_string()))?;
+        if payload["upstream_request_id"].as_u64() == Some(upstream) {
+            return Ok(Some(payload["interaction"].clone()));
+        }
+    }
+    Ok(None)
 }

@@ -42,6 +42,8 @@ audit_kinds! {
     InteractionOpened => "interaction_opened",
     InteractionResolved => "interaction_resolved",
     ClientEvent => "client_event",
+    MutationAdmitted => "mutation_admitted",
+    MutationCompleted => "mutation_completed",
     ControllerReset => "controller_reset",
     ReasoningContentSuppressed => "reasoning_content_suppressed",
     WriterAcquired => "writer_acquired",
@@ -80,6 +82,8 @@ pub const AUDIT_KINDS: &[AuditKind] = &[
     AuditKind::InteractionOpened,
     AuditKind::InteractionResolved,
     AuditKind::ClientEvent,
+    AuditKind::MutationAdmitted,
+    AuditKind::MutationCompleted,
     AuditKind::ControllerReset,
     AuditKind::ReasoningContentSuppressed,
     AuditKind::WriterAcquired,
@@ -110,6 +114,7 @@ pub struct AuditRecord {
     payload: LosslessJson,
     previous_hash: String,
     hash: String,
+    client_projection: Option<crate::event::StampedClientEvent>,
 }
 
 #[derive(Debug)]
@@ -163,7 +168,7 @@ impl AuditRecord {
         let LosslessJson::Object(entries) = value else {
             return Err(AuditError::InvalidStructure);
         };
-        if entries.len() != 9 {
+        if !matches!(entries.len(), 9 | 10) {
             return Err(AuditError::InvalidStructure);
         }
         let field = |name: &str| {
@@ -182,7 +187,8 @@ impl AuditRecord {
             LosslessJson::String(value) => Ok(value.clone()),
             _ => Err(AuditError::InvalidStructure),
         };
-        if number("schema_version")? != 1 {
+        let schema_version = number("schema_version")?;
+        if !matches!((schema_version, entries.len()), (1, 9) | (2, 9 | 10)) {
             return Err(AuditError::InvalidStructure);
         }
         let sequence = number("sequence")?;
@@ -201,6 +207,17 @@ impl AuditRecord {
         let run_generation = number("run_generation")?;
         let kind = serde_json::from_value::<AuditKind>(serde_json::Value::String(string("kind")?))
             .map_err(|_| AuditError::InvalidStructure)?;
+        let admission_kind = matches!(
+            kind,
+            AuditKind::MutationAdmitted | AuditKind::MutationCompleted
+        );
+        if (schema_version == 1 && admission_kind)
+            || (schema_version == 2
+                && ((admission_kind && entries.len() != 9)
+                    || (!admission_kind && entries.len() != 10)))
+        {
+            return Err(AuditError::InvalidStructure);
+        }
         let payload = field("payload")?.clone();
         let previous_hash = string("previous_hash")?;
         let hash = string("hash")?;
@@ -210,8 +227,27 @@ impl AuditRecord {
         if kind == AuditKind::PayloadUnrepresentable && !is_unrepresentable_payload(&payload) {
             return Err(AuditError::InvalidPayload);
         }
+        let client_projection = if schema_version == 2 && !admission_kind {
+            let bytes = canonicalize(field("client_projection")?)?;
+            let projection: crate::event::StampedClientEvent = if kind == AuditKind::ClientEvent {
+                crate::event::StampedClientEvent {
+                    record: crate::event::from_payload(&payload)
+                        .map_err(|_| AuditError::InvalidStructure)?,
+                    stamp: serde_json::from_slice(&bytes)
+                        .map_err(|_| AuditError::InvalidStructure)?,
+                }
+            } else {
+                serde_json::from_slice(&bytes).map_err(|_| AuditError::InvalidStructure)?
+            };
+            projection
+                .validate(run_id, sequence, &timestamp)
+                .map_err(|_| AuditError::InvalidStructure)?;
+            Some(projection)
+        } else {
+            None
+        };
         let record = Self {
-            schema_version: 1,
+            schema_version: schema_version as u32,
             sequence,
             timestamp,
             run_id,
@@ -220,6 +256,7 @@ impl AuditRecord {
             payload,
             previous_hash,
             hash,
+            client_projection,
         };
         if !record.verify_hash() {
             return Err(AuditError::InvalidHash);
@@ -298,7 +335,14 @@ impl AuditRecord {
             return Err(AuditError::InvalidPayload);
         }
         let mut record = Self {
-            schema_version: 1,
+            schema_version: if matches!(
+                kind,
+                AuditKind::MutationAdmitted | AuditKind::MutationCompleted
+            ) {
+                2
+            } else {
+                1
+            },
             sequence,
             timestamp,
             run_id,
@@ -307,9 +351,43 @@ impl AuditRecord {
             payload,
             previous_hash,
             hash: String::new(),
+            client_projection: None,
         };
         record.hash = sha256_hex(&canonicalize(&record.lossless(false))?);
         Ok(record)
+    }
+
+    /// Bind a newly constructed record to its append-time client projection.
+    /// Existing persisted records are never upgraded or rewritten.
+    pub fn with_client_projection(
+        mut self,
+        projection: crate::event::StampedClientEvent,
+    ) -> Result<Self, AuditError> {
+        if matches!(
+            self.kind,
+            AuditKind::MutationAdmitted | AuditKind::MutationCompleted
+        ) {
+            return Err(AuditError::InvalidStructure);
+        }
+        projection
+            .validate(self.run_id, self.sequence, &self.timestamp)
+            .map_err(|_| AuditError::InvalidStructure)?;
+        if self.kind == AuditKind::ClientEvent
+            && crate::event::from_payload(&self.payload)
+                .map_err(|_| AuditError::InvalidStructure)?
+                != projection.record
+        {
+            return Err(AuditError::InvalidStructure);
+        }
+        self.schema_version = 2;
+        self.client_projection = Some(projection);
+        self.hash = sha256_hex(&canonicalize(&self.lossless(false))?);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn client_projection(&self) -> Option<&crate::event::StampedClientEvent> {
+        self.client_projection.as_ref()
     }
 
     pub fn canonical_line(&self) -> Result<Vec<u8>, AuditError> {
@@ -406,6 +484,19 @@ impl AuditRecord {
                 LosslessJson::String(self.previous_hash.clone()),
             ),
         ];
+        if let Some(projection) = &self.client_projection {
+            // The DTO contains only JSON-compatible fields and validated safe integers.
+            let json = if self.kind == AuditKind::ClientEvent {
+                serde_json::to_string(&projection.stamp)
+            } else {
+                serde_json::to_string(projection)
+            }
+            .expect("client projection serializes");
+            entries.push((
+                "client_projection".to_owned(),
+                crate::jcs::parse(&json).expect("client projection is lossless JSON"),
+            ));
+        }
         if include_hash {
             entries.push(("hash".to_owned(), LosslessJson::String(self.hash.clone())));
         }
@@ -555,6 +646,51 @@ pub(crate) fn is_microsecond_utc_timestamp(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_records_require_v2_and_round_trip_without_client_metadata() {
+        let run_id = Uuid::now_v7();
+        let admission_id = Uuid::now_v7();
+        for (kind, payload) in [
+            (
+                AuditKind::MutationAdmitted,
+                serde_json::json!({
+                    "schema_version":1,"admission_id":admission_id,"controller_id":Uuid::now_v7(),
+                    "expected_state_revision":0,"request_sha256":"a".repeat(64),"operation":"acquire_writer","allow_writer_acquire":true
+                }),
+            ),
+            (
+                AuditKind::MutationCompleted,
+                serde_json::json!({"schema_version":1,"admission_id":admission_id}),
+            ),
+        ] {
+            let record = AuditRecord::new(
+                1,
+                "2026-09-09T00:00:00.123456Z",
+                run_id,
+                1,
+                kind,
+                crate::jcs::parse(&payload.to_string()).unwrap(),
+                GENESIS_PREVIOUS_HASH,
+            )
+            .unwrap();
+            assert_eq!(record.schema_version, 2);
+            assert!(record.client_projection().is_none());
+            let line = record.canonical_line().unwrap();
+            assert_eq!(
+                AuditRecord::from_canonical_line(&line[..line.len() - 1]).unwrap(),
+                record
+            );
+            let mut forged_v1 = record;
+            forged_v1.schema_version = 1;
+            forged_v1.hash = sha256_hex(&canonicalize(&forged_v1.lossless(false)).unwrap());
+            let line = forged_v1.canonical_line().unwrap();
+            assert!(matches!(
+                AuditRecord::from_canonical_line(&line[..line.len() - 1]),
+                Err(AuditError::InvalidStructure)
+            ));
+        }
+    }
 
     #[test]
     fn record_hash_omits_only_hash_and_line_is_canonical() {

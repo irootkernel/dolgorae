@@ -205,8 +205,11 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
 
             slow_tree = workspace / "post-drift-window"
             slow_tree.mkdir()
-            for index in range(1_000):
-                (slow_tree / f"{index:04d}.txt").write_text(f"{index}\n", encoding="utf-8")
+            # Keep post-turn integrity verification observable without paying
+            # for 2,000 fsyncs during the two pre-launch materializations.
+            padding = "review fixture\n" * 8_192
+            for index in range(16):
+                (slow_tree / f"{index:04d}.txt").write_text(padding, encoding="utf-8")
             post_drift_codex = add_profile(
                 binary,
                 home,
@@ -216,23 +219,53 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 "post-drift-reviewer",
                 "scoped_specialist_review.json",
             )
+            # Establish the fake server before timing the post-turn boundary;
+            # cold profile startup is covered separately by profile lifecycle tests.
+            code, envelope = machine(
+                binary, home, ["profile", "server", "start", "post-drift-reviewer"]
+            )
+            if code != 0:
+                raise AssertionError(f"post-turn fixture server start failed: {envelope!r}")
             post_drift = start(binary, home, review_args(workspace, "post-drift-reviewer"))
             database = targets.parent / "orchestration" / "orchestration.sqlite3"
-            deadline = time.monotonic() + 30
+            started = time.monotonic()
+            # Capture, fresh reviewer bootstrap, and the Turn share this budget.
+            # Measured successful preparation nearly exhausted 30 seconds;
+            # retain a bounded wait with room for a loaded native-test host.
+            deadline = started + 60
+            observed_states = []
             while time.monotonic() < deadline:
                 if database.is_file():
                     with sqlite3.connect(database) as connection:
                         state = connection.execute(
                             "SELECT state FROM engagements ORDER BY rowid DESC LIMIT 1"
                         ).fetchone()
+                    if not observed_states or observed_states[-1][1] != state:
+                        observed_states.append((round(time.monotonic() - started, 3), state))
                     if state is not None and state[0] == "result_ready":
                         os.kill(post_drift.pid, signal.SIGSTOP)
                         break
                 if post_drift.poll() is not None:
-                    raise AssertionError("post-turn drift review exited before fault injection")
+                    stdout, stderr = post_drift.communicate()
+                    raise AssertionError(
+                        "post-turn drift review exited before fault injection: "
+                        f"states={observed_states!r}, stdout={stdout!r}, stderr={stderr!r}"
+                    )
                 time.sleep(0.001)
             else:
-                raise AssertionError("post-turn drift review never reached result_ready")
+                transcript = root / "transcript-post-drift-reviewer.jsonl"
+                methods = (
+                    [json.loads(line).get("method") for line in transcript.read_text().splitlines()]
+                    if transcript.exists() else []
+                )
+                captures = [
+                    sum(1 for _ in path.rglob("*")) for path in targets.iterdir()
+                ]
+                raise AssertionError(
+                    "post-turn drift review never reached result_ready: "
+                    f"states={observed_states!r}, methods={methods!r}, "
+                    f"capture_entry_counts={captures!r}"
+                )
             old_post_drift = post_drift_codex.with_name("codex.old")
             post_drift_codex.rename(old_post_drift)
             shutil.copy2(schema_source, post_drift_codex)
@@ -332,6 +365,13 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             )
             if not (targets / capture_ref / "source").exists():
                 raise AssertionError("cancellation removed unknown recovery bytes")
+            methods = [
+                json.loads(line).get("method")
+                for line in (root / "transcript-cancel-reviewer.jsonl")
+                .read_text(encoding="utf-8").splitlines()
+            ]
+            if methods.count("turn/start") != 1 or methods.count("turn/interrupt") != 1:
+                raise AssertionError("cancellation must interrupt the accepted Turn exactly once")
         finally:
             terminate_owned(root)
 

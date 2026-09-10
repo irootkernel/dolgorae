@@ -41,6 +41,9 @@ fn main() -> ExitCode {
 
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
+            if matches!(&cli.command, Command::Serve(_)) {
+                return execute_serve(&cli.command);
+            }
             if !matches!(&cli.command, Command::Profile { .. })
                 && let Err(reason) = dolgorae::cli::validate_argument_contract(&cli.command)
             {
@@ -61,6 +64,103 @@ fn main() -> ExitCode {
             MachineError::invalid_argument("argv", error.to_string()),
         ),
     }
+}
+
+/// Serve owns a readiness channel, including pre-runtime argument and home
+/// admission failures. It never enters the finite semantic-command renderer.
+fn execute_serve(command: &Command) -> ExitCode {
+    use std::os::fd::IntoRawFd as _;
+    let Command::Serve(arguments) = command else {
+        unreachable!("serve dispatcher receives only the serve command")
+    };
+    let ready_fd = match parse_ready_fd(&arguments.args) {
+        Ok(fd) => fd,
+        Err(error) => return render_ready_failure(None, error),
+    };
+    // Own the inherited descriptor before any home inspection can open files,
+    // so an invalid descriptor number cannot accidentally name a new file.
+    let ready_file = match ready_fd {
+        Some(fd) => match dolgorae::darwin::DarwinSystem.take_ready_file(fd) {
+            Ok(file) => Some(file),
+            Err(_) => {
+                return render_ready_failure(
+                    None,
+                    MachineError::invalid_argument(
+                        "--ready-fd",
+                        "readiness descriptor is unavailable",
+                    ),
+                );
+            }
+        },
+        None => None,
+    };
+    let prepared = (|| {
+        dolgorae::cli::validate_argument_contract(command)
+            .map_err(|reason| MachineError::invalid_argument("argv", reason))?;
+        let socket = option_path(&arguments.args, "--socket")
+            .map_err(|reason| MachineError::invalid_argument("--socket", reason))?
+            .ok_or_else(|| MachineError::invalid_argument("--socket", "socket path is required"))?;
+        let home = dolgorae::paths::DolgoraeHome::system().map_err(MachineError::from)?;
+        dolgorae::global_profile::require_generation(&home)?;
+        Ok::<_, MachineError>((home, socket))
+    })();
+    let (home, socket) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return render_ready_failure(ready_file, error),
+    };
+    let backend_home = home.clone();
+    let result = dolgorae::gateway::serve(
+        &home,
+        &socket,
+        ready_file.map(|file| file.into_raw_fd()),
+        move |instance_id| {
+            std::sync::Arc::new(dolgorae::gateway_service::CoreGatewayBackend::new(
+                backend_home,
+                instance_id,
+            ))
+        },
+    );
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => ExitCode::from(error.exit_status()),
+    }
+}
+
+fn parse_ready_fd(arguments: &[OsString]) -> Result<Option<i32>, MachineError> {
+    let value = option_path(arguments, "--ready-fd")
+        .map_err(|reason| MachineError::invalid_argument("--ready-fd", reason))?;
+    value
+        .map(|value| {
+            value
+                .to_str()
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|fd| *fd >= 0)
+                .ok_or_else(|| {
+                    MachineError::invalid_argument(
+                        "--ready-fd",
+                        "a nonnegative file descriptor is required",
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn render_ready_failure(file: Option<std::fs::File>, error: MachineError) -> ExitCode {
+    let status = error.exit_status();
+    let mut output: Box<dyn std::io::Write> = match file {
+        Some(file) => Box::new(file),
+        None => Box::new(std::io::stdout()),
+    };
+    let envelope = FailureEnvelope::new("serve", error);
+    if serde_json::to_writer(&mut output, &envelope).is_err()
+        || output
+            .write_all(b"\n")
+            .and_then(|()| output.flush())
+            .is_err()
+    {
+        return ExitCode::from(6);
+    }
+    ExitCode::from(status)
 }
 
 fn is_help(args: &[OsString]) -> bool {
@@ -221,6 +321,47 @@ fn execute(cli: Cli) -> ExitCode {
             let _ = args;
             return ExitCode::from(6);
         }
+    }
+    if let Command::Run(run) = &cli.command
+        && let RunCommand::List(args) = &run.command
+    {
+        return match dolgorae::semantic::run_list(&args.args) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed Run list")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
+    if let Command::Run(run) = &cli.command
+        && let RunCommand::Artifact { command } = &run.command
+        && let Some((args, read)) = match command {
+            dolgorae::cli::RunArtifactCommand::Show(args) => Some((args, false)),
+            dolgorae::cli::RunArtifactCommand::Read(args) => Some((args, true)),
+            dolgorae::cli::RunArtifactCommand::Export(_) => None,
+        }
+    {
+        return match dolgorae::semantic::run_artifact(&run_arguments(run, &args.args), read) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed artifact observation")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
     }
     if let Command::Run(run) = &cli.command
         && let RunCommand::Interaction {
@@ -633,4 +774,81 @@ fn render_json(value: &impl Serialize) {
     let mut lock = stdout.lock();
     serde_json::to_writer(&mut lock, value).expect("machine envelope serialization");
     lock.write_all(b"\n").expect("machine newline");
+}
+
+#[cfg(test)]
+mod gateway_cli_tests {
+    use super::*;
+    use std::io::Read as _;
+    use std::os::fd::IntoRawFd as _;
+    use std::time::Duration;
+
+    #[test]
+    fn serve_keeps_the_exact_foreground_socket_syntax() {
+        let cli = Cli::try_parse_from([
+            "dolgorae",
+            "serve",
+            "--socket",
+            "/private/g.sock",
+            "--ready-fd=7",
+        ])
+        .unwrap();
+        dolgorae::cli::validate_argument_contract(&cli.command).unwrap();
+        let Command::Serve(arguments) = cli.command else {
+            panic!("expected serve");
+        };
+        assert_eq!(parse_ready_fd(&arguments.args).unwrap(), Some(7));
+        for args in [
+            vec!["dolgorae", "serve", "rpc", "--socket", "/private/g.sock"],
+            vec![
+                "dolgorae",
+                "serve",
+                "--socket",
+                "/private/g.sock",
+                "--tcp",
+                "127.0.0.1:1",
+            ],
+            vec![
+                "dolgorae",
+                "serve",
+                "--socket",
+                "/private/g.sock",
+                "--daemonize",
+            ],
+            vec!["dolgorae", "serve", "--ready-fd", "7"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(dolgorae::cli::validate_argument_contract(&cli.command).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_ready_descriptors_are_rejected_before_adoption() {
+        for value in ["-1", "not-a-descriptor", "2147483648"] {
+            assert!(parse_ready_fd(&["--ready-fd".into(), value.into()]).is_err());
+        }
+        assert!(parse_ready_fd(&["--ready-fd=7".into(), "--ready-fd=8".into()]).is_err());
+    }
+
+    #[test]
+    fn serve_argument_failure_uses_the_inherited_readiness_channel_once() {
+        let (mut reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let cli = Cli::try_parse_from(vec![
+            "dolgorae".to_owned(),
+            "serve".to_owned(),
+            "--ready-fd".to_owned(),
+            writer.into_raw_fd().to_string(),
+        ])
+        .unwrap();
+        let _ = execute_serve(&cli.command);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let envelope: FailureEnvelope = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope.command, "serve");
+        assert_eq!(envelope.error.code, "INVALID_ARGUMENT");
+    }
 }

@@ -50,6 +50,7 @@ pub enum LedgerError {
     Integrity(String),
     InvalidRecord(String),
     InvalidEvent(String),
+    MissingEventStamp(u64),
     Projection(String),
     WriterBusy(PathBuf),
     OperationTimeout(String),
@@ -76,6 +77,10 @@ impl std::fmt::Display for LedgerError {
             Self::Integrity(reason) => write!(formatter, "audit integrity failure: {reason}"),
             Self::InvalidRecord(reason) => write!(formatter, "invalid audit record: {reason}"),
             Self::InvalidEvent(reason) => write!(formatter, "invalid client event: {reason}"),
+            Self::MissingEventStamp(sequence) => write!(
+                formatter,
+                "event at sequence {sequence} lacks a historical stamp; refresh snapshots and rebase"
+            ),
             Self::Projection(reason) => write!(formatter, "invalid state projection: {reason}"),
             Self::WriterBusy(path) => write!(
                 formatter,
@@ -179,6 +184,8 @@ pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFault
     replay_started_millis: u64,
     faults: Arc<F>,
     scheduled: Arc<ScheduledCommit<C, F>>,
+    event_context: Option<EventAppendContext>,
+    tail_interaction_revision: u64,
 }
 
 impl Ledger<SystemLedgerClock, NoFaults> {
@@ -281,6 +288,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 .len(),
             |tail| tail.prefix_length,
         );
+        let tail_interaction_revision = interaction_state_revision(&records);
         let mut ledger = Self {
             run_id,
             root,
@@ -298,6 +306,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             replay_started_millis: replay_started,
             faults,
             scheduled,
+            event_context: None,
+            tail_interaction_revision,
         };
         if let Some(tail) = tail {
             ledger.preserve_and_truncate_tail(tail)?;
@@ -305,6 +315,51 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         ledger.finish_pending_repairs()?;
         ledger.reconcile_projection()?;
         Ok(ledger)
+    }
+
+    /// The caller holds Writer observation serialization until the append is fsynced.
+    pub fn with_event_context<T, E>(
+        &mut self,
+        context: EventAppendContext,
+        append: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let previous = self.event_context.replace(context);
+        let result = append(self);
+        self.event_context = previous;
+        result
+    }
+
+    pub(crate) fn replace_event_context(
+        &mut self,
+        context: Option<EventAppendContext>,
+    ) -> Option<EventAppendContext> {
+        std::mem::replace(&mut self.event_context, context)
+    }
+
+    /// Bind metadata before another durable authority hashes or validates this record.
+    pub(crate) fn prepare_event(&self, record: AuditRecord) -> Result<AuditRecord, LedgerError> {
+        Ok(if record.client_projection().is_none() {
+            if let Some(context) = &self.event_context {
+                let mut interaction_revision = self.tail_interaction_revision;
+                interaction_revision = next_interaction_revision(interaction_revision, &record);
+                match crate::event::project_audit_event(
+                    &record,
+                    &self.tail_projection,
+                    context,
+                    interaction_revision,
+                    &self.records,
+                )
+                .map_err(|error| LedgerError::InvalidEvent(error.to_string()))?
+                {
+                    Some(event) => record.with_client_projection(event)?,
+                    None => record,
+                }
+            } else {
+                record
+            }
+        } else {
+            record
+        })
     }
 
     pub fn head(&self) -> Result<LedgerHead, LedgerError> {
@@ -361,7 +416,35 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
     }
 
     pub fn approval_decisions(&self) -> Result<Vec<serde_json::Value>, LedgerError> {
-        self.payloads_of_kind(AuditKind::ApprovalDecided)
+        self.durable_records()?
+            .iter()
+            .filter(|record| record.kind() == AuditKind::ApprovalDecided)
+            .map(|record| {
+                let bytes = canonicalize(record.payload())
+                    .map_err(|error| LedgerError::Integrity(error.to_string()))?;
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|error| LedgerError::Integrity(error.to_string()))?;
+                // Early v2 nonsecret decisions omitted receipts. Reuse their
+                // already committed public event identity without rewriting history.
+                if value
+                    .get("resolution_receipt_id")
+                    .is_none_or(serde_json::Value::is_null)
+                    && value
+                        .get("response_sha256")
+                        .is_some_and(serde_json::Value::is_string)
+                    && matches!(
+                        value
+                            .pointer("/resolution/outcome")
+                            .and_then(serde_json::Value::as_str),
+                        Some("approval" | "answered")
+                    )
+                    && let Some(event) = record.client_projection()
+                {
+                    value["resolution_receipt_id"] = serde_json::json!(event.record.event_id);
+                }
+                Ok(value)
+            })
+            .collect()
     }
 
     pub(crate) fn check_open_replay_budget(&self) -> Result<(), LedgerError> {
@@ -417,6 +500,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             ));
         }
         self.validate_next(&record)?;
+        let record = self.prepare_event(record)?;
         let line = record.canonical_line()?;
         if line.len() > MAX_AUDIT_LINE_BYTES {
             return Err(LedgerError::InvalidRecord(
@@ -448,6 +532,8 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             scheduled_state.error = Some(error.to_string());
             return Err(error);
         }
+        self.tail_interaction_revision =
+            next_interaction_revision(self.tail_interaction_revision, &record);
         self.records.push(record);
         self.ledger_bytes = self.ledger_bytes.saturating_add(line_bytes);
         self.tail_projection = candidate_projection.clone();
@@ -528,6 +614,95 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             self.previous_hash(),
         )?;
         self.append_conformance_record(record, AppendDurability::Required)
+    }
+
+    /// Emit terminal response and complete usage facts before the terminal transition.
+    /// Legacy callers without append authority retain their original ledger shape.
+    pub fn append_final_response_event(
+        &mut self,
+        terminal: &serde_json::Value,
+        run_generation: u64,
+    ) -> Result<(), LedgerError> {
+        let Some(context) = self.event_context.clone() else {
+            return Ok(());
+        };
+        let invalid = || {
+            LedgerError::InvalidEvent("terminal event lacks typed response provenance".to_owned())
+        };
+        let mut data = Vec::new();
+        let response = &terminal["final_response"];
+        let final_response = match response["kind"].as_str() {
+            Some("inline") => {
+                let text = response["text"].as_str().ok_or_else(invalid)?;
+                (!text.is_empty()).then(|| FinalResponse::Inline {
+                    text: text.to_owned(),
+                })
+            }
+            Some("artifact") => Some(FinalResponse::Artifact {
+                artifact: Box::new(ArtifactMetadata {
+                    schema_version: 1,
+                    artifact_id: response["artifact_id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .ok_or_else(invalid)?,
+                    run_id: self.run_id,
+                    kind: "final_response".to_owned(),
+                    visibility: "observer".to_owned(),
+                    interaction_request_id: None,
+                    media_type: "text/markdown".to_owned(),
+                    byte_length: response["byte_length"].as_u64().ok_or_else(invalid)?,
+                    sha256: response["sha256"].as_str().ok_or_else(invalid)?.to_owned(),
+                    created_at: response["created_at"]
+                        .as_str()
+                        .ok_or_else(invalid)?
+                        .to_owned(),
+                    retention: "run_lifetime".to_owned(),
+                    integrity: "unverified".to_owned(),
+                }),
+            }),
+            Some("unavailable") | None => None,
+            _ => return Err(invalid()),
+        };
+        if let Some(response) = final_response {
+            data.push(ClientEventData::ResponseFinal(ResponseEventPayload {
+                response,
+            }));
+        }
+        if let (Some(input_tokens), Some(output_tokens)) = (
+            terminal["usage"]["inputTokens"].as_u64(),
+            terminal["usage"]["outputTokens"].as_u64(),
+        ) {
+            data.push(ClientEventData::UsageReported(UsagePayload {
+                input_tokens,
+                output_tokens,
+            }));
+        }
+        for data in data {
+            self.append_client_event(
+                ClientEventRecord {
+                    schema_version: 1,
+                    event_schema_version: 1,
+                    cursor: self.next_sequence().to_string(),
+                    event_id: Uuid::now_v7(),
+                    timestamp: self.clock.timestamp(),
+                    workspace_id: context.workspace_id.clone(),
+                    run_id: self.run_id,
+                    thread_id: Some(
+                        terminal["thread_id"]
+                            .as_str()
+                            .ok_or_else(invalid)?
+                            .to_owned(),
+                    ),
+                    turn_id: Some(terminal["turn_id"].as_str().ok_or_else(invalid)?.to_owned()),
+                    server_key: context.server_key.clone(),
+                    server_epoch: context.server_epoch,
+                    data,
+                },
+                run_generation,
+                AppendDurability::Required,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn append_client_event(
@@ -1321,10 +1496,13 @@ fn deliveries_after(
     let mut delivery_bytes = 0_usize;
     let first = records.partition_point(|record| record.sequence() <= after);
     for record in &records[first..] {
-        if record.kind() != AuditKind::ClientEvent {
+        let event = if let Some(projection) = record.client_projection() {
+            projection.record.clone()
+        } else if record.kind() == AuditKind::ClientEvent {
+            event_from_payload(record.payload())?
+        } else {
             continue;
-        }
-        let event = event_from_payload(record.payload())?;
+        };
         if projection == EventProjection::Minimal && !event.data.minimal() {
             continue;
         }
@@ -1366,6 +1544,20 @@ pub struct ObservedLedger {
 }
 
 impl ObservedLedger {
+    /// Shared adapter admission for the same committed Run prefix.
+    pub(crate) fn open_run(
+        state_root: &Path,
+        run_id: Uuid,
+        head: u64,
+    ) -> Result<Self, crate::machine::MachineError> {
+        Self::open(
+            &state_root.join("runs").join(run_id.to_string()),
+            run_id,
+            head,
+        )
+        .map_err(|error| audit_integrity_error(run_id, head, &error.to_string()))
+    }
+
     pub fn open(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
         Ok(Self {
             records: observe_records(root, run_id, head)?,
@@ -1374,8 +1566,59 @@ impl ObservedLedger {
     }
 
     #[must_use]
+    pub(crate) fn records(&self) -> &[AuditRecord] {
+        &self.records
+    }
+
+    #[must_use]
     pub const fn head(&self) -> u64 {
         self.head
+    }
+
+    /// The durable sequence that last invalidated this Run's Interaction view.
+    #[must_use]
+    pub fn interaction_state_revision(&self) -> u64 {
+        interaction_state_revision(&self.records)
+    }
+
+    /// Read historical typed events without borrowing current snapshot revisions.
+    pub fn stamped_events_after(
+        &self,
+        after: u64,
+        projection: EventProjection,
+    ) -> Result<Vec<StampedClientEvent>, LedgerError> {
+        let mut events = Vec::new();
+        let mut bytes = 0_usize;
+        for audit in self
+            .records
+            .iter()
+            .filter(|record| record.sequence() > after)
+        {
+            let Some(event) = audit.client_projection() else {
+                if audit.kind() == AuditKind::ClientEvent {
+                    let legacy = event_from_payload(audit.payload())?;
+                    if projection != EventProjection::Minimal || legacy.data.minimal() {
+                        return Err(LedgerError::MissingEventStamp(audit.sequence()));
+                    }
+                }
+                continue;
+            };
+            if projection == EventProjection::Minimal && !event.record.data.minimal() {
+                continue;
+            }
+            let encoded = serde_json::to_vec(event)
+                .map_err(|error| LedgerError::InvalidEvent(error.to_string()))?
+                .len();
+            if !events.is_empty()
+                && (events.len() == MAX_EVENT_DELIVERIES
+                    || bytes.saturating_add(encoded) > MAX_EVENT_DELIVERY_BYTES)
+            {
+                break;
+            }
+            bytes = bytes.saturating_add(encoded);
+            events.push(event.clone());
+        }
+        Ok(events)
     }
 
     /// The payload of the last durable `turn_terminal` record, if this Run
@@ -1423,6 +1666,76 @@ impl ObservedLedger {
         projection: EventProjection,
     ) -> Result<Vec<EventDelivery>, LedgerError> {
         deliveries_after(&self.records, after, projection, true, MAX_EVENT_DELIVERIES)
+    }
+}
+
+pub(crate) fn parse_event_cursor(value: &str) -> Option<u64> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|cursor| cursor.to_string() == value)
+}
+
+pub(crate) fn event_cursor_invalid(
+    run_id: Uuid,
+    requested: &str,
+    head: &str,
+) -> crate::machine::MachineError {
+    crate::machine::MachineError::new(
+        "EVENT_CURSOR_INVALID",
+        "event cursor is noncanonical or beyond the run ledger head",
+        false,
+        serde_json::json!({"run_id":run_id,"requested_cursor":requested,"head_cursor":head}),
+    )
+}
+
+pub(crate) fn audit_integrity_error(
+    run_id: Uuid,
+    sequence: u64,
+    reason: &str,
+) -> crate::machine::MachineError {
+    crate::machine::MachineError::new(
+        "AUDIT_INTEGRITY_FAILURE",
+        "run ledger could not be replayed",
+        false,
+        serde_json::json!({"run_id":run_id,"sequence":sequence,"reason":reason}),
+    )
+}
+
+fn interaction_state_revision(records: &[AuditRecord]) -> u64 {
+    let mut revision = 0;
+    for record in records {
+        revision = next_interaction_revision(revision, record);
+    }
+    revision
+}
+
+fn next_interaction_revision(revision: u64, record: &AuditRecord) -> u64 {
+    let changes_interactions = match record.kind() {
+        AuditKind::ApprovalRequested
+        | AuditKind::ApprovalDecided
+        | AuditKind::InteractionOpened
+        | AuditKind::InteractionResolved => true,
+        AuditKind::RunGenerationStarted
+        | AuditKind::RunGenerationStopped
+        | AuditKind::ControllerReset
+        | AuditKind::LifecycleTransition
+        | AuditKind::Reconciliation
+        | AuditKind::OutcomeUnknown
+        | AuditKind::StartFailed => revision != 0,
+        AuditKind::AppServerNotification => {
+            revision != 0
+                && matches!(record.payload(),
+                LosslessJson::Object(fields) if fields.iter().any(|(key, value)|
+                    key == "method" && matches!(value, LosslessJson::String(method)
+                        if method == "item/fileChange/patchUpdated")))
+        }
+        _ => false,
+    };
+    if changes_interactions {
+        record.sequence()
+    } else {
+        revision
     }
 }
 

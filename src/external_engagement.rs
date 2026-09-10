@@ -634,6 +634,8 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                     caller: None,
                     engagement_id,
                     request: TurnControlRequest {
+                        normalized_request_sha256: None,
+                        write: false,
                         message: prompt,
                         idempotency_key: idempotency_key.clone(),
                         effort: None,

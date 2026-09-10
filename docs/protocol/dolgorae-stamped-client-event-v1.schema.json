@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/stamped-client-event/v1",
+  "title": "Dolgorae historical client event boundary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record",
+    "stamp"
+  ],
+  "properties": {
+    "record": {
+      "$ref": "https://dolgorae.local/schema/client-event-record/v1"
+    },
+    "stamp": {
+      "$ref": "#/$defs/stamp"
+    }
+  },
+  "$defs": {
+    "stamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captured_head_cursor",
+        "run_state_revision",
+        "writer_state_revision",
+        "interaction_state_revision"
+      ],
+      "properties": {
+        "captured_head_cursor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "run_state_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "writer_state_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "interaction_state_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

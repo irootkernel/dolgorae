@@ -37,6 +37,14 @@
     "start_failed",
     "outcome_unknown"
   ],
+  "record_schemas": {
+    "1": "https://dolgorae.local/schema/audit-record/v1",
+    "2": "https://dolgorae.local/schema/audit-record/v2"
+  },
+  "record_kind_extensions": {
+    "2": ["mutation_admitted", "mutation_completed"]
+  },
+  "historical_client_projection_schema": "https://dolgorae.local/schema/stamped-client-event/v1",
   "bootstrap_prefixes": [
     ["workspace_initialized", "idempotency_reserved", "run_created"],
     ["workspace_initialized", "idempotency_reserved", "write_continuation_created"]

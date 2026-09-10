@@ -29,6 +29,15 @@ It consumes these authorities and current runtime capability output; it does
 not redefine product behavior, grant operational authorization, or install with
 the binary.
 
+The ledger retains the frozen [audit v1](protocol/dolgorae-audit-record-v1.schema.json)
+reader and adds [audit v2](protocol/dolgorae-audit-record-v2.schema.json) for
+hash-bound historical client projections and mutation admission/completion.
+[Stamped events](protocol/dolgorae-stamped-client-event-v1.schema.json) bind the
+existing client event record to its append-time aggregate revisions. The
+[ledger conformance registry](protocol/dolgorae-ledger-conformance-v1.json)
+identifies each accepted record version and its kind extensions; these persisted
+contracts do not alter the frozen public-v1 Protobuf or descriptor.
+
 ## Precedence and synchronization
 
 Each role owner is authoritative only for its stated domain. Specifications own

@@ -17,6 +17,10 @@ use crate::event::{EventDelivery, EventProjection};
 use crate::fault::{FaultInjector, NoFaults};
 use crate::ledger::{Ledger, LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
+use crate::mutation_admission::{
+    MutationRequest, MutationRequestIdentity, active_mutation_admission, admit_mutation,
+    complete_mutation_admission, validate_mutation_admission,
+};
 use crate::run::{AggregateMemberKind, RunStore};
 use crate::turn::{
     AcceptedTurn, AppServer, CoordinatorConfig, CoordinatorState, DeliveryMode, DeliveryResult,
@@ -1009,6 +1013,20 @@ impl StartupLockFile {
         acquired.map_err(|_| WorkerProtocolError::StartupBusy)
     }
 
+    /// With startup serialized, exclude a serving owner whose locator is missing.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn require_unowned_worker_range(&self) -> Result<(), WorkerProtocolError> {
+        self.revalidate()?;
+        let offset =
+            i64::try_from(slot_offset(1)?).map_err(|_| WorkerProtocolError::InvalidOwnerRecord)?;
+        crate::darwin::DarwinSystem
+            .try_lock_byte(&self.file, offset)
+            .map_err(|_| WorkerProtocolError::StartupBusy)?;
+        crate::darwin::DarwinSystem
+            .unlock_byte(&self.file, offset)
+            .map_err(|_| WorkerProtocolError::Io)
+    }
+
     /// Release the startup/mutation range before external work, as PREPARE
     /// and COMMIT each require.
     #[cfg(target_os = "macos")]
@@ -1187,6 +1205,23 @@ impl WorkerHello {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequestV1 {
+    ControllerChecked {
+        expected_controller_generation: u64,
+        request: Box<ControlRequestV1>,
+    },
+    /// Ordinary mutation admitted against the authoritative durable Run head.
+    CheckedMutation {
+        expected_state_revision: u64,
+        request: Box<ControlRequestV1>,
+    },
+    BeginPreparedMutation {
+        expected_state_revision: u64,
+        request: Box<ControlRequestV1>,
+    },
+    AdmittedMutation {
+        admission_id: Uuid,
+        request: Box<ControlRequestV1>,
+    },
     Hello {
         expected: WorkerIdentity,
     },
@@ -1379,6 +1414,10 @@ impl ControlRequestV1 {
     #[must_use]
     pub const fn expected(&self) -> &WorkerIdentity {
         match self {
+            Self::ControllerChecked { request, .. }
+            | Self::CheckedMutation { request, .. }
+            | Self::BeginPreparedMutation { request, .. }
+            | Self::AdmittedMutation { request, .. } => request.expected(),
             Self::Hello { expected }
             | Self::Status { expected }
             | Self::Shutdown { expected }
@@ -1403,11 +1442,48 @@ impl ControlRequestV1 {
         }
     }
 
+    fn valid_checked_mutation(&self) -> bool {
+        if let Self::ControllerChecked {
+            expected_controller_generation,
+            request,
+        } = self
+        {
+            return *expected_controller_generation != 0
+                && !matches!(request.as_ref(), Self::ControllerChecked { .. })
+                && request.requires_controller()
+                && request.external_engagement().is_none()
+                && request.valid_checked_mutation();
+        }
+        let (Self::CheckedMutation { request, .. }
+        | Self::BeginPreparedMutation { request, .. }
+        | Self::AdmittedMutation { request, .. }) = self
+        else {
+            return true;
+        };
+        matches!(
+            request.as_ref(),
+            Self::Send { .. }
+                | Self::Submit { .. }
+                | Self::Respond { .. }
+                | Self::Interrupt { .. }
+                | Self::Pause { .. }
+                | Self::Resume { .. }
+                | Self::Reconcile { .. }
+                | Self::SettleLifecycleTimeout { .. }
+                | Self::Close { .. }
+                | Self::SetWriterAccess { .. }
+        )
+    }
+
     /// The build the caller declared, absent on frozen control v1 and on any
     /// request composed by a build that predates the declaration.
     #[must_use]
     pub const fn caller(&self) -> Option<&ExecutingBuild> {
         match self {
+            Self::ControllerChecked { request, .. }
+            | Self::CheckedMutation { request, .. }
+            | Self::BeginPreparedMutation { request, .. }
+            | Self::AdmittedMutation { request, .. } => request.caller(),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => None,
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
@@ -1437,6 +1513,10 @@ impl ControlRequestV1 {
     /// `shutdown` byte-identically.
     pub fn declare_caller(&mut self, build: ExecutingBuild) {
         match self {
+            Self::ControllerChecked { request, .. }
+            | Self::CheckedMutation { request, .. }
+            | Self::BeginPreparedMutation { request, .. }
+            | Self::AdmittedMutation { request, .. } => request.declare_caller(build),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => {}
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
@@ -1484,7 +1564,11 @@ impl ControlRequestV1 {
     pub const fn requires_controller(&self) -> bool {
         matches!(
             self,
-            Self::Send { .. }
+            Self::ControllerChecked { .. }
+                | Self::CheckedMutation { .. }
+                | Self::BeginPreparedMutation { .. }
+                | Self::AdmittedMutation { .. }
+                | Self::Send { .. }
                 | Self::Submit { .. }
                 | Self::ExternalSubmit { .. }
                 | Self::Respond { .. }
@@ -1520,6 +1604,10 @@ impl ControlRequestV1 {
     #[must_use]
     pub const fn operation_name(&self) -> &'static str {
         match self {
+            Self::ControllerChecked { request, .. }
+            | Self::CheckedMutation { request, .. }
+            | Self::BeginPreparedMutation { request, .. }
+            | Self::AdmittedMutation { request, .. } => request.operation_name(),
             Self::Hello { .. } => "run.hello",
             Self::Status { .. } => "run.status",
             Self::Shutdown { .. } => "run.shutdown",
@@ -1556,6 +1644,44 @@ impl ControlRequestV1 {
             | Self::ExternalSetWriterAccess { engagement_id, .. } => Some(*engagement_id),
             _ => None,
         }
+    }
+}
+
+impl MutationRequest for ControlRequestV1 {
+    fn mutation_request_identity(&self) -> Result<MutationRequestIdentity, MachineError> {
+        let mut value =
+            serde_json::to_value(self).map_err(|error| admission_internal(&error.to_string()))?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| admission_internal("mutation request is not an object"))?;
+        object.remove("expected");
+        object.remove("caller");
+        let canonical = crate::jcs::canonicalize(
+            &crate::jcs::parse(&value.to_string())
+                .map_err(|error| admission_internal(&error.to_string()))?,
+        )
+        .map_err(|error| admission_internal(&error.to_string()))?;
+        let compatible_admission_operations: &'static [&'static str] = match self {
+            Self::SetWriterAccess { write: true, .. } => {
+                &["run.submit", "run.send", "run.acquire_write"]
+            }
+            Self::SettleLifecycleTimeout { close: true, .. }
+            | Self::Close {
+                interrupt: false, ..
+            } => &["run.close"],
+            Self::SettleLifecycleTimeout { close: false, .. }
+            | Self::Pause {
+                interrupt: false, ..
+            } => &["run.pause"],
+            _ => &[],
+        };
+        Ok(MutationRequestIdentity::new(
+            crate::jcs::sha256_hex(&canonical),
+            self.operation_name(),
+            matches!(self, Self::Submit { request, .. } | Self::Send { request, .. } if request.write)
+                || matches!(self, Self::SetWriterAccess { write: true, .. }),
+            compatible_admission_operations,
+        ))
     }
 }
 
@@ -1770,6 +1896,21 @@ pub enum ControlResponseV1 {
     },
     Accepted {
         accepted: AcceptedTurn,
+    },
+    /// Immutable acceptance facts for ordinary typed Submit callers.
+    MutationAdmitted {
+        admission_id: Uuid,
+    },
+    AcceptedReceipt {
+        accepted: AcceptedTurn,
+        operation_id: Uuid,
+        stamp: crate::domain::ProjectionStamp,
+        state: crate::projection::RunStateProjection,
+        writer: Box<crate::writer::WriterRecord>,
+        controller: crate::domain::ControllerIdentity,
+        effective_policy: crate::domain::EffectivePolicy,
+        server_key: String,
+        server_epoch: u64,
     },
     WaitingInteraction {
         thread_id: String,
@@ -2379,7 +2520,26 @@ impl SessionCommand {
 /// The credential travels with the work rather than being checked where the
 /// work was accepted: ADR-016 wants the authoritative check on the thread that
 /// performs the effect, at the moment it performs it.
+enum SessionAdmission {
+    Begin {
+        expected: u64,
+        request: ControlRequestV1,
+    },
+    Execute {
+        admission_id: Uuid,
+        request: ControlRequestV1,
+    },
+}
+
+#[derive(Default)]
+struct MutationPreconditions {
+    expected_controller_generation: Option<u64>,
+    expected_state_revision: Option<u64>,
+    admission: Option<SessionAdmission>,
+}
+
 struct SessionMutation {
+    preconditions: MutationPreconditions,
     operation: &'static str,
     /// Absent only for work whose authority is not a Controller credential:
     /// today that is the operator's fenced controller reset.
@@ -2467,7 +2627,7 @@ impl MutationOutcome {
 /// What the Run's drain thread does next.
 enum SessionWork {
     Message(Result<Value, TurnError>),
-    Mutation(SessionMutation),
+    Mutation(Box<SessionMutation>),
     Stop,
 }
 
@@ -2629,7 +2789,7 @@ impl SessionMailbox {
                 return SessionWork::Message(Ok(carried));
             }
             if let Some(mutation) = state.mutations.pop_front() {
-                return SessionWork::Mutation(mutation);
+                return SessionWork::Mutation(Box::new(mutation));
             }
             if let Some(message) = state.delivered.take() {
                 self.changed.notify_all();
@@ -3190,6 +3350,10 @@ impl OwnedDedicatedServer {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnControlRequest {
+    #[serde(default)]
+    pub write: bool,
+    #[serde(default)]
+    pub normalized_request_sha256: Option<String>,
     pub message: String,
     pub idempotency_key: String,
     #[serde(default)]
@@ -3220,6 +3384,7 @@ impl WorkerSession {
         run_generation: u64,
         uid: u32,
         state_root: &Path,
+        workspace_id: &str,
     ) -> Result<Self, WorkerProtocolError> {
         session.validate()?;
         let foreign_diagnostics = Box::new(ProfileForeignDiagnostics {
@@ -3262,7 +3427,7 @@ impl WorkerSession {
             let mailbox = Arc::clone(&mailbox);
             move || read_app_server(&wire, &mailbox)
         });
-        let (replayed, interaction_decisions) = {
+        let (replayed, interaction_decisions, turn_receipts) = {
             let ledger = ledger
                 .lock()
                 .map_err(|_| WorkerProtocolError::LedgerReplay)?;
@@ -3272,7 +3437,30 @@ impl WorkerSession {
             let interaction_decisions = ledger
                 .approval_decisions()
                 .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-            (replayed, interaction_decisions)
+            let turn_receipts = ledger
+                .durable_records()
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.kind(),
+                        crate::audit::AuditKind::IdempotencyReserved
+                            | crate::audit::AuditKind::ThreadBound
+                            | crate::audit::AuditKind::TurnStarted
+                            | crate::audit::AuditKind::TurnTerminal
+                            | crate::audit::AuditKind::WriterAcquired
+                            | crate::audit::AuditKind::WriterReleased
+                    )
+                })
+                .map(|record| {
+                    let raw = crate::jcs::canonicalize(record.payload())
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                    let payload = serde_json::from_slice(&raw)
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                    Ok((record.kind(), payload))
+                })
+                .collect::<Result<Vec<_>, WorkerProtocolError>>()?;
+            (replayed, interaction_decisions, turn_receipts)
         };
         let coordinator = TurnCoordinator::initialize(
             SessionServer::new(
@@ -3280,7 +3468,13 @@ impl WorkerSession {
                 Arc::clone(&mailbox),
                 Duration::from_secs(session.transport_timeout_seconds),
             ),
-            SharedLedgerJournal::new(ledger, run_generation),
+            SharedLedgerJournal::new(ledger, run_generation).with_event_authority(
+                state_root,
+                workspace_id,
+                uid,
+                &session.server_key,
+                session.server_epoch,
+            ),
             artifacts,
             CoordinatorConfig {
                 attach,
@@ -3318,6 +3512,9 @@ impl WorkerSession {
             replayed.active_turn_id,
             replayed.latest_turn_id,
         );
+        coordinator
+            .restore_turn_receipts(turn_receipts)
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
         coordinator
             .restore_interaction_resolutions(interaction_decisions)
             .map_err(|_| WorkerProtocolError::LedgerReplay)?;
@@ -3476,6 +3673,7 @@ impl WorkerSession {
         if self
             .mailbox
             .submit(SessionMutation {
+                preconditions: MutationPreconditions::default(),
                 operation: "run.shutdown",
                 credential: None,
                 external_engagement: None,
@@ -3741,6 +3939,7 @@ impl WorkerSession {
     ) -> ControlResponseV1 {
         let outcome = Arc::new(MutationOutcome::default());
         if let Some(refusal) = self.mailbox.submit(SessionMutation {
+            preconditions: MutationPreconditions::default(),
             operation,
             credential: Some(credential),
             external_engagement: Some(engagement_id),
@@ -3767,8 +3966,26 @@ impl WorkerSession {
         command: SessionCommand,
         budget: Duration,
     ) -> ControlResponseV1 {
+        self.dispatch_checked_with(
+            operation,
+            credential,
+            command,
+            budget,
+            MutationPreconditions::default(),
+        )
+    }
+
+    fn dispatch_checked_with(
+        &self,
+        operation: &'static str,
+        credential: Option<CredentialCarrier>,
+        command: SessionCommand,
+        budget: Duration,
+        preconditions: MutationPreconditions,
+    ) -> ControlResponseV1 {
         let outcome = Arc::new(MutationOutcome::default());
         if let Some(refusal) = self.mailbox.submit(SessionMutation {
+            preconditions,
             operation,
             credential,
             external_engagement: None,
@@ -4119,7 +4336,7 @@ fn drain_run(
             SessionWork::Mutation(mutation) => {
                 let outcome = Arc::clone(&mutation.outcome);
                 outcome.start();
-                let response = perform(&mut coordinator, identity, progress, authority, mutation);
+                let response = perform(&mut coordinator, identity, progress, authority, *mutation);
                 publish_state(&coordinator, progress, control);
                 outcome.settle(response);
             }
@@ -4223,12 +4440,252 @@ fn perform(
     if let Err(error) = authorization {
         return refusal_from(error);
     }
+    let controller =
+        match load_reconciled_controller_binding(&authority.state_root, authority.run_id) {
+            Ok(binding) => binding.identity,
+            Err(error) => return refusal_from(error),
+        };
+    if mutation
+        .preconditions
+        .expected_controller_generation
+        .is_some_and(|generation| generation != controller.generation)
+    {
+        return controller_refused(identity.run_id, mutation.operation);
+    }
+    coordinator.set_acceptance_controller(controller);
     let operation = mutation.operation;
     let context = progress.facts.context(
         coordinator.thread_id().map(str::to_owned),
         coordinator.active_turn_id().map(str::to_owned),
     );
-    match mutation.command {
+    let typed_receipt = mutation.preconditions.expected_state_revision.is_some()
+        || mutation.preconditions.admission.is_some();
+    {
+        // Response-loss retries retain their accepted identity even though
+        // acceptance itself advanced the durable head. Never skip authority.
+        match &mutation.command {
+            SessionCommand::Accept { request, delivery } => {
+                if mutation.preconditions.admission.is_some()
+                    && !request.images.is_empty()
+                    && request.normalized_request_sha256.is_none()
+                {
+                    return failed(
+                        &TurnError::InvalidInput(
+                            "prepared image input requires a captured normalized identity",
+                        ),
+                        &context,
+                    );
+                }
+                let turn = match turn_request(coordinator, request, *delivery) {
+                    Ok(turn) => turn,
+                    Err(error) => return failed(&error, &context),
+                };
+                match coordinator.replay_delivery(&turn) {
+                    Ok(Some(DeliveryResult::Accepted(accepted))) => {
+                        let receipt = accepted_receipt(coordinator, accepted.clone());
+                        if matches!(receipt, ControlResponseV1::Failed { .. }) {
+                            return receipt;
+                        }
+                        if let Err(error) = settle_replayed_admission(
+                            coordinator,
+                            identity,
+                            authority,
+                            mutation.preconditions.admission.as_ref(),
+                        ) {
+                            return refusal_from(error);
+                        }
+                        return if typed_receipt && *delivery == DeliveryMode::Submit {
+                            receipt
+                        } else {
+                            ControlResponseV1::Accepted { accepted }
+                        };
+                    }
+                    Ok(Some(DeliveryResult::Terminal(terminal))) => {
+                        return terminal_response(terminal);
+                    }
+                    Ok(Some(DeliveryResult::WaitingInteraction { accepted, requests })) => {
+                        return ControlResponseV1::WaitingInteraction {
+                            thread_id: accepted.thread_id,
+                            turn_id: accepted.turn_id,
+                            effort: accepted.effort,
+                            requests,
+                        };
+                    }
+                    Err(error) => return failed(&error, &context),
+                    Ok(None) => {}
+                }
+            }
+            SessionCommand::Respond {
+                request_id,
+                idempotency_key,
+                response,
+            } => {
+                if let Some(replayed) =
+                    coordinator.replay_response(*request_id, idempotency_key, response)
+                {
+                    return match replayed {
+                        Ok(resolution_receipt_id) => {
+                            if let Err(error) = settle_replayed_admission(
+                                coordinator,
+                                identity,
+                                authority,
+                                mutation.preconditions.admission.as_ref(),
+                            ) {
+                                return refusal_from(error);
+                            }
+                            ControlResponseV1::Responded {
+                                request_id: *request_id,
+                                resolution_receipt_id,
+                            }
+                        }
+                        Err(error) => failed(&error, &context),
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut admission_completion = None;
+    let admission_result =
+        with_admission_ledger(coordinator, identity, authority, |ledger, writer| {
+            let binding =
+                load_reconciled_controller_binding(&authority.state_root, authority.run_id)?;
+            if let SessionCommand::SetWriterAccess {
+                writer_generation,
+                transaction_id,
+                ..
+            } = &mutation.command
+                && !matches!(
+                    mutation.preconditions.admission,
+                    Some(SessionAdmission::Begin { .. })
+                )
+            {
+                let holder_matches = writer.holder.as_ref().is_some_and(|holder| {
+                    holder.run_id == identity.run_id
+                        && holder.run_generation == identity.run_generation
+                        && holder.worker_generation == identity.run_generation
+                        && holder.controller_id == binding.identity.controller_id
+                        && holder.controller_generation == binding.identity.generation
+                });
+                if writer.transaction_id != Some(*transaction_id)
+                    || writer.writer_generation != *writer_generation
+                    || !holder_matches
+                {
+                    let state =
+                        coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
+                    return Ok(Some(run_state_conflict(
+                        &progress.facts,
+                        &state,
+                        operation,
+                        "Writer transition no longer matches its prepared authority".to_owned(),
+                    )));
+                }
+            }
+            match mutation.preconditions.admission.as_ref() {
+                Some(SessionAdmission::Begin { expected, request }) => {
+                    let admitted =
+                        admit_mutation(ledger, binding.identity.controller_id, *expected, request)?;
+                    Ok(Some(ControlResponseV1::MutationAdmitted {
+                        admission_id: admitted.admission_id,
+                    }))
+                }
+                Some(SessionAdmission::Execute {
+                    admission_id,
+                    request,
+                }) => {
+                    validate_mutation_admission(
+                        ledger,
+                        *admission_id,
+                        binding.identity.controller_id,
+                        request,
+                    )?;
+                    let active = active_mutation_admission(ledger)?
+                        .ok_or_else(|| admission_internal("validated admission disappeared"))?;
+                    let preparation =
+                        matches!(
+                            mutation.command,
+                            SessionCommand::SetWriterAccess { write: true, .. }
+                        ) && matches!(active.operation.as_str(), "run.submit" | "run.send");
+                    if !preparation {
+                        admission_completion = Some(*admission_id);
+                    }
+                    Ok(None)
+                }
+                None => {
+                    if active_mutation_admission(ledger)?.is_some()
+                        && !matches!(mutation.command, SessionCommand::Reconcile)
+                    {
+                        let state =
+                            coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
+                        return Ok(Some(run_state_conflict(
+                            &progress.facts,
+                            &state,
+                            operation,
+                            "a durable mutation admission owns this Run".to_owned(),
+                        )));
+                    }
+                    Ok(None)
+                }
+            }
+        });
+    match admission_result {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(error) => return refusal_from(error),
+    }
+    if let Some(expected) = mutation.preconditions.expected_state_revision {
+        let observed = match coordinator.journal().ledger().lock() {
+            Ok(ledger) => match ledger.head() {
+                Ok(head) => head.sequence,
+                Err(_) => return internal_invariant("durable Run head is unavailable"),
+            },
+            Err(_) => return internal_invariant("shared ledger lock is poisoned"),
+        };
+        if expected != observed {
+            let state = coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
+            return run_state_conflict(
+                &progress.facts,
+                &state,
+                operation,
+                format!("{operation} expected Run revision {expected}, observed {observed}"),
+            );
+        }
+    }
+    let response = perform_command(
+        coordinator,
+        identity,
+        progress,
+        operation,
+        context,
+        mutation.command,
+        typed_receipt,
+    );
+    let incomplete_lifecycle = matches!(response, ControlResponseV1::Interrupted { .. })
+        && matches!(operation, "run.pause" | "run.close");
+    let uncertain = matches!(&response, ControlResponseV1::Failed { code, .. } if matches!(code.as_str(), "OUTCOME_UNKNOWN" | "INTERNAL_ERROR"));
+    if let Some(admission_id) = admission_completion
+        && !incomplete_lifecycle
+        && !uncertain
+        && let Err(error) =
+            with_admission_ledger(coordinator, identity, authority, |ledger, _writer| {
+                complete_mutation_admission(ledger, admission_id)
+            })
+    {
+        return refusal_from(error);
+    }
+    response
+}
+
+fn perform_command(
+    coordinator: &mut SessionCoordinator,
+    identity: &WorkerIdentity,
+    progress: &SessionProgress,
+    operation: &'static str,
+    context: TurnFailureContext,
+    command: SessionCommand,
+    typed_receipt: bool,
+) -> ControlResponseV1 {
+    match command {
         SessionCommand::Accept { request, delivery } => {
             // A closed Run refusing a new Turn is a lifecycle fact about the
             // Run, not a complaint about the caller's arguments: the identical
@@ -4254,7 +4711,13 @@ fn perform(
                     progress.settle(terminal.clone());
                     terminal_response(terminal)
                 }
-                Ok(DeliveryResult::Accepted(accepted)) => ControlResponseV1::Accepted { accepted },
+                Ok(DeliveryResult::Accepted(accepted)) => {
+                    if typed_receipt && delivery == DeliveryMode::Submit {
+                        accepted_receipt(coordinator, accepted)
+                    } else {
+                        ControlResponseV1::Accepted { accepted }
+                    }
+                }
                 Ok(DeliveryResult::WaitingInteraction { accepted, requests }) => {
                     ControlResponseV1::WaitingInteraction {
                         thread_id: accepted.thread_id,
@@ -4312,6 +4775,22 @@ fn perform(
             },
             Err(error) => failed(&error, &context),
         },
+        SessionCommand::Reconcile
+            if typed_receipt
+                && matches!(
+                    coordinator.state(),
+                    CoordinatorState::Threadless
+                        | CoordinatorState::Idle
+                        | CoordinatorState::Paused
+                ) =>
+        {
+            ControlResponseV1::Status {
+                identity: identity.clone(),
+                lifecycle: coordinator_control_state(coordinator, false).lifecycle,
+                active_turn: None,
+                last_terminal: progress.last_terminal(),
+            }
+        }
         SessionCommand::Reconcile => match coordinator.reconcile_history() {
             Ok(_) => ControlResponseV1::Status {
                 identity: identity.clone(),
@@ -4431,6 +4910,255 @@ fn interrupt_active(
     }
 }
 
+fn admission_internal(message: &str) -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        message,
+        false,
+        serde_json::json!({"invariant": message}),
+    )
+}
+
+fn with_admission_ledger<T>(
+    coordinator: &SessionCoordinator,
+    identity: &WorkerIdentity,
+    authority: &RunControllerAuthority,
+    action: impl FnOnce(&mut Ledger, &crate::writer::WriterRecord) -> Result<T, MachineError>,
+) -> Result<T, MachineError> {
+    crate::writer::WriterStore::new(&authority.state_root, &identity.workspace_id, identity.uid)
+        .observe_locked(|writer| {
+            let mut ledger = coordinator
+                .journal()
+                .ledger()
+                .lock()
+                .map_err(|_| admission_internal("shared ledger lock is poisoned"))?;
+            action(&mut ledger, writer)
+        })?
+}
+
+fn settle_replayed_admission(
+    coordinator: &SessionCoordinator,
+    identity: &WorkerIdentity,
+    authority: &RunControllerAuthority,
+    admission: Option<&SessionAdmission>,
+) -> Result<(), MachineError> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    with_admission_ledger(coordinator, identity, authority, |ledger, _writer| {
+        let Some(active) = active_mutation_admission(ledger)? else {
+            return Ok(());
+        };
+        let request = match admission {
+            SessionAdmission::Begin { request, .. } => request,
+            SessionAdmission::Execute {
+                admission_id,
+                request,
+            } => {
+                if *admission_id != active.admission_id {
+                    return Ok(());
+                }
+                request
+            }
+        };
+        let binding = load_reconciled_controller_binding(&authority.state_root, authority.run_id)?;
+        if validate_mutation_admission(
+            ledger,
+            active.admission_id,
+            binding.identity.controller_id,
+            request,
+        )
+        .is_ok()
+        {
+            complete_mutation_admission(ledger, active.admission_id)?;
+        }
+        Ok(())
+    })
+}
+
+/// Reconstruct only the durable prefix ending at this acceptance. A later
+/// terminal, Writer movement, or worker restart cannot rewrite this receipt.
+fn accepted_receipt(coordinator: &SessionCoordinator, accepted: AcceptedTurn) -> ControlResponseV1 {
+    let ledger = match coordinator.journal().ledger().lock() {
+        Ok(ledger) => ledger,
+        Err(_) => return internal_invariant("shared ledger lock is poisoned"),
+    };
+    let records = match ledger.durable_records() {
+        Ok(records) => records,
+        Err(_) => return internal_invariant("durable acceptance records are unavailable"),
+    };
+    accepted_receipt_from_records(records, accepted, coordinator.acceptance_controller())
+}
+
+fn accepted_receipt_from_records(
+    records: &[crate::audit::AuditRecord],
+    accepted: AcceptedTurn,
+    current_controller: Option<&crate::domain::ControllerIdentity>,
+) -> ControlResponseV1 {
+    let Some(first) = records.first() else {
+        return internal_invariant("durable acceptance is missing");
+    };
+    let mut state = crate::projection::RunStateProjection::starting(first.run_id());
+    for record in records {
+        state = match crate::projection::project_next(first.run_id(), &state, record, |record| {
+            Ok(record.sequence().to_string())
+        }) {
+            Ok(state) => state,
+            Err(_) => return internal_invariant("durable acceptance projection is invalid"),
+        };
+        if record.kind() != crate::audit::AuditKind::TurnStarted {
+            continue;
+        }
+        let payload = match crate::jcs::canonicalize(record.payload())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        {
+            Some(payload) => payload,
+            None => return internal_invariant("durable acceptance payload is invalid"),
+        };
+        if payload.get("turn_id").and_then(Value::as_str) != Some(accepted.turn_id.as_str())
+            || payload.get("thread_id").and_then(Value::as_str) != Some(accepted.thread_id.as_str())
+        {
+            continue;
+        }
+        let Some(operation_id) = payload
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+        else {
+            return internal_invariant("durable acceptance operation is missing");
+        };
+        let Some(projection) = record.client_projection() else {
+            return ControlResponseV1::Failed {
+                code: "RUN_STATE_CONFLICT".to_owned(),
+                message: "legacy acceptance has no immutable projection boundary".to_owned(),
+                retryable: false,
+                details: serde_json::json!({"run_id": first.run_id(), "state": state.lifecycle.as_str(), "operation": "run.submit"}),
+            };
+        };
+        let Some(writer) = payload
+            .get("acceptance_writer")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<crate::writer::WriterRecord>(value).ok())
+        else {
+            return internal_invariant("durable acceptance Writer observation is missing");
+        };
+        let Some(controller) = payload
+            .get("acceptance_controller")
+            .cloned()
+            .and_then(|value| {
+                serde_json::from_value::<crate::domain::ControllerIdentity>(value).ok()
+            })
+        else {
+            return internal_invariant("durable acceptance Controller observation is missing");
+        };
+        let Some(current_controller) = current_controller else {
+            return internal_invariant("current acceptance Controller identity is missing");
+        };
+        if &controller != current_controller {
+            let digest = |identity: &crate::domain::ControllerIdentity| {
+                crate::jcs::sha256_hex(
+                    &serde_json::to_vec(identity).expect("serializable identity"),
+                )
+            };
+            return failed(
+                &TurnError::IdempotencyConflict {
+                    recorded: digest(&controller),
+                    observed: digest(current_controller),
+                },
+                &RunFacts {
+                    run_id: first.run_id(),
+                    profile: String::new(),
+                }
+                .context(
+                    Some(accepted.thread_id.clone()),
+                    Some(accepted.turn_id.clone()),
+                ),
+            );
+        }
+        let Some(effective_policy) = payload
+            .get("effective_policy")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+        else {
+            return internal_invariant("durable acceptance policy observation is missing");
+        };
+        if writer.authority_revision != projection.stamp.writer_state_revision {
+            return internal_invariant("durable acceptance Writer revision differs from its stamp");
+        }
+        return ControlResponseV1::AcceptedReceipt {
+            accepted,
+            operation_id,
+            stamp: projection.stamp.clone(),
+            state,
+            writer: Box::new(writer),
+            controller,
+            effective_policy,
+            server_key: projection.record.server_key.clone(),
+            server_epoch: projection.record.server_epoch,
+        };
+    }
+    internal_invariant("durable acceptance is missing")
+}
+
+/// Read-only accepted Submit replay. The semantic owner must authenticate the
+/// Controller before calling; no worker or Writer preparation is performed.
+pub(crate) fn durable_submit_replay(
+    state_root: &Path,
+    run_id: Uuid,
+    request: &TurnControlRequest,
+) -> Result<Option<ControlResponseV1>, MachineError> {
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = runs.load_manifest(run_id)?;
+    let state = runs.load_state_projection(run_id)?;
+    let observer = crate::ledger::ObservedLedger::open(
+        &crate::run::run_root(state_root, run_id),
+        run_id,
+        state.ledger_head.sequence,
+    )
+    .map_err(|_| admission_internal("durable Submit replay prefix is unavailable"))?;
+    let facts = RunFacts {
+        run_id,
+        profile: manifest.profile.profile_name.clone(),
+    };
+    let context = facts.context(state.thread_id.clone(), state.active_turn_id.clone());
+    let turn = turn_request_with_model(&manifest.model, request, DeliveryMode::Submit)
+        .map_err(|error| error.into_machine_error(&context))?;
+    verify_turn_request_identity(request, &turn, &manifest.default_reasoning_effort)
+        .map_err(|error| error.into_machine_error(&context))?;
+    let receipts = observer
+        .records()
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.kind(),
+                crate::audit::AuditKind::IdempotencyReserved
+                    | crate::audit::AuditKind::ThreadBound
+                    | crate::audit::AuditKind::TurnStarted
+                    | crate::audit::AuditKind::TurnTerminal
+            )
+        })
+        .map(|record| {
+            let raw = crate::jcs::canonicalize(record.payload())
+                .map_err(|_| admission_internal("durable Turn receipt payload is invalid"))?;
+            let payload = serde_json::from_slice(&raw)
+                .map_err(|_| admission_internal("durable Turn receipt payload is invalid"))?;
+            Ok((record.kind(), payload))
+        })
+        .collect::<Result<Vec<_>, MachineError>>()?;
+    let Some(accepted) =
+        crate::turn::replay_durable_submit(receipts, &turn, &manifest.default_reasoning_effort)
+            .map_err(|error| error.into_machine_error(&context))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(accepted_receipt_from_records(
+        observer.records(),
+        accepted,
+        Some(&load_reconciled_controller_binding(state_root, run_id)?.identity),
+    )))
+}
+
 /// The registered refusal for a verb the Run's current lifecycle forbids.
 ///
 /// The message says which lifecycle rule was broken, because "conflict" alone
@@ -4470,15 +5198,65 @@ fn turn_request(
     request: &TurnControlRequest,
     delivery: DeliveryMode,
 ) -> Result<TurnRequest, TurnError> {
+    let turn = turn_request_with_model(coordinator.fixed_model(), request, delivery)?;
+    verify_turn_request_identity(request, &turn, coordinator.default_effort())?;
+    Ok(turn)
+}
+
+fn verify_turn_request_identity(
+    request: &TurnControlRequest,
+    turn: &TurnRequest,
+    default_effort: &str,
+) -> Result<(), TurnError> {
+    if let Some(recorded) = &request.normalized_request_sha256 {
+        let observed = crate::turn::normalized_request_digest(turn, default_effort)?;
+        if recorded != &observed {
+            return Err(TurnError::IdempotencyConflict {
+                recorded: recorded.clone(),
+                observed,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Capture complete Turn identity before acquiring the Writer observation lock.
+/// Hashing image bytes is bounded by the existing ImageSnapshot contract.
+pub(crate) fn capture_turn_request_identity(
+    state_root: &Path,
+    run_id: Uuid,
+    request: &mut TurnControlRequest,
+) -> Result<(), MachineError> {
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = runs.load_manifest(run_id)?;
+    let facts = RunFacts {
+        run_id,
+        profile: manifest.profile.profile_name.clone(),
+    };
+    let turn = turn_request_with_model(&manifest.model, request, DeliveryMode::Submit)
+        .map_err(|error| error.into_machine_error(&facts.bare()))?;
+    request.normalized_request_sha256 = Some(
+        crate::turn::normalized_request_digest(&turn, &manifest.default_reasoning_effort)
+            .map_err(|error| error.into_machine_error(&facts.bare()))?,
+    );
+    Ok(())
+}
+
+fn turn_request_with_model(
+    model: &str,
+    request: &TurnControlRequest,
+    delivery: DeliveryMode,
+) -> Result<TurnRequest, TurnError> {
     let mut images = Vec::with_capacity(request.images.len());
     for image in &request.images {
         images.push(ImageSnapshot::capture(&image.path, image.detail)?);
     }
     Ok(TurnRequest {
+        write: request.write,
         idempotency_key: request.idempotency_key.clone(),
         message: request.message.clone(),
         images,
-        model: coordinator.fixed_model().to_owned(),
+        model: model.to_owned(),
         effort: request.effort.clone(),
         delivery,
     })
@@ -5178,6 +5956,7 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
                     bootstrap.run_generation,
                     uid,
                     &bootstrap.state_root,
+                    &bootstrap.workspace_id,
                 )?;
                 record.dedicated_server_identity = owned.dedicated_server_identity();
                 write_runtime_record(&bootstrap.runtime_record_path, &record)?;
@@ -5923,7 +6702,7 @@ fn serve_control_caller(
                 && caller.mutation_protocol_version == hello.mutation_protocol_version
                 && caller.binary_sha256 == hello.binary_sha256
         });
-    if request.expected() != &hello.identity || !peer_matches {
+    if !request.valid_checked_mutation() || request.expected() != &hello.identity || !peer_matches {
         return write_frame(
             &mut stream,
             &ControlResponseV1::Rejected {
@@ -6165,6 +6944,12 @@ fn serve_run_operation(
     authority: &RunControllerAuthority,
     credential: Option<CredentialCarrier>,
 ) -> Result<ControlResponseV1, WorkerProtocolError> {
+    if !request.valid_checked_mutation() {
+        return Err(WorkerProtocolError::ProtocolMismatch {
+            expected_protocol: WORKER_PROTOCOL_VERSION,
+            actual_protocol: WORKER_PROTOCOL_VERSION,
+        });
+    }
     let operation = request.operation_name();
     let mutating = request.requires_controller();
     let external_engagement = request.external_engagement();
@@ -6214,6 +6999,138 @@ fn serve_run_operation(
         return Ok(controller_refused(facts.run_id, operation));
     };
     Ok(match request {
+        wrapped @ (ControlRequestV1::ControllerChecked { .. }
+        | ControlRequestV1::CheckedMutation { .. }
+        | ControlRequestV1::BeginPreparedMutation { .. }
+        | ControlRequestV1::AdmittedMutation { .. }) => {
+            let (expected_controller_generation, wrapped) = match wrapped {
+                ControlRequestV1::ControllerChecked {
+                    expected_controller_generation,
+                    request,
+                } => (Some(expected_controller_generation), *request),
+                other => (None, other),
+            };
+            let (expected_state_revision, admission, request) = match wrapped {
+                ControlRequestV1::CheckedMutation {
+                    expected_state_revision,
+                    request,
+                } => (Some(expected_state_revision), None, request),
+                ControlRequestV1::BeginPreparedMutation {
+                    expected_state_revision,
+                    request,
+                } => (
+                    None,
+                    Some(SessionAdmission::Begin {
+                        expected: expected_state_revision,
+                        request: (*request).clone(),
+                    }),
+                    request,
+                ),
+                ControlRequestV1::AdmittedMutation {
+                    admission_id,
+                    request,
+                } => (
+                    None,
+                    Some(SessionAdmission::Execute {
+                        admission_id,
+                        request: (*request).clone(),
+                    }),
+                    request,
+                ),
+                ordinary => (None, None, Box::new(ordinary)),
+            };
+            let (command, wait_budget) = match *request {
+                ControlRequestV1::Send {
+                    request,
+                    timeout_ms,
+                    ..
+                } => (
+                    SessionCommand::Accept {
+                        request,
+                        delivery: DeliveryMode::Send,
+                    },
+                    Some(caller_budget(timeout_ms)),
+                ),
+                ControlRequestV1::Submit { request, .. } => (
+                    SessionCommand::Accept {
+                        request,
+                        delivery: DeliveryMode::Submit,
+                    },
+                    None,
+                ),
+                ControlRequestV1::Respond {
+                    request_id,
+                    idempotency_key,
+                    response,
+                    ..
+                } => (
+                    SessionCommand::Respond {
+                        request_id,
+                        idempotency_key,
+                        response,
+                    },
+                    None,
+                ),
+                ControlRequestV1::Interrupt { .. } => (SessionCommand::Interrupt, None),
+                ControlRequestV1::Pause { interrupt, .. } => {
+                    (SessionCommand::Pause { interrupt }, None)
+                }
+                ControlRequestV1::Resume { .. } => (SessionCommand::Resume, None),
+                ControlRequestV1::Reconcile { .. } => (SessionCommand::Reconcile, None),
+                ControlRequestV1::SettleLifecycleTimeout { close, .. } => {
+                    (SessionCommand::SettleLifecycleTimeout { close }, None)
+                }
+                ControlRequestV1::Close { interrupt, .. } => {
+                    (SessionCommand::Close { interrupt }, None)
+                }
+                ControlRequestV1::SetWriterAccess {
+                    write,
+                    writer_generation,
+                    transaction_id,
+                    ..
+                } => (
+                    SessionCommand::SetWriterAccess {
+                        write,
+                        writer_generation,
+                        transaction_id,
+                    },
+                    None,
+                ),
+                _ => {
+                    return Err(WorkerProtocolError::ProtocolMismatch {
+                        expected_protocol: WORKER_PROTOCOL_VERSION,
+                        actual_protocol: WORKER_PROTOCOL_VERSION,
+                    });
+                }
+            };
+            let deadline = wait_budget
+                .flatten()
+                .and_then(|budget| Instant::now().checked_add(budget));
+            let response = session.dispatch_checked_with(
+                operation,
+                Some(credential),
+                command,
+                CONTROL_CALL_TIMEOUT,
+                MutationPreconditions {
+                    expected_state_revision,
+                    admission,
+                    expected_controller_generation,
+                },
+            );
+            match (response, wait_budget) {
+                (ControlResponseV1::Accepted { accepted }, Some(budget)) => {
+                    session.progress.await_turn(
+                        &accepted.turn_id,
+                        budget.map(|budget| {
+                            deadline.map_or(budget, |deadline| {
+                                deadline.saturating_duration_since(Instant::now())
+                            })
+                        }),
+                    )
+                }
+                (response, _) => response,
+            }
+        }
         ControlRequestV1::Send {
             request,
             timeout_ms,
@@ -6328,6 +7245,86 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn prepared_image_identity_detects_content_drift_before_effects() {
+        let path =
+            std::path::PathBuf::from("/tmp").join(format!("dg-image-admission-{}", Uuid::now_v7()));
+        std::fs::write(&path, b"original image bytes").unwrap();
+        let mut request = TurnControlRequest {
+            write: false,
+            normalized_request_sha256: None,
+            message: "inspect image".to_owned(),
+            idempotency_key: "image-once".to_owned(),
+            effort: None,
+            images: vec![TurnControlImage {
+                detail: ImageDetail::Auto,
+                path: path.clone(),
+            }],
+        };
+        let captured = turn_request_with_model("gpt-5", &request, DeliveryMode::Submit).unwrap();
+        request.normalized_request_sha256 =
+            Some(crate::turn::normalized_request_digest(&captured, "medium").unwrap());
+        verify_turn_request_identity(&request, &captured, "medium").unwrap();
+        std::fs::write(&path, b"replacement image bytes").unwrap();
+        let changed = turn_request_with_model("gpt-5", &request, DeliveryMode::Submit).unwrap();
+        assert!(matches!(
+            verify_turn_request_identity(&request, &changed, "medium"),
+            Err(TurnError::IdempotencyConflict { .. })
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn checked_mutations_preserve_identity_and_reject_scope_expansion() {
+        let checked = |request| ControlRequestV1::CheckedMutation {
+            expected_state_revision: 0,
+            request: Box::new(request),
+        };
+        let expected = identity();
+        let mut request = checked(ControlRequestV1::Interrupt {
+            expected: expected.clone(),
+            caller: None,
+        });
+        assert!(request.valid_checked_mutation());
+        assert!(request.requires_controller());
+        assert!(!request.frozen_control_v1());
+        assert_eq!(request.expected(), &expected);
+        assert_eq!(request.operation_name(), "run.interrupt");
+        let build = ExecutingBuild {
+            version: "0.1.2".to_owned(),
+            mutation_protocol_version: 1,
+            binary_sha256: "11".repeat(32),
+        };
+        request.declare_caller(build.clone());
+        assert_eq!(request.caller(), Some(&build));
+        let encoded = serde_json::to_vec(&request).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ControlRequestV1>(&encoded).unwrap(),
+            request
+        );
+        assert!(!checked(request).valid_checked_mutation());
+        assert!(
+            !checked(ControlRequestV1::Status {
+                expected: identity()
+            })
+            .valid_checked_mutation()
+        );
+        assert!(
+            !checked(ControlRequestV1::Shutdown {
+                expected: identity()
+            })
+            .valid_checked_mutation()
+        );
+        assert!(
+            !checked(ControlRequestV1::ExternalInterrupt {
+                expected: identity(),
+                caller: None,
+                engagement_id: Uuid::now_v7()
+            })
+            .valid_checked_mutation()
+        );
+    }
+
     #[test]
     fn held_startup_range_rejects_path_mismatch_and_releases_after_spawn_failure() {
         let state_root =
@@ -7024,6 +8021,8 @@ mod tests {
     fn only_state_changing_requests_demand_a_controller_credential() {
         let expected = identity();
         let turn = TurnControlRequest {
+            write: false,
+            normalized_request_sha256: None,
             message: "probe".to_owned(),
             idempotency_key: "probe".to_owned(),
             effort: None,
@@ -7544,6 +8543,10 @@ mod tests {
             executable_path_sha256: "55".repeat(32),
         };
         let zero_guard = lock.claim(&byte_zero, Duration::from_millis(100)).unwrap();
+        assert_eq!(
+            lock.require_unowned_worker_range(),
+            Err(WorkerProtocolError::StartupBusy)
+        );
         let byte_one = StartupOwnerRecord {
             schema_version: 1,
             slot: 1,
@@ -7559,6 +8562,7 @@ mod tests {
         fs::write(root.join("release"), b"release").unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(lock.read_owner(1).unwrap(), None);
+        lock.require_unowned_worker_range().unwrap();
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }

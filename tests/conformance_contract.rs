@@ -4,7 +4,7 @@ use dolgorae::conformance::{
     IdempotencyOperation, IdempotencyReservations, ReservationResult, delete_run_confirmed,
     lifecycle_transition_allowed, verify_ledger_records,
 };
-use dolgorae::domain::RunLifecycle;
+use dolgorae::domain::{MAX_JCS_SAFE_INTEGER, RunLifecycle};
 use dolgorae::fault::{FaultInjector, NoFaults};
 use dolgorae::jcs::{LosslessJson, canonicalize, parse};
 use dolgorae::ledger::{AppendDurability, Ledger, LedgerClock, LedgerError, REPLAY_BUDGET_MILLIS};
@@ -173,6 +173,63 @@ fn transition(
             r#"{{"previous":"{previous}","current":"{current}","terminal_seal":false}}"#
         )),
     )
+}
+
+#[test]
+fn terminal_history_reconciliation_clears_active_turn_before_resuming_after_restart() {
+    for status in ["completed", "interrupted", "failed"] {
+        let tree = RunTree::new();
+        let mut ledger = tree.ledger();
+        bootstrap(&mut ledger, tree.run_id);
+        ledger.mark_threadless_ready(TIMESTAMP).unwrap();
+        for (kind, body) in [
+            (
+                AuditKind::ThreadBound,
+                r#"{"thread_id":"thread-1"}"#.to_owned(),
+            ),
+            (AuditKind::TurnStarted, r#"{"turn_id":"turn-1"}"#.to_owned()),
+            (
+                AuditKind::Reconciliation,
+                format!(
+                    r#"{{"thread_id":"thread-1","turn_id":"turn-1","observed_status":"{status}"}}"#
+                ),
+            ),
+        ] {
+            let record = next_record(&ledger, kind, payload(&body));
+            ledger.append(record, AppendDurability::Required).unwrap();
+        }
+        assert_eq!(
+            ledger
+                .inner()
+                .projection()
+                .unwrap()
+                .active_turn_id
+                .as_deref(),
+            Some("turn-1")
+        );
+        let paused = transition(&ledger, "reconciliation_required", "paused");
+        ledger.append(paused, AppendDurability::Required).unwrap();
+        let state = ledger.inner().projection().unwrap();
+        assert_eq!(state.lifecycle, RunLifecycle::Paused);
+        assert_eq!(state.active_turn_id, None);
+        assert_eq!(state.latest_turn_id.as_deref(), Some("turn-1"));
+        ledger.verify().unwrap();
+        drop(ledger);
+
+        let mut reopened = tree.ledger();
+        assert_eq!(reopened.inner().projection().unwrap().active_turn_id, None);
+        let resumed = transition(&reopened, "paused", "idle");
+        reopened
+            .append(resumed, AppendDurability::Required)
+            .unwrap();
+        let next = next_record(
+            &reopened,
+            AuditKind::TurnStarted,
+            payload(r#"{"turn_id":"turn-2"}"#),
+        );
+        reopened.append(next, AppendDurability::Required).unwrap();
+        assert_eq!(reopened.verify().unwrap().lifecycle, RunLifecycle::Running);
+    }
 }
 
 #[test]
@@ -640,8 +697,46 @@ fn checked_conformance_fixture_matches_the_rust_closed_sets() {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect();
-    let rust_kinds: Vec<&str> = AUDIT_KINDS.iter().map(|kind| kind.as_str()).collect();
-    assert_eq!(fixture_kinds, rust_kinds);
+    let extensions = fixture["record_kind_extensions"]["2"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(extensions, ["mutation_admitted", "mutation_completed"]);
+    let all_kinds = fixture_kinds
+        .iter()
+        .copied()
+        .chain(extensions.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    let rust_kinds = AUDIT_KINDS
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(all_kinds, rust_kinds);
+    for (version, expected) in [(1, fixture_kinds.into_iter().collect()), (2, all_kinds)] {
+        let schema: serde_json::Value = serde_json::from_slice(
+            &fs::read(format!(
+                "docs/protocol/dolgorae-audit-record-v{version}.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            schema["$id"],
+            fixture["record_schemas"][version.to_string()]
+        );
+        let actual = schema["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actual, expected,
+            "audit record v{version} kind registry drift"
+        );
+    }
 
     let fixture_edges: Vec<(&str, &str)> = fixture["lifecycle_transitions"]
         .as_array()
@@ -677,6 +772,78 @@ fn checked_conformance_fixture_matches_the_rust_closed_sets() {
             assert_eq!(
                 lifecycle_transition_allowed(previous, current),
                 fixture_edges.contains(&(previous.as_str(), current.as_str()))
+            );
+        }
+    }
+}
+
+#[test]
+fn protocol_safe_integer_schemas_match_the_runtime_bound() {
+    fn collect_unsigned_maxima(value: &serde_json::Value, maxima: &mut Vec<u64>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(maximum) = object.get("maximum").and_then(serde_json::Value::as_u64) {
+                    maxima.push(maximum);
+                }
+                for value in object.values() {
+                    collect_unsigned_maxima(value, maxima);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect_unsigned_maxima(value, maxima);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for path in [
+        "docs/protocol/dolgorae-audit-record-v2.schema.json",
+        "docs/protocol/dolgorae-event-record-v1.schema.json",
+        "docs/protocol/dolgorae-interaction-v1.schema.json",
+        "docs/protocol/dolgorae-stamped-client-event-v1.schema.json",
+    ] {
+        let schema: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let mut maxima = Vec::new();
+        collect_unsigned_maxima(&schema, &mut maxima);
+        assert!(
+            maxima.contains(&MAX_JCS_SAFE_INTEGER),
+            "{path} does not publish the runtime JCS safe-integer bound"
+        );
+        assert!(
+            maxima
+                .iter()
+                .all(|maximum| *maximum <= MAX_JCS_SAFE_INTEGER),
+            "{path} publishes an unsigned integer beyond the runtime JCS bound"
+        );
+    }
+
+    for (path, pointers) in [
+        (
+            "docs/protocol/dolgorae-audit-record-v2.schema.json",
+            &[
+                "/properties/sequence/maximum",
+                "/properties/run_generation/maximum",
+                "/$defs/unrepresentable_payload/properties/observed_byte_length/maximum",
+            ][..],
+        ),
+        (
+            "docs/protocol/dolgorae-interaction-v1.schema.json",
+            &[
+                "/properties/run_generation/maximum",
+                "/properties/server_epoch/maximum",
+                "/$defs/file_payload/properties/snapshot_revision/maximum",
+                "/$defs/user_input_resolution/properties/answer_count/maximum",
+            ][..],
+        ),
+    ] {
+        let schema: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        for pointer in pointers {
+            assert_eq!(
+                schema.pointer(pointer).and_then(serde_json::Value::as_u64),
+                Some(MAX_JCS_SAFE_INTEGER),
+                "{path} {pointer} does not match the runtime JCS safe-integer bound"
             );
         }
     }
@@ -769,5 +936,58 @@ fn write_continuation_uses_the_only_alternate_bootstrap_kind() {
     assert_eq!(
         ledger.bootstrap(&request).unwrap().bootstrap_kind,
         Some(BootstrapRecordKind::WriteContinuationCreated)
+    );
+}
+
+#[test]
+fn stamped_bootstrap_replay_and_terminal_seal_keep_conformance_hashes_exact() {
+    use dolgorae::event::EventAppendContext;
+    let tree = RunTree::new();
+    let mut ledger = tree.ledger();
+    let context = EventAppendContext {
+        workspace_id: "a".repeat(64),
+        server_key: "b".repeat(64),
+        server_epoch: 9,
+        writer_state_revision: 12,
+    };
+    ledger
+        .with_event_context(context.clone(), |ledger| {
+            bootstrap(ledger, tree.run_id);
+            Ok::<(), String>(())
+        })
+        .unwrap();
+    let original = fs::read(tree.root.join("audit.jsonl")).unwrap();
+    let mut changed = context.clone();
+    changed.writer_state_revision = 13;
+    ledger
+        .with_event_context(changed, |ledger| {
+            bootstrap(ledger, tree.run_id);
+            Ok::<(), String>(())
+        })
+        .unwrap();
+    assert_eq!(fs::read(tree.root.join("audit.jsonl")).unwrap(), original);
+    ledger
+        .with_event_context(context, |ledger| {
+            ledger.mark_threadless_ready(TIMESTAMP)?;
+            ledger.pause_idle(TIMESTAMP)?;
+            ledger.seal_closed(TIMESTAMP, "no_owned_runtime")
+        })
+        .unwrap();
+    let report = ledger.verify().unwrap();
+    assert_eq!(report.head_hash, ledger.inner().head().unwrap().hash);
+    assert_eq!(report.record_count, 7);
+    drop(ledger);
+    let ledger = tree.ledger();
+    assert!(ledger.verify().unwrap().terminal_sealed);
+    let events = ledger
+        .inner()
+        .events_after(0, dolgorae::event::EventProjection::Minimal, true)
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.record.cursor.as_str())
+            .collect::<Vec<_>>(),
+        ["3", "4", "5", "7"]
     );
 }

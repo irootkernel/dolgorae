@@ -92,6 +92,7 @@ test-int:
 
 test-e2e:
 	$(CARGO) build --locked --bin dolgorae
+	$(CARGO) test --locked --no-run --message-format=json --test gateway_native --test gateway_semantic_native --test gateway_configuration_native --test gateway_interaction_native > target/gateway-native-artifacts.json
 	@command -v git >/dev/null 2>&1 || { \
 		echo "Missing E2E dependency: Git 2.39 or later is required." >&2; \
 		exit 1; \
@@ -106,6 +107,15 @@ test-e2e:
 		export XDG_CONFIG_HOME="$$test_root/config"; \
 		export XDG_CACHE_HOME="$$test_root/cache"; \
 		$(PYTHON_BIN) tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_socket_ownership.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_gateway_restart.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_slow_consumer_isolation.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_event_revision_action_barrier.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_start_run_allocation_replay.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_run_configuration_restart.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_threadless_first_write_runtime.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_protected_interaction_lost_response.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_interaction_size_and_secret_barrier.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_review_target_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \

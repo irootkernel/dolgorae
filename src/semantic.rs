@@ -18,9 +18,16 @@ use crate::event::EventProjection;
 use crate::global_runtime::{
     GlobalMembershipStore, GlobalProfileBinding, MembershipDisposition, ResolvedGlobalProfile,
 };
+use crate::interaction::MAX_RESPONSE_BYTES;
 use crate::jcs::{canonicalize, parse, sha256_hex};
-use crate::ledger::{LedgerClock, SystemLedgerClock};
+use crate::ledger::{
+    LedgerClock, SystemLedgerClock, audit_integrity_error as audit_integrity, event_cursor_invalid,
+    parse_event_cursor,
+};
 use crate::machine::MachineError;
+use crate::mutation_admission::{
+    MutationAdmission, admit_mutation_digest, complete_mutation_admission,
+};
 use crate::paths::DolgoraeHome;
 use crate::profile::ServerState;
 use crate::run::{
@@ -44,10 +51,12 @@ use crate::workspace::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -109,66 +118,131 @@ pub fn interaction_get(args: &[OsString]) -> Result<Value, MachineError> {
     let state_root = workspace_state_root(&view)?;
     let run_id = positional_run_id(args)?;
     let request_id = positional_interaction_id(args)?;
+    if optional(args, "--controller-file").is_none() && optional(args, "--controller-fd").is_none()
+    {
+        return Err(MachineError::interaction_full_payload_requires_controller(
+            run_id,
+            "run.interaction.get",
+        ));
+    }
     let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
     let binding = load_reconciled_controller_binding(&state_root, run_id)?;
     authorize_controller(run_id, "run.interaction.get", &binding, &carrier)?;
-    durable_interactions(&state_root, run_id)?
-        .into_iter()
+    checked_interaction(
+        &durable_interactions(&state_root, run_id)?,
+        run_id,
+        request_id,
+    )
+}
+
+fn checked_interaction(
+    interactions: &[(Value, u64)],
+    run_id: Uuid,
+    request_id: Uuid,
+) -> Result<Value, MachineError> {
+    let interaction = interactions
+        .iter()
         .find_map(|(interaction, _)| {
             (interaction.get("request_id") == Some(&json!(request_id))).then_some(interaction)
         })
         .ok_or_else(|| {
-            MachineError::new(
-                "INTERACTION_NOT_FOUND",
+            MachineError::interaction_not_found(
+                run_id,
+                request_id,
                 "interaction is not present in this run",
-                false,
-                json!({"run_id": run_id, "request_id": request_id}),
             )
-        })
+        })?
+        .clone();
+    let parsed = crate::interaction::Interaction::parse(interaction.clone(), run_id)?;
+    crate::interaction_payload::validate(&parsed)?;
+    Ok(interaction)
+}
+
+pub fn run_list(args: &[OsString]) -> Result<Value, MachineError> {
+    let path = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let workspace = WorkspaceService::system()?.discover(path.as_deref())?;
+    let state_root = workspace_state_root(&workspace)?;
+    let observations = CoreSemanticService.list_runs(&workspace, None)?;
+    let mut items = Vec::new();
+    for (snapshot, _) in observations {
+        let verdict = projection_identity_verdict(&state_root, snapshot.manifest.run_id);
+        let terminal = durable_last_terminal(&state_root, snapshot.manifest.run_id, &snapshot)?;
+        items.push(snapshot.run_value(verdict, terminal));
+    }
+    Ok(json!({"items":items}))
+}
+
+pub fn run_artifact(args: &[OsString], read: bool) -> Result<Value, MachineError> {
+    let path = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let workspace = WorkspaceService::system()?.discover(path.as_deref())?;
+    let root = workspace_state_root(&workspace)?;
+    let run_id = positional_run_id(args)?;
+    let positions = positionals(args);
+    let id = positions
+        .get(1)
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            MachineError::invalid_argument("artifact-id", "artifact UUID is required")
+        })?;
+    let carrier = if optional(args, "--controller-file").is_some()
+        || optional(args, "--controller-fd").is_some()
+    {
+        Some(carrier_from_options(
+            args,
+            "--controller-file",
+            "--controller-fd",
+        )?)
+    } else {
+        None
+    };
+    let snapshot = RunSources::load(&root, run_id, observed_control_socket_epoch(&root, run_id))?;
+    if !read {
+        return Ok(
+            crate::artifact::metadata(&root, &snapshot, id, carrier.as_ref())?
+                .artifact
+                .machine_value(run_id),
+        );
+    }
+    let offset = parse_u64_flag(args, "--offset")?;
+    let length = u32::try_from(parse_u64_flag(args, "--length")?).map_err(|_| {
+        MachineError::invalid_argument("--length", "chunk length exceeds the wire bound")
+    })?;
+    let chunk = crate::artifact::chunk(&root, &snapshot, id, (offset, length), carrier.as_ref())?;
+    use base64::Engine as _;
+    Ok(
+        json!({"metadata":chunk.metadata.machine_value(run_id),"offset":chunk.offset,"byte_length":chunk.length,"content_base64":base64::engine::general_purpose::STANDARD.encode(&chunk.data),"eof":chunk.eof}),
+    )
 }
 
 fn interaction_pending_at(state_root: &Path, run_id: Uuid) -> Result<Value, MachineError> {
-    let store = RunStore::new(SystemWorkspacePlatform, state_root);
-    let manifest = store.load_manifest(run_id)?;
-    let resolved = durable_resolved_interaction_ids(state_root, run_id)?;
+    let snapshot = RunSources::load(
+        state_root,
+        run_id,
+        observed_control_socket_epoch(state_root, run_id),
+    )?;
     let mut items = Vec::new();
-    for (interaction, upstream_id) in durable_interactions(state_root, run_id)? {
-        if resolved.contains(&upstream_id)
-            || interaction.get("status").and_then(Value::as_str) != Some("pending")
-        {
+    for (interaction, _) in
+        durable_interactions_at(state_root, run_id, snapshot.stamp.run_state_revision)?
+    {
+        let interaction = crate::interaction::Interaction::parse(interaction, run_id)?;
+        if !interaction.pending_at(&snapshot) {
             continue;
         }
-        let kind = interaction
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| internal("durable interaction kind is missing"))?;
-        let protected_input = kind == "user_input"
-            && interaction
-                .pointer("/payload/questions")
-                .and_then(Value::as_array)
-                .is_some_and(|questions| {
-                    questions.iter().any(|question| {
-                        question.get("is_secret").and_then(Value::as_bool) == Some(true)
-                    })
-                });
-        let title = match (kind, protected_input) {
-            ("command_execution_approval", _) => "Command approval requested",
-            ("file_change_approval", _) => "File change approval requested",
-            ("user_input", true) => "Protected input requested",
-            ("user_input", false) => "User input requested",
-            _ => return Err(internal("durable interaction kind is unsupported")),
-        };
+        let summary =
+            interaction.observer_summary(crate::interaction::InteractionStatus::Pending)?;
         items.push(json!({
             "schema_version": 1,
-            "request_id": interaction.get("request_id").cloned().unwrap_or(Value::Null),
+            "request_id": interaction.request_id,
             "run_id": run_id,
-            "kind": kind,
+            "kind": interaction.kind,
             "status": "pending",
-            "title": title,
-            "controller_kind": manifest.controller.identity.kind.as_str(),
-            "user_escalation_required": true,
-            "protected_input": protected_input,
-            "created_at": interaction.get("opened_at").cloned().unwrap_or(Value::Null),
+            "title": summary.safe_title,
+            "controller_kind": snapshot.manifest.controller.identity.kind.as_str(),
+            "user_escalation_required": summary.requires_user_escalation,
+            "protected_input": summary.contains_protected_input,
+            "created_at": interaction.opened_at,
             "expires_at": Value::Null,
             "resolved_at": Value::Null,
         }));
@@ -180,10 +254,15 @@ fn durable_interactions(
     state_root: &Path,
     run_id: Uuid,
 ) -> Result<Vec<(Value, u64)>, MachineError> {
-    let head = durable_head(state_root, run_id)?;
-    let root = state_root.join("runs").join(run_id.to_string());
-    let ledger = crate::ledger::ObservedLedger::open(&root, run_id, head)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
+    durable_interactions_at(state_root, run_id, durable_head(state_root, run_id)?)
+}
+
+pub(crate) fn durable_interactions_at(
+    state_root: &Path,
+    run_id: Uuid,
+    head: u64,
+) -> Result<Vec<(Value, u64)>, MachineError> {
+    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
     let decisions = ledger
         .payloads_of_kind(AuditKind::ApprovalDecided)
         .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
@@ -235,28 +314,6 @@ fn durable_interactions(
         .collect()
 }
 
-fn durable_resolved_interaction_ids(
-    state_root: &Path,
-    run_id: Uuid,
-) -> Result<std::collections::BTreeSet<u64>, MachineError> {
-    let head = durable_head(state_root, run_id)?;
-    let root = state_root.join("runs").join(run_id.to_string());
-    let ledger = crate::ledger::ObservedLedger::open(&root, run_id, head)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
-    ledger
-        .payloads_of_kind(AuditKind::InteractionResolved)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
-        .into_iter()
-        .map(|payload| {
-            payload
-                .get("request_id")
-                .and_then(Value::as_str)
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| internal("durable resolved interaction id is invalid"))
-        })
-        .collect()
-}
-
 fn resolve_public_interaction_id(
     state_root: &Path,
     run_id: Uuid,
@@ -274,11 +331,10 @@ fn resolve_public_interaction_id(
             (interaction.get("request_id") == Some(&json!(public_id))).then_some(upstream)
         })
         .ok_or_else(|| {
-            MachineError::new(
-                "INTERACTION_NOT_FOUND",
+            MachineError::interaction_not_found(
+                run_id,
+                public_id,
                 "interaction is not present in this run",
-                false,
-                json!({"run_id": run_id, "request_id": public_id}),
             )
         })
 }
@@ -649,8 +705,242 @@ pub(crate) fn control_reviewer_run(
     }
 }
 
+pub(crate) fn interrupt_reviewer_run(
+    state_root: &Path,
+    run_id: Uuid,
+    controller: &Path,
+) -> Result<ControlResponseV1, MachineError> {
+    let carrier = CredentialCarrier::open_path(controller)?;
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, "run.interrupt", &binding, &carrier)?;
+    let carrier = carrier.with_expected_generation(binding.identity.generation);
+    // Internal cancellation has no caller-supplied revision. Worker identity,
+    // controller authority, admission, and lifecycle checks still apply.
+    crate::worker::call_run_worker(
+        state_root,
+        run_id,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| {
+            checked_controller_request(
+                ControlRequestV1::Interrupt {
+                    expected,
+                    caller: None,
+                },
+                Some(&carrier),
+            )
+        },
+    )
+    .map_err(|error| error.machine_error(run_id, state_root))
+}
+
 #[derive(Default)]
 pub struct CoreSemanticService;
+
+/// Transport-neutral allocation inputs; credential descriptors are already open.
+pub struct StartRunInput {
+    pub workspace: Option<PathBuf>,
+    pub expected_workspace_id: Option<String>,
+    pub profile: String,
+    pub control_mode: ControlMode,
+    pub execution_lane: ExecutionLane,
+    pub assurance: Assurance,
+    pub purpose: Purpose,
+    pub parent_ref: Option<ParentReference>,
+    pub idempotency_key: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub instructions: String,
+    pub carrier: CredentialCarrier,
+    pub required_capabilities: Vec<String>,
+}
+
+pub struct RunStartReceipt {
+    pub snapshot: crate::snapshot::RunSnapshot,
+    pub exact_replay: bool,
+}
+
+pub enum RunMutationOperation {
+    Submit {
+        request: TurnControlRequest,
+        write: bool,
+    },
+    Interrupt,
+    Pause {
+        interrupt: bool,
+    },
+    Resume,
+    Close {
+        interrupt: bool,
+    },
+    Recover,
+    Reconcile,
+    AcquireWriter,
+    ReleaseWriter,
+    Respond {
+        request_id: String,
+        idempotency_key: String,
+        response: Value,
+    },
+}
+
+pub struct RunMutationInput {
+    pub workspace: PathBuf,
+    pub expected_workspace_id: String,
+    pub run_id: Uuid,
+    pub expected_state_revision: Option<u64>,
+    pub carrier: CredentialCarrier,
+    pub operation: RunMutationOperation,
+}
+
+pub struct RunMutationReceipt {
+    pub snapshot: crate::snapshot::RunSnapshot,
+    pub response: Option<ControlResponseV1>,
+}
+
+impl CoreSemanticService {
+    pub fn list_runs(
+        &self,
+        workspace: &WorkspaceView,
+        controller_id: Option<Uuid>,
+    ) -> Result<
+        Vec<(
+            crate::snapshot::RunSnapshot,
+            crate::snapshot::RunObservation,
+        )>,
+        MachineError,
+    > {
+        let root = workspace_state_root(workspace)?;
+        let directory = root.join("runs");
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(internal(error.to_string())),
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| internal(error.to_string()))?;
+            if let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| Uuid::parse_str(name).ok())
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        let mut result = Vec::new();
+        for id in ids {
+            let observation = crate::snapshot::RunSnapshot::observe(
+                &root,
+                id,
+                observed_control_socket_epoch(&root, id),
+            )?;
+            if observation.0.manifest.workspace_id != workspace.workspace_id {
+                return Err(internal("Run list crossed a workspace boundary"));
+            }
+            if controller_id
+                .is_none_or(|controller| observation.0.controller.controller_id == controller)
+            {
+                result.push(observation);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn mutate_run(&self, input: RunMutationInput) -> Result<RunMutationReceipt, MachineError> {
+        let view = WorkspaceService::system()?.discover(Some(&input.workspace))?;
+        require_workspace_identity(&view, Some(&input.expected_workspace_id))?;
+        let state_root = workspace_state_root(&view)?;
+        let run_id = input.run_id;
+        let (verb, prepared, write) = match input.operation {
+            RunMutationOperation::Submit { mut request, write } => {
+                request.write = write;
+                (
+                    RunVerb::Submit,
+                    Prepared::Turn {
+                        request,
+                        timeout_ms: None,
+                    },
+                    write,
+                )
+            }
+            RunMutationOperation::Interrupt => (RunVerb::Interrupt, Prepared::Plain, false),
+            RunMutationOperation::Pause { interrupt } => {
+                (RunVerb::Pause, Prepared::Pause { interrupt }, false)
+            }
+            RunMutationOperation::Resume => (RunVerb::Resume, Prepared::Plain, false),
+            RunMutationOperation::Close { interrupt } => {
+                (RunVerb::Close, Prepared::Close { interrupt }, false)
+            }
+            RunMutationOperation::AcquireWriter => (RunVerb::AcquireWrite, Prepared::Plain, false),
+            RunMutationOperation::ReleaseWriter => (RunVerb::ReleaseWrite, Prepared::Plain, false),
+            RunMutationOperation::Respond {
+                request_id,
+                idempotency_key,
+                response,
+            } => (
+                RunVerb::Respond,
+                Prepared::Respond {
+                    request_id: resolve_public_interaction_id(&state_root, run_id, &request_id)?,
+                    idempotency_key,
+                    response,
+                },
+                false,
+            ),
+            operation @ (RunMutationOperation::Recover | RunMutationOperation::Reconcile) => {
+                let name = if matches!(operation, RunMutationOperation::Recover) {
+                    "run.recover"
+                } else {
+                    "run.reconcile"
+                };
+                history_reconciliation_typed(
+                    &view,
+                    &state_root,
+                    run_id,
+                    &input.carrier,
+                    name,
+                    input.expected_state_revision,
+                )?;
+                return Ok(RunMutationReceipt {
+                    snapshot: RunSources::load(
+                        &state_root,
+                        run_id,
+                        observed_control_socket_epoch(&state_root, run_id),
+                    )?,
+                    response: None,
+                });
+            }
+        };
+        let (_, response) = run_control_typed(
+            &view,
+            &state_root,
+            run_id,
+            verb,
+            Some(&input.carrier),
+            prepared,
+            write,
+            input.expected_state_revision,
+        )?;
+        let control_socket_epoch = observed_control_socket_epoch(&state_root, run_id);
+        let snapshot = match &response {
+            Some(response) => RunSources::for_control_response(
+                &state_root,
+                run_id,
+                control_socket_epoch,
+                response,
+            )?,
+            None => RunSources::load(&state_root, run_id, control_socket_epoch)?,
+        };
+        Ok(RunMutationReceipt { snapshot, response })
+    }
+
+    pub fn start_run(&self, input: StartRunInput) -> Result<RunStartReceipt, MachineError> {
+        let view =
+            WorkspaceService::system()?.discover_for_run_start(input.workspace.as_deref())?;
+        start_run_typed(input, view, None, None, None, None)
+    }
+}
 
 impl SemanticService for CoreSemanticService {
     fn execute(&self, command: &SemanticCommand) -> Result<SemanticResult, MachineError> {
@@ -1170,15 +1460,28 @@ fn run_history_reconciliation(
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
     let state_root = workspace_state_root(&view)?;
     let run_id = positional_run_id(args)?;
-    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    history_reconciliation_typed(&view, &state_root, run_id, &carrier, operation, None)
+}
+
+fn history_reconciliation_typed(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation: &'static str,
+    expected_state_revision: Option<u64>,
+) -> Result<Value, MachineError> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
     let runtime_path =
-        crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
-            .map_err(|error| error.machine_error(run_id, &state_root))?;
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
     let control_recovery =
         crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid())
             .is_ok_and(|record| record.control_recovery_required);
     if !control_recovery
+        && durable_pending_admission(state_root, run_id)?.is_none()
         && !matches!(
             projection.lifecycle,
             RunLifecycle::Running
@@ -1193,9 +1496,24 @@ fn run_history_reconciliation(
             operation,
         ));
     }
-    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
-    let binding = load_reconciled_controller_binding(&state_root, run_id)?;
-    authorize_controller(run_id, operation, &binding, &carrier)?;
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, operation, &binding, carrier)?;
+    let admission_id = match begin_prepared_mutation(
+        view,
+        state_root,
+        run_id,
+        RunVerb::Reconcile,
+        carrier,
+        &Prepared::Plain,
+        expected_state_revision,
+    )? {
+        PreparedAdmission::Admitted(id) => id,
+        PreparedAdmission::Replayed(_) => {
+            return Err(internal(
+                "reconciliation cannot replay an acceptance receipt",
+            ));
+        }
+    };
     if control_recovery {
         crate::worker::recover_control_runtime(&runtime_path, DarwinSystem.current_uid())
             .map_err(|error| error.machine_error(run_id, &runtime_path))?;
@@ -1206,28 +1524,44 @@ fn run_history_reconciliation(
                 | RunLifecycle::Closed
                 | RunLifecycle::StartFailed
         ) {
-            let sources = RunSources::load(&state_root, run_id, 0)?;
-            let terminal = durable_last_terminal(&state_root, run_id, &sources)?;
+            let writer = crate::writer::WriterStore::new(
+                state_root,
+                &view.workspace_id,
+                DarwinSystem.current_uid(),
+            );
+            writer.observe_locked(|_| {
+                let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
+                    .map_err(|error| internal(error.to_string()))?;
+                complete_mutation_admission(&mut ledger, admission_id)
+            })??;
+            let sources = RunSources::load(state_root, run_id, 0)?;
+            let terminal = durable_last_terminal(state_root, run_id, &sources)?;
             return Ok(sources.run_value("Absent", terminal));
         }
     }
-    let control_socket_epoch = ensure_run_worker(&view, &state_root, run_id)?;
+    let control_socket_epoch = ensure_run_worker(view, state_root, run_id)?;
     let runtime_record =
-        crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
-            .map_err(|error| error.machine_error(run_id, &state_root))?;
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
     let response = crate::worker::call_run_worker(
-        &state_root,
+        state_root,
         run_id,
         DarwinSystem.current_uid(),
         Some(carrier.raw_fd()),
-        |expected| ControlRequestV1::Reconcile {
-            expected,
-            caller: None,
+        |expected| {
+            let request = ControlRequestV1::Reconcile {
+                expected,
+                caller: None,
+            };
+            ControlRequestV1::AdmittedMutation {
+                admission_id,
+                request: Box::new(request),
+            }
         },
     )
     .map_err(|error| error.machine_error(run_id, &runtime_record))?;
     match control_response_value(
-        &state_root,
+        state_root,
         run_id,
         control_socket_epoch,
         RunVerb::Reconcile,
@@ -1385,19 +1719,79 @@ fn run_start_with_context(
 ) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(args, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    // Preserve the Machine CLI's workspace-first refusal before parsing the
+    // operation-specific configuration and credential carrier.
     let view = WorkspaceService::system()?.discover_for_run_start(workspace.as_deref())?;
-    let profile_name = required(args, "--profile")?;
     let control_mode = parse_control_mode(&required(args, "--control-mode")?)?;
-    let execution_lane = parse_execution_lane(&required(args, "--execution-lane")?)?;
-    let assurance = parse_assurance(&required(args, "--required-assurance")?)?;
-    let purpose = Purpose {
-        kind: parse_purpose(&required(args, "--purpose")?)?,
-        external_label: bounded_option(args, "--purpose-label", 256)?,
+    let input = StartRunInput {
+        workspace,
+        expected_workspace_id: None,
+        profile: required(args, "--profile")?,
+        control_mode,
+        execution_lane: parse_execution_lane(&required(args, "--execution-lane")?)?,
+        assurance: parse_assurance(&required(args, "--required-assurance")?)?,
+        purpose: Purpose {
+            kind: parse_purpose(&required(args, "--purpose")?)?,
+            external_label: bounded_option(args, "--purpose-label", 256)?,
+        },
+        parent_ref: parent_reference(args, control_mode)?,
+        idempotency_key: bounded_key(args, "--idempotency-key", 256)?,
+        model: optional(args, "--model"),
+        effort: optional(args, "--effort"),
+        instructions: instructions_from(args)?,
+        carrier: carrier_from_options(args, "--controller-file", "--controller-fd")?,
+        required_capabilities: required_capabilities(args),
     };
-    let parent_ref = parent_reference(args, control_mode)?;
-    // Checked before the reservation, not after it: a key this command would
-    // refuse must never first become durable state under a Run identity.
-    let idempotency_key = bounded_key(args, "--idempotency-key", 256)?;
+    let receipt = start_run_typed(input, view, reviewer, continuation, fork, external)?;
+    let state_root = workspace_state_root_from_snapshot(&receipt.snapshot)?;
+    let verdict = projection_identity_verdict(&state_root, receipt.snapshot.manifest.run_id);
+    let terminal = durable_last_terminal(
+        &state_root,
+        receipt.snapshot.manifest.run_id,
+        &receipt.snapshot,
+    )?;
+    Ok(receipt.snapshot.run_value(verdict, terminal))
+}
+
+fn workspace_state_root_from_snapshot(
+    snapshot: &crate::snapshot::RunSnapshot,
+) -> Result<PathBuf, MachineError> {
+    Ok(DolgoraeHome::system()?.workspace_root(&snapshot.manifest.workspace_id))
+}
+
+fn start_run_typed(
+    input: StartRunInput,
+    view: WorkspaceView,
+    reviewer: Option<&ReviewerStartContext<'_>>,
+    continuation: Option<&ContinuationStartContext<'_>>,
+    fork: Option<&ForkStartContext<'_>>,
+    external: Option<&ExternalSpecialistStartContext<'_>>,
+) -> Result<RunStartReceipt, MachineError> {
+    let StartRunInput {
+        workspace: _,
+        expected_workspace_id,
+        profile: profile_name,
+        control_mode,
+        execution_lane,
+        assurance,
+        purpose,
+        parent_ref,
+        idempotency_key,
+        model,
+        effort,
+        instructions: instructions_text,
+        carrier,
+        mut required_capabilities,
+    } = input;
+    require_workspace_identity(&view, expected_workspace_id.as_deref())?;
+    if idempotency_key.is_empty() || idempotency_key.len() > 256 {
+        return Err(MachineError::invalid_argument(
+            "idempotency_key",
+            "must contain 1 to 256 bytes",
+        ));
+    }
+    required_capabilities.sort();
+    required_capabilities.dedup();
     let home = DolgoraeHome::system()?;
     let global_profile_binding = if let Some(context) = reviewer {
         context.global_profile_binding.clone()
@@ -1413,7 +1807,7 @@ fn run_start_with_context(
         ));
     }
     let state = crate::profile::ensure_global_server(&global_profile_binding)?;
-    let model = optional(args, "--model").unwrap_or_else(|| state.default_model.clone());
+    let model = model.unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
         return Err(compatibility_rejected(
             &profile_name,
@@ -1424,7 +1818,7 @@ fn run_start_with_context(
         ));
     }
     let efforts = advertised_efforts(&state, &profile_name, &model)?;
-    let effort = optional(args, "--effort").unwrap_or_else(|| default_effort(&efforts));
+    let effort = effort.unwrap_or_else(|| default_effort(&efforts));
     if !efforts.contains(&effort) {
         return Err(compatibility_rejected(
             &profile_name,
@@ -1434,17 +1828,14 @@ fn run_start_with_context(
             "requested reasoning effort is not advertised for this model",
         ));
     }
-    let instructions_text = instructions_from(args)?;
     if instructions_text.is_empty() || instructions_text.len() > 65_536 {
         return Err(MachineError::invalid_argument(
             "--instructions",
             "a Run pins nonempty instructions of at most 65536 bytes",
         ));
     }
-    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
     let binding = binding_from_carrier(&carrier, 1)?;
 
-    let required_capabilities = required_capabilities(args);
     for capability in &required_capabilities {
         let support = match state.capabilities.get(capability) {
             Some(crate::profile::ProfileCapabilityState::Supported) => continue,
@@ -1535,11 +1926,13 @@ fn run_start_with_context(
     } else {
         ("run-start", "start_run")
     };
-    let reservation = match reservations.load_operation(
+    let _allocation = reservations.lock_allocation(reservation_directory, &idempotency_key)?;
+    let prior_reservation = reservations.load_operation(
         reservation_directory,
         reservation_operation,
         &idempotency_key,
-    )? {
+    )?;
+    let reservation = match prior_reservation {
         Some(held) => held,
         None => reservations.reserve(&StartReservation {
             schema_version: 1,
@@ -1585,13 +1978,17 @@ fn run_start_with_context(
     // — and because nothing here reached that Run's worker, the verdict is
     // derived from what durable state proves rather than asserted as `Match`.
     if store.load_manifest(run_id).is_ok() {
-        return run_object(
-            &state_root,
-            run_id,
-            observed_control_socket_epoch(&state_root, run_id),
-            projection_identity_verdict(&state_root, run_id),
-        );
+        return Ok(RunStartReceipt {
+            snapshot: RunSources::load(
+                &state_root,
+                run_id,
+                observed_control_socket_epoch(&state_root, run_id),
+            )?,
+            exact_replay: true,
+        });
     }
+
+    let _process_startup = ProcessRunStartup::acquire(&state_root, run_id)?;
     crate::profile::admit_global_run(&global_profile_binding, &state, &view.workspace_id, run_id)?;
     let mut worker_started = false;
     let admitted_result = (|| -> Result<Value, MachineError> {
@@ -1632,34 +2029,46 @@ fn run_start_with_context(
         }
         let directory = store.publish(&manifest)?;
 
-        let mut ledger = ConformantLedger::open_for_bootstrap(&directory.root, run_id)
-            .map_err(|error| internal(error.to_string()))?;
-        ledger
-            .bootstrap(&BootstrapRequest {
-                timestamp: SystemLedgerClock::default().timestamp(),
-                workspace_id: view.workspace_id.clone(),
-                intent: IdempotencyIntent {
-                    schema_version: 1,
-                    operation: if fork.is_some() {
-                        IdempotencyOperation::ForkRun
-                    } else {
-                        IdempotencyOperation::StartRun
-                    },
-                    idempotency_key,
-                    normalized_identity_sha256,
-                    run_id,
-                },
-                record_kind: BootstrapRecordKind::RunCreated,
-                initial_access: Access::Read.as_str().to_owned(),
-                default_effort: Some(effort.clone()),
-            })
-            .map_err(|error| internal(error.to_string()))?;
-        if reviewer.is_none() {
-            ledger
-                .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
+        crate::writer::WriterStore::new(
+            &state_root,
+            &manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+        .observe_locked(|writer| -> Result<(), MachineError> {
+            let mut ledger = ConformantLedger::open_for_bootstrap(&directory.root, run_id)
                 .map_err(|error| internal(error.to_string()))?;
-        }
-        drop(ledger);
+            ledger.with_event_context(
+                bootstrap_event_context(&manifest, writer),
+                |ledger| -> Result<(), MachineError> {
+                    ledger
+                        .bootstrap(&BootstrapRequest {
+                            timestamp: SystemLedgerClock::default().timestamp(),
+                            workspace_id: view.workspace_id.clone(),
+                            intent: IdempotencyIntent {
+                                schema_version: 1,
+                                operation: if fork.is_some() {
+                                    IdempotencyOperation::ForkRun
+                                } else {
+                                    IdempotencyOperation::StartRun
+                                },
+                                idempotency_key,
+                                normalized_identity_sha256,
+                                run_id,
+                            },
+                            record_kind: BootstrapRecordKind::RunCreated,
+                            initial_access: Access::Read.as_str().to_owned(),
+                            default_effort: Some(effort.clone()),
+                        })
+                        .map_err(|error| internal(error.to_string()))?;
+                    if reviewer.is_none() {
+                        ledger
+                            .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
+                            .map_err(|error| internal(error.to_string()))?;
+                    }
+                    Ok(())
+                },
+            )
+        })??;
 
         // Membership is part of publishing the Run's connection authority, not a
         // later best-effort side effect.  The profile lifecycle must be able to
@@ -1759,7 +2168,14 @@ fn run_start_with_context(
         run_object(&state_root, run_id, control_socket_epoch, "Match")
     })();
     match admitted_result {
-        Ok(value) => Ok(value),
+        Ok(_) => Ok(RunStartReceipt {
+            snapshot: RunSources::load(
+                &state_root,
+                run_id,
+                observed_control_socket_epoch(&state_root, run_id),
+            )?,
+            exact_replay: false,
+        }),
         Err(error) => {
             if !worker_started {
                 let _ = GlobalMembershipStore::new(
@@ -1783,59 +2199,16 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
     let run_id = positional_run_id(args)?;
     let state_root = workspace_state_root(&view)?;
-    // Authority is checked against the Run's own published binding before the
-    // control socket is touched, so an unauthorised caller never occupies a
-    // worker thread.  This is only an early rejection: the same already-open
-    // descriptor travels to the worker with `SCM_RIGHTS`, and the worker's
-    // revalidation under the Run mutation lock is the authoritative one.
     let carrier = if verb.mutates() {
-        let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
-        let binding = load_reconciled_controller_binding(&state_root, run_id)?;
-        authorize_controller(run_id, verb.operation_name(), &binding, &carrier)?;
-        Some(carrier)
+        Some(carrier_from_options(
+            args,
+            "--controller-file",
+            "--controller-fd",
+        )?)
     } else {
         None
     };
-    if verb == RunVerb::AcquireWrite {
-        let carrier = carrier.as_ref().expect("mutating verb has a carrier");
-        acquire_writer(&view, &state_root, run_id, carrier, false)?;
-        return run_object(
-            &state_root,
-            run_id,
-            observed_control_socket_epoch(&state_root, run_id),
-            projection_identity_verdict(&state_root, run_id),
-        )
-        .map(SemanticResult::Run);
-    }
-    if verb == RunVerb::ReleaseWrite {
-        let carrier = carrier.as_ref().expect("mutating verb has a carrier");
-        release_writer(&view, &state_root, run_id, carrier)?;
-        return run_object(
-            &state_root,
-            run_id,
-            observed_control_socket_epoch(&state_root, run_id),
-            projection_identity_verdict(&state_root, run_id),
-        )
-        .map(SemanticResult::Run);
-    }
-    if verb == RunVerb::Pending {
-        return interaction_pending_at(&state_root, run_id).map(SemanticResult::Run);
-    }
-    if verb == RunVerb::Resume {
-        let projection =
-            RunStore::new(SystemWorkspacePlatform, &state_root).load_state_projection(run_id)?;
-        if !resume_lifecycle_allowed(projection.lifecycle) {
-            return Err(run_state_conflict_error(
-                run_id,
-                projection.lifecycle,
-                "run.resume",
-            ));
-        }
-    }
     let uid = DarwinSystem.current_uid();
-    // Every option is parsed before the socket is touched, so a malformed
-    // request never reaches the worker and a worker thread is never held open
-    // waiting for a caller that will fail anyway.
     let prepared = match verb {
         RunVerb::Start
         | RunVerb::CreateWriteContinuation
@@ -1845,13 +2218,11 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             return Err(internal("run allocation is composed separately"));
         }
         RunVerb::Status | RunVerb::Interrupt | RunVerb::Resume => Prepared::Plain,
-        RunVerb::Pending => unreachable!("handled as a durable observer read"),
+        RunVerb::Pending => Prepared::Plain,
         RunVerb::Pause => Prepared::Pause {
             interrupt: switch(args, "--interrupt"),
         },
-        RunVerb::AcquireWrite | RunVerb::ReleaseWrite => {
-            unreachable!("handled before worker request")
-        }
+        RunVerb::AcquireWrite | RunVerb::ReleaseWrite => Prepared::Plain,
         // SPEC-005 grammar: `run wait <run-id> <turn-id>`.  The Turn is the
         // caller's, so it is carried to the worker instead of being inferred
         // there from whatever happens to be live.
@@ -1876,13 +2247,6 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             }
             let request = turn_request(args)?;
             let timeout_ms = caller_timeout_ms(args)?;
-            acquire_writer(
-                &view,
-                &state_root,
-                run_id,
-                carrier.as_ref().expect("mutating verb has carrier"),
-                true,
-            )?;
             Prepared::Turn {
                 request,
                 timeout_ms,
@@ -1907,82 +2271,227 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             response: response_body(args)?,
         },
     };
+    run_control_typed(
+        &view,
+        &state_root,
+        run_id,
+        verb,
+        carrier.as_ref(),
+        prepared,
+        switch(args, "--write"),
+        None,
+    )
+    .map(|(result, _)| result)
+}
+
+fn checked_controller_request(
+    request: ControlRequestV1,
+    carrier: Option<&CredentialCarrier>,
+) -> ControlRequestV1 {
+    match carrier.and_then(CredentialCarrier::expected_generation) {
+        Some(expected_controller_generation) => ControlRequestV1::ControllerChecked {
+            expected_controller_generation,
+            request: Box::new(request),
+        },
+        None => request,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_control_typed(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+    carrier: Option<&CredentialCarrier>,
+    mut prepared: Prepared,
+    write: bool,
+    expected_state_revision: Option<u64>,
+) -> Result<(SemanticResult, Option<ControlResponseV1>), MachineError> {
+    // Authority is checked against the Run's own published binding before the
+    // control socket is touched, so an unauthorised caller never occupies a
+    // worker thread.  This is only an early rejection: the same already-open
+    // descriptor travels to the worker with `SCM_RIGHTS`, and the worker's
+    // revalidation under the Run mutation lock is the authoritative one.
+    if let Some(carrier) = carrier {
+        let binding = load_reconciled_controller_binding(state_root, run_id)?;
+        authorize_controller(run_id, verb.operation_name(), &binding, carrier)?;
+    }
+    if let Prepared::Turn { request, .. } = &mut prepared {
+        crate::worker::capture_turn_request_identity(state_root, run_id, request)?;
+    }
+    if verb == RunVerb::Submit
+        && let Prepared::Turn { request, .. } = &prepared
+        && let Some(response) = crate::worker::durable_submit_replay(state_root, run_id, request)?
+    {
+        let value = control_response_value(
+            state_root,
+            run_id,
+            observed_control_socket_epoch(state_root, run_id),
+            verb,
+            response.clone(),
+        )?;
+        return Ok((value, Some(response)));
+    }
+    let expected_state_revision = if verb.mutates() && verb != RunVerb::Respond {
+        Some(expected_state_revision.unwrap_or(durable_head(state_root, run_id)?))
+    } else {
+        None
+    };
+    if verb == RunVerb::AcquireWrite {
+        let carrier = carrier.as_ref().expect("mutating verb has a carrier");
+        acquire_writer_authorized(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            false,
+            None,
+            expected_state_revision,
+            None,
+        )?;
+        return run_object(
+            state_root,
+            run_id,
+            observed_control_socket_epoch(state_root, run_id),
+            projection_identity_verdict(state_root, run_id),
+        )
+        .map(|value| (SemanticResult::Run(value), None));
+    }
+    if verb == RunVerb::ReleaseWrite {
+        let carrier = carrier.as_ref().expect("mutating verb has a carrier");
+        release_writer_authorized(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            None,
+            expected_state_revision,
+        )?;
+        return run_object(
+            state_root,
+            run_id,
+            observed_control_socket_epoch(state_root, run_id),
+            projection_identity_verdict(state_root, run_id),
+        )
+        .map(|value| (SemanticResult::Run(value), None));
+    }
+    if verb == RunVerb::Pending {
+        return interaction_pending_at(state_root, run_id)
+            .map(|value| (SemanticResult::Run(value), None));
+    }
+    if verb == RunVerb::Resume {
+        let projection =
+            RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+        if !resume_lifecycle_allowed(projection.lifecycle) {
+            return Err(run_state_conflict_error(
+                run_id,
+                projection.lifecycle,
+                "run.resume",
+            ));
+        }
+    }
+    let uid = DarwinSystem.current_uid();
+    // Every option is parsed before the socket is touched, so a malformed
+    // request never reaches the worker and a worker thread is never held open
+    // waiting for a caller that will fail anyway.
     let runtime_record =
-        crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
-            .map_err(|error| error.machine_error(run_id, &state_root))?;
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
     if matches!(verb, RunVerb::Pause | RunVerb::Close)
-        && let Some(result) =
-            threadless_lifecycle_transition(&state_root, run_id, verb, &runtime_record)?
+        && let Some(result) = offline_lifecycle_transition(
+            state_root,
+            run_id,
+            verb,
+            &runtime_record,
+            carrier,
+            expected_state_revision,
+        )?
     {
         if verb == RunVerb::Close {
             let manifest =
-                RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+                RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
             let _ = release_global_run_membership(&manifest, run_id);
         }
-        return Ok(result);
+        return Ok((result, None));
+    }
+    if write
+        && matches!(verb, RunVerb::Send | RunVerb::Submit)
+        && RunStore::new(SystemWorkspacePlatform, state_root)
+            .load_manifest(run_id)?
+            .execution_lane
+            == ExecutionLane::SharedReadonly
+    {
+        return Err(write_forbidden(state_root, run_id));
+    }
+    let admission_id = if matches!(
+        verb,
+        RunVerb::Send | RunVerb::Submit | RunVerb::Resume | RunVerb::Pause | RunVerb::Close
+    ) {
+        match begin_prepared_mutation(
+            view,
+            state_root,
+            run_id,
+            verb,
+            carrier.expect("mutation carrier"),
+            &prepared,
+            expected_state_revision,
+        )? {
+            PreparedAdmission::Admitted(id) => Some(id),
+            PreparedAdmission::Replayed(response) => {
+                let response = *response;
+                let value = control_response_value(
+                    state_root,
+                    run_id,
+                    observed_control_socket_epoch(state_root, run_id),
+                    verb,
+                    response.clone(),
+                )?;
+                return Ok((value, Some(response)));
+            }
+        }
+    } else {
+        None
+    };
+    if write && matches!(verb, RunVerb::Send | RunVerb::Submit) {
+        acquire_writer_authorized(
+            view,
+            state_root,
+            run_id,
+            carrier.expect("mutation carrier"),
+            true,
+            None,
+            None,
+            admission_id,
+        )?;
     }
     if matches!(verb, RunVerb::Send | RunVerb::Submit | RunVerb::Resume) {
-        ensure_run_worker(&view, &state_root, run_id)?;
+        ensure_run_worker(view, state_root, run_id)?;
     }
     let response = crate::worker::call_run_worker(
-        &state_root,
+        state_root,
         run_id,
         uid,
-        carrier.as_ref().map(CredentialCarrier::raw_fd),
-        |expected| match prepared {
-            Prepared::Plain if verb == RunVerb::Status => ControlRequestV1::Status { expected },
-            Prepared::Plain if verb == RunVerb::Resume => ControlRequestV1::Resume {
-                expected,
-                caller: None,
-            },
-            Prepared::Plain => ControlRequestV1::Interrupt {
-                expected,
-                caller: None,
-            },
-            Prepared::Wait {
-                turn_id,
-                timeout_ms,
-            } => ControlRequestV1::Wait {
-                expected,
-                caller: None,
-                turn_id,
-                timeout_ms,
-            },
-            Prepared::Close { interrupt } => ControlRequestV1::Close {
-                expected,
-                caller: None,
-                interrupt,
-            },
-            Prepared::Pause { interrupt } => ControlRequestV1::Pause {
-                expected,
-                caller: None,
-                interrupt,
-            },
-            Prepared::Turn {
-                request,
-                timeout_ms,
-            } if verb == RunVerb::Send => ControlRequestV1::Send {
-                expected,
-                caller: None,
-                request,
-                timeout_ms,
-            },
-            Prepared::Turn { request, .. } => ControlRequestV1::Submit {
-                expected,
-                caller: None,
-                request,
-            },
-            Prepared::Respond {
-                request_id,
-                idempotency_key,
-                response,
-            } => ControlRequestV1::Respond {
-                expected,
-                caller: None,
-                request_id,
-                idempotency_key,
-                response,
-            },
+        carrier.map(CredentialCarrier::raw_fd),
+        |expected| {
+            let request = prepared.into_request(verb, expected);
+            let request = if let Some(admission_id) = admission_id {
+                ControlRequestV1::AdmittedMutation {
+                    admission_id,
+                    request: Box::new(request),
+                }
+            } else {
+                match expected_state_revision {
+                    Some(expected_state_revision) if verb.mutates() => {
+                        ControlRequestV1::CheckedMutation {
+                            expected_state_revision,
+                            request: Box::new(request),
+                        }
+                    }
+                    _ => request,
+                }
+            };
+            checked_controller_request(request, carrier)
         },
     );
     let response = match response {
@@ -1994,10 +2503,11 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         // live Turn, and only the worker that owns the Run can do either.
         Err(error) if verb == RunVerb::Status && worker_unreachable(error) => {
             let verdict = absent_or_unverifiable(&runtime_record);
-            let sources = RunSources::load(&state_root, run_id, 1)?;
-            let last_terminal = durable_last_terminal(&state_root, run_id, &sources)?;
-            return Ok(SemanticResult::Run(
-                sources.run_value(verdict, last_terminal),
+            let sources = RunSources::load(state_root, run_id, 1)?;
+            let last_terminal = durable_last_terminal(state_root, run_id, &sources)?;
+            return Ok((
+                SemanticResult::Run(sources.run_value(verdict, last_terminal)),
+                None,
             ));
         }
         Err(error) => return Err(error.machine_error(run_id, &runtime_record)),
@@ -2005,7 +2515,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     let response = if matches!(verb, RunVerb::Pause | RunVerb::Close)
         && let ControlResponseV1::Interrupted { turn_id, .. } = &response
     {
-        let waited = crate::worker::call_run_worker(&state_root, run_id, uid, None, |expected| {
+        let waited = crate::worker::call_run_worker(state_root, run_id, uid, None, |expected| {
             ControlRequestV1::Wait {
                 expected,
                 caller: None,
@@ -2016,35 +2526,44 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         .map_err(|error| error.machine_error(run_id, &runtime_record))?;
         if matches!(waited, ControlResponseV1::Terminal { .. }) {
             crate::worker::call_run_worker(
-                &state_root,
+                state_root,
                 run_id,
                 uid,
-                carrier.as_ref().map(CredentialCarrier::raw_fd),
-                |expected| match verb {
-                    RunVerb::Pause => ControlRequestV1::Pause {
-                        expected,
-                        caller: None,
-                        interrupt: false,
-                    },
-                    RunVerb::Close => ControlRequestV1::Close {
-                        expected,
-                        caller: None,
-                        interrupt: false,
-                    },
-                    _ => unreachable!("lifecycle retry is pause or close"),
+                carrier.map(CredentialCarrier::raw_fd),
+                |expected| {
+                    let request = match verb {
+                        RunVerb::Pause => ControlRequestV1::Pause {
+                            expected,
+                            caller: None,
+                            interrupt: false,
+                        },
+                        RunVerb::Close => ControlRequestV1::Close {
+                            expected,
+                            caller: None,
+                            interrupt: false,
+                        },
+                        _ => unreachable!("lifecycle retry is pause or close"),
+                    };
+                    ControlRequestV1::AdmittedMutation {
+                        admission_id: admission_id.expect("lifecycle admission"),
+                        request: Box::new(request),
+                    }
                 },
             )
             .map_err(|error| error.machine_error(run_id, &runtime_record))?
         } else {
             crate::worker::call_run_worker(
-                &state_root,
+                state_root,
                 run_id,
                 uid,
-                carrier.as_ref().map(CredentialCarrier::raw_fd),
-                |expected| ControlRequestV1::SettleLifecycleTimeout {
-                    expected,
-                    caller: None,
-                    close: verb == RunVerb::Close,
+                carrier.map(CredentialCarrier::raw_fd),
+                |expected| ControlRequestV1::AdmittedMutation {
+                    admission_id: admission_id.expect("lifecycle admission"),
+                    request: Box::new(ControlRequestV1::SettleLifecycleTimeout {
+                        expected,
+                        caller: None,
+                        close: verb == RunVerb::Close,
+                    }),
                 },
             )
             .map_err(|error| error.machine_error(run_id, &runtime_record))?
@@ -2061,12 +2580,18 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     let mut control_socket_epoch = crate::worker::read_runtime_record(&runtime_record, uid)
         .map_or(1, |record| record.control_socket_epoch);
     if lifecycle_stopped {
-        stop_lifecycle_generation(&state_root, run_id, &runtime_record)?;
+        stop_lifecycle_generation(state_root, run_id, &runtime_record)?;
         control_socket_epoch = 0;
     }
-    let value = control_response_value(&state_root, run_id, control_socket_epoch, verb, response)?;
+    let value = control_response_value(
+        state_root,
+        run_id,
+        control_socket_epoch,
+        verb,
+        response.clone(),
+    )?;
     if closed {
-        let manifest = RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+        let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
         // The Run is already durably closed. A concurrently vanished profile
         // lifetime cannot turn that completed mutation into a retryable close
         // failure (which would invite replay of an effect that already
@@ -2074,7 +2599,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         // an absent/replaced one has no server left for the member to gate.
         let _ = release_global_run_membership(&manifest, run_id);
     }
-    Ok(value)
+    Ok((value, Some(response)))
 }
 
 fn stop_lifecycle_generation(
@@ -2246,66 +2771,81 @@ pub fn quiesce_profile_member(
                 }
             }
         }
-        let mut ledger = ConformantLedger::open(&run_root, member.run_id)
-            .map_err(|error| internal(error.to_string()))?;
-        let operation_id_text = operation_id.to_string();
-        let observations = ledger
-            .inner()
-            .payloads_of_kind(AuditKind::ProfileObserved)
-            .map_err(|error| internal(error.to_string()))?;
-        if let Some(outcome) =
-            recorded_profile_observation_outcome(&observations, &operation_id_text)?
-        {
-            return Ok(outcome);
-        }
-        let observed_turn = ledger
-            .inner()
-            .durable_records()
-            .map_err(|error| internal(error.to_string()))?
-            .iter()
-            .filter(|record| {
-                record.sequence() > before.ledger_head.sequence
-                    && record.kind() == AuditKind::TurnStarted
-            })
-            .filter_map(|record| {
-                let crate::jcs::LosslessJson::Object(entries) = record.payload() else {
-                    return None;
-                };
-                entries.iter().find_map(|(name, value)| {
-                    (name == "turn_id")
-                        .then_some(value)
-                        .and_then(|value| match value {
-                            crate::jcs::LosslessJson::String(value) => Some(value.clone()),
-                            _ => None,
-                        })
-                })
-            })
-            .next_back()
-            .or_else(|| before.active_turn_id.clone());
-        let timestamp = SystemLedgerClock::default().timestamp();
-        let after = ledger
-            .verify()
-            .map_err(|error| internal(error.to_string()))?;
-        let (outcome, mark_unknown) =
-            profile_quiesce_outcome(observed_turn.is_some(), after.lifecycle);
-        if mark_unknown {
-            ledger
-                .mark_profile_interrupt_outcome_unknown(&timestamp, operation_id)
+        crate::writer::WriterStore::new(
+            &state_root,
+            &manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+        .observe_locked(|writer| -> Result<String, MachineError> {
+            let mut ledger = ConformantLedger::open(&run_root, member.run_id)
                 .map_err(|error| internal(error.to_string()))?;
-        }
-        let payload = json!({
-            "observation": "operator_override",
-            "operation_id": operation_id,
-            "profile": profile,
-            "server_key": server_key,
-            "server_epoch": server_epoch,
-            "turn_id": observed_turn,
-            "outcome": outcome,
-        });
-        ledger
-            .append_profile_observation(&timestamp, operation_id, &payload)
-            .map_err(|error| internal(error.to_string()))?;
-        Ok(outcome.to_owned())
+            let context = crate::event::EventAppendContext {
+                workspace_id: manifest.workspace_id.clone(),
+                server_key: server_key.to_owned(),
+                server_epoch,
+                writer_state_revision: writer.authority_revision,
+            };
+            ledger.with_event_context(context, |ledger| -> Result<String, MachineError> {
+                let operation_id_text = operation_id.to_string();
+                let observations = ledger
+                    .inner()
+                    .payloads_of_kind(AuditKind::ProfileObserved)
+                    .map_err(|error| internal(error.to_string()))?;
+                if let Some(outcome) =
+                    recorded_profile_observation_outcome(&observations, &operation_id_text)?
+                {
+                    return Ok(outcome);
+                }
+                let observed_turn = ledger
+                    .inner()
+                    .durable_records()
+                    .map_err(|error| internal(error.to_string()))?
+                    .iter()
+                    .filter(|record| {
+                        record.sequence() > before.ledger_head.sequence
+                            && record.kind() == AuditKind::TurnStarted
+                    })
+                    .filter_map(|record| {
+                        let crate::jcs::LosslessJson::Object(entries) = record.payload() else {
+                            return None;
+                        };
+                        entries.iter().find_map(|(name, value)| {
+                            (name == "turn_id")
+                                .then_some(value)
+                                .and_then(|value| match value {
+                                    crate::jcs::LosslessJson::String(value) => Some(value.clone()),
+                                    _ => None,
+                                })
+                        })
+                    })
+                    .next_back()
+                    .or_else(|| before.active_turn_id.clone());
+                let timestamp = SystemLedgerClock::default().timestamp();
+                let after = ledger
+                    .verify()
+                    .map_err(|error| internal(error.to_string()))?;
+                let (outcome, mark_unknown) =
+                    profile_quiesce_outcome(observed_turn.is_some(), after.lifecycle);
+                if mark_unknown {
+                    ledger
+                        .mark_profile_interrupt_outcome_unknown(&timestamp, operation_id)
+                        .map_err(|error| internal(error.to_string()))?;
+                }
+                let payload = json!({
+                    "observation": "operator_override",
+                    "operation_id": operation_id,
+                    "profile": profile,
+                    "server_key": server_key,
+                    "server_epoch": server_epoch,
+                    "turn_id": observed_turn,
+                    "outcome": outcome,
+                });
+                ledger
+                    .append_profile_observation(&timestamp, operation_id, &payload)
+                    .map_err(|error| internal(error.to_string()))?;
+                Ok(outcome.to_owned())
+            })
+        })?
     })();
     lock.release();
     result
@@ -2373,29 +2913,49 @@ pub fn quiesce_profile_member(
     ))
 }
 
-/// Complete pause/close for a run that has never allocated a Codex thread.
+// Before a dedicated runtime exists, events retain the real Profile observation
+// accepted into this Run's capability snapshot; this is bootstrap provenance,
+// not a claim that the Run has materialized a dedicated generation.
+fn bootstrap_event_context(
+    manifest: &RunManifest,
+    writer: &crate::writer::WriterRecord,
+) -> crate::event::EventAppendContext {
+    crate::event::EventAppendContext {
+        workspace_id: manifest.workspace_id.clone(),
+        server_key: manifest.profile_capability_snapshot.server_key.clone(),
+        server_epoch: manifest.profile_capability_snapshot.server_epoch,
+        writer_state_revision: writer.authority_revision,
+    }
+}
+
+/// Complete threadless lifecycle changes or close an already stopped paused Run.
 /// The startup range excludes a concurrent first-turn worker election; after
 /// taking it we re-read both runtime and projection, so this path cannot race
 /// a worker into existence or mistake a crashed, history-bearing generation
 /// for a process-free run.
-fn threadless_lifecycle_transition(
+fn offline_lifecycle_transition(
     state_root: &Path,
     run_id: Uuid,
     verb: RunVerb,
     runtime_record: &Path,
+    carrier: Option<&CredentialCarrier>,
+    expected_state_revision: Option<u64>,
 ) -> Result<Option<SemanticResult>, MachineError> {
-    if runtime_record.exists() {
+    if !matches!(std::fs::symlink_metadata(runtime_record), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
         return Ok(None);
     }
     let lock = RunStartupLock::open(state_root, run_id)?;
     lock.acquire()?;
     let result = (|| {
-        if runtime_record.exists() {
+        if !matches!(std::fs::symlink_metadata(runtime_record), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
             return Ok(None);
         }
         let store = RunStore::new(SystemWorkspacePlatform, state_root);
         let projection = store.load_state_projection(run_id)?;
-        if projection.thread_id.is_some()
+        let stopped_paused = verb == RunVerb::Close && projection.lifecycle == RunLifecycle::Paused;
+        if (projection.thread_id.is_some() && !stopped_paused)
             || !matches!(
                 projection.lifecycle,
                 RunLifecycle::Idle | RunLifecycle::Paused
@@ -2403,40 +2963,107 @@ fn threadless_lifecycle_transition(
         {
             return Ok(None);
         }
+        lock.lock
+            .require_unowned_worker_range()
+            .map_err(|error| worker_startup_range_error(error, run_id, lock.lock.path()))?;
+        if let Some(carrier) = carrier {
+            require_mutation_revision(
+                state_root,
+                run_id,
+                carrier,
+                verb.operation_name(),
+                expected_state_revision,
+            )?;
+        }
         if verb == RunVerb::Pause && projection.lifecycle == RunLifecycle::Paused {
             return run_object(state_root, run_id, 0, "Absent")
                 .map(SemanticResult::Run)
                 .map(Some);
         }
         let run_root = state_root.join("runs").join(run_id.to_string());
-        let mut ledger = ConformantLedger::open(&run_root, run_id)
-            .map_err(|error| internal(error.to_string()))?;
-        let timestamp = SystemLedgerClock::default().timestamp();
-        match verb {
-            RunVerb::Pause => ledger.pause_idle(&timestamp),
-            RunVerb::Close => ledger.seal_closed(
-                &timestamp,
-                "threadless_run_had_no_worker_connection_or_owned_runtime",
-            ),
-            _ => unreachable!("only pause and close use threadless lifecycle"),
-        }
-        .map_err(|error| internal(error.to_string()))?;
+        let manifest = store.load_manifest(run_id)?;
+        let writer_store = crate::writer::WriterStore::new(
+            state_root,
+            &manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        writer_store.transact(|writer| -> Result<(), MachineError> {
+            if let Some(carrier) = carrier {
+                require_mutation_revision(
+                    state_root,
+                    run_id,
+                    carrier,
+                    verb.operation_name(),
+                    expected_state_revision,
+                )?;
+            }
+            if stopped_paused
+                && writer
+                    .holder
+                    .as_ref()
+                    .is_some_and(|holder| holder.run_id == run_id)
+                && writer.state != crate::writer::WriterAuthorityState::Active
+            {
+                return Err(run_state_conflict_error(
+                    run_id,
+                    projection.lifecycle,
+                    verb.operation_name(),
+                ));
+            }
+            let mut ledger = ConformantLedger::open(&run_root, run_id)
+                .map_err(|error| internal(error.to_string()))?;
+            let mut event_context = bootstrap_event_context(&manifest, writer);
+            if projection.thread_id.is_some() {
+                let observed = crate::ledger::ObservedLedger::open(
+                    &run_root,
+                    run_id,
+                    projection.ledger_head.sequence,
+                )
+                .map_err(|error| internal(error.to_string()))?;
+                let event = observed
+                    .records()
+                    .iter()
+                    .rev()
+                    .find_map(crate::audit::AuditRecord::client_projection)
+                    .ok_or_else(|| internal("stopped Run has no durable lane provenance"))?;
+                event_context.server_key = event.record.server_key.clone();
+                event_context.server_epoch = event.record.server_epoch;
+            }
+            ledger.with_event_context(event_context, |ledger| -> Result<(), MachineError> {
+                let timestamp = SystemLedgerClock::default().timestamp();
+                match verb {
+                    RunVerb::Pause => ledger.pause_idle(&timestamp),
+                    RunVerb::Close => ledger.seal_closed(
+                        &timestamp,
+                        if stopped_paused {
+                            "paused_generation_had_verified_absent_runtime"
+                        } else {
+                            "threadless_run_had_no_worker_connection_or_owned_runtime"
+                        },
+                    ),
+                    _ => unreachable!("only pause and close use threadless lifecycle"),
+                }
+                .map_err(|error| internal(error.to_string()))?;
+                Ok(())
+            })?;
+            if stopped_paused
+                && writer
+                    .holder
+                    .as_ref()
+                    .is_some_and(|holder| holder.run_id == run_id)
+            {
+                let transaction_id = Uuid::now_v7();
+                writer.prepare_release(run_id, transaction_id)?;
+                writer.commit_release(transaction_id)?;
+            }
+            Ok(())
+        })?;
         run_object(state_root, run_id, 0, "Absent")
             .map(SemanticResult::Run)
             .map(Some)
     })();
     lock.release();
     result
-}
-
-fn acquire_writer(
-    view: &WorkspaceView,
-    state_root: &Path,
-    run_id: Uuid,
-    carrier: &CredentialCarrier,
-    allow_threadless: bool,
-) -> Result<(), MachineError> {
-    acquire_writer_authorized(view, state_root, run_id, carrier, allow_threadless, None)
 }
 
 pub(crate) fn acquire_external_writer(
@@ -2446,9 +3073,19 @@ pub(crate) fn acquire_external_writer(
     engagement_id: Uuid,
     carrier: &CredentialCarrier,
 ) -> Result<(), MachineError> {
-    acquire_writer_authorized(view, state_root, run_id, carrier, true, Some(engagement_id))
+    acquire_writer_authorized(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        true,
+        Some(engagement_id),
+        None,
+        None,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn acquire_writer_authorized(
     view: &WorkspaceView,
     state_root: &Path,
@@ -2456,6 +3093,8 @@ fn acquire_writer_authorized(
     carrier: &CredentialCarrier,
     allow_threadless: bool,
     external_engagement: Option<Uuid>,
+    expected_state_revision: Option<u64>,
+    admission_id: Option<Uuid>,
 ) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
@@ -2495,8 +3134,20 @@ fn acquire_writer_authorized(
         projection.thread_id.clone(),
         projection.lifecycle,
     );
-    let (_, (replayed, next_generation)) =
-        writer.transact(|record| record.prepare_acquire(run_id, holder.clone(), transaction_id))?;
+    let (_, (replayed, next_generation)) = writer.transact(|record| {
+        if let Some(admission_id) = admission_id {
+            require_writer_admission(state_root, run_id, carrier, admission_id)?;
+        } else if external_engagement.is_none() {
+            require_mutation_revision(
+                state_root,
+                run_id,
+                carrier,
+                "run.acquire_write",
+                expected_state_revision,
+            )?;
+        }
+        record.prepare_acquire(run_id, holder.clone(), transaction_id)
+    })?;
     if replayed {
         return Ok(());
     }
@@ -2561,7 +3212,7 @@ fn acquire_writer_authorized(
         uid,
         Some(carrier.raw_fd()),
         |expected| {
-            external_engagement.map_or(
+            let request = external_engagement.map_or(
                 ControlRequestV1::SetWriterAccess {
                     expected: expected.clone(),
                     caller: None,
@@ -2577,7 +3228,14 @@ fn acquire_writer_authorized(
                     writer_generation: next_generation,
                     transaction_id,
                 },
-            )
+            );
+            match admission_id {
+                Some(admission_id) => ControlRequestV1::AdmittedMutation {
+                    admission_id,
+                    request: Box::new(request),
+                },
+                None => request,
+            }
         },
     );
     match response {
@@ -2665,15 +3323,6 @@ const fn external_writer_release_can_bypass_lifecycle(
     }
 }
 
-fn release_writer(
-    view: &WorkspaceView,
-    state_root: &Path,
-    run_id: Uuid,
-    carrier: &CredentialCarrier,
-) -> Result<(), MachineError> {
-    release_writer_authorized(view, state_root, run_id, carrier, None)
-}
-
 pub(crate) fn release_external_writer(
     view: &WorkspaceView,
     state_root: &Path,
@@ -2681,7 +3330,7 @@ pub(crate) fn release_external_writer(
     engagement_id: Uuid,
     carrier: &CredentialCarrier,
 ) -> Result<(), MachineError> {
-    release_writer_authorized(view, state_root, run_id, carrier, Some(engagement_id))
+    release_writer_authorized(view, state_root, run_id, carrier, Some(engagement_id), None)
 }
 
 fn release_writer_authorized(
@@ -2690,6 +3339,7 @@ fn release_writer_authorized(
     run_id: Uuid,
     carrier: &CredentialCarrier,
     external_engagement: Option<Uuid>,
+    expected_state_revision: Option<u64>,
 ) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
@@ -2715,8 +3365,18 @@ fn release_writer_authorized(
     }
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
     let transaction_id = Uuid::now_v7();
-    let (_, generation) =
-        writer.transact(|record| record.prepare_release(run_id, transaction_id))?;
+    let (_, generation) = writer.transact(|record| {
+        if external_engagement.is_none() {
+            require_mutation_revision(
+                state_root,
+                run_id,
+                carrier,
+                "run.release_write",
+                expected_state_revision,
+            )?;
+        }
+        record.prepare_release(run_id, transaction_id)
+    })?;
     let Some(generation) = generation else {
         return Ok(());
     };
@@ -3691,9 +4351,7 @@ fn observed_events(
             &head.to_string(),
         ));
     }
-    let root = state_root.join("runs").join(run_id.to_string());
-    let ledger = crate::ledger::ObservedLedger::open(&root, run_id, head)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
+    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
     let mut objects = Vec::new();
     let mut cursor = after;
     loop {
@@ -3750,30 +4408,6 @@ fn parse_cursor(value: &str) -> Result<u64, MachineError> {
         .map_err(|_| internal("ledger cursor is not a decimal sequence"))
 }
 
-/// The registered refusal for a noncanonical or beyond-head event cursor.
-fn event_cursor_invalid(run_id: Uuid, requested: &str, head: &str) -> MachineError {
-    MachineError::new(
-        "EVENT_CURSOR_INVALID",
-        "event cursor is noncanonical or beyond the run ledger head",
-        false,
-        json!({
-            "run_id": run_id,
-            "requested_cursor": requested,
-            "head_cursor": head,
-        }),
-    )
-}
-
-/// A durable ledger an observer could not replay is an integrity failure.
-fn audit_integrity(run_id: Uuid, sequence: u64, reason: &str) -> MachineError {
-    MachineError::new(
-        "AUDIT_INTEGRITY_FAILURE",
-        "run ledger could not be replayed",
-        false,
-        json!({"run_id": run_id, "sequence": sequence, "reason": reason}),
-    )
-}
-
 /// The `--after` cursor a caller supplied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RequestedCursor {
@@ -3808,16 +4442,14 @@ fn requested_cursor(args: &[OsString]) -> Result<RequestedCursor, MachineError> 
             "cursor exceeds the ledger sequence domain",
         ));
     }
-    if canonical != value {
-        return Ok(RequestedCursor::Refused(canonical.to_owned()));
-    }
-    canonical.parse::<u64>().map_or_else(
-        |_| Ok(RequestedCursor::Refused(canonical.to_owned())),
-        |cursor| Ok(RequestedCursor::Exact(cursor)),
-    )
+    Ok(parse_event_cursor(&value).map_or_else(
+        || RequestedCursor::Refused(canonical.to_owned()),
+        RequestedCursor::Exact,
+    ))
 }
 
 /// A control request with everything but the worker's identity already decided.
+#[derive(Clone)]
 enum Prepared {
     Plain,
     Pause {
@@ -3839,6 +4471,104 @@ enum Prepared {
         idempotency_key: String,
         response: Value,
     },
+}
+
+impl Prepared {
+    fn into_request(
+        self,
+        verb: RunVerb,
+        expected: crate::worker::WorkerIdentity,
+    ) -> ControlRequestV1 {
+        match self {
+            Prepared::Plain if verb == RunVerb::Status => ControlRequestV1::Status { expected },
+            Prepared::Plain if verb == RunVerb::Resume => ControlRequestV1::Resume {
+                expected,
+                caller: None,
+            },
+            Prepared::Plain if matches!(verb, RunVerb::Reconcile | RunVerb::Recover) => {
+                ControlRequestV1::Reconcile {
+                    expected,
+                    caller: None,
+                }
+            }
+            Prepared::Plain => ControlRequestV1::Interrupt {
+                expected,
+                caller: None,
+            },
+            Prepared::Wait {
+                turn_id,
+                timeout_ms,
+            } => ControlRequestV1::Wait {
+                expected,
+                caller: None,
+                turn_id,
+                timeout_ms,
+            },
+            Prepared::Close { interrupt } => ControlRequestV1::Close {
+                expected,
+                caller: None,
+                interrupt,
+            },
+            Prepared::Pause { interrupt } => ControlRequestV1::Pause {
+                expected,
+                caller: None,
+                interrupt,
+            },
+            Prepared::Turn {
+                request,
+                timeout_ms,
+            } if verb == RunVerb::Send => ControlRequestV1::Send {
+                expected,
+                caller: None,
+                request,
+                timeout_ms,
+            },
+            Prepared::Turn { request, .. } => ControlRequestV1::Submit {
+                expected,
+                caller: None,
+                request,
+            },
+            Prepared::Respond {
+                request_id,
+                idempotency_key,
+                response,
+            } => ControlRequestV1::Respond {
+                expected,
+                caller: None,
+                request_id,
+                idempotency_key,
+                response,
+            },
+        }
+    }
+
+    fn normalized_request(&self, verb: RunVerb) -> Value {
+        match self {
+            Self::Plain => {
+                json!({"operation": match verb {RunVerb::Resume => "resume", RunVerb::Reconcile | RunVerb::Recover => "reconcile", _ => "interrupt"}})
+            }
+            Self::Pause { interrupt } => json!({"operation":"pause","interrupt":interrupt}),
+            Self::Close { interrupt } => json!({"operation":"close","interrupt":interrupt}),
+            Self::Turn {
+                request,
+                timeout_ms,
+            } if verb == RunVerb::Send => {
+                json!({"operation":"send","request":request,"timeout_ms":timeout_ms})
+            }
+            Self::Turn { request, .. } => json!({"operation":"submit","request":request}),
+            Self::Respond {
+                request_id,
+                idempotency_key,
+                response,
+            } => {
+                json!({"operation":"respond","request_id":request_id,"idempotency_key":idempotency_key,"response":response})
+            }
+            Self::Wait {
+                turn_id,
+                timeout_ms,
+            } => json!({"operation":"wait","turn_id":turn_id,"timeout_ms":timeout_ms}),
+        }
+    }
 }
 
 /// Restate one control reply as the checked machine `data` for its verb.
@@ -3863,7 +4593,8 @@ fn control_response_value(
         } => Err(MachineError::new(&code, message, retryable, details)),
         ControlResponseV1::Rejected { code } => Err(rejected_error(&code)),
         other => {
-            let sources = RunSources::load(state_root, run_id, control_socket_epoch)?;
+            let sources =
+                RunSources::for_control_response(state_root, run_id, control_socket_epoch, &other)?;
             let value = match verb {
                 RunVerb::Send | RunVerb::Submit | RunVerb::Wait => {
                     let turn = turn_value(&sources, &other)?;
@@ -3954,9 +4685,7 @@ fn durable_last_terminal(
     if head == 0 || sources.projection.latest_turn_id.is_none() {
         return Ok(Value::Null);
     }
-    let root = state_root.join("runs").join(run_id.to_string());
-    let ledger = crate::ledger::ObservedLedger::open(&root, run_id, head)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
+    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
     let Some(payload) = ledger
         .last_terminal()
         .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
@@ -4004,47 +4733,9 @@ fn last_terminal_value(sources: &RunSources, response: &ControlResponseV1) -> Va
 /// produced it, so it is read from the Run's own manifest and the durable
 /// state projection its worker commits rather than assembled out of a control
 /// reply that only describes one operation.
-struct RunSources {
-    manifest: RunManifest,
-    projection: crate::projection::RunStateProjection,
-    writer: crate::writer::WriterRecord,
-    control_socket_epoch: u64,
-    app_server_epoch: Option<u64>,
-    runtime_record: Option<crate::worker::WorkerRuntimeRecord>,
-}
+type RunSources = crate::snapshot::RunSnapshot;
 
 impl RunSources {
-    fn load(
-        state_root: &Path,
-        run_id: Uuid,
-        control_socket_epoch: u64,
-    ) -> Result<Self, MachineError> {
-        let store = RunStore::new(SystemWorkspacePlatform, state_root);
-        let manifest = store.load_manifest(run_id)?;
-        let writer = crate::writer::WriterStore::new(
-            state_root,
-            &manifest.workspace_id,
-            DarwinSystem.current_uid(),
-        )
-        .load()?;
-        let runtime_record =
-            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
-                .ok()
-                .and_then(|path| {
-                    crate::worker::read_runtime_record(&path, DarwinSystem.current_uid()).ok()
-                });
-        Ok(Self {
-            manifest,
-            projection: store.load_state_projection(run_id)?,
-            writer,
-            control_socket_epoch,
-            app_server_epoch: runtime_record
-                .as_ref()
-                .and_then(|record| record.app_server_epoch),
-            runtime_record,
-        })
-    }
-
     /// The event cursor an observer may resume from.
     fn event_cursor(&self) -> String {
         self.projection
@@ -4287,7 +4978,8 @@ fn turn_value(sources: &RunSources, response: &ControlResponseV1) -> Result<Valu
             final_response_value(sources.manifest.run_id, terminal.final_response.as_ref()),
             terminal.usage.clone(),
         ),
-        ControlResponseV1::Accepted { accepted } => (
+        ControlResponseV1::Accepted { accepted }
+        | ControlResponseV1::AcceptedReceipt { accepted, .. } => (
             accepted.thread_id.clone(),
             accepted.turn_id.clone(),
             "accepted".to_owned(),
@@ -4467,6 +5159,8 @@ fn turn_request(args: &[OsString]) -> Result<TurnControlRequest, MachineError> {
         });
     }
     Ok(TurnControlRequest {
+        normalized_request_sha256: None,
+        write: switch(args, "--write"),
         message,
         idempotency_key: required(args, "--idempotency-key")?,
         effort: optional(args, "--effort"),
@@ -4534,9 +5228,12 @@ fn response_body(args: &[OsString]) -> Result<Value, MachineError> {
             ));
         }
         let mut bytes = Vec::new();
-        std::io::Read::take(std::io::stdin(), MAX_RESPONSE_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| MachineError::invalid_argument("stdin", "response read failed"))?;
+        std::io::Read::take(
+            std::io::stdin(),
+            (MAX_RESPONSE_BYTES as u64).saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|_| MachineError::invalid_argument("stdin", "response read failed"))?;
         reject_oversized_response(args, &bytes)?;
         return decode_response(&bytes, "stdin");
     };
@@ -4549,7 +5246,7 @@ fn response_body(args: &[OsString]) -> Result<Value, MachineError> {
             .map_err(|_| MachineError::invalid_argument("--response-fd", "fd is not readable"))?,
     );
     let mut bytes = Vec::new();
-    std::io::Read::take(&mut file, MAX_RESPONSE_BYTES.saturating_add(1))
+    std::io::Read::take(&mut file, (MAX_RESPONSE_BYTES as u64).saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| MachineError::invalid_argument("--response-fd", "response read failed"))?;
     reject_oversized_response(args, &bytes)?;
@@ -4557,24 +5254,19 @@ fn response_body(args: &[OsString]) -> Result<Value, MachineError> {
 }
 
 fn reject_oversized_response(args: &[OsString], bytes: &[u8]) -> Result<(), MachineError> {
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= MAX_RESPONSE_BYTES {
+    if bytes.len() <= MAX_RESPONSE_BYTES {
         return Ok(());
     }
-    Err(MachineError::new(
-        "INTERACTION_RESPONSE_TOO_LARGE",
+    Err(crate::interaction::response_too_large(
+        positional_run_id(args)?,
+        &required(args, "--request-id")?,
+        bytes.len(),
         "interaction response exceeds the 1 MiB input limit",
-        false,
-        json!({
-            "run_id": positional_run_id(args)?,
-            "request_id": required(args, "--request-id")?,
-            "observed_bytes": bytes.len(),
-            "limit_bytes": MAX_RESPONSE_BYTES,
-        }),
     ))
 }
 
 /// One bounded body, canonicalized before it is allowed to travel further.
-fn decode_response(bytes: &[u8], argument: &str) -> Result<Value, MachineError> {
+pub(crate) fn decode_response(bytes: &[u8], argument: &str) -> Result<Value, MachineError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| MachineError::invalid_argument(argument, "response is not UTF-8"))?;
     let parsed = parse(text)
@@ -5071,6 +5763,28 @@ fn ensure_run_worker(
     state_root: &Path,
     run_id: Uuid,
 ) -> Result<u64, MachineError> {
+    let mut startup = Some(RunStartupLock::open(state_root, run_id)?);
+    startup.as_ref().expect("startup lock").acquire()?;
+    let result = ensure_run_worker_locked(view, state_root, run_id, &mut startup);
+    if let Some(startup) = startup {
+        let release = startup
+            .lock
+            .release_startup_range()
+            .map_err(|error| worker_startup_range_error(error, run_id, startup.lock.path()));
+        if result.is_ok() {
+            release?;
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_run_worker_locked(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    startup: &mut Option<RunStartupLock>,
+) -> Result<u64, MachineError> {
     let uid = DarwinSystem.current_uid();
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
@@ -5114,6 +5828,11 @@ fn ensure_run_worker(
     let manifest = store.load_manifest(run_id)?;
     let projection = store.load_state_projection(run_id)?;
     ensure_worker_spawn_lifecycle(run_id, projection.lifecycle)?;
+    let run_generation = projection.run_generation.saturating_add(1).max(1);
+    let startup_file = &startup.as_ref().expect("startup lock").lock;
+    crate::worker::current_startup_owner(&view.workspace_id, run_id, run_generation)
+        .and_then(|owner| startup_file.write_owner(&owner))
+        .map_err(|error| worker_startup_range_error(error, run_id, startup_file.path()))?;
     let global_binding = manifest.global_profile_binding.as_ref().ok_or_else(|| {
         MachineError::new(
             "LEGACY_STATE_UNSUPPORTED",
@@ -5154,7 +5873,6 @@ fn ensure_run_worker(
         .holder
         .as_ref()
         .is_some_and(|holder| holder.run_id == run_id);
-    let run_generation = projection.run_generation.saturating_add(1).max(1);
     let control_socket_epoch = observed_control_socket_epoch(state_root, run_id)
         .saturating_add(1)
         .max(1);
@@ -5274,14 +5992,17 @@ fn ensure_run_worker(
         transport_timeout_seconds: 900,
         dedicated_server,
     };
-    let startup_range = fenced_worker_startup_range(
+    crate::profile::fence_global_run_worker_start(
         global_binding,
         &state,
         &view.workspace_id,
-        state_root,
         run_id,
-        run_generation,
     )?;
+    let RunStartupLock {
+        lock: startup_range,
+        _process_guard,
+        ..
+    } = startup.take().expect("startup lock transfers once");
     let start = start_worker(
         state_root,
         &crate::worker::RunWorkerStart {
@@ -5413,6 +6134,8 @@ fn positionals(args: &[OsString]) -> Vec<&OsStr> {
         "--projection",
         "--request-id",
         "--response-fd",
+        "--offset",
+        "--length",
     ];
     let mut values = Vec::new();
     let mut index = 0;
@@ -5757,7 +6480,6 @@ fn compatibility_rejected(
 }
 
 /// A control response body is bounded by the interaction payload contract.
-const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 /// A Turn's text is one bounded payload, not a stream: docs/specs/README.md bounds "raw
 /// app-server payloads selected for ledger representation to 2 MiB", and the
 /// message the caller pipes in is exactly such a payload.
@@ -5871,6 +6593,39 @@ fn parse_lifecycle(value: &str) -> Result<crate::domain::RunLifecycle, MachineEr
         .map_err(|_| internal("worker reported an unknown run lifecycle"))
 }
 
+static PROCESS_RUN_STARTUPS: Mutex<BTreeSet<(PathBuf, Uuid)>> = Mutex::new(BTreeSet::new());
+
+/// POSIX locks do not serialize threads; sibling opens/closes also drop them.
+/// Keep only active claims and reject contention before opening another fd.
+struct ProcessRunStartup {
+    key: (PathBuf, Uuid),
+}
+
+impl ProcessRunStartup {
+    fn acquire(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
+        let key = (state_root.to_owned(), run_id);
+        let mut active = PROCESS_RUN_STARTUPS
+            .lock()
+            .map_err(|_| internal("process startup serializer is poisoned"))?;
+        if !active.insert(key.clone()) {
+            return Err(crate::controller::run_busy(
+                run_id,
+                "startup",
+                "another operation in this process is preparing the Run",
+            ));
+        }
+        Ok(Self { key })
+    }
+}
+
+impl Drop for ProcessRunStartup {
+    fn drop(&mut self) {
+        if let Ok(mut active) = PROCESS_RUN_STARTUPS.lock() {
+            active.remove(&self.key);
+        }
+    }
+}
+
 /// The Run startup/mutation lock as a file range, for the resetting CLI.
 ///
 /// One descriptor is opened for the whole reset and kept alive across PREPARE,
@@ -5878,12 +6633,15 @@ fn parse_lifecycle(value: &str) -> Result<crate::domain::RunLifecycle, MachineEr
 /// descriptor for this file would drop every range this process holds on it,
 /// including the one the next phase depends on.
 struct RunStartupLock {
+    // The fd must close before releasing the process claim.
     lock: crate::worker::StartupLockFile,
     run_id: Uuid,
+    _process_guard: ProcessRunStartup,
 }
 
 impl RunStartupLock {
     fn open(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
+        let process_guard = ProcessRunStartup::acquire(state_root, run_id)?;
         let uid = DarwinSystem.current_uid();
         let runtime = crate::worker::runtime_root(state_root);
         crate::worker::prepare_runtime_root(&runtime, uid)
@@ -5891,7 +6649,11 @@ impl RunStartupLock {
         let path = crate::worker::startup_lock_path(&runtime, run_id);
         let lock = crate::worker::StartupLockFile::open(&path, uid)
             .map_err(|error| worker_startup_range_error(error, run_id, &path))?;
-        Ok(Self { lock, run_id })
+        Ok(Self {
+            lock,
+            run_id,
+            _process_guard: process_guard,
+        })
     }
 }
 
@@ -5914,6 +6676,85 @@ impl RunMutationLock for RunStartupLock {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn checked_interaction_rejects_an_oversized_payload() {
+        let run_id = Uuid::now_v7();
+        let request_id = Uuid::now_v7();
+        let interaction = json!({
+            "schema_version": 1,
+            "request_id": request_id,
+            "run_id": run_id,
+            "controller_id": Uuid::now_v7(),
+            "control_mode": "managed_agent",
+            "thread_id": "thread",
+            "turn_id": "turn",
+            "item_id": null,
+            "run_generation": 1,
+            "server_epoch": 1,
+            "kind": "user_input",
+            "status": "pending",
+            "payload": {"question": "x".repeat(crate::interaction::MAX_PAYLOAD_BYTES)},
+            "available_decisions": [],
+            "response_schema": "dolgorae.interaction.user-input/v1",
+            "opened_at": "2026-09-09T00:00:00.000000Z",
+            "resolved_at": null,
+            "resolution": null
+        });
+        let error = checked_interaction(&[(interaction, 1)], run_id, request_id).unwrap_err();
+        assert_eq!(error.code, "INTERACTION_PAYLOAD_TOO_LARGE");
+        assert_eq!(error.details["run_id"], json!(run_id));
+        assert_eq!(error.details["request_id"], json!(request_id));
+    }
+
+    #[test]
+    fn checked_interaction_rejects_invalid_typed_payload_and_unsafe_generations() {
+        let run_id = Uuid::now_v7();
+        let request_id = Uuid::now_v7();
+        let mut interaction = json!({
+            "schema_version": 1,
+            "request_id": request_id,
+            "run_id": run_id,
+            "controller_id": Uuid::now_v7(),
+            "control_mode": "managed_agent",
+            "thread_id": "thread",
+            "turn_id": "turn",
+            "item_id": null,
+            "run_generation": 1,
+            "server_epoch": 1,
+            "kind": "command_execution_approval",
+            "status": "pending",
+            "payload": {
+                "title": "x".repeat(513),
+                "message": "message",
+                "command": ["true"],
+                "cwd": "/tmp",
+                "reason": null
+            },
+            "available_decisions": ["accept_once", "decline", "cancel"],
+            "response_schema": "dolgorae.interaction.command-approval/v1",
+            "opened_at": "2026-09-09T00:00:00.000000Z",
+            "resolved_at": null,
+            "resolution": null
+        });
+        let error =
+            checked_interaction(&[(interaction.clone(), 1)], run_id, request_id).unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(error.details["invariant"], "interaction UTF-8 byte bound");
+
+        interaction["payload"]["title"] = json!("title");
+        for field in ["run_generation", "server_epoch"] {
+            interaction[field] = json!(crate::domain::MAX_JCS_SAFE_INTEGER + 1);
+            let error =
+                checked_interaction(&[(interaction.clone(), 1)], run_id, request_id).unwrap_err();
+            assert_eq!(error.code, "INTERNAL_ERROR");
+            assert_eq!(
+                error.details["invariant"],
+                "normalized interaction identity and state"
+            );
+            interaction[field] = json!(1);
+        }
+    }
 
     #[test]
     fn reviewer_honors_explicit_effort_without_substitution() {
@@ -6386,7 +7227,7 @@ mod tests {
             .execute(&SemanticCommand::RuntimeCapabilities)
             .unwrap();
         let value = serde_json::to_value(result).unwrap();
-        assert_eq!(value["features"]["persistent_runs"], false);
+        assert_eq!(value["features"]["persistent_runs"], true);
     }
 
     #[test]
@@ -6770,5 +7611,454 @@ mod tests {
             RunLifecycle::Closed,
             false
         ));
+    }
+}
+
+fn require_workspace_identity(
+    view: &WorkspaceView,
+    expected: Option<&str>,
+) -> Result<(), MachineError> {
+    if expected.is_some_and(|expected| expected != view.workspace_id) {
+        return Err(MachineError::invalid_argument(
+            "workspace_id",
+            "workspace identity no longer matches the request",
+        ));
+    }
+    Ok(())
+}
+
+/// Called only while the writer authority or threadless startup boundary is held.
+/// The writer boundary is shared with every worker durable mutation append.
+fn require_mutation_revision(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation: &str,
+    expected_state_revision: Option<u64>,
+) -> Result<u64, MachineError> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let binding = store.load_controller_binding(run_id)?;
+    authorize_controller(run_id, operation, &binding, carrier)?;
+    let projection = store.load_state_projection(run_id)?;
+    let actual = projection.ledger_head.sequence;
+    if durable_pending_admission(state_root, run_id)?.is_some() {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            operation,
+        ));
+    }
+    if expected_state_revision.is_some_and(|expected| expected != actual) {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            operation,
+        ));
+    }
+    Ok(actual)
+}
+
+enum PreparedAdmission {
+    Admitted(Uuid),
+    Replayed(Box<ControlResponseV1>),
+}
+
+fn begin_prepared_mutation(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+    carrier: &CredentialCarrier,
+    prepared: &Prepared,
+    expected_state_revision: Option<u64>,
+) -> Result<PreparedAdmission, MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let runtime_path =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    let expected = expected_state_revision.unwrap_or(durable_head(state_root, run_id)?);
+    if crate::worker::read_runtime_record(&runtime_path, uid).is_ok_and(|record| {
+        crate::worker::classify_worker_identity(&record)
+            == crate::worker::ProcessIdentityVerdict::Match
+    }) {
+        let response = crate::worker::call_run_worker(
+            state_root,
+            run_id,
+            uid,
+            Some(carrier.raw_fd()),
+            |identity| {
+                checked_controller_request(
+                    ControlRequestV1::BeginPreparedMutation {
+                        expected_state_revision: expected,
+                        request: Box::new(prepared.clone().into_request(verb, identity)),
+                    },
+                    Some(carrier),
+                )
+            },
+        )
+        .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+        return match response {
+            ControlResponseV1::MutationAdmitted { admission_id } => {
+                Ok(PreparedAdmission::Admitted(admission_id))
+            }
+            ControlResponseV1::Failed {
+                code,
+                message,
+                retryable,
+                details,
+            } => Err(MachineError::new(code, message, retryable, details)),
+            ControlResponseV1::Rejected { code } => Err(rejected_error(&code)),
+            response => Ok(PreparedAdmission::Replayed(Box::new(response))),
+        };
+    }
+    let lock = RunStartupLock::open(state_root, run_id)?;
+    lock.acquire()?;
+    let result = (|| {
+        if runtime_path.exists() {
+            let record = crate::worker::read_runtime_record(&runtime_path, uid)
+                .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+            if crate::worker::classify_worker_identity(&record)
+                != crate::worker::ProcessIdentityVerdict::Absent
+            {
+                return Err(crate::controller::run_busy(
+                    run_id,
+                    verb.operation_name(),
+                    "the prior worker must be absent before offline admission",
+                ));
+            }
+        }
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, uid).observe_locked(
+            |_| {
+                let binding = load_reconciled_controller_binding(state_root, run_id)?;
+                authorize_controller(run_id, verb.operation_name(), &binding, carrier)?;
+                let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
+                    .map_err(|error| internal(error.to_string()))?;
+                let request = prepared.normalized_request(verb);
+                let bytes = canonicalize(
+                    &parse(&request.to_string()).map_err(|error| internal(error.to_string()))?,
+                )
+                .map_err(|error| internal(error.to_string()))?;
+                admit_mutation_digest(
+                    &mut ledger,
+                    binding.identity.controller_id,
+                    expected,
+                    sha256_hex(&bytes),
+                    verb.operation_name(),
+                    matches!(prepared, Prepared::Turn { request, .. } if request.write),
+                )
+                .map(|admission| PreparedAdmission::Admitted(admission.admission_id))
+            },
+        )?
+    })();
+    lock.release();
+    result
+}
+
+fn require_writer_admission(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    admission_id: Uuid,
+) -> Result<(), MachineError> {
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, "run.acquire_write", &binding, carrier)?;
+    let head = durable_head(state_root, run_id)?;
+    let ledger = crate::ledger::ObservedLedger::open(&run_root(state_root, run_id), run_id, head)
+        .map_err(|error| internal(error.to_string()))?;
+    let admitted = ledger
+        .payloads_of_kind(AuditKind::MutationAdmitted)
+        .map_err(|error| internal(error.to_string()))?;
+    let completed = ledger
+        .payloads_of_kind(AuditKind::MutationCompleted)
+        .map_err(|error| internal(error.to_string()))?;
+    let matching = writer_admission_matches(
+        &admitted,
+        &completed,
+        admission_id,
+        binding.identity.controller_id,
+    );
+    if !matching {
+        let state =
+            RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+        return Err(run_state_conflict_error(
+            run_id,
+            state.lifecycle,
+            "run.acquire_write",
+        ));
+    }
+    Ok(())
+}
+
+fn writer_admission_matches(
+    admitted: &[Value],
+    completed: &[Value],
+    admission_id: Uuid,
+    controller_id: Uuid,
+) -> bool {
+    admitted.last().is_some_and(|value| {
+        value.get("admission_id") == Some(&json!(admission_id))
+            && value.get("controller_id") == Some(&json!(controller_id))
+            && value.get("allow_writer_acquire") == Some(&Value::Bool(true))
+            && matches!(
+                value.get("operation").and_then(Value::as_str),
+                Some("run.submit" | "run.send" | "run.acquire_write")
+            )
+    }) && !completed
+        .iter()
+        .any(|value| value.get("admission_id") == Some(&json!(admission_id)))
+}
+
+fn durable_pending_admission(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<Option<MutationAdmission>, MachineError> {
+    let head = durable_head(state_root, run_id)?;
+    let ledger = crate::ledger::ObservedLedger::open(&run_root(state_root, run_id), run_id, head)
+        .map_err(|error| internal(error.to_string()))?;
+    let admitted = ledger
+        .payloads_of_kind(AuditKind::MutationAdmitted)
+        .map_err(|error| internal(error.to_string()))?;
+    let Some(last) = admitted.last() else {
+        return Ok(None);
+    };
+    let admission: MutationAdmission =
+        serde_json::from_value(last.clone()).map_err(|error| internal(error.to_string()))?;
+    let completed = ledger
+        .payloads_of_kind(AuditKind::MutationCompleted)
+        .map_err(|error| internal(error.to_string()))?;
+    if completed
+        .iter()
+        .any(|value| value.get("admission_id") == Some(&json!(admission.admission_id)))
+    {
+        return Ok(None);
+    }
+    Ok(Some(admission))
+}
+
+#[cfg(test)]
+mod mutation_admission_tests {
+    use super::*;
+    use crate::mutation_admission::{MutationRequest, active_mutation_admission};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn writer_admission_requires_live_writer_capable_operation_from_current_controller() {
+        let admission_id = Uuid::now_v7();
+        let controller_id = Uuid::now_v7();
+        let valid = json!({
+            "admission_id": admission_id,
+            "controller_id": controller_id,
+            "allow_writer_acquire": true,
+            "operation": "run.submit",
+        });
+        assert!(writer_admission_matches(
+            std::slice::from_ref(&valid),
+            &[],
+            admission_id,
+            controller_id,
+        ));
+
+        for invalid in [
+            {
+                let mut value = valid.clone();
+                value["allow_writer_acquire"] = Value::Bool(false);
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["operation"] = json!("run.resume");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["controller_id"] = json!(Uuid::now_v7());
+                value
+            },
+        ] {
+            assert!(!writer_admission_matches(
+                &[invalid],
+                &[],
+                admission_id,
+                controller_id,
+            ));
+        }
+        assert!(!writer_admission_matches(
+            &[valid],
+            &[json!({"admission_id": admission_id})],
+            admission_id,
+            controller_id,
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reconciliation_preparation_matches_its_executed_request() {
+        let identity = crate::worker::current_startup_owner(&"a".repeat(64), Uuid::now_v7(), 1)
+            .unwrap()
+            .identity;
+        for verb in [RunVerb::Recover, RunVerb::Reconcile] {
+            let request = Prepared::Plain.into_request(verb, identity.clone());
+            assert!(matches!(request, ControlRequestV1::Reconcile { .. }));
+            let normalized = Prepared::Plain.normalized_request(verb);
+            let bytes = canonicalize(&parse(&normalized.to_string()).unwrap()).unwrap();
+            assert_eq!(
+                request
+                    .mutation_request_identity()
+                    .unwrap()
+                    .request_sha256(),
+                sha256_hex(&bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn durable_admission_replays_only_original_owner_request_and_revision() {
+        let root = std::env::temp_dir().join(format!("dolgorae-admission-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir(root.join("recovery")).unwrap();
+        std::fs::set_permissions(
+            root.join("recovery"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::write(root.join("audit.jsonl"), b"").unwrap();
+        std::fs::set_permissions(
+            root.join("audit.jsonl"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let run_id = Uuid::now_v7();
+        let controller = Uuid::now_v7();
+        let mut ledger = crate::ledger::Ledger::open(&root, run_id).unwrap();
+        let digest = "a".repeat(64);
+        let first = admit_mutation_digest(
+            &mut ledger,
+            controller,
+            0,
+            digest.clone(),
+            "run.resume",
+            false,
+        )
+        .unwrap();
+        assert_eq!(ledger.head().unwrap().sequence, 1);
+        assert!(!first.allow_writer_acquire);
+        assert_eq!(
+            admit_mutation_digest(
+                &mut ledger,
+                controller,
+                0,
+                digest.clone(),
+                "run.resume",
+                true
+            )
+            .unwrap_err()
+            .code,
+            "RUN_STATE_CONFLICT"
+        );
+        let replay = admit_mutation_digest(
+            &mut ledger,
+            controller,
+            0,
+            digest.clone(),
+            "run.resume",
+            false,
+        )
+        .unwrap();
+        assert_eq!(first.admission_id, replay.admission_id);
+        assert_eq!(ledger.head().unwrap().sequence, 1);
+        for (owner, expected, request) in [
+            (Uuid::now_v7(), 0, digest.clone()),
+            (controller, 1, digest.clone()),
+            (controller, 0, "b".repeat(64)),
+        ] {
+            assert_eq!(
+                admit_mutation_digest(&mut ledger, owner, expected, request, "run.resume", false)
+                    .unwrap_err()
+                    .code,
+                "RUN_STATE_CONFLICT"
+            );
+        }
+        assert_eq!(
+            complete_mutation_admission(&mut ledger, Uuid::now_v7())
+                .unwrap_err()
+                .code,
+            "RUN_STATE_CONFLICT"
+        );
+        drop(ledger);
+        let mut ledger = crate::ledger::Ledger::open(&root, run_id).unwrap();
+        assert_eq!(
+            active_mutation_admission(&ledger)
+                .unwrap()
+                .unwrap()
+                .admission_id,
+            first.admission_id
+        );
+        complete_mutation_admission(&mut ledger, first.admission_id).unwrap();
+        assert!(active_mutation_admission(&ledger).unwrap().is_none());
+        assert_eq!(
+            admit_mutation_digest(
+                &mut ledger,
+                controller,
+                0,
+                digest.clone(),
+                "run.resume",
+                false
+            )
+            .unwrap_err()
+            .code,
+            "RUN_STATE_CONFLICT"
+        );
+        let head = ledger.head().unwrap().sequence;
+        let next =
+            admit_mutation_digest(&mut ledger, controller, head, digest, "run.resume", false)
+                .unwrap();
+        assert_ne!(first.admission_id, next.admission_id);
+        let head = ledger.head().unwrap().sequence;
+        assert_eq!(
+            admit_mutation_digest(
+                &mut ledger,
+                controller,
+                head - 1,
+                "c".repeat(64),
+                "run.reconcile",
+                false
+            )
+            .unwrap_err()
+            .code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert_eq!(
+            active_mutation_admission(&ledger)
+                .unwrap()
+                .unwrap()
+                .admission_id,
+            next.admission_id
+        );
+        let reconciliation = admit_mutation_digest(
+            &mut ledger,
+            controller,
+            head,
+            "c".repeat(64),
+            "run.reconcile",
+            false,
+        )
+        .unwrap();
+        assert_ne!(reconciliation.admission_id, next.admission_id);
+        assert_eq!(
+            complete_mutation_admission(&mut ledger, next.admission_id)
+                .unwrap_err()
+                .code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert_eq!(
+            active_mutation_admission(&ledger)
+                .unwrap()
+                .unwrap()
+                .admission_id,
+            reconciliation.admission_id
+        );
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

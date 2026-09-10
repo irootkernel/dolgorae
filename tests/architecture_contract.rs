@@ -34,13 +34,19 @@ fn direct_crate_dependencies(source: &str) -> BTreeSet<String> {
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
         ("app_server", &["jcs"][..]),
-        ("audit", &["jcs"][..]),
+        ("audit", &["event", "jcs"][..]),
+        ("interaction", &["domain", "machine", "snapshot"][..]),
+        (
+            "interaction_payload",
+            &["domain", "interaction", "machine", "workspace"][..],
+        ),
         ("cli", &[][..]),
         (
             "conformance",
             &[
                 "audit",
                 "domain",
+                "event",
                 "fault",
                 "jcs",
                 "ledger",
@@ -95,7 +101,10 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "writer",
             ][..],
         ),
-        ("event", &["audit", "domain", "jcs", "workspace"][..]),
+        (
+            "event",
+            &["audit", "domain", "jcs", "projection", "workspace"][..],
+        ),
         ("fault", &[][..]),
         (
             "global_profile",
@@ -128,6 +137,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         ("machine", &["paths", "workspace"][..]),
+        (
+            "mutation_admission",
+            &["audit", "domain", "fault", "jcs", "ledger", "machine"][..],
+        ),
         ("mcp_review", &[][..]),
         (
             "mcp_review_server",
@@ -185,6 +198,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "run",
             &[
                 "audit",
+                "darwin",
                 "domain",
                 "global_runtime",
                 "jcs",
@@ -202,24 +216,29 @@ fn source_module_dependencies_match_the_approved_graph() {
             "semantic",
             &[
                 "app_server",
+                "artifact",
                 "audit",
                 "cli",
                 "conformance",
                 "controller",
                 "darwin",
                 "domain",
-                "event",
                 "engagement",
+                "event",
                 "global_profile",
                 "global_runtime",
+                "interaction",
+                "interaction_payload",
                 "jcs",
                 "ledger",
                 "machine",
+                "mutation_admission",
                 "paths",
                 "profile",
                 "projection",
                 "run",
                 "runtime",
+                "snapshot",
                 "specialist",
                 "turn",
                 "worker",
@@ -236,12 +255,15 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "app_server",
                 "audit",
+                "darwin",
                 "domain",
                 "fault",
+                "interaction_payload",
                 "jcs",
                 "ledger",
                 "machine",
                 "workspace",
+                "writer",
             ][..],
         ),
         (
@@ -281,6 +303,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "worker",
             &[
                 "app_server",
+                "audit",
                 "conformance",
                 "controller",
                 "darwin",
@@ -288,14 +311,132 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "engagement",
                 "event",
                 "fault",
+                "jcs",
                 "ledger",
                 "machine",
+                "mutation_admission",
                 "profile",
+                "projection",
                 "providers",
                 "run",
                 "turn",
                 "workspace",
                 "writer",
+            ][..],
+        ),
+        (
+            "gateway",
+            &["darwin", "gateway_socket", "machine", "paths", "protocol"][..],
+        ),
+        (
+            "gateway_socket",
+            &["darwin", "machine", "paths", "protocol"][..],
+        ),
+        (
+            "gateway_projection",
+            &[
+                "domain",
+                "machine",
+                "profile",
+                "protocol",
+                "run",
+                "runtime",
+                "snapshot",
+                "turn",
+                "worker",
+                "workspace",
+                "writer",
+            ][..],
+        ),
+        (
+            "gateway_event",
+            &[
+                "audit",
+                "domain",
+                "event",
+                "gateway_projection",
+                "machine",
+                "protocol",
+                "workspace",
+                "writer",
+            ][..],
+        ),
+        (
+            "gateway_service",
+            &[
+                "controller",
+                "darwin",
+                "domain",
+                "gateway",
+                "gateway_event",
+                "gateway_observation",
+                "gateway_projection",
+                "global_profile",
+                "ledger",
+                "machine",
+                "paths",
+                "profile",
+                "protocol",
+                "run",
+                "runtime",
+                "semantic",
+                "snapshot",
+                "turn",
+                "worker",
+                "workspace",
+                "writer",
+            ][..],
+        ),
+        (
+            "snapshot",
+            &[
+                "audit",
+                "controller",
+                "darwin",
+                "domain",
+                "ledger",
+                "machine",
+                "projection",
+                "run",
+                "turn",
+                "worker",
+                "workspace",
+                "writer",
+            ][..],
+        ),
+        (
+            "gateway_observation",
+            &[
+                "artifact",
+                "controller",
+                "domain",
+                "event",
+                "gateway",
+                "gateway_event",
+                "gateway_projection",
+                "interaction",
+                "interaction_payload",
+                "ledger",
+                "machine",
+                "protocol",
+                "semantic",
+                "snapshot",
+                "turn",
+                "workspace",
+            ][..],
+        ),
+        (
+            "artifact",
+            &[
+                "audit",
+                "controller",
+                "darwin",
+                "event",
+                "interaction_payload",
+                "jcs",
+                "ledger",
+                "machine",
+                "snapshot",
             ][..],
         ),
     ]);
@@ -366,6 +507,20 @@ fn integration_tests_do_not_cross_the_external_system_boundary() {
         "https://",
     ];
     for path in rust_sources(&repository_root().join("tests")) {
+        // These black-box executables belong to test-e2e and are never in INT_TESTS.
+        let relative = path.strip_prefix(repository_root()).unwrap().to_path_buf();
+        if [
+            "tests/gateway_native.rs",
+            "tests/gateway_semantic_native.rs",
+            "tests/gateway_configuration_native.rs",
+            "tests/gateway_interaction_native.rs",
+            "tests/support/gateway_native.rs",
+        ]
+        .iter()
+        .any(|native| relative == Path::new(native))
+        {
+            continue;
+        }
         if path
             .file_name()
             .is_some_and(|name| name == "architecture_contract.rs")
@@ -457,4 +612,90 @@ fn the_shared_fake_app_server_shares_no_parser_with_the_product() {
             );
         }
     }
+}
+
+fn native_test_functions(source: &str) -> BTreeSet<String> {
+    let mut test_attribute = false;
+    let mut tests = BTreeSet::new();
+    for line in source.lines().map(str::trim) {
+        if line.starts_with("#[tokio::test") {
+            test_attribute = true;
+        } else if test_attribute && line.starts_with("async fn ") {
+            let name = line["async fn ".len()..]
+                .split_once('(')
+                .expect("native test function declaration")
+                .0;
+            assert!(
+                tests.insert(name.to_owned()),
+                "duplicate native test {name}"
+            );
+            test_attribute = false;
+        }
+    }
+    tests
+}
+
+fn quoted_arguments(source: &str, start: usize) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = &source[start..];
+    while values.len() < 2 {
+        let quote = rest.find('"').expect("run_case string argument");
+        rest = &rest[quote + 1..];
+        let end = rest.find('"').expect("terminated run_case string argument");
+        values.push(rest[..end].to_owned());
+        rest = &rest[end + 1..];
+    }
+    values
+}
+
+#[test]
+fn every_native_gateway_test_has_exactly_one_e2e_wrapper_reference() {
+    let root = repository_root();
+    let native_targets = [
+        "gateway_native",
+        "gateway_semantic_native",
+        "gateway_configuration_native",
+        "gateway_interaction_native",
+    ];
+    let mut declared = BTreeSet::new();
+    for target in native_targets {
+        let source = fs::read_to_string(root.join("tests").join(format!("{target}.rs"))).unwrap();
+        for test in native_test_functions(&source) {
+            assert!(declared.insert(format!("{target}::{test}")));
+        }
+    }
+
+    let mut referenced = BTreeMap::<String, usize>::new();
+    let e2e = root.join("tests/e2e");
+    for entry in fs::read_dir(&e2e).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "py") {
+            continue;
+        }
+        if path
+            .file_name()
+            .is_some_and(|name| name == "run_native_gateway_case.py")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(path).unwrap();
+        for (index, _) in source.match_indices("run_case(") {
+            let arguments = quoted_arguments(&source, index + "run_case(".len());
+            *referenced
+                .entry(format!("{}::{}", arguments[0], arguments[1]))
+                .or_default() += 1;
+        }
+    }
+    assert_eq!(
+        referenced.keys().cloned().collect::<BTreeSet<_>>(),
+        declared,
+        "native gateway source tests and E2E wrapper cases diverged"
+    );
+    assert!(
+        referenced.values().all(|count| *count == 1),
+        "each native gateway test must be referenced exactly once: {referenced:?}"
+    );
+    let runner = fs::read_to_string(e2e.join("run_native_gateway_case.py")).unwrap();
+    assert!(runner.contains("\"--list\", \"--format\", \"terse\""));
+    assert!(runner.contains("native gateway case is unavailable"));
 }

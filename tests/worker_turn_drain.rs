@@ -446,6 +446,14 @@ impl Run {
         let state_root = root.join("state");
         make_dir(&state_root);
         make_dir(&state_root.join("runs"));
+        make_dir(&state_root.join("runtime"));
+        make_dir(&state_root.join("runtime/locks"));
+        dolgorae::writer::WriterStore::initialize_layout(
+            &state_root,
+            &"1".repeat(64),
+            fs::metadata(".").unwrap().uid(),
+        )
+        .unwrap();
         let run_id = Uuid::now_v7();
 
         let credential_path = root.join("controller.json");
@@ -502,6 +510,7 @@ impl Run {
                 1,
                 fs::metadata(".").unwrap().uid(),
                 &state_root,
+                &"1".repeat(64),
             )
             .unwrap(),
         );
@@ -675,6 +684,8 @@ impl Run {
 
     fn turn(&self, key: &str) -> TurnControlRequest {
         TurnControlRequest {
+            write: false,
+            normalized_request_sha256: None,
             message: format!("do {key}"),
             idempotency_key: key.to_owned(),
             effort: None,
@@ -688,6 +699,8 @@ impl Run {
             caller: None,
             expected: self.identity.clone(),
             request: TurnControlRequest {
+                write: false,
+                normalized_request_sha256: None,
                 message: format!("do {key}"),
                 idempotency_key: key.to_owned(),
                 effort: Some(effort.to_owned()),
@@ -896,6 +909,254 @@ fn terminal(response: &ControlResponseV1) -> (String, String) {
 // Cases
 // ---------------------------------------------------------------------------
 
+#[test]
+fn checked_submit_rejects_stale_revision_before_any_turn_effect() {
+    let run = Run::start(Behaviour::default());
+    let before = run.ledger.lock().unwrap().head().unwrap().sequence;
+    let stale = ControlRequestV1::CheckedMutation {
+        expected_state_revision: before + 1,
+        request: Box::new(run.submit("stale")),
+    };
+    assert_eq!(failure_code(&run.call(&stale)), "RUN_STATE_CONFLICT");
+    assert_eq!(run.ledger.lock().unwrap().head().unwrap().sequence, before);
+    assert!(run.server.calls("turn/start").is_empty());
+    assert!(run.server.calls("thread/start").is_empty());
+}
+
+#[test]
+fn checked_submit_replay_preserves_the_original_acceptance_and_requires_controller() {
+    let run = Run::start(Behaviour {
+        complete_on_start: true,
+        ..Behaviour::default()
+    });
+    let before = run.ledger.lock().unwrap().head().unwrap().sequence;
+    let request = ControlRequestV1::CheckedMutation {
+        expected_state_revision: before,
+        request: Box::new(run.submit("receipt")),
+    };
+    let first = run.call(&request);
+    let ControlResponseV1::AcceptedReceipt {
+        accepted: first_turn,
+        operation_id,
+        stamp,
+        state,
+        writer,
+        controller,
+        effective_policy,
+        server_key,
+        server_epoch,
+    } = first
+    else {
+        panic!("expected immutable acceptance receipt: {first:?}");
+    };
+    assert!(!first_turn.replayed);
+    assert_eq!(state.lifecycle, dolgorae::domain::RunLifecycle::Running);
+    assert_eq!(state.ledger_head.sequence, stamp.run_state_revision);
+    run.await_lifecycle("idle");
+    // Exercise a real later Writer transaction; replay must retain its earlier observation.
+    let binding = RunStore::new(SystemWorkspacePlatform, &run.state_root)
+        .load_controller_binding(run.identity.run_id)
+        .unwrap();
+    let holder = dolgorae::writer::WriterStore::holder(
+        run.identity.run_id,
+        "default".to_owned(),
+        &binding,
+        1,
+        "a".repeat(64),
+        1,
+        Some(first_turn.thread_id.clone()),
+        dolgorae::domain::RunLifecycle::Idle,
+    );
+    dolgorae::writer::WriterStore::new(
+        &run.state_root,
+        &run.identity.workspace_id,
+        run.identity.uid,
+    )
+    .transact(|record| record.prepare_acquire(run.identity.run_id, holder, Uuid::now_v7()))
+    .unwrap();
+    let replay = run.call(&request);
+    let ControlResponseV1::AcceptedReceipt {
+        accepted,
+        operation_id: replay_op,
+        stamp: replay_stamp,
+        state: replay_state,
+        writer: replay_writer,
+        controller: replay_controller,
+        effective_policy: replay_policy,
+        server_key: replay_server,
+        server_epoch: replay_epoch,
+    } = replay
+    else {
+        panic!("expected replay receipt: {replay:?}");
+    };
+    assert!(accepted.replayed);
+    assert_eq!(accepted.turn_id, first_turn.turn_id);
+    assert_eq!(
+        (
+            replay_op,
+            replay_stamp,
+            replay_state,
+            replay_writer,
+            replay_controller,
+            replay_policy,
+            replay_server,
+            replay_epoch
+        ),
+        (
+            operation_id,
+            stamp,
+            state,
+            writer,
+            controller,
+            effective_policy,
+            server_key,
+            server_epoch
+        )
+    );
+    let unauthenticated = run.call_raw(&declared(&request));
+    assert_eq!(unauthenticated["code"], "CONTROLLER_MISMATCH");
+    assert_eq!(run.server.calls("turn/start").len(), 1);
+}
+
+#[test]
+fn prepared_mutation_fences_competitors_and_its_token_survives_reply_loss() {
+    let run = Run::start(Behaviour::default());
+    let before = run.ledger.lock().unwrap().head().unwrap().sequence;
+    let request = run.submit("admitted");
+    let begin = ControlRequestV1::BeginPreparedMutation {
+        expected_state_revision: before,
+        request: Box::new(request.clone()),
+    };
+    let ControlResponseV1::MutationAdmitted { admission_id } = run.call(&begin) else {
+        panic!("admission refused");
+    };
+    assert!(run.server.calls("turn/start").is_empty());
+    let again = run.call(&begin);
+    assert!(
+        matches!(again, ControlResponseV1::MutationAdmitted { admission_id: same } if same == admission_id)
+    );
+    assert_eq!(failure_code(&run.call(&run.resume())), "RUN_STATE_CONFLICT");
+    let admitted = ControlRequestV1::AdmittedMutation {
+        admission_id,
+        request: Box::new(request),
+    };
+    let ControlResponseV1::AcceptedReceipt {
+        accepted: first, ..
+    } = run.call(&admitted)
+    else {
+        panic!("admitted Submit refused");
+    };
+    let ControlResponseV1::AcceptedReceipt {
+        accepted: replay, ..
+    } = run.call(&admitted)
+    else {
+        panic!("accepted reply was not replayed");
+    };
+    assert!(replay.replayed);
+    assert_eq!(first.turn_id, replay.turn_id);
+    assert_eq!(run.server.calls("turn/start").len(), 1);
+    assert_eq!(
+        run.recorded_kinds()
+            .iter()
+            .filter(|kind| **kind == AuditKind::MutationAdmitted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        run.recorded_kinds()
+            .iter()
+            .filter(|kind| **kind == AuditKind::MutationCompleted)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_read_submit_admission_cannot_prepare_writer_access() {
+    let run = Run::start(Behaviour::default());
+    let revision = run.ledger.lock().unwrap().head().unwrap().sequence;
+    let request = run.submit("read-admission");
+    let ControlResponseV1::MutationAdmitted { admission_id } =
+        run.call(&ControlRequestV1::BeginPreparedMutation {
+            expected_state_revision: revision,
+            request: Box::new(request.clone()),
+        })
+    else {
+        panic!("read admission refused");
+    };
+    let binding = RunStore::new(SystemWorkspacePlatform, &run.state_root)
+        .load_controller_binding(run.identity.run_id)
+        .unwrap();
+    let transaction_id = Uuid::now_v7();
+    let holder = dolgorae::writer::WriterStore::holder(
+        run.identity.run_id,
+        "default".to_owned(),
+        &binding,
+        run.identity.run_generation,
+        "a".repeat(64),
+        1,
+        None,
+        dolgorae::domain::RunLifecycle::Idle,
+    );
+    let (_, (_, writer_generation)) = dolgorae::writer::WriterStore::new(
+        &run.state_root,
+        &run.identity.workspace_id,
+        run.identity.uid,
+    )
+    .transact(|record| record.prepare_acquire(run.identity.run_id, holder, transaction_id))
+    .unwrap();
+    let refused = run.call(&ControlRequestV1::AdmittedMutation {
+        admission_id,
+        request: Box::new(ControlRequestV1::SetWriterAccess {
+            expected: run.identity.clone(),
+            caller: None,
+            write: true,
+            writer_generation,
+            transaction_id,
+        }),
+    });
+    assert_eq!(failure_code(&refused), "RUN_STATE_CONFLICT");
+    assert!(run.server.calls("thread/start").is_empty());
+    assert!(run.server.calls("turn/start").is_empty());
+    assert!(matches!(
+        run.call(&ControlRequestV1::AdmittedMutation {
+            admission_id,
+            request: Box::new(request),
+        }),
+        ControlResponseV1::AcceptedReceipt { .. }
+    ));
+}
+
+#[test]
+fn controller_generation_is_checked_before_an_accepted_replay() {
+    let run = Run::start(Behaviour::default());
+    let turn_id = accepted(&run.call(&run.submit("controller-generation")));
+    let rejected = ControlRequestV1::ControllerChecked {
+        expected_controller_generation: 2,
+        request: Box::new(run.submit("controller-generation")),
+    };
+    assert_eq!(failure_code(&run.call(&rejected)), "CONTROLLER_MISMATCH");
+    assert_eq!(run.server.calls("turn/start").len(), 1);
+    assert_eq!(run.status().1, Some(turn_id));
+
+    let mut binding = RunStore::new(SystemWorkspacePlatform, &run.state_root)
+        .load_controller_binding(run.identity.run_id)
+        .unwrap();
+    binding.identity.generation += 1;
+    let binding_path = run
+        .state_root
+        .join("runs")
+        .join(run.identity.run_id.to_string())
+        .join("controller.json");
+    fs::write(binding_path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    let drifted = ControlRequestV1::CheckedMutation {
+        expected_state_revision: 0,
+        request: Box::new(run.submit("controller-generation")),
+    };
+    assert_eq!(failure_code(&run.call(&drifted)), "IDEMPOTENCY_CONFLICT");
+    assert_eq!(run.server.calls("turn/start").len(), 1);
+}
+
 /// F7, direction one: the drain accepted a Turn before the operator's PREPARE
 /// became durable.
 ///
@@ -1043,7 +1304,7 @@ fn a_submitted_turn_reaches_its_terminal_with_nobody_waiting() {
     );
     // The observer page still answers, which a drain that held the ledger for
     // the length of a Turn would have cost.
-    assert_eq!(run.events(), 0);
+    assert!(run.events() > 0);
 
     // A caller that arrives afterwards is told the outcome rather than being
     // left waiting for an event that has already been and gone.
@@ -1089,19 +1350,20 @@ fn an_interaction_pauses_a_blocked_caller_and_its_answer_resumes_the_turn() {
 
     // The answer is accepted and reaches the app-server, not just the Run's
     // own bookkeeping.
-    assert_eq!(
-        run.call(&ControlRequestV1::Respond {
-            caller: None,
-            expected: run.identity.clone(),
-            request_id: 4_100,
-            idempotency_key: "approval-4100".to_owned(),
-            response: json!({"decision": "accept_once"}),
-        }),
+    let first_response = run.call(&ControlRequestV1::Respond {
+        caller: None,
+        expected: run.identity.clone(),
+        request_id: 4_100,
+        idempotency_key: "approval-4100".to_owned(),
+        response: json!({"decision": "accept_once"}),
+    });
+    assert!(matches!(
+        first_response,
         ControlResponseV1::Responded {
             request_id: 4_100,
-            resolution_receipt_id: None,
+            resolution_receipt_id: Some(_),
         }
-    );
+    ));
     let replies = run.server.replies();
     assert!(
         replies.iter().any(|reply| {
@@ -1118,10 +1380,7 @@ fn an_interaction_pauses_a_blocked_caller_and_its_answer_resumes_the_turn() {
             idempotency_key: "approval-4100".to_owned(),
             response: json!({"decision": "accept_once"}),
         }),
-        ControlResponseV1::Responded {
-            request_id: 4_100,
-            resolution_receipt_id: None,
-        }
+        first_response
     );
     match run.call(&ControlRequestV1::Respond {
         caller: None,
@@ -1179,7 +1438,7 @@ fn pinned_file_change_snapshot_reaches_a_durable_approval_and_upstream_answer() 
                 .position(|kind| *kind == AuditKind::ApprovalRequested)
                 .unwrap()
     );
-    assert_eq!(
+    assert!(matches!(
         run.call(&ControlRequestV1::Respond {
             caller: None,
             expected: run.identity.clone(),
@@ -1189,9 +1448,9 @@ fn pinned_file_change_snapshot_reaches_a_durable_approval_and_upstream_answer() 
         }),
         ControlResponseV1::Responded {
             request_id: 7100,
-            resolution_receipt_id: None
+            resolution_receipt_id: Some(_)
         }
-    );
+    ));
     let deadline = Instant::now() + SETTLE;
     while !run
         .server

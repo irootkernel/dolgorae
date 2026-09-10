@@ -3,7 +3,7 @@ fn main() {
     println!("cargo:rerun-if-changed={proto}");
     println!("cargo:rerun-if-changed=docs/protocol/dolgorae-public-v1.descriptor.pb");
 
-    prost_build::Config::new()
+    tonic_prost_build::configure()
         .compile_protos(&[proto], &["docs/protocol"])
         .expect("checked public v1 protobuf must compile");
 }

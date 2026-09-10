@@ -7,6 +7,13 @@ development commits.
 
 ## v0.1.3 - Unreleased
 
+### Added
+
+- Foreground local gRPC gateway with same-user Unix socket ownership, bounded
+  event subscriptions, and the 24-method Brokered Hierarchy bootstrap surface.
+- Shared Run, Controller, Writer, interaction, and artifact observations for Machine CLI and gRPC,
+  with durable event revisions and immutable Turn acceptance replay across gateway and worker replacement.
+
 ### Changed
 
 - Set the Codex compatibility baseline to 0.153.4 while retaining completed-only forks.

@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/audit-record/v2",
+  "title": "Dolgorae canonical audit ledger record v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sequence",
+    "timestamp",
+    "run_id",
+    "run_generation",
+    "kind",
+    "payload",
+    "previous_hash",
+    "hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "run_generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "kind": {
+      "enum": [
+        "workspace_initialized",
+        "run_created",
+        "write_continuation_created",
+        "turn_intent",
+        "thread_bound",
+        "turn_started",
+        "turn_terminal",
+        "lifecycle_transition",
+        "run_generation_started",
+        "run_generation_stopped",
+        "app_server_request",
+        "app_server_response",
+        "app_server_notification",
+        "approval_requested",
+        "approval_decided",
+        "interaction_opened",
+        "interaction_resolved",
+        "client_event",
+        "controller_reset",
+        "reasoning_content_suppressed",
+        "writer_acquired",
+        "writer_released",
+        "writer_handoff_requested",
+        "writer_handoff_cancelled",
+        "writer_handoff_completed",
+        "profile_observed",
+        "idempotency_reserved",
+        "reconciliation",
+        "cleanup_intent",
+        "cleanup_result",
+        "ledger_tail_repaired",
+        "projection_rewound",
+        "payload_unrepresentable",
+        "start_failed",
+        "outcome_unknown",
+        "mutation_admitted",
+        "mutation_completed"
+      ]
+    },
+    "payload": true,
+    "previous_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "client_projection": {}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "idempotency_reserved"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "https://dolgorae.local/schema/idempotency-intent/v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "lifecycle_transition"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/lifecycle_transition"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "start_failed"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/start_failed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "cleanup_result"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/cleanup_result"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "payload_unrepresentable"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/unrepresentable_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "client_event"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "client_projection": {
+            "$ref": "https://dolgorae.local/schema/stamped-client-event/v1#/$defs/stamp"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "client_projection": {
+            "$ref": "https://dolgorae.local/schema/stamped-client-event/v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "mutation_admitted",
+              "mutation_completed"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "client_projection"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "client_projection"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "mutation_admitted"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/mutation_admitted"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "mutation_completed"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/mutation_completed"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "lifecycle": {
+      "enum": [
+        "starting",
+        "idle",
+        "running",
+        "waiting_interaction",
+        "reconciliation_required",
+        "paused",
+        "closed",
+        "start_failed",
+        "outcome_unknown"
+      ]
+    },
+    "lifecycle_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "previous",
+        "current",
+        "terminal_seal"
+      ],
+      "properties": {
+        "previous": {
+          "$ref": "#/$defs/lifecycle"
+        },
+        "current": {
+          "$ref": "#/$defs/lifecycle"
+        },
+        "terminal_seal": {
+          "type": "boolean"
+        },
+        "interrupt_terminal_confirmed": {
+          "const": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "previous": {
+                "enum": [
+                  "running",
+                  "waiting_interaction"
+                ]
+              },
+              "current": {
+                "enum": [
+                  "paused",
+                  "closed"
+                ]
+              }
+            },
+            "required": [
+              "previous",
+              "current"
+            ]
+          },
+          "then": {
+            "required": [
+              "interrupt_terminal_confirmed"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "interrupt_terminal_confirmed"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "start_failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      }
+    },
+    "cleanup_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      }
+    },
+    "unrepresentable_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "observed_byte_length",
+        "raw_sha256",
+        "json_pointer",
+        "reason"
+      ],
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "workspace_initialized",
+            "run_created",
+            "write_continuation_created",
+            "turn_intent",
+            "thread_bound",
+            "turn_started",
+            "turn_terminal",
+            "lifecycle_transition",
+            "run_generation_started",
+            "run_generation_stopped",
+            "app_server_request",
+            "app_server_response",
+            "app_server_notification",
+            "approval_requested",
+            "approval_decided",
+            "interaction_opened",
+            "interaction_resolved",
+            "client_event",
+            "controller_reset",
+            "reasoning_content_suppressed",
+            "writer_acquired",
+            "writer_released",
+            "writer_handoff_requested",
+            "writer_handoff_cancelled",
+            "writer_handoff_completed",
+            "profile_observed",
+            "idempotency_reserved",
+            "reconciliation",
+            "cleanup_intent",
+            "cleanup_result",
+            "ledger_tail_repaired",
+            "projection_rewound",
+            "start_failed",
+            "outcome_unknown"
+          ]
+        },
+        "observed_byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "json_pointer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:|/.*)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "enum": [
+            "raw_payload_too_large",
+            "payload_not_utf8",
+            "duplicate_object_member",
+            "invalid_json",
+            "canonicalization_failed",
+            "represented_payload_too_large"
+          ]
+        }
+      }
+    },
+    "mutation_admitted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "admission_id",
+        "controller_id",
+        "expected_state_revision",
+        "request_sha256",
+        "operation",
+        "allow_writer_acquire"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "admission_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "controller_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "expected_state_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "allow_writer_acquire": {
+          "type": "boolean"
+        }
+      }
+    },
+    "mutation_completed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "admission_id"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "admission_id": {
+          "$ref": "#/$defs/uuid7"
+        }
+      }
+    },
+    "uuid7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

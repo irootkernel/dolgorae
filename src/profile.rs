@@ -2103,6 +2103,25 @@ fn snapshot_for(
     name: &str,
     profile: &RuntimeProfile,
 ) -> Result<ProfileSnapshot, MachineError> {
+    let snapshot = observe_snapshot(context, name, profile)?;
+    let binding =
+        crate::global_runtime::ResolvedGlobalProfile::from_definition(name, profile.clone())?
+            .bind(snapshot.clone())?;
+    crate::global_profile::GlobalProfileStore::from_root(&context.dolgorae_home_root)
+        .record_binding(crate::global_profile::ProfileBindingRecord {
+            selected_name: binding.selected_name,
+            definition_sha256: binding.definition_sha256,
+            server_key: binding.server_key,
+            launch_snapshot_sha256: binding.launch_snapshot_sha256,
+        })?;
+    Ok(snapshot)
+}
+
+fn observe_snapshot(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+) -> Result<ProfileSnapshot, MachineError> {
     let executable = Path::new(&profile.argv[0]);
     let canonical_executable = fs::canonicalize(executable).map_err(|error| {
         MachineError::profile_config_invalid(&context.registry_path, error.to_string())
@@ -2178,18 +2197,7 @@ fn snapshot_for(
         })
     })();
     let _ = fs::remove_dir_all(&schema_root);
-    let snapshot = result?;
-    let binding =
-        crate::global_runtime::ResolvedGlobalProfile::from_definition(name, profile.clone())?
-            .bind(snapshot.clone())?;
-    crate::global_profile::GlobalProfileStore::from_root(&context.dolgorae_home_root)
-        .record_binding(crate::global_profile::ProfileBindingRecord {
-            selected_name: binding.selected_name,
-            definition_sha256: binding.definition_sha256,
-            server_key: binding.server_key,
-            launch_snapshot_sha256: binding.launch_snapshot_sha256,
-        })?;
-    Ok(snapshot)
+    result
 }
 
 /// Prepare the launch snapshot for a definition already resolved from the
@@ -2208,6 +2216,226 @@ pub(crate) fn snapshot_for_global(
         name,
         profile,
     )
+}
+
+/// A normalized model catalog observed without starting a Profile Server.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedProfileModel {
+    pub model_id: String,
+    pub is_default: bool,
+    pub supported_efforts: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileObservationBlocker {
+    ServerUnavailable,
+    RuntimeIncompatible,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileObservation {
+    pub snapshot: ProfileSnapshot,
+    pub server_epoch: Option<u64>,
+    pub models: Vec<ObservedProfileModel>,
+    pub blockers: Vec<ProfileObservationBlocker>,
+}
+
+/// Observe the registered definition and an already-running verified server.
+/// Schema probes use disposable output; this does not install a binding or
+/// start, stop, migrate, or repair a Profile Server.
+pub fn observe_global_profile(
+    home: &DolgoraeHome,
+    name: &str,
+) -> Result<ProfileObservation, MachineError> {
+    let definition = crate::global_profile::GlobalProfileStore::new(home).resolve(name)?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let snapshot = observe_snapshot(&context, name, &definition)?;
+    let mut observation = ProfileObservation {
+        snapshot,
+        server_epoch: None,
+        models: Vec::new(),
+        blockers: Vec::new(),
+    };
+    if observation.snapshot.compatibility_verdict == CompatibilityVerdict::Rejected {
+        observation
+            .blockers
+            .push(ProfileObservationBlocker::RuntimeIncompatible);
+        return Ok(observation);
+    }
+    let state_path = profile_state_path(&context, &observation.snapshot);
+    let Some(state) = read_state_if_running(&state_path)? else {
+        observation
+            .blockers
+            .push(ProfileObservationBlocker::ServerUnavailable);
+        return Ok(observation);
+    };
+    let active_path =
+        home_root(&context, &observation.snapshot.canonical_codex_home)?.join("active.json");
+    let active = read_home_active(&active_path)?;
+    if state.lifecycle != "ready"
+        || state.server_key != observation.snapshot.server_key
+        || state.snapshot.launch_contract_sha256 != observation.snapshot.launch_contract_sha256
+        || attach_running(&observation.snapshot, &state, active.as_ref()).is_err()
+        || verify_live_process_identity(&state).is_err()
+        || verify_recorded_socket(name, &state).is_err()
+    {
+        observation
+            .blockers
+            .push(ProfileObservationBlocker::ServerUnavailable);
+        return Ok(observation);
+    }
+    let catalog = observe_model_catalog(name, &state);
+    // Bind the observation to the same server generation after the read.
+    if read_state(&state_path)?.as_ref() != Some(&state)
+        || read_home_active(&active_path)? != active
+        || verify_live_process_identity(&state).is_err()
+        || verify_recorded_socket(name, &state).is_err()
+    {
+        observation
+            .blockers
+            .push(ProfileObservationBlocker::ServerUnavailable);
+        return Ok(observation);
+    }
+    match catalog {
+        Ok(models) => {
+            observation.server_epoch = Some(state.server_epoch);
+            observation.models = models;
+        }
+        Err(error) if error.code == "TRANSPORT_FAILURE" => {
+            observation
+                .blockers
+                .push(ProfileObservationBlocker::ServerUnavailable);
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(observation)
+}
+
+fn observe_model_catalog(
+    profile_name: &str,
+    state: &ServerState,
+) -> Result<Vec<ObservedProfileModel>, MachineError> {
+    let mut connection =
+        JsonRpcConnection::connect(Path::new(&state.socket_path), Duration::from_secs(30))
+            .map_err(transport)?;
+    let initialized = connection.request("initialize", json!({
+        "clientInfo": {"name":"dolgorae", "title":"Dolgorae", "version":env!("CARGO_PKG_VERSION")},
+        "capabilities":{"experimentalApi":false,"optOutNotificationMethods":[]}
+    })).map_err(transport)?;
+    if initialized["codexHome"].as_str() != Some(&state.snapshot.canonical_codex_home) {
+        return Err(compatibility(
+            profile_name,
+            "app_server_probe",
+            "profile model observation home mismatch",
+        ));
+    }
+    connection
+        .notify("initialized", json!({}))
+        .map_err(transport)?;
+    let mut cursor = Value::Null;
+    let mut cursors = BTreeSet::new();
+    let mut items = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for _ in 0..1000 {
+        if Instant::now() >= deadline {
+            return Err(transport(
+                "model catalog observation exceeded its time budget",
+            ));
+        }
+        let page = connection
+            .request("model/list", json!({"cursor":cursor,"limit":100}))
+            .map_err(transport)?;
+        let data = page["data"].as_array().ok_or_else(|| {
+            compatibility(
+                profile_name,
+                "app_server_probe",
+                "model/list response lacks data",
+            )
+        })?;
+        if data.len() > 100 {
+            return Err(compatibility(
+                profile_name,
+                "app_server_probe",
+                "model page exceeds requested limit",
+            ));
+        }
+        items.extend(data.iter().cloned());
+        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.is_null() {
+            connection.close().map_err(transport)?;
+            return normalize_observed_models(profile_name, &items);
+        }
+        let next = cursor
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                compatibility(profile_name, "app_server_probe", "invalid model cursor")
+            })?;
+        if !cursors.insert(next.to_owned()) {
+            return Err(compatibility(
+                profile_name,
+                "app_server_probe",
+                "repeated model cursor",
+            ));
+        }
+    }
+    Err(compatibility(
+        profile_name,
+        "app_server_probe",
+        "model catalog pagination exceeds bound",
+    ))
+}
+
+fn normalize_observed_models(
+    profile_name: &str,
+    items: &[Value],
+) -> Result<Vec<ObservedProfileModel>, MachineError> {
+    let invalid = || {
+        compatibility(
+            profile_name,
+            "app_server_probe",
+            "invalid model identity, default, or effort catalog",
+        )
+    };
+    let mut names = BTreeSet::new();
+    let mut result = Vec::new();
+    for item in items {
+        let name = item["model"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(invalid)?;
+        if !names.insert(name) {
+            return Err(invalid());
+        }
+        let is_default = item["isDefault"].as_bool().ok_or_else(invalid)?;
+        let efforts = item["supportedReasoningEfforts"]
+            .as_array()
+            .ok_or_else(invalid)?;
+        let mut unique = BTreeSet::new();
+        for effort in efforts {
+            let token = effort["reasoningEffort"]
+                .as_str()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(invalid)?;
+            unique.insert(token.to_owned());
+        }
+        if unique.is_empty() {
+            return Err(invalid());
+        }
+        result.push(ObservedProfileModel {
+            model_id: name.to_owned(),
+            is_default,
+            supported_efforts: unique.into_iter().collect(),
+        });
+    }
+    if result.is_empty() || result.iter().filter(|model| model.is_default).count() != 1 {
+        return Err(invalid());
+    }
+    result.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+    Ok(result)
 }
 
 fn configuration_snapshot(
@@ -5953,6 +6181,33 @@ impl ProfileOperation {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observed_models_validate_defaults_and_efforts() {
+        let item = serde_json::json!({"model":"m", "isDefault":true,
+            "supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"low"}]});
+        let models = super::normalize_observed_models("p", std::slice::from_ref(&item)).unwrap();
+        assert_eq!(models[0].supported_efforts, ["high", "low"]);
+        assert!(super::normalize_observed_models("p", &[item.clone(), item.clone()]).is_err());
+        for replacement in [
+            serde_json::json!([]),
+            serde_json::json!([{"reasoningEffort":""}]),
+        ] {
+            let mut invalid = item.clone();
+            invalid["supportedReasoningEfforts"] = replacement;
+            assert!(super::normalize_observed_models("p", &[invalid]).is_err());
+        }
+        let mut repeated = item.clone();
+        repeated["supportedReasoningEfforts"] =
+            serde_json::json!([{"reasoningEffort":"high"},{"reasoningEffort":"high"}]);
+        assert_eq!(
+            super::normalize_observed_models("p", &[repeated]).unwrap()[0].supported_efforts,
+            ["high"]
+        );
+        let mut invalid = item;
+        invalid["isDefault"] = serde_json::json!(false);
+        assert!(super::normalize_observed_models("p", &[invalid]).is_err());
+    }
+
     #[test]
     fn an_operational_diagnostic_keeps_its_details_out_of_the_minimal_projection() {
         let root =

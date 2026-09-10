@@ -146,7 +146,172 @@ pub struct AccountEnvironment {
     pub temporary_directory: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AtNodeIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub uid: u32,
+    pub mode: u32,
+    pub links: u64,
+}
+
+unsafe extern "C" {
+    fn __pthread_fchdir(fd: libc::c_int) -> libc::c_int;
+}
+
 impl DarwinSystem {
+    /// Bind in a thread-local directory, without modifying the process cwd.
+    /// Darwin has no bindat; the dedicated thread owns the cwd override until exit.
+    pub fn bind_unix_at(
+        self,
+        directory: &File,
+        name: &OsStr,
+    ) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
+        let directory = directory.try_clone()?;
+        let name = name.to_owned();
+        std::thread::spawn(move || {
+            // SAFETY: the descriptor remains live on this dedicated thread. Darwin's
+            // thread-local cwd override disappears when this thread exits.
+            if unsafe { __pthread_fchdir(directory.as_raw_fd()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            std::os::unix::net::UnixListener::bind(Path::new(&name))
+        })
+        .join()
+        .map_err(|_| std::io::Error::other("socket bind thread failed"))?
+    }
+
+    pub fn peer_uid(self, socket: &UnixStream) -> Result<u32, std::io::Error> {
+        let mut uid = 0;
+        let mut gid = 0;
+        // SAFETY: socket is live and both output scalars remain writable for the call.
+        if unsafe { libc::getpeereid(socket.as_raw_fd(), &raw mut uid, &raw mut gid) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+
+    pub fn statat_nofollow(
+        self,
+        directory: &File,
+        name: &OsStr,
+    ) -> Result<AtNodeIdentity, std::io::Error> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut stat = MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: name is terminated, directory is live, and stat is writable.
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: successful fstatat initialized the complete structure.
+        let stat = unsafe { stat.assume_init() };
+        Ok(AtNodeIdentity {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino,
+            uid: stat.st_uid,
+            mode: u32::from(stat.st_mode),
+            links: u64::from(stat.st_nlink),
+        })
+    }
+
+    pub fn mkdirat_private(self, directory: &File, name: &OsStr) -> Result<(), std::io::Error> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: the borrowed directory and terminated component remain live.
+        if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn createat_private(
+        self,
+        directory: &File,
+        name: &OsStr,
+        exclusive: bool,
+    ) -> Result<File, std::io::Error> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let flags = libc::O_RDWR
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | libc::O_CREAT
+            | if exclusive { libc::O_EXCL } else { 0 };
+        // SAFETY: directory and component are live; mode is supplied for O_CREAT.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fd is a newly owned descriptor returned by openat.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    pub fn chmodat_private_socket(
+        self,
+        directory: &File,
+        name: &OsStr,
+    ) -> Result<(), std::io::Error> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: directory and name remain live; no-follow prevents symlink traversal.
+        if unsafe {
+            libc::fchmodat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                0o600,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn unlinkat_file(self, directory: &File, name: &OsStr) -> Result<(), std::io::Error> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: directory and name remain live; unlinkat does not follow the leaf.
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn renameat_file(
+        self,
+        directory: &File,
+        source: &OsStr,
+        destination: &OsStr,
+    ) -> Result<(), std::io::Error> {
+        let source = CString::new(source.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let destination = CString::new(destination.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: all arguments remain live; both names resolve relative to one descriptor.
+        if unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn openat_nofollow(
         self,
         directory: &File,
@@ -405,6 +570,23 @@ impl DarwinSystem {
             return Ok(identities);
         }
     }
+    /// Take the command's inherited readiness descriptor before starting the runtime.
+    pub fn take_ready_file(self, fd: RawFd) -> Result<File, std::io::Error> {
+        if fd < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ready descriptor must be nonnegative",
+            ));
+        }
+        // SAFETY: F_GETFD validates the inherited descriptor without taking ownership.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the foreground serve command is the sole owner of its inherited
+        // readiness descriptor and calls this once before opening gateway resources.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     pub fn duplicate_fd_cloexec(self, fd: RawFd) -> Result<OwnedFd, std::io::Error> {
         // SAFETY: fcntl borrows the caller's descriptor and returns a distinct
         // descriptor on success. Ownership of that new descriptor is transferred

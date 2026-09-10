@@ -1,0 +1,769 @@
+//! Public request decoding and typed dispatch into the shared semantic service.
+use crate::controller::{CredentialCarrier, authorize_controller, binding_from_carrier};
+use crate::darwin::DarwinSystem;
+use crate::domain;
+use crate::gateway::GatewayBackend;
+use crate::gateway_projection::{self as project, ProjectionFacts};
+use crate::machine::MachineError;
+use crate::paths::DolgoraeHome;
+use crate::protocol::public_v1 as pb;
+use crate::semantic::{
+    CoreSemanticService, RunMutationInput, RunMutationOperation, RunMutationReceipt, StartRunInput,
+};
+use crate::snapshot::RunSnapshot;
+use crate::workspace::{WorkspaceService, WorkspaceView};
+use std::path::{Component, Path, PathBuf};
+use uuid::Uuid;
+
+pub struct CoreGatewayBackend {
+    pub(crate) home: DolgoraeHome,
+    instance_id: Uuid,
+}
+
+impl CoreGatewayBackend {
+    pub fn new(home: DolgoraeHome, instance_id: Uuid) -> Self {
+        Self { home, instance_id }
+    }
+
+    pub(crate) fn context(&self) -> pb::ResponseContext {
+        pb::ResponseContext {
+            protocol_version: 1,
+            server_instance_id: self.instance_id.to_string(),
+            operation_id: None,
+        }
+    }
+
+    pub(crate) fn workspace(
+        &self,
+        reference: &pb::WorkspaceRef,
+    ) -> Result<WorkspaceView, MachineError> {
+        absolute(&reference.absolute_path, "workspace.absolute_path")?;
+        if reference.expected_workspace_id.is_empty() {
+            return Err(invalid(
+                "workspace.expected_workspace_id",
+                "workspace identity is required",
+            ));
+        }
+        let view =
+            WorkspaceService::system()?.discover(Some(Path::new(&reference.absolute_path)))?;
+        if view.workspace_id != reference.expected_workspace_id {
+            return Err(invalid(
+                "workspace.expected_workspace_id",
+                "workspace identity does not match canonical path",
+            ));
+        }
+        Ok(view)
+    }
+
+    pub(crate) fn run_snapshot(
+        &self,
+        reference: &pb::RunRef,
+    ) -> Result<(PathBuf, RunSnapshot, ProjectionFacts), MachineError> {
+        let view = self.workspace(required(reference.workspace.as_ref(), "run.workspace")?)?;
+        let run_id = uuid(&reference.run_id, "run.run_id")?;
+        let root = self.home.workspace_root(&view.workspace_id);
+        let (snapshot, observation) = RunSnapshot::observe(&root, run_id, 0)?;
+        if snapshot.manifest.workspace_id != view.workspace_id {
+            return Err(invalid("run.run_id", "Run belongs to another workspace"));
+        }
+        let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+        Ok((root, snapshot, facts))
+    }
+
+    fn run_state(&self, reference: &pb::RunRef) -> Result<(PathBuf, RunSnapshot), MachineError> {
+        let view = self.workspace(required(reference.workspace.as_ref(), "run.workspace")?)?;
+        let root = self.home.workspace_root(&view.workspace_id);
+        let snapshot = RunSnapshot::load(&root, uuid(&reference.run_id, "run.run_id")?, 0)?;
+        if snapshot.manifest.workspace_id != view.workspace_id {
+            return Err(invalid("run.run_id", "Run belongs to another workspace"));
+        }
+        Ok((root, snapshot))
+    }
+
+    pub(crate) fn controller(
+        &self,
+        reference: &pb::ControllerCarrierRef,
+    ) -> Result<CredentialCarrier, MachineError> {
+        let path = absolute(
+            &reference.absolute_file_path,
+            "controller.absolute_file_path",
+        )?;
+        let root = self.home.root().join("controller-carriers");
+        let carrier = CredentialCarrier::open_confined(&root, path)?;
+        let expected = uuid(
+            &reference.expected_controller_id,
+            "controller.expected_controller_id",
+        )?;
+        if reference.expected_controller_generation == 0 {
+            return Err(invalid(
+                "controller.expected_controller_generation",
+                "generation must be positive",
+            ));
+        }
+        let binding = binding_from_carrier(&carrier, reference.expected_controller_generation)?;
+        if binding.identity.controller_id != expected {
+            return Err(invalid(
+                "controller.expected_controller_id",
+                "carrier identity does not match",
+            ));
+        }
+        Ok(carrier.with_expected_generation(reference.expected_controller_generation))
+    }
+
+    pub(crate) fn run_controller(
+        &self,
+        snapshot: &RunSnapshot,
+        reference: &pb::ControllerCarrierRef,
+    ) -> Result<CredentialCarrier, MachineError> {
+        let carrier = self.controller(reference)?;
+        if reference.expected_controller_generation != snapshot.controller.generation {
+            return Err(controller_mismatch(snapshot.manifest.run_id));
+        }
+        authorize_controller(
+            snapshot.manifest.run_id,
+            "run.interaction.get",
+            snapshot.controller_authority()?,
+            &carrier,
+        )?;
+        Ok(carrier)
+    }
+
+    pub(crate) fn mutate(
+        &self,
+        reference: &pb::RunRef,
+        controller: &pb::ControllerCarrierRef,
+        revision: Option<u64>,
+        operation: RunMutationOperation,
+    ) -> Result<RunMutationReceipt, MachineError> {
+        let view = self.workspace(required(reference.workspace.as_ref(), "run.workspace")?)?;
+        let run_id = uuid(&reference.run_id, "run.run_id")?;
+        let carrier = self.controller(controller)?;
+        let binding = crate::controller::load_reconciled_controller_binding(
+            &self.home.workspace_root(&view.workspace_id),
+            run_id,
+        )?;
+        if binding.identity.generation != controller.expected_controller_generation {
+            return Err(controller_mismatch(run_id));
+        }
+        CoreSemanticService.mutate_run(RunMutationInput {
+            workspace: view.canonical_path.to_path_buf()?,
+            expected_workspace_id: view.workspace_id,
+            run_id,
+            expected_state_revision: revision,
+            carrier,
+            operation,
+        })
+    }
+
+    fn mutation_response(
+        &self,
+        reference: &pb::RunRef,
+        controller: &pb::ControllerCarrierRef,
+        revision: u64,
+        operation: RunMutationOperation,
+    ) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutate(reference, controller, Some(revision), operation)?;
+        let (_, snapshot, facts) = self.run_snapshot(reference)?;
+        Ok(pb::RunMutationResponse {
+            context: Some(self.context()),
+            run: Some(project::run_projection(&snapshot, &facts)?),
+        })
+    }
+
+    fn profile(&self, name: &str) -> Result<pb::ProfileProjection, MachineError> {
+        let observation = crate::profile::observe_global_profile(&self.home, name)?;
+        let blockers = observation
+            .blockers
+            .into_iter()
+            .map(|blocker| match blocker {
+                crate::profile::ProfileObservationBlocker::ServerUnavailable => {
+                    pb::CapabilityBlocker {
+                        code: pb::CapabilityBlockerCode::ProfileServerUnavailable as i32,
+                        safe_message: "Profile server is unavailable".to_owned(),
+                    }
+                }
+                crate::profile::ProfileObservationBlocker::RuntimeIncompatible => {
+                    pb::CapabilityBlocker {
+                        code: pb::CapabilityBlockerCode::ProfileRuntimeIncompatible as i32,
+                        safe_message: "Profile runtime is incompatible".to_owned(),
+                    }
+                }
+            })
+            .collect();
+        project::profile(&project::ProfileFacts {
+            snapshot: observation.snapshot,
+            server_epoch: observation.server_epoch,
+            models: observation
+                .models
+                .into_iter()
+                .map(|model| project::ProfileModelFacts {
+                    model_id: model.model_id,
+                    is_default: model.is_default,
+                    supported_efforts: model.supported_efforts,
+                })
+                .collect(),
+            capabilities: crate::runtime::capabilities(),
+            blockers,
+        })
+    }
+
+    fn workspace_writer(
+        &self,
+        reference: &pb::WorkspaceRef,
+    ) -> Result<pb::WriterState, MachineError> {
+        let view = self.workspace(reference)?;
+        let root = self.home.workspace_root(&view.workspace_id);
+        let writer =
+            crate::writer::WriterStore::new(&root, &view.workspace_id, DarwinSystem.current_uid())
+                .load()?;
+        if let Some(holder) = writer.holder.as_ref() {
+            let (_, snapshot, facts) = self.run_snapshot(&pb::RunRef {
+                workspace: Some(reference.clone()),
+                run_id: holder.run_id.to_string(),
+            })?;
+            project::writer_state(&snapshot, &facts, self.context())
+        } else {
+            project::ownerless_writer_state(&writer, self.context())
+        }
+    }
+}
+
+pub(crate) fn invalid(field: &str, reason: &str) -> MachineError {
+    MachineError::invalid_argument(field, reason)
+}
+pub(crate) fn required<'a, T>(value: Option<&'a T>, field: &str) -> Result<&'a T, MachineError> {
+    value.ok_or_else(|| invalid(field, "field is required"))
+}
+pub(crate) fn uuid(value: &str, field: &str) -> Result<Uuid, MachineError> {
+    Uuid::parse_str(value).map_err(|_| invalid(field, "expected UUID"))
+}
+fn controller_mismatch(run_id: Uuid) -> MachineError {
+    MachineError::new(
+        "CONTROLLER_MISMATCH",
+        "controller generation does not authorize this operation",
+        false,
+        serde_json::json!({"run_id":run_id,"operation":"rpc.controller.authorize"}),
+    )
+}
+fn input_enum<T: TryFrom<i32>>(field: &str, value: i32, maximum: u32) -> Result<T, MachineError> {
+    T::try_from(value).map_err(|_| MachineError::new("UNSUPPORTED_SCHEMA_VERSION", "input enum is not supported by this public protocol", false,
+        serde_json::json!({"schema":format!("dolgorae.public.v1.{field}"),"requested":u32::from_ne_bytes(value.to_ne_bytes()),"supported":(0..=maximum).collect::<Vec<_>>()})))
+}
+fn absolute<'a>(value: &'a str, field: &str) -> Result<&'a Path, MachineError> {
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(invalid(
+            field,
+            "expected an absolute path without traversal components",
+        ));
+    }
+    Ok(path)
+}
+
+impl GatewayBackend for CoreGatewayBackend {
+    fn watch_run_events(
+        &self,
+        request: pb::WatchRunEventsRequest,
+    ) -> Result<crate::gateway::EventPage, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        crate::gateway_observation::watch_page(
+            &root,
+            &snapshot,
+            &request.after_cursor,
+            request.projection,
+            request.projection_version,
+        )
+    }
+    fn list_pending_interactions(
+        &self,
+        request: pb::ListPendingInteractionsRequest,
+    ) -> Result<pb::ListPendingInteractionsResponse, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        crate::gateway_observation::list_pending(&root, &snapshot, self.context())
+    }
+    fn get_controller_interaction(
+        &self,
+        request: pb::GetControllerInteractionRequest,
+    ) -> Result<pb::GetControllerInteractionResponse, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        let controller = request.controller.as_ref().ok_or_else(|| {
+            MachineError::interaction_full_payload_requires_controller(
+                snapshot.manifest.run_id,
+                "run.interaction.get",
+            )
+        })?;
+        let carrier = self.run_controller(&snapshot, controller)?;
+        crate::gateway_observation::get_interaction(
+            &root,
+            &snapshot,
+            &request.interaction_id,
+            &carrier,
+            self.context(),
+        )
+    }
+    fn resolve_interaction(
+        &self,
+        mut request: pb::ResolveInteractionRequest,
+    ) -> Result<pb::ResolveInteractionResponse, MachineError> {
+        let operation = crate::gateway_observation::resolve_operation(&mut request)?;
+        let receipt = self.mutate(
+            required(request.run.as_ref(), "run")?,
+            required(request.controller.as_ref(), "controller")?,
+            None,
+            operation,
+        )?;
+        let Some(crate::worker::ControlResponseV1::Responded {
+            resolution_receipt_id: Some(id),
+            ..
+        }) = receipt.response
+        else {
+            return Err(crate::snapshot::state_conflict(
+                receipt.snapshot.manifest.run_id,
+                receipt.snapshot.projection.lifecycle,
+                "run.respond",
+            ));
+        };
+        let mut context = self.context();
+        context.operation_id = Some(id.to_string());
+        Ok(pb::ResolveInteractionResponse {
+            context: Some(context),
+            interaction_id: request.interaction_id,
+            status: pb::InteractionStatus::Resolved as i32,
+            resolution_receipt: id.to_string(),
+        })
+    }
+    fn get_artifact(
+        &self,
+        request: pb::GetArtifactRequest,
+    ) -> Result<pb::GetArtifactResponse, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        let carrier = request
+            .controller
+            .as_ref()
+            .map(|reference| self.run_controller(&snapshot, reference))
+            .transpose()?;
+        crate::gateway_observation::artifact_metadata(
+            &root,
+            &snapshot,
+            &request.artifact_id,
+            carrier.as_ref(),
+            self.context(),
+        )
+    }
+    fn read_artifact_chunk(
+        &self,
+        request: pb::ReadArtifactChunkRequest,
+    ) -> Result<pb::ReadArtifactChunkResponse, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        let carrier = request
+            .controller
+            .as_ref()
+            .map(|reference| self.run_controller(&snapshot, reference))
+            .transpose()?;
+        crate::gateway_observation::artifact_chunk(
+            &root,
+            &snapshot,
+            &request.artifact_id,
+            (request.offset, request.length),
+            carrier.as_ref(),
+            self.context(),
+        )
+    }
+    fn submit_turn(
+        &self,
+        request: pb::SubmitTurnRequest,
+    ) -> Result<pb::SubmitTurnAccepted, MachineError> {
+        input_enum::<pb::WriteIntent>("WriteIntent", request.write_intent, 2)?;
+        let reference = required(request.run.as_ref(), "run")?;
+        let write = match pb::WriteIntent::try_from(request.write_intent) {
+            Ok(pb::WriteIntent::Read) => false,
+            Ok(pb::WriteIntent::Write) => true,
+            _ => {
+                return Err(invalid(
+                    "write_intent",
+                    "explicit read or write intent is required",
+                ));
+            }
+        };
+        let images = request
+            .images
+            .into_iter()
+            .map(|image| {
+                input_enum::<pb::ImageDetail>("ImageDetail", image.detail, 3)?;
+                let path =
+                    absolute(&image.absolute_file_path, "images.absolute_file_path")?.to_path_buf();
+                let detail = match pb::ImageDetail::try_from(image.detail) {
+                    Ok(pb::ImageDetail::Auto) => crate::turn::ImageDetail::Auto,
+                    Ok(pb::ImageDetail::Low) => crate::turn::ImageDetail::Low,
+                    Ok(pb::ImageDetail::High) => crate::turn::ImageDetail::High,
+                    _ => {
+                        return Err(invalid(
+                            "images.detail",
+                            "explicit image detail is required",
+                        ));
+                    }
+                };
+                Ok(crate::worker::TurnControlImage { path, detail })
+            })
+            .collect::<Result<Vec<_>, MachineError>>()?;
+        let receipt = self.mutate(
+            reference,
+            required(request.controller.as_ref(), "controller")?,
+            Some(request.expected_state_revision),
+            RunMutationOperation::Submit {
+                request: crate::worker::TurnControlRequest {
+                    normalized_request_sha256: None,
+                    message: request.message,
+                    idempotency_key: request.idempotency_key.clone(),
+                    effort: request.effort,
+                    images,
+                    write,
+                },
+                write,
+            },
+        )?;
+        let Some(crate::worker::ControlResponseV1::AcceptedReceipt {
+            accepted,
+            operation_id,
+            effective_policy,
+            ..
+        }) = receipt.response
+        else {
+            return Err(crate::snapshot::state_conflict(
+                receipt.snapshot.manifest.run_id,
+                receipt.snapshot.projection.lifecycle,
+                "run.submit",
+            ));
+        };
+        let snapshot = receipt.snapshot;
+        let facts = project::acceptance_facts(&snapshot, &effective_policy)?;
+        let mut context = self.context();
+        context.operation_id = Some(operation_id.to_string());
+        Ok(pb::SubmitTurnAccepted {
+            context: Some(context.clone()),
+            accepted_turn: Some(project::turn_projection(
+                snapshot.manifest.run_id,
+                &accepted.thread_id,
+                &accepted.turn_id,
+                pb::TurnStatus::Accepted,
+                &snapshot.stamp.captured_head_cursor,
+                None,
+            )?),
+            run: Some(project::run_projection(&snapshot, &facts)?),
+            writer: Some(project::writer_state(&snapshot, &facts, context)?),
+            idempotency_key: request.idempotency_key,
+            correlation_id: operation_id.to_string(),
+        })
+    }
+    fn list_profiles(
+        &self,
+        _: pb::ListProfilesRequest,
+    ) -> Result<pb::ListProfilesResponse, MachineError> {
+        let registry = crate::global_profile::GlobalProfileStore::new(&self.home).load()?;
+        let items = registry
+            .profiles
+            .keys()
+            .map(|name| self.profile(name))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(pb::ListProfilesResponse {
+            context: Some(self.context()),
+            items,
+        })
+    }
+    fn get_profile(
+        &self,
+        r: pb::GetProfileRequest,
+    ) -> Result<pb::GetProfileResponse, MachineError> {
+        Ok(pb::GetProfileResponse {
+            context: Some(self.context()),
+            profile: Some(self.profile(&r.profile_name)?),
+        })
+    }
+    fn list_runs(&self, r: pb::ListRunsRequest) -> Result<pb::ListRunsResponse, MachineError> {
+        let view = self.workspace(required(r.workspace.as_ref(), "workspace")?)?;
+        let controller = r
+            .controller_id
+            .as_deref()
+            .map(|value| uuid(value, "controller_id"))
+            .transpose()?;
+        let items = CoreSemanticService
+            .list_runs(&view, controller)?
+            .into_iter()
+            .map(|(snapshot, observation)| {
+                let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+                project::run_projection(&snapshot, &facts)
+            })
+            .collect::<Result<Vec<_>, MachineError>>()?;
+        Ok(pb::ListRunsResponse {
+            context: Some(self.context()),
+            items,
+        })
+    }
+    fn get_workspace_writer_status(
+        &self,
+        r: pb::GetWorkspaceWriterStatusRequest,
+    ) -> Result<pb::GetWorkspaceWriterStatusResponse, MachineError> {
+        Ok(pb::GetWorkspaceWriterStatusResponse {
+            writer: Some(self.workspace_writer(required(r.workspace.as_ref(), "workspace")?)?),
+        })
+    }
+    fn acquire_writer(&self, r: pb::AcquireWriterRequest) -> Result<pb::WriterState, MachineError> {
+        let reference = required(r.run.as_ref(), "run")?;
+        self.mutate(
+            reference,
+            required(r.controller.as_ref(), "controller")?,
+            Some(r.expected_state_revision),
+            RunMutationOperation::AcquireWriter,
+        )?;
+        self.workspace_writer(required(reference.workspace.as_ref(), "run.workspace")?)
+    }
+    fn release_writer(&self, r: pb::ReleaseWriterRequest) -> Result<pb::WriterState, MachineError> {
+        let reference = required(r.run.as_ref(), "run")?;
+        self.mutate(
+            reference,
+            required(r.controller.as_ref(), "controller")?,
+            Some(r.expected_state_revision),
+            RunMutationOperation::ReleaseWriter,
+        )?;
+        let (_, snapshot, facts) = self.run_snapshot(reference)?;
+        project::writer_state(&snapshot, &facts, self.context())
+    }
+    fn get_capabilities(
+        &self,
+        _: pb::GetCapabilitiesRequest,
+    ) -> Result<pb::GetCapabilitiesResponse, MachineError> {
+        project::capabilities(&crate::runtime::capabilities(), self.context())
+    }
+
+    fn inspect_workspace(
+        &self,
+        request: pb::InspectWorkspaceRequest,
+    ) -> Result<pb::InspectWorkspaceResponse, MachineError> {
+        absolute(&request.absolute_path, "absolute_path")?;
+        let view = WorkspaceService::system()?.discover(Some(Path::new(&request.absolute_path)))?;
+        if request
+            .expected_workspace_id
+            .as_ref()
+            .is_some_and(|id| *id != view.workspace_id)
+        {
+            return Err(invalid(
+                "expected_workspace_id",
+                "workspace identity does not match",
+            ));
+        }
+        Ok(pb::InspectWorkspaceResponse {
+            context: Some(self.context()),
+            workspace_id: view.workspace_id,
+            canonical_path: Some(project::path(&view.canonical_path)?),
+            mode: match view.mode {
+                crate::workspace::WorkspaceMode::Git => pb::WorkspaceMode::Git,
+                crate::workspace::WorkspaceMode::NonGit => pb::WorkspaceMode::NonGit,
+            } as i32,
+            status: pb::WorkspaceInspectionStatus::Compatible as i32,
+            blockers: vec![],
+        })
+    }
+
+    fn get_run(&self, request: pb::GetRunRequest) -> Result<pb::GetRunResponse, MachineError> {
+        let (_, snapshot, facts) = self.run_snapshot(required(request.run.as_ref(), "run")?)?;
+        Ok(pb::GetRunResponse {
+            context: Some(self.context()),
+            run: Some(project::run_projection(&snapshot, &facts)?),
+        })
+    }
+
+    fn start_run(
+        &self,
+        request: pb::StartRunRequest,
+    ) -> Result<pb::StartRunResponse, MachineError> {
+        input_enum::<pb::ControlMode>("ControlMode", request.control_mode, 2)?;
+        input_enum::<pb::ExecutionLane>("ExecutionLane", request.execution_lane, 2)?;
+        input_enum::<pb::AssuranceLevel>("AssuranceLevel", request.required_assurance, 3)?;
+        input_enum::<pb::PurposeKind>("PurposeKind", request.purpose, 8)?;
+        if request.control_mode == pb::ControlMode::Unspecified as i32 {
+            return Err(MachineError::new(
+                "CONTROL_MODE_REQUIRED",
+                "explicit control mode is required",
+                false,
+                serde_json::json!({"argument":"control_mode","reason":"control mode is unspecified"}),
+            ));
+        }
+        if request.required_assurance == pb::AssuranceLevel::Unspecified as i32
+            && request.execution_lane != 0
+        {
+            return Err(MachineError::new(
+                "ASSURANCE_LEVEL_UNAVAILABLE",
+                "explicit assurance is required",
+                false,
+                serde_json::json!({"run_id":null,"execution_lane":if request.execution_lane == pb::ExecutionLane::Dedicated as i32 {"dedicated"} else {"shared_readonly"},"reason":"assurance is unspecified","required_action":"lower_required_assurance"}),
+            ));
+        }
+        let reference = required(request.workspace.as_ref(), "workspace")?;
+        let view = self.workspace(reference)?;
+        let controller = required(request.controller.as_ref(), "controller")?;
+        if controller.expected_controller_generation != 1 {
+            return Err(invalid(
+                "controller.expected_controller_generation",
+                "new Run requires initial generation 1",
+            ));
+        }
+        let input = StartRunInput {
+            workspace: Some(view.canonical_path.to_path_buf()?),
+            expected_workspace_id: Some(view.workspace_id),
+            profile: request.profile_name,
+            control_mode: match pb::ControlMode::try_from(request.control_mode) {
+                Ok(pb::ControlMode::DirectInteractive) => domain::ControlMode::DirectInteractive,
+                Ok(pb::ControlMode::ManagedAgent) => domain::ControlMode::ManagedAgent,
+                _ => return Err(invalid("control_mode", "unsupported control mode")),
+            },
+            execution_lane: match pb::ExecutionLane::try_from(request.execution_lane) {
+                Ok(pb::ExecutionLane::SharedReadonly) => domain::ExecutionLane::SharedReadonly,
+                Ok(pb::ExecutionLane::Dedicated) => domain::ExecutionLane::Dedicated,
+                _ => return Err(invalid("execution_lane", "unsupported execution lane")),
+            },
+            assurance: match pb::AssuranceLevel::try_from(request.required_assurance) {
+                Ok(pb::AssuranceLevel::BestEffortPersonalAlpha) => {
+                    domain::Assurance::BestEffortPersonalAlpha
+                }
+                Ok(pb::AssuranceLevel::VerifiedThreadScopedControl) => {
+                    domain::Assurance::VerifiedThreadScopedControl
+                }
+                Ok(pb::AssuranceLevel::StrongProcessContainment) => {
+                    domain::Assurance::StrongProcessContainment
+                }
+                _ => return Err(invalid("required_assurance", "unsupported assurance")),
+            },
+            purpose: domain::Purpose {
+                kind: match pb::PurposeKind::try_from(request.purpose) {
+                    Ok(pb::PurposeKind::Interactive) => domain::PurposeKind::Interactive,
+                    Ok(pb::PurposeKind::Planning) => domain::PurposeKind::Planning,
+                    Ok(pb::PurposeKind::Implementation) => domain::PurposeKind::Implementation,
+                    Ok(pb::PurposeKind::Review) => domain::PurposeKind::Review,
+                    Ok(pb::PurposeKind::Research) => domain::PurposeKind::Research,
+                    Ok(pb::PurposeKind::Discussion) => domain::PurposeKind::Discussion,
+                    Ok(pb::PurposeKind::WorkflowStage) => domain::PurposeKind::WorkflowStage,
+                    Ok(pb::PurposeKind::Other) => domain::PurposeKind::Other,
+                    _ => return Err(invalid("purpose", "unsupported purpose")),
+                },
+                external_label: request.purpose_label,
+            },
+            parent_ref: request.parent.map(|p| crate::run::ParentReference {
+                namespace: p.namespace,
+                kind: p.kind,
+                id: p.id,
+            }),
+            idempotency_key: request.idempotency_key.clone(),
+            model: request.model,
+            effort: request.effort,
+            instructions: request.instructions.unwrap_or_default(),
+            carrier: self.controller(controller)?,
+            required_capabilities: request.required_capabilities,
+        };
+        let receipt = CoreSemanticService.start_run(input)?;
+        let root = self
+            .home
+            .workspace_root(&receipt.snapshot.manifest.workspace_id);
+        let (snapshot, observation) =
+            RunSnapshot::observe(&root, receipt.snapshot.manifest.run_id, 0)?;
+        let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+        Ok(pb::StartRunResponse {
+            context: Some(self.context()),
+            run: Some(project::run_projection(&snapshot, &facts)?),
+            idempotency_key: request.idempotency_key,
+            exact_replay: receipt.exact_replay,
+        })
+    }
+
+    fn interrupt_turn(
+        &self,
+        r: pb::InterruptTurnRequest,
+    ) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutation_response(
+            required(r.run.as_ref(), "run")?,
+            required(r.controller.as_ref(), "controller")?,
+            r.expected_state_revision,
+            RunMutationOperation::Interrupt,
+        )
+    }
+    fn pause_run(&self, r: pb::PauseRunRequest) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutation_response(
+            required(r.run.as_ref(), "run")?,
+            required(r.controller.as_ref(), "controller")?,
+            r.expected_state_revision,
+            RunMutationOperation::Pause {
+                interrupt: r.interrupt,
+            },
+        )
+    }
+    fn resume_run(&self, r: pb::ResumeRunRequest) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutation_response(
+            required(r.run.as_ref(), "run")?,
+            required(r.controller.as_ref(), "controller")?,
+            r.expected_state_revision,
+            RunMutationOperation::Resume,
+        )
+    }
+    fn close_run(&self, r: pb::CloseRunRequest) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutation_response(
+            required(r.run.as_ref(), "run")?,
+            required(r.controller.as_ref(), "controller")?,
+            r.expected_state_revision,
+            RunMutationOperation::Close {
+                interrupt: r.interrupt,
+            },
+        )
+    }
+    fn recover_run(
+        &self,
+        r: pb::RecoverRunRequest,
+    ) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutation_response(
+            required(r.run.as_ref(), "run")?,
+            required(r.controller.as_ref(), "controller")?,
+            r.expected_state_revision,
+            RunMutationOperation::Recover,
+        )
+    }
+    fn reconcile_run(
+        &self,
+        r: pb::ReconcileRunRequest,
+    ) -> Result<pb::RunMutationResponse, MachineError> {
+        self.mutation_response(
+            required(r.run.as_ref(), "run")?,
+            required(r.controller.as_ref(), "controller")?,
+            r.expected_state_revision,
+            RunMutationOperation::Reconcile,
+        )
+    }
+
+    fn verify_controller(
+        &self,
+        r: pb::VerifyControllerRequest,
+    ) -> Result<pb::VerifyControllerResponse, MachineError> {
+        let (_, snapshot) = self.run_state(required(r.run.as_ref(), "run")?)?;
+        let reference = required(r.controller.as_ref(), "controller")?;
+        let carrier = self.controller(reference)?;
+        if reference.expected_controller_generation != snapshot.controller.generation {
+            return Err(controller_mismatch(snapshot.manifest.run_id));
+        }
+        authorize_controller(
+            snapshot.manifest.run_id,
+            "controller.verify",
+            snapshot.controller_authority()?,
+            &carrier,
+        )?;
+        use crate::ledger::LedgerClock as _;
+        Ok(pb::VerifyControllerResponse {
+            context: Some(self.context()),
+            run_id: snapshot.manifest.run_id.to_string(),
+            controller: Some(project::controller(&snapshot.controller)),
+            verified_at: Some(crate::gateway_event::timestamp(
+                &crate::ledger::SystemLedgerClock::default().timestamp(),
+            )?),
+        })
+    }
+}

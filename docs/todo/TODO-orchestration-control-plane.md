@@ -47,6 +47,13 @@ exactly the 24 implemented BH1 methods from the checked conformance inventory;
 unavailable methods fail closed. Route every method through shared semantic
 services rather than building a second Run or authorization implementation.
 
+The [Projection revision authority](../specs/README.md#projection-revision-authority)
+contract owns revision sources, mutation preconditions, response-loss replay
+ordering, and the explicit snapshot rebase for unstamped legacy events. Capture
+all consumed durable state together; retain historical audit bytes and the
+existing Machine replay path. Include cross-process observation races and
+restart/replay stamp identity in TASK-023 verification.
+
 Verify handshake, singleton and socket attacks, readiness, clean shutdown and
 crash restart; semantic parity for every minimum method; StartRun allocation
 response loss and protected Interaction response loss; event replay; artifact

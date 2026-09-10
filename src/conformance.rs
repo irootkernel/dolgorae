@@ -531,6 +531,18 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         })
     }
 
+    /// The caller holds Writer observation serialization through all required appends.
+    pub fn with_event_context<T, E>(
+        &mut self,
+        context: crate::event::EventAppendContext,
+        append: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let previous = self.ledger.replace_event_context(Some(context));
+        let result = append(self);
+        self.ledger.replace_event_context(previous);
+        result
+    }
+
     pub fn bootstrap(
         &mut self,
         request: &BootstrapRequest,
@@ -577,6 +589,14 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
                 payload,
                 &previous,
             )?;
+            let record = if let Some(existing) = self.ledger.durable_records()?.get(index) {
+                match existing.client_projection() {
+                    Some(projection) => record.with_client_projection(projection.clone())?,
+                    None => record,
+                }
+            } else {
+                self.ledger.prepare_event(record)?
+            };
             previous = record.hash().to_owned();
             records.push(record);
         }
@@ -633,6 +653,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         let mut candidate = self.tail_conformance.clone().ok_or_else(|| {
             ConformanceError::InvalidHistory("conformance state is not initialized".to_owned())
         })?;
+        let record = self.ledger.prepare_event(record)?;
         candidate.apply(&record)?;
         candidate.require_complete_terminal_pair()?;
         if record.kind() == AuditKind::LifecycleTransition {
@@ -942,6 +963,10 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
         let mut candidate = self.conformance.clone().ok_or_else(|| {
             ConformanceError::InvalidHistory("conformance state is not initialized".to_owned())
         })?;
+        // Terminal evidence has no public projection; preparing the seal here
+        // keeps the cached conformance hash equal to the actual durable record.
+        let evidence = self.ledger.prepare_event(evidence)?;
+        let seal = self.ledger.prepare_event(seal)?;
         candidate.apply(&evidence)?;
         candidate.apply(&seal)?;
         candidate.require_complete_terminal_pair()?;
@@ -975,6 +1000,11 @@ impl ConformanceState {
                     active_turn = Some(required_string(record.payload(), "turn_id")?);
                 }
                 AuditKind::TurnTerminal | AuditKind::OutcomeUnknown => active_turn = None,
+                AuditKind::LifecycleTransition
+                    if required_string(record.payload(), "current")? == "paused" =>
+                {
+                    active_turn = None;
+                }
                 AuditKind::InteractionOpened => {
                     pending.insert(required_string(record.payload(), "request_id")?);
                 }
@@ -1205,6 +1235,9 @@ impl ConformanceState {
             ));
         }
         self.report.lifecycle = current;
+        if current == RunLifecycle::Paused {
+            self.active_turn = None;
+        }
         self.report.terminal_sealed = terminal;
         Ok(())
     }
@@ -1532,6 +1565,9 @@ fn verify_ledger_records_with_check(
                     }
                 }
                 lifecycle = current;
+                if current == RunLifecycle::Paused {
+                    active_turn = None;
+                }
                 sealed = terminal;
             }
             _ => {}

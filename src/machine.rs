@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 use uuid::{Timestamp, Uuid};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -63,6 +65,33 @@ impl MachineError {
             "invalid command arguments",
             false,
             serde_json::json!({"argument": argument.into(), "reason": reason.into()}),
+        )
+    }
+
+    #[must_use]
+    pub fn interaction_not_found(
+        run_id: Uuid,
+        request_id: impl ToString,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            "INTERACTION_NOT_FOUND",
+            message,
+            false,
+            serde_json::json!({"run_id": run_id, "request_id": request_id.to_string()}),
+        )
+    }
+
+    #[must_use]
+    pub fn interaction_full_payload_requires_controller(
+        run_id: Uuid,
+        operation: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER",
+            "the full interaction payload requires the current Controller",
+            false,
+            serde_json::json!({"run_id": run_id, "operation": operation.into()}),
         )
     }
 
@@ -156,6 +185,31 @@ impl MachineError {
     pub fn exit_status(&self) -> u8 {
         exit_status_for(&self.code)
     }
+}
+
+/// Current checked error vocabulary, including the v1 codes inherited by v2.
+pub(crate) fn registered_errors() -> &'static BTreeMap<String, u8> {
+    static ERRORS: OnceLock<BTreeMap<String, u8>> = OnceLock::new();
+    ERRORS.get_or_init(|| {
+        let mut errors = BTreeMap::new();
+        for source in [
+            include_str!("../docs/protocol/dolgorae-error-contract-v1.json"),
+            include_str!("../docs/protocol/dolgorae-error-contract-v2.json"),
+        ] {
+            let contract: Value = serde_json::from_str(source).expect("checked error contract");
+            for (code, status) in contract["x-exit-status"]
+                .as_object()
+                .expect("exit statuses")
+            {
+                let status = u8::try_from(status.as_u64().expect("exit status integer"))
+                    .expect("exit status byte");
+                if let Some(previous) = errors.insert(code.clone(), status) {
+                    assert_eq!(previous, status, "inherited error classification changed");
+                }
+            }
+        }
+        errors
+    })
 }
 
 /// The process exit status one registered error code maps to.
@@ -264,16 +318,8 @@ mod tests {
 
     #[test]
     fn current_error_exit_statuses_match_the_checked_contract() {
-        let contract: serde_json::Value = serde_json::from_str(include_str!(
-            "../docs/protocol/dolgorae-error-contract-v2.json"
-        ))
-        .unwrap();
-        for (code, expected) in contract["x-exit-status"].as_object().unwrap() {
-            assert_eq!(
-                u64::from(exit_status_for(code)),
-                expected.as_u64().unwrap(),
-                "{code}"
-            );
+        for (code, expected) in registered_errors() {
+            assert_eq!(exit_status_for(code), *expected, "{code}");
         }
     }
 

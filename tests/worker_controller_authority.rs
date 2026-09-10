@@ -166,6 +166,8 @@ fn aggregate_owner_delegation_requires_binding_and_active_membership() {
             caller: None,
             engagement_id: opened.engagement_id,
             request: dolgorae::worker::TurnControlRequest {
+                normalized_request_sha256: None,
+                write: false,
                 message: "delegated submit".to_owned(),
                 idempotency_key: "delegated-submit".to_owned(),
                 effort: None,
@@ -368,6 +370,8 @@ impl Worker {
             caller: None,
             expected: self.identity.clone(),
             request: dolgorae::worker::TurnControlRequest {
+                normalized_request_sha256: None,
+                write: false,
                 message: "authorized?".to_owned(),
                 idempotency_key: "authority-probe".to_owned(),
                 effort: None,
@@ -448,6 +452,8 @@ fn worker_revalidates_every_mutating_request_against_the_current_binding() {
             caller: None,
             expected: worker.identity.clone(),
             request: dolgorae::worker::TurnControlRequest {
+                normalized_request_sha256: None,
+                write: false,
                 message: "submit".to_owned(),
                 idempotency_key: "authority-submit".to_owned(),
                 effort: None,

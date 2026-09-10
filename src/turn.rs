@@ -4,6 +4,9 @@ use crate::app_server::{JsonRpcConnection, SolicitedSink, TransportError, Wire};
 use crate::audit::AuditKind;
 use crate::domain::RunLifecycle;
 use crate::fault::{FaultInjector, NoFaults};
+use crate::interaction_payload::{
+    ChangeArtifactPayload, CommandApprovalPayload, FileApprovalPayload, FileChangePayload,
+};
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{Ledger, LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
@@ -324,12 +327,9 @@ impl TurnError {
                     }),
                 )
             }
-            Self::InteractionNotFound { request_id } => MachineError::new(
-                "INTERACTION_NOT_FOUND",
-                message,
-                false,
-                serde_json::json!({"run_id": run_id, "request_id": request_id.to_string()}),
-            ),
+            Self::InteractionNotFound { request_id } => {
+                MachineError::interaction_not_found(context.run_id, request_id, message)
+            }
             Self::InteractionResponseInvalid { request_id } => MachineError::new(
                 "INTERACTION_RESPONSE_INVALID",
                 message,
@@ -488,6 +488,7 @@ impl ImageSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnRequest {
+    pub write: bool,
     pub idempotency_key: String,
     pub message: String,
     pub images: Vec<ImageSnapshot>,
@@ -519,11 +520,15 @@ pub enum JournalEntry {
         operation_id: Uuid,
         thread_id: String,
         thread_generation: u64,
+        effective_policy: crate::domain::EffectivePolicy,
     },
     TurnAccepted {
         operation_id: Uuid,
         thread_id: String,
         turn_id: String,
+        effort: String,
+        effective_policy: crate::domain::EffectivePolicy,
+        controller: Option<crate::domain::ControllerIdentity>,
     },
     InteractionOpened {
         request_id: u64,
@@ -554,6 +559,7 @@ pub enum JournalEntry {
         write: bool,
         writer_generation: u64,
         transaction_id: Uuid,
+        effective_policy: crate::domain::EffectivePolicy,
     },
     Reconciliation {
         thread_id: String,
@@ -638,6 +644,14 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
 pub struct SharedLedgerJournal<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFaults> {
     ledger: Arc<Mutex<Ledger<C, F>>>,
     run_generation: u64,
+    event_authority: Option<JournalEventAuthority>,
+}
+
+struct JournalEventAuthority {
+    writer: crate::writer::WriterStore,
+    workspace_id: String,
+    server_key: String,
+    server_epoch: u64,
 }
 
 impl<C: LedgerClock, F: FaultInjector> SharedLedgerJournal<C, F> {
@@ -646,7 +660,26 @@ impl<C: LedgerClock, F: FaultInjector> SharedLedgerJournal<C, F> {
         Self {
             ledger,
             run_generation,
+            event_authority: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_event_authority(
+        mut self,
+        state_root: &Path,
+        workspace_id: &str,
+        uid: u32,
+        server_key: &str,
+        server_epoch: u64,
+    ) -> Self {
+        self.event_authority = Some(JournalEventAuthority {
+            writer: crate::writer::WriterStore::new(state_root, workspace_id, uid),
+            workspace_id: workspace_id.to_owned(),
+            server_key: server_key.to_owned(),
+            server_epoch,
+        });
+        self
     }
 
     #[must_use]
@@ -659,7 +692,34 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
     for SharedLedgerJournal<C, F>
 {
     fn append_and_sync(&mut self, entry: JournalEntry) -> Result<(), TurnError> {
-        let (kind, payload) = journal_record(entry)?;
+        let (kind, mut payload) = journal_record(entry)?;
+        if let Some(authority) = &self.event_authority {
+            return authority
+                .writer
+                .observe_locked(|writer| {
+                    if kind == AuditKind::TurnStarted {
+                        payload["acceptance_writer"] = serde_json::to_value(writer)
+                            .map_err(|error| TurnError::Journal(error.to_string()))?;
+                    }
+                    let mut ledger = self.ledger.lock().map_err(|_| {
+                        TurnError::Journal("shared ledger lock is poisoned".to_owned())
+                    })?;
+                    ledger.with_event_context(
+                        crate::ledger::EventAppendContext {
+                            workspace_id: authority.workspace_id.clone(),
+                            server_key: authority.server_key.clone(),
+                            server_epoch: authority.server_epoch,
+                            writer_state_revision: writer.authority_revision,
+                        },
+                        |ledger| {
+                            append_journal_payload(ledger, kind, &payload, self.run_generation)
+                        },
+                    )
+                })
+                .map_err(|_| {
+                    TurnError::Journal("Writer authority observation failed".to_owned())
+                })?;
+        }
         let mut ledger = self
             .ledger
             .lock()
@@ -687,6 +747,11 @@ fn append_journal_payload<C: LedgerClock + 'static, F: FaultInjector + 'static>(
             )
             .map(|_| ())
             .map_err(|error| TurnError::Journal(error.to_string()));
+    }
+    if kind == AuditKind::TurnTerminal {
+        ledger
+            .append_final_response_event(payload, run_generation)
+            .map_err(|error| TurnError::Journal(error.to_string()))?;
     }
     let outcome = if matches!(
         kind,
@@ -726,20 +791,24 @@ fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> 
                 operation_id,
                 thread_id,
                 thread_generation,
+                effective_policy,
             } => (
                 AuditKind::ThreadBound,
                 Ok(
-                    serde_json::json!({"operation_id":operation_id,"thread_id":thread_id,"thread_generation":thread_generation}),
+                    serde_json::json!({"operation_id":operation_id,"thread_id":thread_id,"thread_generation":thread_generation,"effective_policy":effective_policy}),
                 ),
             ),
             JournalEntry::TurnAccepted {
                 operation_id,
                 thread_id,
                 turn_id,
+                effort,
+                effective_policy,
+                controller,
             } => (
                 AuditKind::TurnStarted,
                 Ok(
-                    serde_json::json!({"operation_id":operation_id,"thread_id":thread_id,"turn_id":turn_id}),
+                    serde_json::json!({"operation_id":operation_id,"thread_id":thread_id,"turn_id":turn_id,"effort":effort,"effective_policy":effective_policy,"acceptance_controller":controller}),
                 ),
             ),
             JournalEntry::InteractionOpened { request_id, method } => (
@@ -792,6 +861,7 @@ fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> 
                 write,
                 writer_generation,
                 transaction_id,
+                effective_policy,
             } => (
                 if write {
                     AuditKind::WriterAcquired
@@ -801,6 +871,7 @@ fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> 
                 Ok(serde_json::json!({
                     "writer_generation": writer_generation,
                     "transaction_id": transaction_id,
+                    "effective_policy": effective_policy,
                 })),
             ),
             JournalEntry::Reconciliation {
@@ -1024,7 +1095,7 @@ pub struct Interaction {
 #[derive(Clone, Debug)]
 struct FileChangeSnapshot {
     revision: u64,
-    changes: Vec<Value>,
+    changes: Vec<FileChangePayload>,
     snapshot_sha256: String,
 }
 
@@ -1362,6 +1433,9 @@ pub struct TurnCoordinator<S, J, A> {
     attach: ThreadAttach,
     thread_id: Option<String>,
     thread_generation: u64,
+    policy_epoch: u64,
+    acceptance_controller: Option<crate::domain::ControllerIdentity>,
+    writer_generation: Option<u64>,
     active_turn_id: Option<String>,
     /// The effort the active Turn was started with, so its terminal reports
     /// what it actually ran at rather than the Run's default.
@@ -1380,6 +1454,7 @@ pub struct TurnCoordinator<S, J, A> {
     undiagnosed_foreign: u64,
     streamed_history_bytes: u64,
     idempotency: BTreeMap<String, IdempotencyRecord>,
+    unresolved_idempotency: BTreeMap<String, String>,
     fixed_model: String,
     default_effort: String,
     supported_efforts: BTreeSet<String>,
@@ -1466,6 +1541,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             attach: config.attach,
             thread_id,
             thread_generation: 0,
+            policy_epoch: 0,
+            acceptance_controller: None,
+            writer_generation: None,
             active_turn_id: None,
             active_turn_effort: None,
             active_operation_id: None,
@@ -1479,6 +1557,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             undiagnosed_foreign: 0,
             streamed_history_bytes: 0,
             idempotency: BTreeMap::new(),
+            unresolved_idempotency: BTreeMap::new(),
             fixed_model: config.fixed_model,
             default_effort: config.default_effort,
             supported_efforts: config.supported_efforts,
@@ -1514,6 +1593,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     pub fn active_turn_id(&self) -> Option<&str> {
         self.active_turn_id.as_deref()
     }
+    pub(crate) fn default_effort(&self) -> &str {
+        &self.default_effort
+    }
+
     /// The reasoning effort the active Turn was started with.
     #[must_use]
     pub fn active_turn_effort(&self) -> Option<&str> {
@@ -1522,6 +1605,35 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     #[must_use]
     pub fn pending_interactions(&self) -> Vec<&Interaction> {
         self.pending.values().collect()
+    }
+
+    pub(crate) fn set_acceptance_controller(
+        &mut self,
+        controller: crate::domain::ControllerIdentity,
+    ) {
+        self.acceptance_controller = Some(controller);
+    }
+
+    pub(crate) fn acceptance_controller(&self) -> Option<&crate::domain::ControllerIdentity> {
+        self.acceptance_controller.as_ref()
+    }
+
+    fn next_unverified_policy(
+        &self,
+        writer_generation: Option<u64>,
+    ) -> Result<crate::domain::EffectivePolicy, TurnError> {
+        Ok(crate::domain::EffectivePolicy {
+            access: crate::domain::Access::Unknown,
+            verification: crate::domain::PolicyVerification::Unverified,
+            policy_epoch: crate::domain::PolicyEpoch(
+                self.policy_epoch
+                    .checked_add(1)
+                    .ok_or(TurnError::OutcomeUnknown)?,
+            ),
+            thread_generation: (self.thread_generation != 0).then_some(self.thread_generation),
+            server_epoch: Some(self.server_epoch),
+            writer_generation,
+        })
     }
 
     pub fn set_writer_access(
@@ -1548,12 +1660,17 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 "Reviewer read-only policy cannot acquire writer access",
             ));
         }
+        let effective_policy = self.next_unverified_policy(write.then_some(writer_generation))?;
+        let policy_epoch = effective_policy.policy_epoch.0;
         self.journal
             .append_and_sync(JournalEntry::WriterAccessChanged {
                 write,
                 writer_generation,
                 transaction_id,
+                effective_policy,
             })?;
+        self.policy_epoch = policy_epoch;
+        self.writer_generation = write.then_some(writer_generation);
         self.sandbox = if write {
             "workspace-write"
         } else {
@@ -1591,6 +1708,31 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 }
             }
         };
+    }
+
+    /// Rebuild accepted Turn receipts from the durable operation chain.
+    /// Reservations without proven acceptance remain fenced even if
+    /// recovery subsequently makes the Run idle again.
+    pub fn restore_turn_receipts(
+        &mut self,
+        records: Vec<(AuditKind, Value)>,
+    ) -> Result<(), TurnError> {
+        for (_, payload) in &records {
+            if let Some(policy) = payload.get("effective_policy") {
+                let policy: crate::domain::EffectivePolicy = serde_json::from_value(policy.clone())
+                    .map_err(|_| {
+                        TurnError::Journal("durable effective policy is invalid".to_owned())
+                    })?;
+                if policy.policy_epoch.0 > self.policy_epoch {
+                    self.policy_epoch = policy.policy_epoch.0;
+                    self.writer_generation = policy.writer_generation;
+                }
+            }
+        }
+        let restored = restore_turn_receipt_maps(records)?;
+        self.idempotency = restored.accepted;
+        self.unresolved_idempotency = restored.unresolved;
+        Ok(())
     }
 
     /// Restore the durable response receipts needed to make a retried
@@ -1805,10 +1947,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &self.artifacts
     }
 
-    pub fn start_turn(&mut self, request: TurnRequest) -> Result<AcceptedTurn, TurnError> {
-        if self.state == CoordinatorState::OutcomeUnknown {
-            return Err(TurnError::OutcomeUnknown);
-        }
+    /// Resolve an accepted retry without performing new work. Authority must
+    /// be checked by the caller before using this result to bypass admission.
+    fn replay_accepted(&self, request: &TurnRequest) -> Result<Option<AcceptedTurn>, TurnError> {
         if request.idempotency_key.is_empty()
             || request.idempotency_key.len() > 1024
             || request.message.is_empty()
@@ -1836,7 +1977,17 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         for image in &request.images {
             image.verify()?;
         }
-        let digest = request_digest(&request, &effort)?;
+        let digest = request_digest(request, &effort)?;
+        if let Some(recorded) = self.unresolved_idempotency.get(&request.idempotency_key) {
+            return Err(if recorded == &digest {
+                TurnError::OutcomeUnknown
+            } else {
+                TurnError::IdempotencyConflict {
+                    recorded: recorded.clone(),
+                    observed: digest,
+                }
+            });
+        }
         if let Some(record) = self.idempotency.get(&request.idempotency_key) {
             if record.digest != digest {
                 return Err(TurnError::IdempotencyConflict {
@@ -1846,8 +1997,44 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             }
             let mut accepted = record.accepted.clone();
             accepted.replayed = true;
+            return Ok(Some(accepted));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn replay_delivery(
+        &self,
+        request: &TurnRequest,
+    ) -> Result<Option<DeliveryResult>, TurnError> {
+        let Some(accepted) = self.replay_accepted(request)? else {
+            if self.state == CoordinatorState::OutcomeUnknown {
+                return Err(TurnError::OutcomeUnknown);
+            }
+            return Ok(None);
+        };
+        if request.delivery == DeliveryMode::Send
+            && let Some(terminal) = self
+                .idempotency
+                .get(&request.idempotency_key)
+                .and_then(|record| record.terminal.clone())
+        {
+            return Ok(Some(DeliveryResult::Terminal(terminal)));
+        }
+        Ok(Some(DeliveryResult::Accepted(accepted)))
+    }
+
+    pub fn start_turn(&mut self, request: TurnRequest) -> Result<AcceptedTurn, TurnError> {
+        if self.state == CoordinatorState::OutcomeUnknown {
+            return Err(TurnError::OutcomeUnknown);
+        }
+        if let Some(accepted) = self.replay_accepted(&request)? {
             return Ok(accepted);
         }
+        let effort = request
+            .effort
+            .clone()
+            .unwrap_or_else(|| self.default_effort.clone());
+        let digest = request_digest(&request, &effort)?;
         if matches!(
             self.state,
             CoordinatorState::Running
@@ -1868,9 +2055,16 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             provisional_thread: self.thread_id.is_none(),
         };
         self.journal.append_and_sync(JournalEntry::Intent(intent))?;
+        self.unresolved_idempotency
+            .insert(request.idempotency_key.clone(), digest.clone());
         let thread_id = match self.ensure_thread(operation_id) {
             Ok(thread) => thread,
-            Err(error) => return Err(self.lost_after_write(operation_id, error)),
+            Err(error) => {
+                if matches!(error, TurnError::AppServerRejected { .. }) {
+                    self.unresolved_idempotency.remove(&request.idempotency_key);
+                }
+                return Err(self.lost_after_write(operation_id, error));
+            }
         };
         let input = turn_input(&request)?;
         let result = match self.server.request("turn/start", serde_json::json!({
@@ -1878,7 +2072,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             "sandboxPolicy": turn_sandbox(&self.sandbox, &self.cwd), "approvalPolicy": self.approval_policy
         })) {
             Ok(result) => result,
-            Err(error) => return Err(self.lost_after_write(operation_id, error)),
+            Err(error) => {
+                if matches!(error, TurnError::AppServerRejected { .. }) { self.unresolved_idempotency.remove(&request.idempotency_key); }
+                return Err(self.lost_after_write(operation_id, error));
+            },
         };
         let Some(turn_id) =
             nested_identity(&result, "turn", "id").or_else(|| identity(&result, "turnId"))
@@ -1898,16 +2095,30 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .thread_generation
                 .checked_add(1)
                 .ok_or(TurnError::OutcomeUnknown)?;
+            let effective_policy = self.next_unverified_policy(self.writer_generation)?;
+            let policy_epoch = effective_policy.policy_epoch.0;
             self.journal.append_and_sync(JournalEntry::ThreadBound {
                 operation_id,
                 thread_id: thread_id.clone(),
                 thread_generation: self.thread_generation,
+                effective_policy,
             })?;
+            self.policy_epoch = policy_epoch;
         }
         self.journal.append_and_sync(JournalEntry::TurnAccepted {
             operation_id,
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),
+            effort: effort.clone(),
+            effective_policy: crate::domain::EffectivePolicy {
+                access: crate::domain::Access::Unknown,
+                verification: crate::domain::PolicyVerification::Unverified,
+                policy_epoch: crate::domain::PolicyEpoch(self.policy_epoch),
+                thread_generation: Some(self.thread_generation),
+                server_epoch: Some(self.server_epoch),
+                writer_generation: self.writer_generation,
+            },
+            controller: self.acceptance_controller.clone(),
         })?;
         self.active_turn_id = Some(turn_id.clone());
         self.active_turn_effort = Some(effort.clone());
@@ -1919,6 +2130,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             effort,
             replayed: false,
         };
+        self.unresolved_idempotency.remove(&request.idempotency_key);
         self.idempotency.insert(
             request.idempotency_key,
             IdempotencyRecord {
@@ -1937,16 +2149,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// the app-server on its own thread accepts here and reports the outcome
     /// from the drain, so no caller has to hold the Run still while a Turn runs.
     pub fn accept(&mut self, request: TurnRequest) -> Result<DeliveryResult, TurnError> {
-        let accepted = self.start_turn(request)?;
-        if accepted.replayed
-            && let Some(terminal) = self
-                .idempotency
-                .values()
-                .find(|record| record.accepted.turn_id == accepted.turn_id)
-                .and_then(|record| record.terminal.clone())
-        {
-            return Ok(DeliveryResult::Terminal(terminal));
+        if let Some(replayed) = self.replay_delivery(&request)? {
+            return Ok(replayed);
         }
+        let accepted = self.start_turn(request)?;
         Ok(DeliveryResult::Accepted(accepted))
     }
 
@@ -2188,7 +2394,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .ok_or(TurnError::CorrelationMismatch)?,
             &self.cwd,
         )?;
-        let bytes = canonical_json_bytes(&Value::Array(normalized.clone()))?;
+        let bytes = canonical_json_bytes(
+            &serde_json::to_value(&normalized).map_err(|_| TurnError::CorrelationMismatch)?,
+        )?;
         if bytes.len() > 8 * 1024 * 1024 {
             return Err(TurnError::CorrelationMismatch);
         }
@@ -2426,92 +2634,129 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         interaction: &Interaction,
         public_request_id: Uuid,
     ) -> Result<Value, TurnError> {
-        let (kind, payload, available_decisions, response_schema) = match interaction
-            .method
-            .as_str()
-        {
-            "item/commandExecution/requestApproval" => (
-                "command_execution_approval",
-                serde_json::json!({
-                    "title": interaction.payload.get("title").and_then(Value::as_str).unwrap_or("Command approval"),
-                    "message": interaction.payload.get("message").and_then(Value::as_str).unwrap_or("Command execution requires approval"),
-                    "command": interaction.payload.get("command").cloned().ok_or(TurnError::CorrelationMismatch)?,
-                    "cwd": interaction.payload.get("cwd").cloned().unwrap_or_else(|| serde_json::json!(self.cwd)),
-                    "reason": interaction.payload.get("reason").cloned().unwrap_or(Value::Null),
-                }),
-                serde_json::json!(["accept_once", "decline", "cancel"]),
-                "dolgorae.interaction.command-approval/v1",
-            ),
-            "item/fileChange/requestApproval" => {
-                let item_id = interaction
-                    .payload
-                    .get("itemId")
-                    .and_then(Value::as_str)
-                    .ok_or(TurnError::CorrelationMismatch)?;
-                let key = (
-                    interaction.thread_id.clone(),
-                    interaction.turn_id.clone(),
-                    item_id.to_owned(),
-                );
-                let snapshot = self
-                    .file_change_snapshots
-                    .get(&key)
-                    .cloned()
-                    .ok_or(TurnError::CorrelationMismatch)?;
-                let inline_bytes = snapshot
-                    .changes
-                    .iter()
-                    .filter_map(|change| change.get("diff").and_then(Value::as_str))
-                    .map(str::len)
-                    .sum::<usize>();
-                let (changes, artifact) = if inline_bytes <= 64 * 1024 {
-                    (Value::Array(snapshot.changes), Value::Null)
-                } else {
-                    let combined = snapshot
+        let (kind, payload, available_decisions, response_schema) =
+            match interaction.method.as_str() {
+                "item/commandExecution/requestApproval" => (
+                    "command_execution_approval",
+                    serde_json::to_value(CommandApprovalPayload {
+                        title: interaction
+                            .payload
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Command approval")
+                            .to_owned(),
+                        message: interaction
+                            .payload
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Command execution requires approval")
+                            .to_owned(),
+                        command: serde_json::from_value(
+                            interaction
+                                .payload
+                                .get("command")
+                                .cloned()
+                                .ok_or(TurnError::CorrelationMismatch)?,
+                        )
+                        .map_err(|_| TurnError::CorrelationMismatch)?,
+                        cwd: interaction
+                            .payload
+                            .get("cwd")
+                            .cloned()
+                            .map(serde_json::from_value)
+                            .transpose()
+                            .map_err(|_| TurnError::CorrelationMismatch)?
+                            .unwrap_or_else(|| LosslessPath::from_path(&self.cwd)),
+                        reason: serde_json::from_value(
+                            interaction
+                                .payload
+                                .get("reason")
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        )
+                        .map_err(|_| TurnError::CorrelationMismatch)?,
+                    })
+                    .map_err(|_| TurnError::CorrelationMismatch)?,
+                    serde_json::json!(["accept_once", "decline", "cancel"]),
+                    "dolgorae.interaction.command-approval/v1",
+                ),
+                "item/fileChange/requestApproval" => {
+                    let item_id = interaction
+                        .payload
+                        .get("itemId")
+                        .and_then(Value::as_str)
+                        .ok_or(TurnError::CorrelationMismatch)?;
+                    let key = (
+                        interaction.thread_id.clone(),
+                        interaction.turn_id.clone(),
+                        item_id.to_owned(),
+                    );
+                    let snapshot = self
+                        .file_change_snapshots
+                        .get(&key)
+                        .cloned()
+                        .ok_or(TurnError::CorrelationMismatch)?;
+                    let inline_bytes = snapshot
                         .changes
                         .iter()
-                        .filter_map(|change| change.get("diff").and_then(Value::as_str))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if combined.len() > 8 * 1024 * 1024 {
-                        return Err(TurnError::CorrelationMismatch);
-                    }
-                    let stored = self.artifacts.store(combined.as_bytes())?;
+                        .map(|change| change.diff.len())
+                        .sum::<usize>();
+                    let (changes, artifact) = if inline_bytes <= 64 * 1024 {
+                        (Some(snapshot.changes), None)
+                    } else {
+                        let combined = snapshot
+                            .changes
+                            .iter()
+                            .map(|change| change.diff.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if combined.len() > 8 * 1024 * 1024 {
+                            return Err(TurnError::CorrelationMismatch);
+                        }
+                        let stored = self.artifacts.store(combined.as_bytes())?;
+                        (
+                            None,
+                            Some(ChangeArtifactPayload {
+                                artifact_id: stored.artifact_id,
+                                sha256: sha256_hex(combined.as_bytes()),
+                                media_type: "text/x-diff".to_owned(),
+                                byte_length: combined.len() as u64,
+                                truncated: false,
+                            }),
+                        )
+                    };
                     (
-                        Value::Null,
-                        serde_json::json!({
-                            "artifact_id": stored.artifact_id,
-                            "sha256": sha256_hex(combined.as_bytes()),
-                            "media_type": "text/x-diff",
-                            "byte_length": combined.len(),
-                            "truncated": false,
-                        }),
+                        "file_change_approval",
+                        serde_json::to_value(FileApprovalPayload {
+                            title: "File change approval".to_owned(),
+                            message: "File changes require approval".to_owned(),
+                            reason: serde_json::from_value(
+                                interaction
+                                    .payload
+                                    .get("reason")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                            )
+                            .map_err(|_| TurnError::CorrelationMismatch)?,
+                            snapshot_sha256: snapshot.snapshot_sha256,
+                            snapshot_revision: snapshot.revision,
+                            truncated: false,
+                            changes,
+                            change_artifact: artifact,
+                        })
+                        .map_err(|_| TurnError::CorrelationMismatch)?,
+                        serde_json::json!(["accept_once", "decline", "cancel"]),
+                        "dolgorae.interaction.file-change-approval/v1",
                     )
-                };
-                (
-                    "file_change_approval",
-                    serde_json::json!({
-                        "title": "File change approval",
-                        "message": "File changes require approval",
-                        "reason": interaction.payload.get("reason").cloned().unwrap_or(Value::Null),
-                        "snapshot_sha256": snapshot.snapshot_sha256,
-                        "snapshot_revision": snapshot.revision,
-                        "truncated": false,
-                        "changes": changes,
-                        "change_artifact": artifact,
-                    }),
-                    serde_json::json!(["accept_once", "decline", "cancel"]),
-                    "dolgorae.interaction.file-change-approval/v1",
-                )
-            }
-            "item/tool/requestUserInput" => (
-                "user_input",
-                normalize_user_input_payload(&interaction.payload, interaction.request_id)?,
-                serde_json::json!([]),
-                "dolgorae.interaction.user-input/v1",
-            ),
-            _ => return Err(TurnError::CorrelationMismatch),
-        };
+                }
+                "item/tool/requestUserInput" => (
+                    "user_input",
+                    normalize_user_input_payload(&interaction.payload, interaction.request_id)?,
+                    serde_json::json!([]),
+                    "dolgorae.interaction.user-input/v1",
+                ),
+                _ => return Err(TurnError::CorrelationMismatch),
+            };
         Ok(serde_json::json!({
             "schema_version": 1,
             "request_id": public_request_id,
@@ -2603,6 +2848,18 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.ignored_foreign.push(observation);
     }
 
+    /// Existing interaction decisions are read before admitting a new mutation.
+    pub(crate) fn replay_response(
+        &mut self,
+        request_id: u64,
+        idempotency_key: &str,
+        response: &Value,
+    ) -> Option<Result<Option<Uuid>, TurnError>> {
+        self.resolved_interactions
+            .contains_key(&request_id)
+            .then(|| self.respond(request_id, idempotency_key.to_owned(), response.clone()))
+    }
+
     pub fn respond(
         &mut self,
         request_id: u64,
@@ -2633,7 +2890,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     return Err(TurnError::InteractionAlreadyResolved { request_id });
                 }
             }
-            return Ok(resolved.resolution_receipt_id);
+            return resolved
+                .resolution_receipt_id
+                .map(Some)
+                .ok_or(TurnError::InteractionAlreadyResolved { request_id });
         }
         if self.state == CoordinatorState::OutcomeUnknown {
             return Err(TurnError::OutcomeUnknown);
@@ -2648,7 +2908,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let response_sha256 = (!contains_secret)
             .then(|| interaction_response_digest(&response.0, request_id))
             .transpose()?;
-        let resolution_receipt_id = contains_secret.then(Uuid::now_v7);
+        let resolution_receipt_id = Some(Uuid::now_v7());
         let resolution = if interaction.method == "item/tool/requestUserInput" {
             let answer_count = response
                 .0
@@ -2993,9 +3253,160 @@ pub fn recorded_terminal<C: LedgerClock + 'static, F: FaultInjector + 'static>(
         })
 }
 
+struct RestoredTurnReceipts {
+    accepted: BTreeMap<String, IdempotencyRecord>,
+    unresolved: BTreeMap<String, String>,
+}
+
+fn restore_turn_receipt_maps(
+    records: Vec<(AuditKind, Value)>,
+) -> Result<RestoredTurnReceipts, TurnError> {
+    let mut idempotency = BTreeMap::new();
+    let mut unresolved_idempotency = BTreeMap::new();
+    let mut bound_threads = BTreeSet::new();
+    let mut intents = BTreeMap::<String, OperationIntent>::new();
+    let mut accepted = BTreeMap::<String, (String, String)>::new();
+    for (kind, payload) in records {
+        match kind {
+            AuditKind::IdempotencyReserved if payload.get("operation_id").is_some() => {
+                let intent: OperationIntent = serde_json::from_value(payload)
+                    .map_err(|_| TurnError::Journal("invalid durable Turn intent".to_owned()))?;
+                unresolved_idempotency.insert(
+                    intent.idempotency_key.clone(),
+                    intent.request_sha256.clone(),
+                );
+                intents.insert(intent.operation_id.to_string(), intent);
+            }
+            AuditKind::ThreadBound => {
+                if let Some(thread_id) = payload.get("thread_id").and_then(Value::as_str) {
+                    bound_threads.insert(thread_id.to_owned());
+                }
+            }
+            AuditKind::TurnStarted => {
+                let field = |name| {
+                    payload.get(name).and_then(Value::as_str).ok_or_else(|| {
+                        TurnError::Journal("invalid durable Turn acceptance".to_owned())
+                    })
+                };
+                let Some(operation_id) = payload.get("operation_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Some(intent) = intents.get(operation_id) {
+                    let thread_id = field("thread_id")?;
+                    if !bound_threads.contains(thread_id) {
+                        continue;
+                    }
+                    if let Some(effort) = payload
+                        .get("effort")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                    {
+                        unresolved_idempotency.remove(&intent.idempotency_key);
+                        idempotency.insert(
+                            intent.idempotency_key.clone(),
+                            IdempotencyRecord {
+                                digest: intent.request_sha256.clone(),
+                                accepted: AcceptedTurn {
+                                    thread_id: thread_id.to_owned(),
+                                    turn_id: field("turn_id")?.to_owned(),
+                                    effort: effort.to_owned(),
+                                    replayed: true,
+                                },
+                                terminal: None,
+                            },
+                        );
+                    }
+                    accepted.insert(
+                        field("turn_id")?.to_owned(),
+                        (operation_id.to_owned(), field("thread_id")?.to_owned()),
+                    );
+                }
+            }
+            AuditKind::TurnTerminal => {
+                let Some(turn_id) = payload.get("turn_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some((operation_id, thread_id)) = accepted.get(turn_id) else {
+                    continue;
+                };
+                let terminal: TerminalTurn = serde_json::from_value(payload)
+                    .map_err(|_| TurnError::Journal("invalid durable Turn terminal".to_owned()))?;
+                if terminal.thread_id != *thread_id {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                let intent = &intents[operation_id];
+                unresolved_idempotency.remove(&intent.idempotency_key);
+                idempotency.insert(
+                    intent.idempotency_key.clone(),
+                    IdempotencyRecord {
+                        digest: intent.request_sha256.clone(),
+                        accepted: AcceptedTurn {
+                            thread_id: terminal.thread_id.clone(),
+                            turn_id: terminal.turn_id.clone(),
+                            effort: terminal.effort.clone(),
+                            replayed: true,
+                        },
+                        terminal: Some(terminal),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(RestoredTurnReceipts {
+        accepted: idempotency,
+        unresolved: unresolved_idempotency,
+    })
+}
+
+/// Recover an original Submit result without constructing or starting a worker.
+/// Callers authorize before this read and pass the pinned model/default effort.
+pub(crate) fn replay_durable_submit(
+    records: Vec<(AuditKind, Value)>,
+    request: &TurnRequest,
+    default_effort: &str,
+) -> Result<Option<AcceptedTurn>, TurnError> {
+    let RestoredTurnReceipts {
+        accepted,
+        unresolved,
+    } = restore_turn_receipt_maps(records)?;
+    let effort = request.effort.as_deref().unwrap_or(default_effort);
+    let digest = request_digest(request, effort)?;
+    if let Some(recorded) = unresolved.get(&request.idempotency_key) {
+        return Err(if recorded == &digest {
+            TurnError::OutcomeUnknown
+        } else {
+            TurnError::IdempotencyConflict {
+                recorded: recorded.clone(),
+                observed: digest,
+            }
+        });
+    }
+    let Some(record) = accepted.get(&request.idempotency_key) else {
+        return Ok(None);
+    };
+    if record.digest != digest {
+        return Err(TurnError::IdempotencyConflict {
+            recorded: record.digest.clone(),
+            observed: digest,
+        });
+    }
+    let mut accepted = record.accepted.clone();
+    accepted.replayed = true;
+    Ok(Some(accepted))
+}
+
+pub(crate) fn normalized_request_digest(
+    request: &TurnRequest,
+    default_effort: &str,
+) -> Result<String, TurnError> {
+    request_digest(request, request.effort.as_deref().unwrap_or(default_effort))
+}
+
 fn request_digest(request: &TurnRequest, effort: &str) -> Result<String, TurnError> {
     let value = serde_json::json!({
         "message": request.message,
+        "write": request.write,
         "images": request.images,
         "model": request.model,
         "effort": effort,
@@ -3197,7 +3608,10 @@ fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, TurnError> {
     canonicalize(&parsed).map_err(|_| TurnError::CorrelationMismatch)
 }
 
-fn normalize_file_changes(changes: &[Value], workspace: &Path) -> Result<Vec<Value>, TurnError> {
+fn normalize_file_changes(
+    changes: &[Value],
+    workspace: &Path,
+) -> Result<Vec<FileChangePayload>, TurnError> {
     if changes.is_empty() || changes.len() > 4_096 || !workspace.is_absolute() {
         return Err(TurnError::CorrelationMismatch);
     }
@@ -3247,12 +3661,12 @@ fn normalize_file_changes(changes: &[Value], workspace: &Path) -> Result<Vec<Val
             if kind != "update" && move_path.is_some() {
                 return Err(TurnError::CorrelationMismatch);
             }
-            Ok(serde_json::json!({
-                "path": path,
-                "kind": kind,
-                "diff": diff,
-                "move_path": move_path,
-            }))
+            Ok(FileChangePayload {
+                path: LosslessPath::Utf8(path),
+                kind: kind.to_owned(),
+                diff: diff.to_owned(),
+                move_path: move_path.map(LosslessPath::Utf8),
+            })
         })
         .collect()
 }
@@ -3468,6 +3882,7 @@ mod tests {
 
     fn request(key: &str, delivery: DeliveryMode) -> TurnRequest {
         TurnRequest {
+            write: false,
             idempotency_key: key.to_owned(),
             message: "hello".to_owned(),
             images: vec![],
@@ -3525,6 +3940,7 @@ mod tests {
                 write: true,
                 writer_generation: 7,
                 transaction_id: observed,
+                ..
             }) if *observed == transaction_id
         ));
         coordinator
@@ -3583,6 +3999,65 @@ mod tests {
     }
 
     #[test]
+    fn nonsecret_resolution_receipt_survives_restart_without_redelivery() {
+        let answer = serde_json::json!({"answers":{"q":{"answers":["yes"]}}});
+        let mut original =
+            running_turn_with(&RecordingDiagnostics::default(), vec![input_request()]);
+        original.next_event().unwrap();
+        let receipt = original
+            .respond(9, "answer".to_owned(), answer.clone())
+            .unwrap()
+            .expect("every accepted resolution has a receipt");
+        assert_eq!(original.server.responses.len(), 1);
+        let decisions = original
+            .journal
+            .entries
+            .clone()
+            .into_iter()
+            .map(journal_record)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .filter_map(|(kind, payload)| (kind == AuditKind::ApprovalDecided).then_some(payload))
+            .collect();
+        let mut restarted = coordinator(FakeServer::default());
+        restarted
+            .restore_interaction_resolutions(decisions)
+            .unwrap();
+        assert_eq!(
+            restarted.respond(9, "answer".to_owned(), answer),
+            Ok(Some(receipt))
+        );
+        assert!(restarted.server.responses.is_empty());
+        assert!(matches!(
+            restarted.respond(
+                9,
+                "answer".to_owned(),
+                serde_json::json!({"answers":{"q":{"answers":["no"]}}})
+            ),
+            Err(TurnError::InteractionAlreadyResolved { request_id: 9 })
+        ));
+    }
+
+    #[test]
+    fn legacy_resolution_without_a_receipt_never_redelivers_or_invents_one() {
+        let answer = serde_json::json!({"decision":"decline"});
+        let mut restarted = coordinator(FakeServer::default());
+        restarted
+            .restore_interaction_resolutions(vec![serde_json::json!({
+                "request_id":"9", "idempotency_key":"answer",
+                "response_sha256":interaction_response_digest(&answer, 9).unwrap(),
+                "resolution_receipt_id":null, "resolution":{"outcome":"approval"}
+            })])
+            .unwrap();
+        assert_eq!(
+            restarted.respond(9, "answer".to_owned(), answer),
+            Err(TurnError::InteractionAlreadyResolved { request_id: 9 })
+        );
+        assert!(restarted.server.responses.is_empty());
+    }
+
+    #[test]
     fn latest_durable_interaction_receipt_wins_when_an_upstream_id_is_reused() {
         let mut coordinator = coordinator(FakeServer::default());
         let latest_receipt = Uuid::now_v7();
@@ -3610,6 +4085,180 @@ mod tests {
             Ok(Some(latest_receipt))
         );
         assert!(coordinator.server.responses.is_empty());
+    }
+
+    #[test]
+    fn durable_acceptance_replays_without_terminal_and_without_claiming_outcome() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        let mut original = coordinator(server);
+        let accepted = original
+            .start_turn(request("key", DeliveryMode::Submit))
+            .unwrap();
+        let records = original
+            .journal
+            .entries
+            .clone()
+            .into_iter()
+            .map(journal_record)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut restored = coordinator(FakeServer::default());
+        restored.restore_turn_receipts(records.clone()).unwrap();
+        restored.restore_durable_state(
+            RunLifecycle::OutcomeUnknown,
+            Some("thread-1".to_owned()),
+            Some("turn-1".to_owned()),
+            None,
+        );
+        let before = restored.journal.entries.len();
+        assert!(
+            matches!(restored.accept(request("key", DeliveryMode::Submit)).unwrap(),
+            DeliveryResult::Accepted(replayed) if replayed.replayed && replayed.turn_id == accepted.turn_id && replayed.effort == accepted.effort)
+        );
+        assert_eq!(restored.state(), &CoordinatorState::OutcomeUnknown);
+        assert_eq!(restored.journal.entries.len(), before);
+
+        let legacy = records
+            .into_iter()
+            .map(|(kind, mut payload)| {
+                if kind == AuditKind::TurnStarted {
+                    payload.as_object_mut().unwrap().remove("effort");
+                }
+                (kind, payload)
+            })
+            .collect();
+        let mut legacy_restored = coordinator(FakeServer::default());
+        legacy_restored.restore_turn_receipts(legacy).unwrap();
+        assert!(matches!(
+            legacy_restored.accept(request("key", DeliveryMode::Submit)),
+            Err(TurnError::OutcomeUnknown)
+        ));
+    }
+
+    #[test]
+    fn completed_turn_receipt_survives_worker_restart_without_resubmission() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        server.messages.push_back(serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}));
+        let mut original = coordinator(server);
+        original
+            .start_turn(request("key", DeliveryMode::Submit))
+            .unwrap();
+        let terminal = original.next_event().unwrap().unwrap();
+        let records = original
+            .journal
+            .entries
+            .clone()
+            .into_iter()
+            .map(journal_record)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut restored = coordinator(FakeServer::default());
+        restored.restore_turn_receipts(records).unwrap();
+        let before = restored.journal.entries.len();
+        assert_eq!(
+            restored.accept(request("key", DeliveryMode::Send)).unwrap(),
+            DeliveryResult::Terminal(terminal)
+        );
+        let mut changed = request("key", DeliveryMode::Submit);
+        changed.message = "changed".to_owned();
+        assert!(matches!(
+            restored.accept(changed),
+            Err(TurnError::IdempotencyConflict { .. })
+        ));
+        assert_eq!(restored.journal.entries.len(), before);
+    }
+
+    #[test]
+    fn restored_unaccepted_reservation_never_reexecutes_after_run_becomes_idle() {
+        let mut original = coordinator(FakeServer::default());
+        assert!(
+            original
+                .start_turn(request("lost", DeliveryMode::Submit))
+                .is_err()
+        );
+        let records = original
+            .journal
+            .entries
+            .clone()
+            .into_iter()
+            .map(journal_record)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut restored = coordinator(FakeServer::default());
+        restored.restore_turn_receipts(records).unwrap();
+        let before = restored.journal.entries.len();
+        assert!(matches!(
+            restored.accept(request("lost", DeliveryMode::Submit)),
+            Err(TurnError::OutcomeUnknown)
+        ));
+        assert_eq!(restored.journal.entries.len(), before);
+    }
+
+    #[test]
+    fn revision_admission_replay_lookup_has_no_effect_and_preserves_identity() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        let mut coordinator = coordinator(server);
+        assert!(
+            coordinator
+                .replay_delivery(&request("key", DeliveryMode::Submit))
+                .unwrap()
+                .is_none()
+        );
+        let accepted = coordinator
+            .start_turn(request("key", DeliveryMode::Submit))
+            .unwrap();
+        let before = coordinator.journal.entries.len();
+        assert!(
+            matches!(coordinator.replay_delivery(&request("key", DeliveryMode::Send)).unwrap(),
+            Some(DeliveryResult::Accepted(replayed)) if replayed.replayed && replayed.turn_id == accepted.turn_id)
+        );
+        let mut write_drift = request("key", DeliveryMode::Submit);
+        write_drift.write = true;
+        assert!(matches!(
+            coordinator.replay_delivery(&write_drift),
+            Err(TurnError::IdempotencyConflict { .. })
+        ));
+        let mut changed = request("key", DeliveryMode::Submit);
+        changed.message = "different identity".to_owned();
+        assert!(matches!(
+            coordinator.replay_delivery(&changed),
+            Err(TurnError::IdempotencyConflict { .. })
+        ));
+        assert!(
+            coordinator
+                .replay_delivery(&request("new", DeliveryMode::Submit))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(coordinator.journal.entries.len(), before);
+        coordinator.state = CoordinatorState::OutcomeUnknown;
+        assert!(matches!(
+            coordinator.replay_delivery(&request("key", DeliveryMode::Submit)),
+            Ok(Some(DeliveryResult::Accepted(_)))
+        ));
+        assert!(matches!(
+            coordinator.replay_delivery(&request("new", DeliveryMode::Submit)),
+            Err(TurnError::OutcomeUnknown)
+        ));
+        assert_eq!(coordinator.journal.entries.len(), before);
     }
 
     #[test]
@@ -3702,7 +4351,10 @@ mod tests {
             uncertain.respond(9, "answer".to_owned(), answer.clone()),
             Err(TurnError::OutcomeUnknown)
         );
-        assert_eq!(uncertain.respond(9, "answer".to_owned(), answer), Ok(None));
+        assert!(matches!(
+            uncertain.respond(9, "answer".to_owned(), answer),
+            Ok(Some(_))
+        ));
         assert_eq!(uncertain.server.responses.len(), 1);
         assert_eq!(uncertain.state(), &CoordinatorState::OutcomeUnknown);
         assert!(uncertain.pending_interactions().is_empty());
@@ -3741,11 +4393,14 @@ mod tests {
         let normalized =
             normalize_file_changes(changes.as_array().unwrap(), Path::new("/tmp/workspace"))
                 .unwrap();
-        assert_eq!(normalized[0]["kind"], "add");
-        assert_eq!(normalized[1]["kind"], "delete");
-        assert_eq!(normalized[2]["kind"], "update");
-        assert_eq!(normalized[2]["move_path"], "d");
-        assert!(normalized[0]["move_path"].is_null());
+        assert_eq!(normalized[0].kind, "add");
+        assert_eq!(normalized[1].kind, "delete");
+        assert_eq!(normalized[2].kind, "update");
+        assert_eq!(
+            normalized[2].move_path,
+            Some(LosslessPath::Utf8("d".to_owned()))
+        );
+        assert!(normalized[0].move_path.is_none());
     }
 
     #[test]
@@ -4018,15 +4673,15 @@ mod tests {
         assert_eq!(coordinator.state(), &CoordinatorState::WaitingInteraction);
         assert!(coordinator.server.responses.is_empty());
 
-        assert_eq!(
+        assert!(
             coordinator
                 .respond(
                     9,
                     "valid-option".to_owned(),
                     serde_json::json!({"answers":{"choice":{"answers":["beta"]}}}),
                 )
-                .unwrap(),
-            None
+                .unwrap()
+                .is_some()
         );
         assert_eq!(coordinator.state(), &CoordinatorState::Running);
     }
@@ -4509,6 +5164,117 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["text"], "kept");
         assert!(streamed > 12_000, "the decoys were streamed, not skipped");
+    }
+
+    #[test]
+    fn shared_journal_stamps_acceptance_and_response_at_their_durable_boundaries() {
+        let root = PathBuf::from("/tmp").join(format!("dg-stamped-journal-{}", Uuid::now_v7()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let state_root = root.as_path();
+        for path in [
+            state_root.join("runtime"),
+            state_root.join("runtime/locks"),
+            state_root.join("run"),
+            state_root.join("run/recovery"),
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(state_root.join("run/audit.jsonl"))
+            .unwrap();
+        let workspace_id = "a".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        crate::writer::WriterStore::initialize_layout(state_root, &workspace_id, uid).unwrap();
+        let run_id = Uuid::now_v7();
+        let ledger = Arc::new(Mutex::new(
+            Ledger::open(state_root.join("run"), run_id).unwrap(),
+        ));
+        let mut journal = SharedLedgerJournal::new(Arc::clone(&ledger), 1).with_event_authority(
+            state_root,
+            &workspace_id,
+            uid,
+            &"b".repeat(64),
+            7,
+        );
+        let operation_id = Uuid::now_v7();
+        journal
+            .append_and_sync(JournalEntry::ThreadBound {
+                operation_id,
+                thread_id: "thread-1".to_owned(),
+                thread_generation: 1,
+                effective_policy: crate::domain::EffectivePolicy {
+                    access: crate::domain::Access::Unknown,
+                    verification: crate::domain::PolicyVerification::Unverified,
+                    policy_epoch: crate::domain::PolicyEpoch(1),
+                    thread_generation: Some(1),
+                    server_epoch: Some(7),
+                    writer_generation: None,
+                },
+            })
+            .unwrap();
+        journal
+            .append_and_sync(JournalEntry::TurnAccepted {
+                operation_id,
+                thread_id: "thread-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                effort: "medium".to_owned(),
+                effective_policy: crate::domain::EffectivePolicy {
+                    access: crate::domain::Access::Unknown,
+                    verification: crate::domain::PolicyVerification::Unverified,
+                    policy_epoch: crate::domain::PolicyEpoch(1),
+                    thread_generation: Some(1),
+                    server_epoch: Some(7),
+                    writer_generation: None,
+                },
+                controller: Some(crate::domain::ControllerIdentity {
+                    controller_id: Uuid::now_v7(),
+                    kind: crate::domain::ControllerKind::HumanCli,
+                    instance_id: "test".to_owned(),
+                    subject_id: None,
+                    generation: 1,
+                }),
+            })
+            .unwrap();
+        journal
+            .append_and_sync(JournalEntry::Terminal {
+                thread_id: "thread-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                status: "completed".to_owned(),
+                effort: "medium".to_owned(),
+                usage: None,
+                final_response: Some(FinalResponse::Inline {
+                    text: "finished".to_owned(),
+                }),
+            })
+            .unwrap();
+        let locked = ledger.lock().unwrap();
+        let records = locked.durable_records().unwrap();
+        let projected: Vec<_> = records
+            .iter()
+            .filter_map(|record| {
+                record
+                    .client_projection()
+                    .map(|projection| (record.sequence(), projection))
+            })
+            .collect();
+        assert_eq!(projected.len(), 3);
+        for (sequence, projection) in &projected {
+            assert_eq!(projection.stamp.run_state_revision, *sequence);
+            assert_eq!(projection.stamp.writer_state_revision, 0);
+            assert_eq!(projection.record.server_epoch, 7);
+        }
+        assert!(projected[0].0 < projected[1].0 && projected[1].0 < projected[2].0);
+        assert_eq!(records.last().unwrap().kind(), AuditKind::TurnTerminal);
+        drop(locked);
+        drop(journal);
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

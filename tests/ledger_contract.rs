@@ -1837,3 +1837,325 @@ fn an_observer_refuses_a_head_the_durable_bytes_do_not_reach() {
         Err(LedgerError::Integrity(_))
     ));
 }
+
+#[test]
+fn stamped_semantic_events_survive_reopen_without_rewriting_legacy_history() {
+    use dolgorae::domain::ProjectionStamp;
+    use dolgorae::ledger::StampedClientEvent;
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let legacy = event(
+        &ledger,
+        tree.run_id,
+        None,
+        None,
+        ClientEventData::RuntimeError(RuntimeErrorPayload {
+            error_code: "TRANSPORT_FAILURE".to_owned(),
+            message: "legacy".to_owned(),
+        }),
+    );
+    ledger
+        .append_client_event(legacy, 1, AppendDurability::Required)
+        .unwrap();
+    let original = fs::read(tree.root.join("audit.jsonl")).unwrap();
+    let record = event(
+        &ledger,
+        tree.run_id,
+        None,
+        None,
+        ClientEventData::RuntimeError(RuntimeErrorPayload {
+            error_code: "TRANSPORT_FAILURE".to_owned(),
+            message: "current".to_owned(),
+        }),
+    );
+    let stamped = StampedClientEvent {
+        record,
+        stamp: ProjectionStamp {
+            captured_head_cursor: "2".to_owned(),
+            run_state_revision: 2,
+            writer_state_revision: 17,
+            interaction_state_revision: 0,
+        },
+    };
+    let audit = AuditRecord::new(
+        2,
+        TIMESTAMP,
+        tree.run_id,
+        1,
+        AuditKind::ProfileObserved,
+        object(&[]),
+        ledger.previous_hash(),
+    )
+    .unwrap()
+    .with_client_projection(stamped.clone())
+    .unwrap();
+    ledger.append(audit, AppendDurability::Required).unwrap();
+    drop(ledger);
+    let reopened = Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    assert_eq!(reopened.head().unwrap().sequence, 2);
+    let observer = ObservedLedger::open(&tree.root, tree.run_id, 2).unwrap();
+    assert!(matches!(
+        observer.stamped_events_after(0, EventProjection::Minimal),
+        Err(LedgerError::MissingEventStamp(1))
+    ));
+    assert_eq!(
+        observer
+            .stamped_events_after(1, EventProjection::Minimal)
+            .unwrap(),
+        vec![stamped]
+    );
+    assert_eq!(
+        observer
+            .events_after(0, EventProjection::Minimal)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        fs::read(tree.root.join("audit.jsonl"))
+            .unwrap()
+            .starts_with(&original)
+    );
+}
+
+#[test]
+fn historical_stamp_is_hash_bound_and_rejects_a_different_boundary() {
+    use dolgorae::domain::ProjectionStamp;
+    use dolgorae::ledger::StampedClientEvent;
+    let tree = RunTree::new();
+    let ledger = Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let record = event(
+        &ledger,
+        tree.run_id,
+        None,
+        None,
+        ClientEventData::RuntimeError(RuntimeErrorPayload {
+            error_code: "TRANSPORT_FAILURE".to_owned(),
+            message: "current".to_owned(),
+        }),
+    );
+    let mut stamped = StampedClientEvent {
+        record,
+        stamp: ProjectionStamp {
+            captured_head_cursor: "1".to_owned(),
+            run_state_revision: 1,
+            writer_state_revision: 17,
+            interaction_state_revision: 0,
+        },
+    };
+    let audit = AuditRecord::new(
+        1,
+        TIMESTAMP,
+        tree.run_id,
+        1,
+        AuditKind::ProfileObserved,
+        object(&[]),
+        ledger.previous_hash(),
+    )
+    .unwrap();
+    let bound = audit
+        .clone()
+        .with_client_projection(stamped.clone())
+        .unwrap();
+    let line = String::from_utf8(bound.canonical_line().unwrap()).unwrap();
+    let tampered = line.trim_end().replace(
+        "\"writer_state_revision\":17",
+        "\"writer_state_revision\":18",
+    );
+    assert!(AuditRecord::from_canonical_line(tampered.as_bytes()).is_err());
+    stamped.stamp.run_state_revision = 2;
+    assert!(audit.with_client_projection(stamped).is_err());
+}
+
+#[test]
+fn scoped_event_authority_stamps_production_turn_and_response_at_distinct_boundaries() {
+    use dolgorae::ledger::EventAppendContext;
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    let public_id = Uuid::now_v7();
+    let context = EventAppendContext {
+        workspace_id: "a".repeat(64),
+        server_key: "b".repeat(64),
+        server_epoch: 4,
+        writer_state_revision: 12,
+    };
+    ledger
+        .with_event_context(context, |ledger| {
+            ledger.append_required_payload(
+                AuditKind::ThreadBound,
+                &serde_json::json!({"thread_id":"thread-1"}),
+                1,
+            )?;
+            ledger.append_required_payload(
+                AuditKind::TurnStarted,
+                &serde_json::json!({"thread_id":"thread-1","turn_id":"turn-1"}),
+                1,
+            )?;
+            ledger.append_required_payload(
+                AuditKind::ApprovalRequested,
+                &serde_json::json!({"upstream_request_id":1,"interaction":{
+                    "schema_version":1,"request_id":public_id,"run_id":tree.run_id,
+                    "controller_id":Uuid::now_v7(),"control_mode":"direct_interactive",
+                    "thread_id":"thread-1","turn_id":"turn-1","item_id":null,
+                    "run_generation":1,"server_epoch":4,"kind":"user_input","status":"pending",
+                    "payload":{"is_blocking":true,"questions":[{"id":"q","header":"h",
+                        "question":"Continue?","is_other":false,"is_secret":false,"options":null}]},
+                    "available_decisions":[],"response_schema":"dolgorae.interaction.user-input/v1",
+                    "opened_at":TIMESTAMP,"resolved_at":null,"resolution":null
+                }}),
+                1,
+            )?;
+            ledger.append_required_payload(
+                AuditKind::InteractionOpened,
+                &serde_json::json!({"request_id":"1","method":"item/tool/requestUserInput"}),
+                1,
+            )?;
+            ledger.append_required_payload(
+                AuditKind::ApprovalDecided,
+                &serde_json::json!({"request_id":"1","response_sha256":"c".repeat(64),"resolution_receipt_id":null,"resolution":{"outcome":"answered"}}),
+                1,
+            )?;
+            ledger.append_required_payload(
+                AuditKind::InteractionResolved,
+                &serde_json::json!({"request_id":"1"}),
+                1,
+            )?;
+            let terminal = serde_json::json!({"thread_id":"thread-1","turn_id":"turn-1",
+            "status":"completed","final_response":{"kind":"inline","text":"done"},
+            "usage":{"inputTokens":2,"outputTokens":3}});
+            ledger.append_final_response_event(&terminal, 1)?;
+            ledger.append_required_payload(AuditKind::TurnTerminal, &terminal, 1)
+        })
+        .unwrap();
+    let head = ledger.head().unwrap().sequence;
+    let decision = ledger
+        .durable_records()
+        .unwrap()
+        .iter()
+        .find(|record| record.kind() == AuditKind::ApprovalDecided)
+        .unwrap();
+    let receipt = decision.client_projection().unwrap().record.event_id;
+    assert_eq!(
+        ledger.approval_decisions().unwrap()[0]["resolution_receipt_id"],
+        receipt.to_string()
+    );
+    let before = std::fs::read(tree.root.join("audit.jsonl")).unwrap();
+    drop(ledger);
+    let replay = Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    assert_eq!(
+        replay.approval_decisions().unwrap()[0]["resolution_receipt_id"],
+        receipt.to_string()
+    );
+    drop(replay);
+    assert_eq!(
+        std::fs::read(tree.root.join("audit.jsonl")).unwrap(),
+        before
+    );
+    let events = ObservedLedger::open(&tree.root, tree.run_id, head)
+        .unwrap()
+        .stamped_events_after(0, EventProjection::Operational)
+        .unwrap();
+    assert_eq!(events.len(), 6);
+    let machine = ObservedLedger::open(&tree.root, tree.run_id, head)
+        .unwrap()
+        .events_after(0, EventProjection::Operational)
+        .unwrap();
+    assert_eq!(
+        machine
+            .iter()
+            .map(|delivery| &delivery.record)
+            .collect::<Vec<_>>(),
+        events.iter().map(|event| &event.record).collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        events[0].record.data,
+        ClientEventData::TurnStateChanged(_)
+    ));
+    assert!(matches!(
+        events[3].record.data,
+        ClientEventData::ResponseFinal(_)
+    ));
+    assert!(matches!(
+        events[4].record.data,
+        ClientEventData::UsageReported(_)
+    ));
+    assert!(matches!(
+        events[5].record.data,
+        ClientEventData::TurnStateChanged(_)
+    ));
+    assert_eq!(events[3].stamp.interaction_state_revision, 6);
+    assert!(
+        matches!(&events[1].record.data, ClientEventData::InteractionOpened(payload)
+        if payload.request_id == public_id.to_string())
+    );
+    assert!(
+        matches!(&events[2].record.data, ClientEventData::InteractionResolved(payload)
+        if payload.request_id == public_id.to_string())
+    );
+    for event in &events {
+        assert_eq!(event.stamp.writer_state_revision, 12);
+        assert_eq!(event.record.cursor, event.stamp.captured_head_cursor);
+    }
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].stamp.run_state_revision < pair[1].stamp.run_state_revision)
+    );
+}
+
+#[test]
+fn empty_terminal_response_does_not_fabricate_an_event_or_block_terminal_evidence() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    ledger.with_event_context(dolgorae::event::EventAppendContext {workspace_id:"a".repeat(64),server_key:"b".repeat(64),server_epoch:1,writer_state_revision:0},|ledger| {
+        ledger.append_required_payload(AuditKind::ThreadBound,&serde_json::json!({"thread_id":"thread"}),1)?;
+        ledger.append_required_payload(AuditKind::TurnStarted,&serde_json::json!({"thread_id":"thread","turn_id":"turn"}),1)?;
+        let terminal=serde_json::json!({"thread_id":"thread","turn_id":"turn","status":"interrupted","final_response":{"kind":"inline","text":""},"usage":null});
+        ledger.append_final_response_event(&terminal,1)?;
+        ledger.append_required_payload(AuditKind::TurnTerminal,&terminal,1)
+    }).unwrap();
+    assert_eq!(ledger.head().unwrap().sequence, 3);
+    assert_eq!(
+        ledger.projection().unwrap().lifecycle,
+        dolgorae::domain::RunLifecycle::Idle
+    );
+    assert!(
+        ledger
+            .events_after(0, EventProjection::Minimal, true)
+            .unwrap()
+            .iter()
+            .all(|delivery| !matches!(delivery.record.data, ClientEventData::ResponseFinal(_)))
+    );
+}
+
+#[test]
+fn unstamped_legacy_decisions_do_not_fabricate_resolution_receipts() {
+    let tree = RunTree::new();
+    let mut ledger =
+        Ledger::open_with(&tree.root, tree.run_id, TestClock::new(), NoFaults).unwrap();
+    for receipt in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!(Uuid::now_v7())),
+    ] {
+        let mut payload = serde_json::json!({"request_id":"1","response_sha256":"c".repeat(64),"resolution":{"outcome":"approval"}});
+        if let Some(value) = &receipt {
+            payload["resolution_receipt_id"] = value.clone();
+        }
+        ledger
+            .append_required_payload(AuditKind::ApprovalDecided, &payload, 1)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .approval_decisions()
+                .unwrap()
+                .last()
+                .unwrap()
+                .get("resolution_receipt_id"),
+            receipt.as_ref()
+        );
+    }
+}

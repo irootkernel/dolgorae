@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod app_server;
+pub mod artifact;
 pub mod audit;
 pub mod cli;
 pub mod conformance;
@@ -10,13 +11,22 @@ pub mod engagement;
 pub mod event;
 pub mod external_engagement;
 pub mod fault;
+pub mod gateway;
+pub mod gateway_event;
+pub mod gateway_observation;
+pub mod gateway_projection;
+pub mod gateway_service;
+pub mod gateway_socket;
 pub mod global_profile;
 pub mod global_runtime;
+pub(crate) mod interaction;
+pub(crate) mod interaction_payload;
 pub mod jcs;
 pub mod ledger;
 pub mod machine;
 pub mod mcp_review;
 pub mod mcp_review_server;
+pub(crate) mod mutation_admission;
 pub mod paths;
 pub mod profile;
 pub mod projection;
@@ -27,6 +37,7 @@ pub mod review_target;
 pub mod run;
 pub mod runtime;
 pub mod semantic;
+pub mod snapshot;
 pub mod specialist;
 pub mod turn;
 pub mod worker;

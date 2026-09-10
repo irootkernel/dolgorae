@@ -1608,8 +1608,8 @@ normative:
 | `RUN_NOT_FOUND` | 3 | every `run` command except `start/list` | the run ID is absent in the selected workspace |
 | `THREAD_NOT_FOUND` | 3 | `run resume/send/submit/wait/recover/reconcile` and history-copying `run fork` | the pinned Codex history required by the operation is absent; never emitted by `fork --fresh` |
 | `TURN_NOT_FOUND` | 3 | `run wait` | the turn ID is absent from both ledger and Codex history |
-| `INTERACTION_NOT_FOUND` | 3 | `run respond` | the interaction ID is absent |
-| `INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER` | 4 | `run interaction get` | an observer attempted to fetch the full normalized interaction |
+| `INTERACTION_NOT_FOUND` | 3 | `run respond`, `run interaction get`, `GetControllerInteraction` | the interaction ID is absent |
+| `INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER` | 4 | `run interaction get`, `GetControllerInteraction` | an observer attempted to fetch the full normalized interaction |
 | `INTERACTION_ARTIFACT_REQUIRES_CONTROLLER` | 4 | artifact show/read | an observer attempted to fetch a controller-only interaction artifact |
 | `OBSERVER_MUTATION_FORBIDDEN` | 4 | state-changing run commands | an observer attempted a Controller mutation without presenting the bound credential |
 | `PROFILE_ALREADY_EXISTS` | 4 | `profile add` | the name already exists; replacement is never implicit |
@@ -2408,6 +2408,13 @@ coordination cleanup and record repair; `resume` starts its next generation. If
 failure occurred during an active turn, Dolgorae reconciles only terminal status
 confirmed by persisted Codex history. It MUST NOT replay the input automatically.
 
+Closing a paused Run whose physical generation was removed after exact absence
+proof does not restart or resume its thread. Under startup serialization it
+requires an absent runtime locator, an unowned worker range, and a fresh
+Controller/revision check, then durably closes the Run and releases any Writer
+authority still owned by that Run. A present or unreadable runtime locator and
+an occupied worker range cannot use this path.
+
 Cross-epoch reconciliation never connects to an absent recorded epoch. It reads
 the recorded server key/epoch and applies the immutable lane-specific barrier.
 A dedicated Run proves its exact prior Dedicated Lane Server generation and
@@ -2704,6 +2711,12 @@ The v1 audit-kind enum is closed:
 `start_failed`, and `outcome_unknown`. Adding a kind is a machine-contract
 schema change; an unknown kind fails ledger verification rather than flowing
 through `events` as an open object.
+
+The accepted v2 envelope adds the hash-covered historical client projection
+and the v2-only `mutation_admitted` and `mutation_completed` kinds described in
+SPEC-015. The checked ledger conformance registry identifies both versioned
+kind sets. This does not extend the v1 kind enum or rewrite previously
+committed records; both versions share the same ordered hash chain.
 
 An allocated Run's v1 ledger bootstrap is closed and reconstructable without a
 worker or Codex process. Its first three records MUST be, in order,
@@ -3465,6 +3478,10 @@ quarantine for bounded waits, but it is not cancel-, release-, or replay-eligibl
 Likewise, a cancellation that races with an accepted Reviewer task may leave the
 engagement in terminal `interrupted_unknown` quarantine; the acceptance campaign
 distinguishes that state from the fully cleaned `closed` pre-task path.
+Caller cancellation during Turn preparation MUST remain pending until the
+Reviewer Turn becomes active or the pending task settles. The internal adapter
+sends one authenticated Interrupt after observing the active Turn; it does not
+invent a caller revision precondition or retry an uncertain mutation outcome.
 
 The first adapter profile supports one Reviewer, one active task, read-only
 access, and working-tree scope only. It does not queue a second task, retain a
@@ -4280,6 +4297,111 @@ projections carry the same stamp shape: captured durable head plus Run, Writer,
 and Interaction revisions. A client MUST derive actions only from compatible
 typed projections and MUST keep mutations disabled while any required
 aggregate is older than an invalidating event or the stamps do not converge.
+
+#### Projection revision authority
+
+`ProjectionStamp` is a durable observation boundary, not a gateway counter.
+Its revision operands have the following authorities:
+
+- `run_state_revision` is the Run's fsynced audit-ledger head sequence,
+  including records omitted from the selected client event projection.
+  `RunProjection.state_revision` is the same value.
+- `writer_state_revision` is the workspace Writer record's persisted
+  `authority_revision`; `WriterState.state_revision` is the same value. A
+  committed Writer authority transaction advances it, including an otherwise
+  state-convergent transaction. Read-only observation does not advance it.
+- `interaction_state_revision` is the greatest durable Run-ledger sequence
+  that changed the Interaction view, including opening, resolution, payload
+  or approval-binding changes, and generation or lifecycle changes that make
+  an Interaction stale. It is zero before the first such record. It is scoped
+  to the Run's complete Interaction view, not to one selected Interaction.
+- `captured_head_cursor` encodes the captured Run-ledger head with the canonical
+  SPEC-006 cursor encoding. It is not the last delivered client-event cursor.
+
+Zero denotes the corresponding initial durable state, never an omitted
+precondition or a request to bypass comparison. Revisions never reset on
+gateway or worker restart, and overflow fails closed before mutation. Equal
+stamps are compatible only within the same workspace and Run identity.
+Workspace-only Writer status uses its owner Run's captured boundary when an
+owner exists; with no owner it has an empty head cursor and zero Run and
+Interaction revisions. Such an ownerless stamp does not replace a Run-bound
+snapshot when enabling a Run mutation.
+
+An ownerless `WriterState` has no lane, requested assurance, or achieved
+assurance to project; those enum fields are `UNSPECIFIED`, effective access is
+`UNKNOWN`, policy verification is `UNVERIFIED`, and handoff eligibility is
+false. These fields never stand in for an owner Run's policy observation.
+
+For `BackgroundExecutionProjection`, `UNVERIFIED` means that the census did
+not establish authoritative workload facts. Its census revision, observed
+process count, and consecutive empty samples are zero, and quiescent time is
+absent. In that state, zero is an unavailable observation, never evidence of
+an empty process set or permission to mutate. `NOT_APPLICABLE` likewise uses
+zero scalars without claiming a census. A dedicated lane that has never
+started has an empty initial workload state with revision and sample count
+zero; a started lane requires actual exact-identity census evidence before
+reporting `VERIFIED_ABSENT`.
+
+A legacy Run with a durable Thread binding but no recorded effective-policy
+observation remains readable. Its fresh snapshot reports `UNKNOWN` access,
+`UNVERIFIED` policy, and policy epoch zero, retaining the actual recorded Thread
+generation and any independently observed server epoch. This denotes the
+absence of policy evidence and cannot authorize a Writer transition or handoff.
+It does not retrofit stamps onto historical events.
+
+Every snapshot MUST capture all consumed authoritative state at one compatible
+boundary. Holding the existing ordered locks or a bounded read-and-revalidate
+capture is permitted; a gateway-local mutex alone is not serialization with a
+worker. Revalidation MUST cover all consumed records and identities, including
+Writer observation fields that do not advance `authority_revision`. A capture
+that cannot establish a compatible boundary returns `RUN_STATE_CONFLICT` and
+requires a fresh snapshot; it never returns partially converged values.
+
+All existing-Run RPC fields named `expected_state_revision`, including
+`AcquireWriter` and `ReleaseWriter`, compare the addressed Run's durable head
+sequence. For a new operation, the authoritative mutation owner compares it
+for exact equality after Controller authorization and immediately before
+admission under its mutation serialization boundary. A mismatch returns
+`RUN_STATE_CONFLICT` without admitting the operation. Writer authority and
+eligibility are independently revalidated under the existing Writer lock;
+this Run precondition does not turn writer movement into an atomic handoff.
+
+An authenticated same-key/same-normalized-identity replay of an already accepted
+idempotent operation returns its original result before testing a new-operation
+revision precondition. The original operation's revision advance must not make
+its response-loss replay conflict. Identity drift remains `IDEMPOTENCY_CONFLICT`;
+an unknown outcome still requires reconciliation. The expected revision is an
+admission precondition, not an additional identity field for `SubmitTurn` replay.
+
+The persisted `audit-record/v2` envelope extends the hash-covered record with
+`client_projection` for newly stamped records. A `client_event` record stores
+its stamp there and retains the existing event payload; a semantic record stores
+the complete checked `stamped-client-event/v1` value. Sequence, Run identity,
+and timestamp MUST agree with the containing audit record. Existing audit v1
+records remain valid and MUST NOT be rewritten or assigned invented stamps.
+
+The v2-only `mutation_admitted` and `mutation_completed` kinds carry no client
+projection. Admission records bind the Controller, expected Run revision,
+operation, and normalized request digest to a durable admission ID before the
+admitted effects. Completion releases that admission fence; it does not mean a
+Turn has completed or that the client received its response. An unfinished
+admission remains reconstructable after process loss and cannot authorize a
+different operation. The terminal closed seal needs no later completion append.
+These internal records advance the durable Run head without creating a public
+event or advancing the last client-event cursor.
+
+An event's stamp is captured durably with that event's append and identifies
+its historical boundary. Replay MUST use the recorded stamp, not a snapshot
+captured at delivery time. Historical audit records remain immutable. Where a
+pre-gateway record lacks evidence sufficient to reconstruct its complete stamp,
+`WatchRunEvents` fails closed with `RUN_STATE_CONFLICT` and the existing typed
+refresh-snapshot action before delivering that unstamped record. The client
+fetches fresh Run and required aggregate snapshots and may explicitly resume
+after their converged `captured_head_cursor`. This is a snapshot rebase, not a
+claim that the old event was delivered. Original Machine event replay remains
+available under its existing contract. Malformed or beyond-head cursors retain
+`EVENT_CURSOR_INVALID`; a missing historical stamp does not change that code's
+meaning. No gateway startup, read, or rebase rewrites the old audit history.
 
 `SubmitTurn` is accepted-operation unary RPC. It MUST return only after the
 App Server accepts `turn/start` and Dolgorae fsyncs the permanent thread and

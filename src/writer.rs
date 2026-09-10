@@ -535,6 +535,26 @@ impl WriterStore {
         Ok((record, result))
     }
 
+    /// Capture authority while a short local observer operation completes.
+    /// Callers acquire this before a Run ledger mutex and must not perform
+    /// network, process, or worker-control operations in the closure.
+    pub fn observe_locked<T>(
+        &self,
+        observe: impl FnOnce(&WriterRecord) -> T,
+    ) -> Result<T, MachineError> {
+        let lock = self.open_lock(LOCK_NAME)?;
+        crate::darwin::DarwinSystem
+            .lock_exclusive(&lock)
+            .map_err(|error| path_error(&self.lock_path(LOCK_NAME), error))?;
+        self.revalidate_lock(&lock, LOCK_NAME)?;
+        let record = self.load()?;
+        let result = observe(&record);
+        crate::darwin::DarwinSystem
+            .unlock(&lock)
+            .map_err(|error| path_error(&self.lock_path(LOCK_NAME), error))?;
+        Ok(result)
+    }
+
     pub fn transact_handoff<T>(
         &self,
         operation: impl FnOnce(&mut WriterRecord) -> Result<T, MachineError>,

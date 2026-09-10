@@ -48,15 +48,8 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     "worker_controller_revalidation must be true once the "
                     "worker performs authoritative credential revalidation"
                 )
-            # safe_client_projection stays false: no production caller reads a
-            # complete client-safe observation (Controller metadata plus
-            # pending interactions) yet, so advertising it would claim
-            # observer behavior the runtime does not implement.
-            if features["safe_client_projection"] is not False:
-                raise AssertionError(
-                    "safe_client_projection must stay false until a real "
-                    "safe-observer projection caller exists"
-                )
+            if features["safe_client_projection"] is not True or features["public_local_socket"] is not True:
+                raise AssertionError("the implemented public observation transport is not advertised")
         elif arguments[0] in {"--help", "help"}:
             if instance["command"] != "help":
                 raise AssertionError(f"help used the wrong command: {arguments}")

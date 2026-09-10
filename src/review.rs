@@ -1,7 +1,7 @@
 //! One-shot read-only Specialist Review coordinator.
 
 use crate::controller::{CredentialCarrier, binding_from_carrier, create_controller_credential};
-use crate::domain::ControllerKind;
+use crate::domain::{ControllerKind, RunLifecycle};
 use crate::engagement::{EngagementStore, RuntimeOutcome};
 use crate::machine::{MachineError, new_uuid_v7};
 use crate::run::RunStore;
@@ -172,18 +172,23 @@ struct InterruptWatcher {
 }
 
 impl InterruptWatcher {
-    fn start(interrupt_epoch: u64, workspace: PathBuf, controller: PathBuf, run_id: Uuid) -> Self {
+    fn start(interrupt_epoch: u64, state_root: PathBuf, controller: PathBuf, run_id: Uuid) -> Self {
         let done = Arc::new(AtomicBool::new(false));
         let watcher_done = Arc::clone(&done);
         let handle = thread::spawn(move || {
             while !watcher_done.load(Ordering::SeqCst) {
-                if interrupted_since(interrupt_epoch) {
-                    let mut arguments = vec![OsString::from(run_id.to_string())];
-                    arguments.extend(pairs(&[
-                        ("--workspace", workspace.as_os_str()),
-                        ("--controller-file", controller.as_os_str()),
-                    ]));
-                    let _ = control_reviewer_run(RunVerb::Interrupt, &arguments);
+                if interrupted_since(interrupt_epoch)
+                    && RunStore::new(SystemWorkspacePlatform, &state_root)
+                        .load_state_projection(run_id)
+                        .is_ok_and(|projection| {
+                            matches!(
+                                projection.lifecycle,
+                                RunLifecycle::Running | RunLifecycle::WaitingInteraction
+                            )
+                        })
+                {
+                    let _ =
+                        crate::semantic::interrupt_reviewer_run(&state_root, run_id, &controller);
                     return;
                 }
                 thread::sleep(Duration::from_millis(25));
@@ -395,27 +400,12 @@ pub fn execute(
                 "Specialist review was cancelled by the caller",
             ));
         }
-        let watcher_done = Arc::new(AtomicBool::new(false));
-        let watcher = {
-            let watcher_done = Arc::clone(&watcher_done);
-            let workspace = canonical_workspace.clone();
-            let controller = carriers.reviewer.clone();
-            let run_id = hired.specialist_run_id;
-            thread::spawn(move || {
-                while !watcher_done.load(Ordering::SeqCst) {
-                    if interrupted_since(interrupt_epoch) {
-                        let mut arguments = vec![OsString::from(run_id.to_string())];
-                        arguments.extend(pairs(&[
-                            ("--workspace", workspace.as_os_str()),
-                            ("--controller-file", controller.as_os_str()),
-                        ]));
-                        let _ = control_reviewer_run(RunVerb::Interrupt, &arguments);
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(25));
-                }
-            })
-        };
+        let mut watcher = InterruptWatcher::start(
+            interrupt_epoch,
+            prepared.state_root.clone(),
+            carriers.reviewer.clone(),
+            hired.specialist_run_id,
+        );
         let mut task_error = None;
         let task = store.assign_review(
             review_id,
@@ -458,8 +448,7 @@ pub fn execute(
                 }
             },
         );
-        watcher_done.store(true, Ordering::SeqCst);
-        let _ = watcher.join();
+        watcher.stop();
         let task = task?;
         if interrupted_since(interrupt_epoch) {
             return Err(review_error(
@@ -681,7 +670,7 @@ pub fn execute_scoped(
         }
         let mut watcher = InterruptWatcher::start(
             interrupt_epoch,
-            canonical_workspace.clone(),
+            prepared.state_root.clone(),
             carriers.reviewer.clone(),
             hired.specialist_run_id,
         );

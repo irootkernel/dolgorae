@@ -1170,7 +1170,7 @@ remains ineligible until all three Tasks complete.
 
 ## EPIC-007: Dolgorae Orchestration Control Plane and Brokered Hierarchy Core
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [Orchestration control plane execution dossier](../todo/TODO-orchestration-control-plane.md).
 
@@ -1179,7 +1179,7 @@ Hierarchy over the hardened independent Run and Specialist foundations.
 
 ### TASK-023: Supervised Control-Plane Runtime and Minimum Gul Run Gateway
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-038`. Implement the production host required before any
 live Gul Orchestrated Session is claimed: foreground `dolgorae serve`, the
