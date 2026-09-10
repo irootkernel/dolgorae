@@ -141,6 +141,19 @@ fn source_module_dependencies_match_the_approved_graph() {
             "mutation_admission",
             &["audit", "domain", "fault", "jcs", "ledger", "machine"][..],
         ),
+        (
+            "orchestration",
+            &[
+                "darwin",
+                "domain",
+                "engagement",
+                "jcs",
+                "machine",
+                "run",
+                "specialist_policy",
+                "workspace",
+            ][..],
+        ),
         ("mcp_review", &[][..]),
         (
             "mcp_review_server",
@@ -233,6 +246,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "ledger",
                 "machine",
                 "mutation_admission",
+                "orchestration",
                 "paths",
                 "profile",
                 "projection",
@@ -240,6 +254,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "runtime",
                 "snapshot",
                 "specialist",
+                "specialist_policy",
                 "turn",
                 "worker",
                 "workspace",
@@ -249,6 +264,19 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "specialist",
             &["domain", "jcs", "machine", "run", "turn", "workspace"][..],
+        ),
+        (
+            "specialist_policy",
+            &[
+                "darwin",
+                "domain",
+                "jcs",
+                "machine",
+                "paths",
+                "run",
+                "semantic",
+                "workspace",
+            ][..],
         ),
         (
             "turn",

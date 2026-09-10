@@ -7,9 +7,9 @@ description: "Use Dolgorae safely through its local Machine CLI or an actually e
 
 Dolgorae is a local durable control layer for Codex runs. This revision of the
 skill covers workspace and profile readiness, immutable review targets, and
-one-shot Specialist Review and externally planned reusable Specialist
-Engagements. It does not provide a Dolgorae-owned orchestration, general
-persistent-Run, or Specialist Policy workflow.
+Specialist Policy operations, one-shot Specialist Review, and externally
+planned reusable Specialist Engagements. It does not provide a live
+Dolgorae-owned Primary tool or general persistent-Run workflow.
 
 ## Establish current authority
 
@@ -77,9 +77,8 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
 
    `profile doctor` reports its verdict in `data.compatibility` and diagnostics;
    envelope `ok:true` means the check ran, not that the profile is compatible.
-   Read [configuration.md](references/configuration.md) when a profile must be
-   created or changed. Specialist Policy operations remain unavailable in this
-   release even though their future command grammar is parsed.
+   Read [configuration.md](references/configuration.md) when a profile or
+   Specialist Policy must be created or changed.
 4. Treat a review as an external, potentially costly operation. Run it only
    when the user requested Dolgorae review:
 
@@ -171,8 +170,8 @@ or let a Specialist hire or contact another Specialist.
   only what the new envelope proves. A successful review, profile check, or
   lifecycle command never authorizes Git commit, push, release, installation,
   or another mutation.
-- This skill does not operate general `run`, workspace-writer, Specialist
-  Policy, or Dolgorae-orchestrated session flows. If one is
+- This skill does not operate general `run`, workspace-writer, or live
+  Dolgorae-orchestrated Primary tool flows. If one is
   requested, inspect current capabilities and repository authority, report that
   it is outside this skill's present workflow, and do not improvise from
   planned command grammar.

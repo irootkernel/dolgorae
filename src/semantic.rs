@@ -7,6 +7,7 @@ use crate::conformance::{
 use crate::controller::{
     CredentialCarrier, RunMutationLock, RunResetEnvironment, authorize_controller,
     binding_from_carrier, carrier_from_options, load_reconciled_controller_binding,
+    presented_controller_from_carrier,
 };
 use crate::darwin::DarwinSystem;
 use crate::domain::{
@@ -51,7 +52,7 @@ use crate::workspace::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
 use std::os::unix::net::UnixStream;
@@ -467,10 +468,58 @@ pub(crate) struct PreparedExternalSpecialist {
     pub global_profile_binding: GlobalProfileBinding,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalSpecialistPreparation {
+    EnsureServer,
+    ObserveOnly,
+}
+
+fn verify_external_profile_binding(
+    input: &ExternalAgentConfigurationInput,
+    binding: &GlobalProfileBinding,
+) -> Result<(), MachineError> {
+    if let Some(expected) = &input.global_profile_binding_sha256
+        && expected != &binding.digest()?
+    {
+        return Err(MachineError::invalid_argument(
+            "global_profile_binding_sha256",
+            "the requested global Profile binding has changed",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_external_specialist(
     workspace: Option<&Path>,
     role_ref: &str,
     input: ExternalAgentConfigurationInput,
+) -> Result<PreparedExternalSpecialist, MachineError> {
+    prepare_external_specialist_with(
+        workspace,
+        role_ref,
+        input,
+        ExternalSpecialistPreparation::EnsureServer,
+    )
+}
+
+pub(crate) fn prepare_external_specialist_read_only(
+    workspace: Option<&Path>,
+    role_ref: &str,
+    input: ExternalAgentConfigurationInput,
+) -> Result<PreparedExternalSpecialist, MachineError> {
+    prepare_external_specialist_with(
+        workspace,
+        role_ref,
+        input,
+        ExternalSpecialistPreparation::ObserveOnly,
+    )
+}
+
+fn prepare_external_specialist_with(
+    workspace: Option<&Path>,
+    role_ref: &str,
+    input: ExternalAgentConfigurationInput,
+    preparation: ExternalSpecialistPreparation,
 ) -> Result<PreparedExternalSpecialist, MachineError> {
     if input.schema_version != 2
         || input.required_assurance != "best_effort_personal_alpha"
@@ -500,28 +549,114 @@ pub(crate) fn prepare_external_specialist(
         ));
     }
     let home = DolgoraeHome::system()?;
-    let global_profile_binding =
-        ResolvedGlobalProfile::resolve(&home, &input.runtime_profile)?.prepare(&home)?;
-    if let Some(expected) = &input.global_profile_binding_sha256
-        && expected != &global_profile_binding.digest()?
-    {
-        return Err(MachineError::invalid_argument(
-            "global_profile_binding_sha256",
-            "the requested global Profile binding has changed",
-        ));
-    }
-    let state = crate::profile::ensure_global_server(&global_profile_binding)?;
-    let model = input.model.unwrap_or_else(|| state.default_model.clone());
-    if !state.models.contains(&model) {
+    let resolved = ResolvedGlobalProfile::resolve(&home, &input.runtime_profile)?;
+    let (
+        global_profile_binding,
+        default_model,
+        models,
+        profile_capabilities,
+        observed_efforts,
+        live_state,
+    ) = match preparation {
+        ExternalSpecialistPreparation::EnsureServer => {
+            let binding = resolved.prepare(&home)?;
+            verify_external_profile_binding(&input, &binding)?;
+            let state = crate::profile::ensure_global_server(&binding)?;
+            (
+                binding,
+                state.default_model.clone(),
+                state.models.clone(),
+                state.capabilities.clone(),
+                None,
+                Some(state),
+            )
+        }
+        ExternalSpecialistPreparation::ObserveOnly => {
+            let observation =
+                crate::profile::observe_global_profile(&home, &input.runtime_profile)?;
+            if !observation.blockers.is_empty() {
+                let blockers = observation
+                    .blockers
+                    .iter()
+                    .map(|blocker| match blocker {
+                        crate::profile::ProfileObservationBlocker::ServerUnavailable => {
+                            "profile_server_unavailable"
+                        }
+                        crate::profile::ProfileObservationBlocker::RuntimeIncompatible => {
+                            "profile_runtime_incompatible"
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                return Err(compatibility_rejected(
+                    &input.runtime_profile,
+                    "profile_observation",
+                    json!("an already-running compatible Profile Server"),
+                    json!(blockers),
+                    "read-only Specialist Policy validation cannot start or repair a Profile Server",
+                ));
+            }
+            let binding = resolved.bind(observation.snapshot)?;
+            verify_external_profile_binding(&input, &binding)?;
+            let default_model = observation
+                .models
+                .iter()
+                .find(|model| model.is_default)
+                .map(|model| model.model_id.clone())
+                .ok_or_else(|| {
+                    compatibility_rejected(
+                        &input.runtime_profile,
+                        "default_model",
+                        json!("exactly one advertised default model"),
+                        Value::Null,
+                        "profile model observation has no default model",
+                    )
+                })?;
+            let models = observation
+                .models
+                .iter()
+                .map(|model| model.model_id.clone())
+                .collect();
+            let efforts = observation
+                .models
+                .into_iter()
+                .map(|model| (model.model_id, model.supported_efforts))
+                .collect::<BTreeMap<_, _>>();
+            (
+                binding,
+                default_model,
+                models,
+                observation.capabilities,
+                Some(efforts),
+                None,
+            )
+        }
+    };
+    let model = input.model.unwrap_or(default_model);
+    if !models.contains(&model) {
         return Err(compatibility_rejected(
             &input.runtime_profile,
             "model",
-            json!(state.models),
+            json!(models),
             json!(model),
             "requested model is not advertised by the profile server",
         ));
     }
-    let efforts = advertised_efforts(&state, &input.runtime_profile, &model)?;
+    let efforts = match observed_efforts {
+        Some(catalog) => catalog.get(&model).cloned().ok_or_else(|| {
+            compatibility_rejected(
+                &input.runtime_profile,
+                "model",
+                json!(models),
+                json!(model),
+                "requested model is not present in the observed profile catalog",
+            )
+        })?,
+        None => advertised_efforts(
+            live_state.as_ref().expect("ensure-server evidence"),
+            &input.runtime_profile,
+            &model,
+        )?,
+    };
     if !efforts.contains(&input.default_effort) {
         return Err(compatibility_rejected(
             &input.runtime_profile,
@@ -599,7 +734,7 @@ pub(crate) fn prepare_external_specialist(
             ));
         }
         if !matches!(
-            state.capabilities.get(capability),
+            profile_capabilities.get(capability),
             Some(crate::profile::ProfileCapabilityState::Supported)
         ) {
             return Err(compatibility_rejected(
@@ -1834,7 +1969,59 @@ fn start_run_typed(
             "a Run pins nonempty instructions of at most 65536 bytes",
         ));
     }
-    let binding = binding_from_carrier(&carrier, 1)?;
+    let presented_controller = presented_controller_from_carrier(&carrier, 1)?;
+    let binding = presented_controller.binding;
+    let state_root = workspace_state_root(&view)?;
+    let orchestration_policy = if let Some(launch) = presented_controller.orchestration_launch {
+        if reviewer.is_some()
+            || external.is_some()
+            || continuation.is_some()
+            || fork.is_some()
+            || control_mode != ControlMode::DirectInteractive
+            || parent_ref.is_some()
+            || !matches!(
+                binding.identity.kind,
+                crate::domain::ControllerKind::HumanCli
+                    | crate::domain::ControllerKind::InteractiveClient
+            )
+        {
+            return Err(MachineError::invalid_argument(
+                "orchestration_launch",
+                "orchestration launch requires a parentless direct-interactive public Run",
+            ));
+        }
+        let prior = StartReservationStore::new(SystemWorkspacePlatform, &state_root)
+            .load_operation("run-start", "start_run", &idempotency_key)?;
+        let prior_run_id = prior.as_ref().map(|reservation| reservation.run_id);
+        let existing = if let Some(run_id) = prior_run_id {
+            let store = crate::orchestration::OrchestrationStore::open(&state_root)?;
+            match store.session(run_id) {
+                Ok(session) => Some(session.specialist_policy),
+                Err(error) if error.code == "RUN_NOT_FOUND" => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let policy = match existing {
+            Some(policy) => policy,
+            None => {
+                let workspace_path = view.canonical_path.to_path_buf()?;
+                crate::specialist_policy::SpecialistPolicyRegistry::discover(Some(&workspace_path))?
+                    .resolve_for_session(&launch.specialist_policy_name)?
+            }
+        };
+        if policy.policy_name != launch.specialist_policy_name {
+            return Err(crate::run::idempotency_conflict(
+                prior_run_id.unwrap_or_else(Uuid::nil),
+                &policy.policy_name,
+                &launch.specialist_policy_name,
+            ));
+        }
+        Some(policy)
+    } else {
+        None
+    };
 
     for capability in &required_capabilities {
         let support = match state.capabilities.get(capability) {
@@ -1857,7 +2044,6 @@ fn start_run_typed(
         ));
     }
 
-    let state_root = workspace_state_root(&view)?;
     let profile = run_profile_snapshot(&global_profile_binding.launch_snapshot)?;
     // docs/specs/README.md: "Run allocation reserves its key before publishing a Run."
     // The normalization is decided here, before any Run identity exists, so a
@@ -1878,6 +2064,15 @@ fn start_run_typed(
         &required_capabilities,
         &instructions_text,
     )?;
+    if let Some(policy) = &orchestration_policy {
+        normalized_identity_sha256 = sha256_hex(
+            format!(
+                "orchestrated-session-v1\0{normalized_identity_sha256}\0{}",
+                policy.digest()?
+            )
+            .as_bytes(),
+        );
+    }
     if let Some(context) = reviewer {
         normalized_identity_sha256 = sha256_hex(
             format!(
@@ -1972,12 +2167,47 @@ fn start_run_typed(
     }
     let run_id = reservation.run_id;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let mut orchestration = if let Some(policy) = &orchestration_policy {
+        let mut orchestration = crate::orchestration::OrchestrationStore::open(&state_root)?;
+        orchestration.prepare_session(
+            &view.workspace_id,
+            run_id,
+            &idempotency_key,
+            &normalized_identity_sha256,
+            policy,
+        )?;
+        Some(orchestration)
+    } else {
+        None
+    };
     // The identical retry returns the original Run.  Reaching a published Run
     // through its own reservation is exactly the response-loss reconciliation
     // docs/specs/README.md describes, so nothing is allocated, published, or started again
     // — and because nothing here reached that Run's worker, the verdict is
     // derived from what durable state proves rather than asserted as `Match`.
-    if store.load_manifest(run_id).is_ok() {
+    if let Ok(manifest) = store.load_manifest(run_id) {
+        if let Some(orchestration) = orchestration.as_mut() {
+            let session = orchestration.session(run_id)?;
+            let binding_matches = manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+                binding.aggregate_kind == AggregateKind::OrchestratedSession
+                    && binding.aggregate_id == run_id
+                    && binding.member_kind == crate::run::AggregateMemberKind::Primary
+                    && binding.operation_id == session.bootstrap_operation_id
+                    && binding.policy_sha256.as_deref()
+                        == Some(session.specialist_policy_sha256.as_str())
+            });
+            if !binding_matches {
+                return Err(MachineError::new(
+                    "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                    "published Primary Run disagrees with its Orchestrated Session",
+                    false,
+                    json!({"run_id":run_id,"session_id":run_id}),
+                ));
+            }
+            if matches!(session.status.as_str(), "creating" | "recovering") {
+                orchestration.finish_primary_publication(run_id, Ok(()))?;
+            }
+        }
         return Ok(RunStartReceipt {
             snapshot: RunSources::load(
                 &state_root,
@@ -2020,6 +2250,22 @@ fn start_run_typed(
             manifest.agent_configuration = context.agent_configuration.clone();
             manifest.aggregate_binding = Some(context.aggregate_binding.clone());
             validate_external_specialist_manifest(&manifest, context.agent_configuration)?;
+        }
+        if let (Some(policy), Some(orchestration)) =
+            (orchestration_policy.as_ref(), orchestration.as_mut())
+        {
+            let session = orchestration.session(run_id)?;
+            manifest.aggregate_binding = Some(AggregateBinding {
+                aggregate_kind: AggregateKind::OrchestratedSession,
+                aggregate_id: run_id,
+                member_kind: crate::run::AggregateMemberKind::Primary,
+                operation_id: session.bootstrap_operation_id,
+                policy_sha256: Some(policy.digest()?),
+                role_reference: None,
+                role_snapshot_sha256: None,
+                agent_configuration_sha256: None,
+            });
+            orchestration.mark_primary_intent(run_id)?;
         }
         if let Some(context) = continuation {
             manifest.write_continuation_provenance = Some(context.provenance.clone());
@@ -2094,6 +2340,10 @@ fn start_run_typed(
                 runtime_locator: Some(directory.root.to_string_lossy().into_owned()),
             },
         )?;
+
+        if let Some(orchestration) = orchestration.as_mut() {
+            orchestration.finish_primary_publication(run_id, Ok(()))?;
+        }
 
         // Public Run allocation is deliberately threadless and process-free. The
         // first turn (or an explicit recovery/resume operation) wins the startup
@@ -2177,6 +2427,16 @@ fn start_run_typed(
             exact_replay: false,
         }),
         Err(error) => {
+            if let Some(orchestration) = orchestration.as_mut() {
+                let publication = if store.load_manifest(run_id).is_ok() {
+                    Err(crate::orchestration::AdapterFailure::Unknown)
+                } else {
+                    Err(crate::orchestration::AdapterFailure::Rejected(
+                        error.code.clone(),
+                    ))
+                };
+                let _ = orchestration.finish_primary_publication(run_id, publication);
+            }
             if !worker_started {
                 let _ = GlobalMembershipStore::new(
                     &home,

@@ -1,8 +1,9 @@
 # Dolgorae Configuration
 
 Read this reference only when creating, inspecting, removing, or replacing a
-global Codex Profile. Configuration is user-global and machine-local under the
-fixed Dolgorae home. Use the public CLI rather than editing registry files directly.
+global Codex Profile or Specialist Policy. Configuration is machine-local under
+the fixed Dolgorae home. Use the public CLI rather than editing registry files
+directly.
 
 ## Create a global Codex Profile
 
@@ -61,23 +62,55 @@ to replace one. Replacement requires an explicit remove and a later add, after
 checking current profile membership and runtime impact. Removing a definition
 does not rewrite immutable snapshots already stored by existing Runs.
 
-## Specialist Policy availability
+## Configure a Specialist Policy
 
-The Specialist Policy Registry is owned by planned roadmap task `TASK-024` and
-is not implemented in this release. The CLI parses future `specialist policy`
-grammar, but every such operation reaches the unavailable-command path. Parsed
-grammar is not runtime capability evidence.
+1. Inspect the selected global Profiles and the explicit common or project Role
+   sources. A source defines character and instructions only; the policy input
+   separately supplies Profile, model, lane, access, approval, reuse, and
+   lifecycle controls. Never infer scope when the same name exists in both
+   locations.
+2. Start each selected Profile Server through an independently authorized
+   lifecycle operation. Then treat `validate` as read-only and run it against
+   the intended canonical workspace:
 
-If a Specialist Policy operation is requested, inspect current capabilities and
-the owning roadmap task, report that the workflow is unavailable, and stop. Do
-not invoke `add`, `list`, `show`, `validate`, or `remove`, and do not edit a
-registry or policy snapshot directly.
+   ```sh
+   dolgorae specialist policy validate \
+     --workspace <path> \
+     --file <policy-input.json>
+   ```
+
+   The result is the complete immutable installed-policy candidate. Validation
+   observes the already-running server and never starts, repairs, or records a
+   Profile binding. It does not authorize later installation and cannot be
+   reused if a source, policy input, or Profile binding changes.
+3. Add only with explicit authorization to install the project-authored
+   instructions:
+
+   ```sh
+   dolgorae specialist policy add <name> \
+     --workspace <path> \
+     --file <policy-input.json>
+   dolgorae specialist policy show <name> --workspace <path>
+   ```
+
+   The requested name must equal `policy_name`. Installation is
+   create-exclusive; an existing name is never replaced implicitly.
+4. `list` and `show` are read-only. `remove` is a distinct authorized mutation.
+   Removing an entry affects future launches only and never rewrites an existing
+   Orchestrated Session snapshot. Replacement requires an authorized remove and
+   a separately validated add.
+
+Never edit common or project Role files as part of a policy operation unless
+the user separately authorized that source change. Never edit the protected
+installed registry or orchestration state directly.
 
 ## Configuration boundaries
 
-- `profile add` and `profile remove` are mutations and require explicit intent.
-- Bare `profile doctor` and profile list/show are read-only. A launch probe is
-  not read-only.
+- `profile add`, `profile remove`, `specialist policy add`, and `specialist
+  policy remove` are mutations and require explicit intent.
+- Bare `profile doctor`, profile list/show, and policy validate/list/show are
+  read-only. Policy validation requires an already-running compatible Profile
+  Server; a launch probe is a separate lifecycle operation and is not read-only.
 - Do not expose `CODEX_HOME` contents, authentication state, environment values,
   executable digests, or diagnostic records beyond what the user needs.
 - After a mutation, repeat the corresponding list/show operation and report the

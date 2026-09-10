@@ -1221,7 +1221,7 @@ TASK-024, TASK-025, and TASK-026 also complete.
 
 ### TASK-024: Durable Orchestration Session and Brokered Hierarchy Core
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-023`. Implement the first-class `Dolgorae-Orchestrated Session` aggregate over the
 independent Run core and the hardened Specialist execution path. Implement

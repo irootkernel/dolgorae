@@ -41,6 +41,37 @@ as a complete unit. That rollback restores the legacy condition for diagnosis;
 it does not make the state compatible. Escalate any identity mismatch or
 unexpected mutation to the repository maintainers before retrying.
 
+## Specialist Role and policy operation
+
+Treat project Role sources as executable project-authored instructions only
+after the user explicitly authorizes policy installation. Before adding a
+policy, inspect the selected global Profiles, verify the Role source scope and
+name, ensure each selected Profile Server is already running, and run the
+read-only compiler:
+
+```sh
+dolgorae specialist policy validate \
+  --workspace /absolute/project \
+  --file /absolute/policy-input.json
+```
+
+Common Role directories and files require owner-only modes 0700 and 0600.
+Project Role paths must be owned by the current user and must not be writable by
+group or others. `CONFIG_INVALID` leaves the installed registry unchanged;
+correct the named source or policy input and validate again. Never repair the
+registry, an installed snapshot, the orchestration database, or a broker
+credential carrier by editing its files directly.
+
+Validation observes the running server's model, effort, and capability catalog;
+it does not start or repair a stopped server or record a Profile binding.
+
+After an authorized `specialist policy add`, use `show` to verify the returned
+name, revision, Role source digests, and resolved Agent Configuration snapshots.
+Adding an existing name fails closed. Replacement is an explicit `remove`
+followed by `add`; removal changes only future session selection. Existing
+Orchestrated Sessions retain their complete policy snapshots and remain
+recoverable without the source or registry entry.
+
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,
 configuration, immutable-target, one-shot review, and externally planned

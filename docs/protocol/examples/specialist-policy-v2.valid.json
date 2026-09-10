@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "policy_name": "brokered-review",
+  "revision": 1,
+  "approval_policy": "user_approval_required",
+  "max_active_specialists": 2,
+  "roles": [
+    {
+      "role_ref": "reviewer",
+      "role_source": {
+        "scope": "project",
+        "name": "reviewer"
+      },
+      "role_source_sha256": "877a6c4a3955961ff1ca99acbda7b3d3494a25f40fce2c74ba114cb8761b1a8a",
+      "role": {
+        "schema_version": 1,
+        "name": "reviewer",
+        "display_name": "Independent Reviewer",
+        "description": "Reviews bounded implementation evidence.",
+        "instructions": "Inspect the requested evidence and return a concise, source-backed verdict."
+      },
+      "agent_configuration": {
+        "schema_version": 2,
+        "selected_profile": "reviewer",
+        "global_profile_binding_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model": "gpt-5.6",
+        "default_effort": "high",
+        "purpose": {
+          "kind": "review",
+          "external_label": null
+        },
+        "required_capabilities": [],
+        "role_reference": "reviewer",
+        "normalized_instructions": "Inspect the requested evidence and return a concise, source-backed verdict.",
+        "instructions": {
+          "schema": "dolgorae.instructions/v1",
+          "common_prefix_version": 1,
+          "mode_prefix_version": 1,
+          "purpose_prefix_version": 1,
+          "normalized_byte_length": 75,
+          "normalized_sha256": "db5922400e92eee679534dc3ec610ea79796f484a56a94934938ce7bbcb95b32"
+        },
+        "execution_lane": "dedicated",
+        "required_assurance": "best_effort_personal_alpha",
+        "native_subagent_policy": "enabled"
+      },
+      "max_active_instances": 1,
+      "reuse_policy": "reuse_idle_compatible",
+      "allowed_access": [
+        "read_only",
+        "isolated_write"
+      ],
+      "activation_policy": "keep_resident",
+      "primary_may_request": true,
+      "collaboration_source": false,
+      "collaboration_target": false,
+      "auto_approve_when_fully_delegated": true
+    }
+  ]
+}

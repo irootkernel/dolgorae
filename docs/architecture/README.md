@@ -368,7 +368,7 @@ transactionally without losing rows.
 
 ### Role Source and Policy Resolver
 
-TASK-024 adds a bounded resolver for the specification's
+A bounded resolver implements the specification's
 [Specialist Role Sources](../specs/README.md#specialist-role-sources).
 Role sources are authoring inputs; they are neither an execution registry nor
 authority for a model-originated request. Common Role files are protected
@@ -389,10 +389,10 @@ current global Profile bindings into Agent Configuration snapshots, and commits
 the resolved session-policy snapshot and digest with the prepared bootstrap.
 The broker subsequently uses that immutable session snapshot. Recovery never
 reconstructs character from current source files, the current registry, or a
-Profile name. Installed-policy and session-snapshot contracts are distinct;
-TASK-024 publishes their global-Profile successors and synchronizes affected
-exported state and validators before activation, retaining the old checked v1
-design as historical input rather than silently changing its meaning.
+Profile name. Installed-policy and session-snapshot contracts are distinct.
+Their active v2 contracts use global Profile Agent Configuration snapshots,
+while the old checked v1 policy remains historical input rather than changing
+meaning.
 
 ### Orchestration Broker
 
@@ -420,6 +420,13 @@ through internal aggregate-aware transactions and separately held per-Run
 Controller capabilities. A model-originated request is advisory until accepted
 under the session's explicit approval policy. No model receives a Controller
 capability or a private Worker address.
+
+Each broker-held capability has one owner-only mode-0600 carrier below the
+workspace state root at `orchestration/broker-credentials/<run-id>.json`. The
+carrier is outside SQLite, checked against its stored public Controller binding
+before every Specialist side effect, and deleted only after authoritative
+member release. SQLite, events, model input, and public projections contain the
+public binding and capability digest, never the raw capability.
 
 ### Primary Orchestration Service
 
@@ -1181,7 +1188,7 @@ delivery. It uses SQLite WAL, foreign keys, `synchronous=FULL`, a bounded busy
 timeout, and one workspace mutation owner. A hash-chained append-only
 `orchestration_event` table commits with state changes. `orchestration/state.json`
 and JSONL exports are replaceable materializations validated against
-[`dolgorae-orchestration-state-v1.schema.json`](../protocol/dolgorae-orchestration-state-v1.schema.json)
+[`dolgorae-orchestration-state-v2.schema.json`](../protocol/dolgorae-orchestration-state-v2.schema.json)
 with cross-object invariants enforced by the Rust orchestration implementation.
 
 The state owner creates an External Specialist Engagement entirely inside one
@@ -1437,7 +1444,7 @@ policy:
 <workspace>/.dolgorae/
   .gitignore
   config.yaml
-  roles/  # optional shared Role sources; TASK-024
+  roles/  # optional shared Role sources
 ```
 
 All machine-local configuration and mutable authority are outside the workspace:
@@ -1446,7 +1453,7 @@ All machine-local configuration and mutable authority are outside the workspace:
 ~/.dolgorae/
   state.json
   profiles.yaml
-  roles/  # optional common Role sources; TASK-024
+  roles/  # optional common Role sources
   rpc/
   controller-carriers/
   operator/

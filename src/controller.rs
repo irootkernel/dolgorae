@@ -33,6 +33,12 @@ pub struct OrchestrationLaunch {
     pub specialist_policy_name: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PresentedController {
+    pub binding: ControllerBinding,
+    pub orchestration_launch: Option<OrchestrationLaunch>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ControllerPublic {
     pub controller_id: Uuid,
@@ -131,6 +137,7 @@ struct OperatorWireRef<'a> {
 struct ControllerSecret {
     public: ControllerPublic,
     capability: Zeroizing<[u8; 32]>,
+    orchestration_launch: Option<OrchestrationLaunch>,
 }
 
 struct OperatorSecret {
@@ -1172,6 +1179,7 @@ fn parse_controller(bytes: &[u8]) -> Result<ControllerSecret, MachineError> {
             generation: 1,
         },
         capability,
+        orchestration_launch: wire.orchestration_launch.clone(),
     })
 }
 
@@ -1461,17 +1469,30 @@ pub fn binding_from_carrier(
     carrier: &CredentialCarrier,
     generation: u64,
 ) -> Result<ControllerBinding, MachineError> {
+    Ok(presented_controller_from_carrier(carrier, generation)?.binding)
+}
+
+/// Reopens one protected carrier and returns both its mutation binding and the
+/// optional creation-only orchestration intent from the same checked bytes.
+/// Callers must never derive either value from a model-visible request.
+pub fn presented_controller_from_carrier(
+    carrier: &CredentialCarrier,
+    generation: u64,
+) -> Result<PresentedController, MachineError> {
     let bytes = carrier.reread()?;
     let secret = parse_controller(&bytes)?;
-    Ok(ControllerBinding {
-        identity: ControllerIdentity {
-            controller_id: secret.public.controller_id,
-            kind: secret.public.kind,
-            instance_id: secret.public.instance_id,
-            subject_id: secret.public.subject_id,
-            generation,
+    Ok(PresentedController {
+        binding: ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: secret.public.controller_id,
+                kind: secret.public.kind,
+                instance_id: secret.public.instance_id,
+                subject_id: secret.public.subject_id,
+                generation,
+            },
+            capability_sha256: controller_capability_digest(&secret.capability),
         },
-        capability_sha256: controller_capability_digest(&secret.capability),
+        orchestration_launch: secret.orchestration_launch,
     })
 }
 

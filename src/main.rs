@@ -5,8 +5,8 @@ use dolgorae::cli::{
     Cli, Command, ControllerCommand, ControllerCredentialCommand, EngagementCommand,
     OperatorCommand, OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand,
     ProfileMembershipCommand, ProfileServerCommand, ProfileStateCommand, ReviewTargetCommand,
-    RunCommand, RunControllerCommand, RuntimeCommand, SpecialistCommand, WorkspaceCommand,
-    WorkspaceWriterCommand, option_path,
+    RunCommand, RunControllerCommand, RuntimeCommand, SpecialistCommand, SpecialistPolicyCommand,
+    WorkspaceCommand, WorkspaceWriterCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{
@@ -517,6 +517,47 @@ fn execute(cli: Cli) -> ExitCode {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&data).expect("typed review result")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
+    if let Command::Specialist {
+        command: SpecialistCommand::Policy { command },
+    } = &cli.command
+    {
+        let (operation, arguments) = match command {
+            SpecialistPolicyCommand::Add(args) => (
+                dolgorae::specialist_policy::PolicyOperation::Add,
+                &args.args,
+            ),
+            SpecialistPolicyCommand::List(args) => (
+                dolgorae::specialist_policy::PolicyOperation::List,
+                &args.args,
+            ),
+            SpecialistPolicyCommand::Show(args) => (
+                dolgorae::specialist_policy::PolicyOperation::Show,
+                &args.args,
+            ),
+            SpecialistPolicyCommand::Validate(args) => (
+                dolgorae::specialist_policy::PolicyOperation::Validate,
+                &args.args,
+            ),
+            SpecialistPolicyCommand::Remove(args) => (
+                dolgorae::specialist_policy::PolicyOperation::Remove,
+                &args.args,
+            ),
+        };
+        return match dolgorae::specialist_policy::execute(operation, arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed policy result")
                     );
                 } else {
                     render_json(&SuccessEnvelope::new(command_name, data));

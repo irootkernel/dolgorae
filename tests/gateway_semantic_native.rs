@@ -993,6 +993,372 @@ async fn start_run_allocation_replay() {
     gateway.terminate();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orchestrated_start_run_pins_policy_and_replays_without_registry_source() {
+    let fixture = Fixture::new("run_start_model_list.json");
+    let role_directory = fixture.workspace.join(".dolgorae/roles");
+    fs::create_dir_all(&role_directory).unwrap();
+    let role_path = role_directory.join("reviewer.json");
+    fs::write(
+        &role_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,
+            "name":"reviewer",
+            "display_name":"Reviewer",
+            "description":"Reviews bounded implementation evidence.",
+            "instructions":"Inspect the evidence and return one bounded verdict.",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let policy_input = fixture.root.join("specialist-policy-input.json");
+    fs::write(
+        &policy_input,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":2,
+            "policy_name":"brokered-review",
+            "revision":1,
+            "approval_policy":"fully_delegated",
+            "max_active_specialists":1,
+            "roles":[{
+                "role_ref":"reviewer",
+                "role_source":{"scope":"project","name":"reviewer"},
+                "agent_configuration":{
+                    "schema_version":2,
+                    "selected_profile":"default",
+                    "model":"gpt-5.6",
+                    "default_effort":"medium",
+                    "purpose":"review",
+                    "purpose_label":null,
+                    "required_capabilities":[],
+                    "execution_lane":"dedicated",
+                    "required_assurance":"best_effort_personal_alpha",
+                    "native_subagent_policy":"enabled"
+                },
+                "max_active_instances":1,
+                "reuse_policy":"never",
+                "allowed_access":["read_only"],
+                "activation_policy":"keep_resident",
+                "primary_may_request":true,
+                "collaboration_source":false,
+                "collaboration_target":false,
+                "auto_approve_when_fully_delegated":true
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let stopped = fixture.cli(&[
+        "profile",
+        "server",
+        "stop",
+        "default",
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+    ]);
+    assert_eq!(stopped["stopped"], true);
+    let rejected = fixture.command(&[
+        "specialist",
+        "policy",
+        "validate",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--file",
+        policy_input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    let rejection: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(rejection["error"]["code"], "COMPATIBILITY_REJECTED");
+    let status = fixture.cli(&["profile", "server", "status", "default"]);
+    assert_eq!(status["lifecycle"], "stopped");
+    fixture.cli(&["profile", "server", "start", "default"]);
+    let validated = fixture.cli(&[
+        "specialist",
+        "policy",
+        "validate",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--file",
+        policy_input.to_str().unwrap(),
+    ]);
+    let installed = fixture.cli(&[
+        "specialist",
+        "policy",
+        "add",
+        "brokered-review",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--file",
+        policy_input.to_str().unwrap(),
+    ]);
+    assert_eq!(installed["schema_version"], 2);
+    assert_eq!(installed, validated);
+    assert_eq!(installed["roles"][0]["role"]["name"], "reviewer");
+    let listed = fixture.cli(&[
+        "specialist",
+        "policy",
+        "list",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    assert_eq!(listed["items"], serde_json::json!([installed]));
+    let carrier = fixture
+        .controller
+        .parent()
+        .unwrap()
+        .join("orchestrated.json");
+    let created = fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "interactive-client",
+        "--instance-id",
+        "orchestrated-native-test",
+        "--orchestration-policy",
+        "brokered-review",
+        "--output",
+        carrier.to_str().unwrap(),
+    ]);
+    let controller_id = created["controller"]["controller_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture.cli(&[
+        "profile",
+        "server",
+        "stop",
+        "default",
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        fixture.cli(&["profile", "remove", "default"])["removed"],
+        true
+    );
+    let missing = fixture.command(&[
+        "run",
+        "--controller-file",
+        carrier.to_str().unwrap(),
+        "start",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--profile",
+        "default",
+        "--control-mode",
+        "direct-interactive",
+        "--execution-lane",
+        "shared-readonly",
+        "--required-assurance",
+        "best-effort-personal-alpha",
+        "--purpose",
+        "interactive",
+        "--instructions",
+        "Exercise missing policy binding rejection.",
+        "--idempotency-key",
+        "orchestrated-missing-binding",
+    ]);
+    assert!(!missing.status.success());
+    let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["error"]["code"], "PROFILE_NOT_FOUND");
+    let codex = fixture.root.join("bin/codex");
+    let codex_home = fixture.root.join("codex-home");
+    fixture.cli(&[
+        "profile",
+        "add",
+        "default",
+        "--codex-home",
+        codex_home.to_str().unwrap(),
+        "--native-subagents",
+        "enabled",
+        "--env",
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        "--env",
+        "LANG=en_US.UTF-8",
+        "--env",
+        "LC_ALL=en_US.UTF-8",
+        "--env",
+        "EXAMPLE_POLICY_DRIFT=1",
+        "--",
+        codex.to_str().unwrap(),
+    ]);
+    let drifted = fixture.command(&[
+        "run",
+        "--controller-file",
+        carrier.to_str().unwrap(),
+        "start",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--profile",
+        "default",
+        "--control-mode",
+        "direct-interactive",
+        "--execution-lane",
+        "shared-readonly",
+        "--required-assurance",
+        "best-effort-personal-alpha",
+        "--purpose",
+        "interactive",
+        "--instructions",
+        "Exercise changed policy binding rejection.",
+        "--idempotency-key",
+        "orchestrated-changed-binding",
+    ]);
+    assert!(!drifted.status.success());
+    let drifted: Value = serde_json::from_slice(&drifted.stdout).unwrap();
+    assert_eq!(drifted["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(run_count(&fixture), 0);
+    assert_eq!(
+        fixture.cli(&["profile", "server", "status", "default"])["lifecycle"],
+        "ready"
+    );
+    fixture.cli(&[
+        "profile",
+        "server",
+        "stop",
+        "default",
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        fixture.cli(&["profile", "remove", "default"])["removed"],
+        true
+    );
+    fixture.cli(&[
+        "profile",
+        "add",
+        "default",
+        "--codex-home",
+        codex_home.to_str().unwrap(),
+        "--native-subagents",
+        "enabled",
+        "--env",
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        "--env",
+        "LANG=en_US.UTF-8",
+        "--env",
+        "LC_ALL=en_US.UTF-8",
+        "--",
+        codex.to_str().unwrap(),
+    ]);
+    fixture.cli(&["profile", "server", "start", "default"]);
+    fs::remove_file(role_path).unwrap();
+    let carrier_ref = pb::ControllerCarrierRef {
+        absolute_file_path: carrier.to_string_lossy().into_owned(),
+        expected_controller_id: controller_id,
+        expected_controller_generation: 1,
+    };
+    let mut request = start_request(
+        &fixture,
+        "orchestrated-response-loss",
+        pb::ExecutionLane::SharedReadonly,
+    );
+    request.controller = Some(carrier_ref);
+
+    let mut gateway = fixture.start_gateway();
+    let mut client = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    semantic_error(
+        &client.start_run(request.clone()).await.unwrap_err(),
+        "INVALID_ARGUMENT",
+    );
+    let mut parented = request.clone();
+    parented.idempotency_key = "orchestrated-parented-denial".to_owned();
+    parented.control_mode = pb::ControlMode::DirectInteractive as i32;
+    parented.parent = Some(pb::ParentRefProjection {
+        namespace: "example.client.v1".to_owned(),
+        kind: "parent".to_owned(),
+        id: "forged".to_owned(),
+    });
+    semantic_error(
+        &client.start_run(parented).await.unwrap_err(),
+        "INVALID_ARGUMENT",
+    );
+    assert_eq!(run_count(&fixture), 0);
+    request.control_mode = pb::ControlMode::DirectInteractive as i32;
+    let first = client
+        .start_run(request.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!first.exact_replay);
+    let run_id = Uuid::parse_str(&first.run.as_ref().unwrap().run_id).unwrap();
+    let session = dolgorae::orchestration::OrchestrationStore::open(&fixture.state_root)
+        .unwrap()
+        .session(run_id)
+        .unwrap();
+    assert_eq!(session.status, "active");
+    assert_eq!(session.root_run_id, run_id);
+    assert_eq!(
+        serde_json::to_value(&session.specialist_policy).unwrap(),
+        installed
+    );
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .state_root
+                .join("runs")
+                .join(run_id.to_string())
+                .join("manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["aggregate_binding"]["aggregate_kind"],
+        "orchestrated_session"
+    );
+    assert_eq!(manifest["aggregate_binding"]["member_kind"], "primary");
+    assert_eq!(
+        manifest["aggregate_binding"]["policy_sha256"],
+        session.specialist_policy_sha256
+    );
+
+    let removed = fixture.cli(&[
+        "specialist",
+        "policy",
+        "remove",
+        "brokered-review",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    assert_eq!(removed, serde_json::json!({"deleted":true}));
+    gateway.kill();
+    let mut gateway = fixture.start_gateway();
+    let mut client = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let replay = client
+        .start_run(request.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(replay.exact_replay);
+    assert_eq!(replay.run.as_ref().unwrap().run_id, run_id.to_string());
+    assert_eq!(run_count(&fixture), 1);
+    let replayed_run = replay.run.unwrap();
+    let controller = request.controller.clone();
+    let mut drift = request;
+    drift.instructions = Some("Different orchestration request.".to_owned());
+    semantic_error(
+        &client.start_run(drift).await.unwrap_err(),
+        "IDEMPOTENCY_CONFLICT",
+    );
+    assert_eq!(run_count(&fixture), 1);
+    let closed = client
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: fixture.run_ref(&run_id.to_string()),
+            controller,
+            interrupt: false,
+            expected_state_revision: replayed_run.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(closed.lifecycle, pb::RunLifecycle::Closed as i32);
+    gateway.terminate();
+}
+
 fn active_turn_scenario(interaction: bool) -> Value {
     let mut scenario = support::base_scenario();
     let steps = scenario["steps"].as_array_mut().unwrap();

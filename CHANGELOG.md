@@ -13,6 +13,13 @@ development commits.
   event subscriptions, and the 24-method Brokered Hierarchy bootstrap surface.
 - Shared Run, Controller, Writer, interaction, and artifact observations for Machine CLI and gRPC,
   with durable event revisions and immutable Turn acceptance replay across gateway and worker replacement.
+- Checked common and project Specialist Role sources, create-exclusive
+  Specialist Policy Registry operations, and immutable global-Profile v2 policy
+  snapshots.
+- Prepared Dolgorae-Orchestrated Session bootstrap and a durable Brokered
+  Hierarchy core with approval-aware Specialist provisioning, broker-owned
+  Controller capabilities, accepted task/result delivery, writer sequencing,
+  recovery, and a transport-independent Primary tool dispatcher.
 
 ### Changed
 

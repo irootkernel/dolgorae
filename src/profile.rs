@@ -2237,6 +2237,7 @@ pub struct ProfileObservation {
     pub snapshot: ProfileSnapshot,
     pub server_epoch: Option<u64>,
     pub models: Vec<ObservedProfileModel>,
+    pub capabilities: BTreeMap<String, ProfileCapabilityState>,
     pub blockers: Vec<ProfileObservationBlocker>,
 }
 
@@ -2257,6 +2258,7 @@ pub fn observe_global_profile(
         snapshot,
         server_epoch: None,
         models: Vec::new(),
+        capabilities: capability_snapshot(None),
         blockers: Vec::new(),
     };
     if observation.snapshot.compatibility_verdict == CompatibilityVerdict::Rejected {
@@ -2303,6 +2305,7 @@ pub fn observe_global_profile(
         Ok(models) => {
             observation.server_epoch = Some(state.server_epoch);
             observation.models = models;
+            observation.capabilities = capability_snapshot(Some(&state.capabilities));
         }
         Err(error) if error.code == "TRANSPORT_FAILURE" => {
             observation

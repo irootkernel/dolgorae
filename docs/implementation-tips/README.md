@@ -49,3 +49,22 @@ production state and the user's real home must never be reused.
 
 Do not commit virtual environments, caches, generated review material, local
 workflow state, credentials, or run/session identifiers.
+
+## Orchestration core verification
+
+Keep Role and policy semantics in `src/specialist_policy.rs` and durable
+aggregate behavior in `src/orchestration.rs`. The orchestration adapter is the
+effect boundary: tests should inject deterministic failures immediately before
+and after SQLite commit, Primary intent publication, child reservation, Worker
+publication, thread creation, task dispatch, result append, and delivery
+receipt. A retry may resume only when durable state proves that no external
+effect was accepted; ambiguous publication or Turn acceptance must remain
+`recovery_required` or `interrupted_unknown`.
+
+Use isolated temporary state roots for broker tests and check both SQLite and
+the protected credential carrier. Raw capabilities must not appear in the
+database, events, tool results, or diagnostics; the carrier must be mode 0600
+and disappear only after authoritative Specialist release. Schema examples and
+the fake adapter prove the transport-independent core. They do not prove the
+later live model-facing tool transport, and the opt-in live Codex targets remain
+outside the complete repository gate.

@@ -579,7 +579,7 @@
           "then": {
             "properties": {
               "data": {
-                "$ref": "https://dolgorae.local/schema/specialist-policy/v1"
+                "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
               }
             }
           }
@@ -604,7 +604,7 @@
                   "items": {
                     "type": "array",
                     "items": {
-                      "$ref": "https://dolgorae.local/schema/specialist-policy/v1"
+                      "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
                     }
                   }
                 }

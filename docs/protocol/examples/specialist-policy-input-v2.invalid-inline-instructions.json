@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "policy_name": "brokered-review",
+  "revision": 1,
+  "approval_policy": "user_approval_required",
+  "max_active_specialists": 2,
+  "roles": [
+    {
+      "role_ref": "reviewer",
+      "role_source": {
+        "scope": "project",
+        "name": "reviewer"
+      },
+      "agent_configuration": {
+        "schema_version": 2,
+        "selected_profile": "reviewer",
+        "global_profile_binding_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model": "gpt-5.6",
+        "default_effort": "high",
+        "purpose": "review",
+        "purpose_label": null,
+        "required_capabilities": [],
+        "execution_lane": "dedicated",
+        "required_assurance": "best_effort_personal_alpha",
+        "native_subagent_policy": "enabled",
+        "instructions": "inline instructions are forbidden"
+      },
+      "max_active_instances": 1,
+      "reuse_policy": "reuse_idle_compatible",
+      "allowed_access": [
+        "read_only",
+        "isolated_write"
+      ],
+      "activation_policy": "keep_resident",
+      "primary_may_request": true,
+      "collaboration_source": false,
+      "collaboration_target": false,
+      "auto_approve_when_fully_delegated": true
+    }
+  ]
+}

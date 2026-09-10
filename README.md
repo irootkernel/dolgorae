@@ -48,13 +48,47 @@ descriptor instead. Clients negotiate with `GetCapabilities` and use its
 advertised methods and Controller carrier policy. Stopping or replacing the
 gateway preserves durable Runs and their workers.
 
+## Specialist policies and orchestrated sessions
+
+Specialist Roles keep reusable instructions separate from account and execution
+configuration. Put an explicitly named Role source in either
+`~/.dolgorae/roles/<name>.json` for machine-local use or
+`.dolgorae/roles/<name>.json` for project scope. A policy input names each
+source by both scope and name, then supplies the global Profile, model, lane,
+access, approval, reuse, and lifecycle controls separately.
+
+Start each selected Profile Server, then validate the complete resolved
+snapshot before installing it:
+
+```sh
+dolgorae specialist policy validate \
+  --workspace /absolute/project \
+  --file /absolute/policy-input.json
+dolgorae specialist policy add brokered-review \
+  --workspace /absolute/project \
+  --file /absolute/policy-input.json
+dolgorae specialist policy list --workspace /absolute/project
+```
+
+Policy installation is create-exclusive. `show` reads one installed immutable
+snapshot; `remove` deletes only the registry entry and does not rewrite an
+existing session snapshot.
+
+A trusted interactive client starts a Dolgorae-Orchestrated Session by creating
+a protected Controller carrier with `--orchestration-policy <name>` and passing
+that carrier to a parentless, direct-interactive public-v1 `StartRun`. Dolgorae
+atomically prepares the session around the preallocated Primary Run identity.
+The transport-independent Primary orchestration service and durable Brokered
+Hierarchy core are available to internal adapters; a live model-facing Primary
+tool transport is a later release boundary.
+
 ## Agent skill
 
 The source tree distributes the optional complete
 [`use-dolgorae` skill](skills/use-dolgorae/SKILL.md) for AI coding agents that
 operate Dolgorae's currently advertised workspace, profile, immutable-target,
-one-shot Specialist Review, and externally planned reusable Specialist
-Engagement surfaces. It is guidance, not a deployed runtime artifact:
+Specialist Policy, one-shot Specialist Review, and externally planned reusable
+Specialist Engagement surfaces. It is guidance, not a deployed runtime artifact:
 installing the Dolgorae binary does not install or activate the skill.
 
 For Codex, run the following command from the repository root of a checkout of

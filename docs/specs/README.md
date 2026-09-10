@@ -441,7 +441,7 @@ The agent-writable workspace contains only portable project policy:
 <canonical-workspace>/.dolgorae/
   .gitignore
   config.yaml
-  roles/  # optional shared Role sources; TASK-024
+  roles/  # optional shared Role sources
 ```
 
 `config.yaml` is strict YAML and contains exactly `schema_version: 1` and
@@ -623,8 +623,9 @@ generations.
 
 ### Specialist Role Sources
 
-The following Role-source contract is the target for TASK-024. It does not
-activate Role loading or Specialist Policy commands in earlier releases.
+The following Role-source contract is active for Specialist Policy authoring.
+Role sources become executable input only when an explicitly authorized policy
+installation captures them into a checked immutable policy.
 
 A Specialist Role source defines reusable character, not an account or mutation
 authority. Common sources live at `~/.dolgorae/roles/<role-name>.json`;
@@ -663,8 +664,12 @@ diagnostic and no installed-policy change.
 
 `specialist policy validate --file` and `specialist policy add --file` resolve
 the selected sources against the explicit or discovered canonical workspace.
-Validation is read-only, while add validates its own capture and installs one
-complete policy through the registry's existing create-exclusive transaction.
+Validation does not install a policy, record a Profile binding, or start, stop,
+repair, or migrate a Profile Server. It requires every selected Profile Server
+to be already running and compatible so it can observe the current model,
+effort, and capability catalog. Add compiles one fresh captured input under the
+same observation rule and installs that exact result through the registry's
+existing create-exclusive transaction.
 An earlier validation result is not authority for a later, changed input.
 The caller must authorize installation of project-authored instructions;
 tracking, reading or editing a source file never authorizes its execution.
@@ -687,13 +692,12 @@ policy edits, removal or Profile registry changes do not rewrite existing
 session snapshots. Existing Run binding and recovery rules continue to reject
 unavailable or incompatible runtime state rather than silently selecting it anew.
 
-TASK-024 owns checked Role-source and policy-authoring schemas and the
-installed-policy/session-snapshot successors that express this separation.
+The checked Role-source, policy-authoring, installed-policy, and session-state
+schemas express this separation.
 The existing [policy v1 schema](../protocol/dolgorae-specialist-policy-v1.schema.json)
 embeds pre-cutover Agent Configuration v1 and remains a historical design
-baseline, not the global-Profile successor. Before activating these commands,
-TASK-024 MUST synchronize schemas, references, positive/negative examples,
-Machine projections and Rust semantic validators with the
+baseline, not the global-Profile successor. The active v2 contracts, Machine
+projections, examples, and Rust semantic validators use the
 [Agent Configuration v2 input](../protocol/dolgorae-agent-configuration-input-v2.schema.json)
 and [snapshot](../protocol/dolgorae-agent-configuration-v2.schema.json)
 contracts. Do not reinterpret existing v1 bytes or change public Protobuf fields
@@ -709,7 +713,8 @@ The machine-local Specialist Policy Registry lives at:
 
 Each entry is a create-exclusive `<policy-name>.json` file containing the
 fully expanded installed policy defined under Specialist Role Sources. It
-validates against the TASK-024 checked successor schema and its Rust semantic
+validates against the checked
+[v2 policy schema](../protocol/dolgorae-specialist-policy-v2.schema.json) and its Rust semantic
 validator before admission. The content `policy_name` MUST match the
 filename exactly. Files are current-uid-owned mode 0600, no-symlink regular
 files, at most 1 MiB, and installed through a descriptor-relative temporary
@@ -2682,7 +2687,8 @@ and one workspace mutation owner. A hash-chained append-only
 `orchestration_event` table is committed with each state transition.
 `orchestration/state.json` and any orchestration JSONL are disposable exports
 that MUST validate against
-`protocol/dolgorae-orchestration-state-v1.schema.json`. A multi-object change that affects an aggregate and a Run uses the durable
+`protocol/dolgorae-orchestration-state-v2.schema.json`. A multi-object change
+that affects an aggregate and a Run uses the durable
 Aggregate Bootstrap, spawn, or hire Operation ID as its cross-store correlation
 identifier. The SQLite portion commits in one crash-consistent transaction, and
 the matching Run creation intent is fsynced with that same Operation ID before
@@ -3596,7 +3602,9 @@ The orchestration directory is owner-only (`0700`) and the SQLite authority is
 owner-readable and owner-writable only (`0600`) before any engagement state is
 published.
 
-The checked `dolgorae-orchestration-state-v1.schema.json` owns the exported
+The checked
+[`dolgorae-orchestration-state-v2.schema.json`](../protocol/dolgorae-orchestration-state-v2.schema.json)
+owns the exported
 materialized shape for aggregate bootstrap operations, both aggregates,
 membership, spawn or hire operations, Specialist tasks, collaboration exchanges,
 mailbox items, and activation

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "name": "reviewer",
+  "display_name": "Independent Reviewer",
+  "description": "Reviews bounded implementation evidence.",
+  "instructions": "Inspect the requested evidence and return a concise, source-backed verdict.",
+  "credential": "must-not-be-admitted"
+}
