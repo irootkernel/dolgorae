@@ -5,13 +5,61 @@ recovering, and safely updating Dolgorae's local per-user and per-workspace
 runtime surfaces. Repository maintainers own this role and are the escalation
 owner for missing or unsafe procedures.
 
-The global Profile generation recovery procedure below is the only approved
-operator runbook. The product
+The procedures below are the approved operator runbooks. The product
 [specification](../specs/README.md) and
 [architecture](../architecture/README.md) define normative operator and recovery
 behavior, but they are not procedural authorization. Add a runbook only after
 its target, prerequisites, safe diagnosis, bounded resolution, success checks,
 rollback, and escalation path are verified against the implementation.
+
+## Supervised public gateway recovery
+
+Run `dolgorae serve` only under a supervisor that retains the foreground
+process, its single readiness envelope, and its exit status. Before launch,
+verify that the Dolgorae home uses the supported generation and choose an
+absolute socket path whose existing parent is owned by the current user with
+mode 0700. The socket name must be unused or must be the exact stale socket
+recorded for a provably absent prior gateway.
+
+Launch the gateway with `--socket <absolute-path>`. A supervisor may also pass
+one inherited writable descriptor with `--ready-fd <fd>`; in that case the
+readiness envelope is written there instead of standard output. Success is one
+`ok: true` envelope containing the selected socket path, a new server instance
+ID, protocol range, and public descriptor digest. Connect only as the same OS
+user, call `GetCapabilities`, and use only the advertised methods.
+
+Diagnose a failed start from that one machine envelope:
+
+- `RPC_SERVER_ALREADY_RUNNING` means another process still holds the
+  installation gateway lock. Connect to the reported existing gateway or ask
+  its supervisor to send `SIGTERM`, then wait for that process to exit. Do not
+  start a competing socket or remove its lock, record, or socket.
+- `RPC_SOCKET_UNSAFE` means Dolgorae could not prove the socket path, parent,
+  lock, record, or prior process identity. Correct an unsafe parent's ownership
+  or mode, or select a fresh private parent and unused path. Preserve symlinks,
+  foreign files, unrecorded sockets, replaced inodes, and malformed or
+  unverifiable gateway state for escalation; a client must never unlink them.
+- A stale socket from an ungraceful stop needs no manual deletion when its
+  device and inode still match the private gateway record and the recorded
+  process is provably absent. Restart with the same path and let Dolgorae
+  validate and replace it. If either identity differs, stop and escalate.
+
+For a planned stop, send `SIGTERM` through the supervisor and allow at least
+five seconds for admitted unary calls to drain. Open streams end with
+`SERVER_SHUTDOWN`; a clean exit unlinks only the socket inode that gateway
+created. After a crash, durable Runs, workers, writer authority, and App Server
+lifetimes remain independent. Restart the gateway, verify a new readiness
+identity and capabilities response, then resume event streams from each
+client's durable cursor and retry mutations only through their documented
+idempotency or reconciliation contract.
+
+Success means the prior process is absent, the replacement reports readiness,
+the socket is a current-user mode-0600 Unix socket, and `GetCapabilities`
+matches the checked public descriptor. If startup still fails, leave the
+observed path and `~/.dolgorae/rpc` state untouched and escalate the complete
+machine error and supervisor exit status to the repository maintainers. There
+is no in-place rollback beyond stopping the replacement; the prior gateway can
+be relaunched only after its own process and socket identity are revalidated.
 
 ## Global Profile generation recovery
 
