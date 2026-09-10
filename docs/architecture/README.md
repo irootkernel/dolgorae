@@ -461,9 +461,12 @@ policy. Compatible means identical active-session membership, role reference,
 role snapshot digest, Agent Configuration digest, and admitted access. Reuse
 selection is idle first, then lower pending mail count, then lower Run ID. A
 reuse result exposes the existing member's original spawn operation ID and is
-persisted in the Primary Run tool-call/result ledger; it appends no new spawn or
-membership row. That ledger, rather than current queue state, replays the exact
-selection after retry.
+first committed in an aggregate reuse receipt keyed by the session, trusted
+idempotency key, and normalized request digest; it appends no new spawn or
+membership row. The Primary Run tool-call/result ledger then persists the
+complete response with its source Turn and tool-call identity. The receipt,
+rather than current queue state, restores the exact selection when a response
+is lost before the ledger append.
 
 Task assignment never auto-hires a missing role. A bounded tool wait may expire
 without cancelling the durable operation or task. Cancellation is fail-closed

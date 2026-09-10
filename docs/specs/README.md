@@ -3084,9 +3084,12 @@ role snapshot, Agent Configuration digest, and admitted access.
 task is queued normally. Selection orders idle before busy, then lower pending
 mail count, then lower Run ID. A reused `request_specialist_result` returns the
 existing member's original `spawn_operation_id` with `reused: true`; no new
-spawn operation is appended. The Primary Run's durable tool-call/result ledger
-binds that reuse decision to the source Turn and tool-call idempotency identity,
-so exact replay returns the same member even if queue state later changes.
+spawn operation is appended. Before returning, the broker durably binds the
+selected spawn operation to the session-scoped idempotency key and normalized
+request digest. The Primary Run's durable tool-call/result ledger then binds the
+complete response to the source Turn and tool-call identity. Exact replay
+therefore returns the same member even if the response is lost before that
+ledger append and queue state later changes.
 Reparenting, role conversion, configuration drift, and reuse across sessions are
 forbidden.
 

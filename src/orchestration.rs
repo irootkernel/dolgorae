@@ -986,6 +986,13 @@ impl OrchestrationStore {
             }
             return Ok(existing);
         }
+        if let Some(existing) = self.load_reuse_receipt(
+            context.session_id,
+            &context.idempotency_key,
+            &request_sha256,
+        )? {
+            return Ok(existing);
+        }
         let role_snapshot_sha256 = digest_value(&role)?;
         let agent_configuration_sha256 =
             crate::run::agent_configuration_digest(&role.agent_configuration).map_err(internal)?;
@@ -1013,9 +1020,12 @@ impl OrchestrationStore {
         }
         reusable.sort_by_key(|(pending, run_id, _)| (*pending != 0, *pending, *run_id));
         if let Some((_, _, member)) = reusable.first() {
-            let mut operation = self.spawn(member.spawn_operation_id)?;
-            operation.reused = true;
-            return Ok(operation);
+            return self.record_reuse_receipt(
+                context.session_id,
+                &context.idempotency_key,
+                &request_sha256,
+                member.spawn_operation_id,
+            );
         }
         let active_total = session
             .members
@@ -2252,6 +2262,76 @@ impl OrchestrationStore {
             .map_err(internal)
     }
 
+    fn load_reuse_receipt(
+        &self,
+        session_id: Uuid,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<Option<SpecialistOperationSnapshot>, MachineError> {
+        let receipt = self
+            .connection
+            .query_row(
+                "SELECT request_sha256,spawn_operation_id
+                 FROM brokered_specialist_reuse_receipts
+                 WHERE session_id=?1 AND idempotency_key=?2",
+                params![session_id.to_string(), idempotency_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((recorded_sha256, operation_id)) = receipt else {
+            return Ok(None);
+        };
+        if recorded_sha256 != request_sha256 {
+            return Err(idempotency_conflict(idempotency_key));
+        }
+        let mut operation = self.spawn(parse_uuid(&operation_id)?)?;
+        operation.reused = true;
+        Ok(Some(operation))
+    }
+
+    fn record_reuse_receipt(
+        &mut self,
+        session_id: Uuid,
+        idempotency_key: &str,
+        request_sha256: &str,
+        spawn_operation_id: Uuid,
+    ) -> Result<SpecialistOperationSnapshot, MachineError> {
+        let now = now_ms()?;
+        let transaction = self.transaction()?;
+        transaction
+            .execute(
+                "INSERT INTO brokered_specialist_reuse_receipts(
+                   session_id,idempotency_key,request_sha256,spawn_operation_id,created_at_ms
+                 ) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(session_id,idempotency_key) DO NOTHING",
+                params![
+                    session_id.to_string(),
+                    idempotency_key,
+                    request_sha256,
+                    spawn_operation_id.to_string(),
+                    now
+                ],
+            )
+            .map_err(internal)?;
+        let (recorded_sha256, recorded_operation_id) = transaction
+            .query_row(
+                "SELECT request_sha256,spawn_operation_id
+                 FROM brokered_specialist_reuse_receipts
+                 WHERE session_id=?1 AND idempotency_key=?2",
+                params![session_id.to_string(), idempotency_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(internal)?;
+        if recorded_sha256 != request_sha256 {
+            return Err(idempotency_conflict(idempotency_key));
+        }
+        transaction.commit().map_err(internal)?;
+        let mut operation = self.spawn(parse_uuid(&recorded_operation_id)?)?;
+        operation.reused = true;
+        Ok(operation)
+    }
+
     fn spawn_session(&self, operation_id: Uuid) -> Result<Uuid, MachineError> {
         let value: String = self
             .connection
@@ -2580,6 +2660,16 @@ CREATE TABLE IF NOT EXISTS brokered_spawn_operations(
   updated_at_ms INTEGER NOT NULL,
   UNIQUE(session_id,idempotency_key),
   FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS brokered_specialist_reuse_receipts(
+  session_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_sha256 TEXT NOT NULL,
+  spawn_operation_id TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(session_id,idempotency_key),
+  FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id),
+  FOREIGN KEY(spawn_operation_id) REFERENCES brokered_spawn_operations(operation_id)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS brokered_tasks(
   task_id TEXT PRIMARY KEY,
@@ -4330,6 +4420,87 @@ mod tests {
                 .unwrap();
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn reuse_receipt_survives_lost_tool_result_and_queue_state_change() {
+        let root = root();
+        let mut configured = policy("fully_delegated");
+        configured.roles[0].reuse_policy = "reuse_idle_compatible".to_owned();
+        let (mut store, session) = active_session_with_policy(&root, configured);
+        let mut adapter = FakeAdapter::default();
+        let initial = store
+            .request_specialist(
+                &context(session.session_id, "initial-member"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let initial_run = initial.specialist_run_id.unwrap();
+        let request_context = context(session.session_id, "lost-reuse-response");
+        let request_payload = serde_json::json!({
+            "operation":"request_specialist",
+            "role_ref":"reviewer",
+            "objective":"Review the implementation.",
+            "expected_output":["A bounded verdict"],
+            "requested_access":"read_only",
+            "deadline_seconds":60,
+        });
+        let lost_response = {
+            let mut service = PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            };
+            service
+                .execute(
+                    &request_context,
+                    ToolRequest::RequestSpecialist {
+                        role_ref: "reviewer".to_owned(),
+                        objective: "Review the implementation.".to_owned(),
+                        expected_output: vec!["A bounded verdict".to_owned()],
+                        requested_access: "read_only".to_owned(),
+                        deadline_seconds: 60,
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(lost_response["specialist_operation"]["reused"], true);
+        assert_eq!(
+            lost_response["specialist_operation"]["specialist_run_id"],
+            initial_run.to_string()
+        );
+        let mut changed_request = request("read_only");
+        changed_request.objective.push_str(" Changed.");
+        assert_eq!(
+            store
+                .request_specialist(&request_context, &changed_request, &mut adapter)
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        drop(store);
+
+        let mut store = OrchestrationStore::open(&root).unwrap();
+        store
+            .assign_task(
+                &context(session.session_id, "make-original-busy"),
+                &task_request(initial_run, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let replay = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&request_context, &request_payload)
+        .unwrap();
+        assert_eq!(replay, lost_response);
+        assert_eq!(store.members(session.session_id).unwrap().len(), 1);
+        store.collect_results(session.session_id, 0, 1).unwrap();
+        store
+            .finish_session(session.session_id, false, &mut adapter)
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
