@@ -1311,6 +1311,8 @@ and performs no later stdout writes. Graceful SIGTERM exits zero after the
 five-second drain contract. Startup collision, unsafe socket state, or a fatal
 runtime failure exits with the mapped typed error and MUST NOT affect Runs,
 workers, writer authority, Profile Servers, or Dedicated Lane Servers.
+`--human` is accepted for command-line uniformity but does not reformat this
+supervisor-facing readiness envelope.
 
 In JSON mode `--help` emits an ordinary success envelope with command `help`;
 `--human` selects presentation-only text. Version reporting is the stateless
@@ -3105,6 +3107,17 @@ writer protocol and may return a typed writer conflict without changing the
 member or task. Release is graceful: it prevents new work, waits for
 authoritative terminal work and delivery state, and never discards an unknown
 outcome.
+
+Primary result collection is a durable cursor page. The first
+`collect_specialist_results` request supplies `after_sequence: 0`; every later
+page supplies the preceding `next_after_sequence`. In one SQLite transaction,
+the broker replays existing receipts after that cursor, fills the remaining
+page with `completed_not_delivered` tasks, and commits their delivery receipts.
+The response advances `next_after_sequence` to the last returned receipt or
+echoes the input cursor when the page is empty. Replaying a cursor redelivers
+already receipted results byte-identically without replaying a Specialist Turn
+and may fill unused page capacity with later results. Later pages remain
+collectable and continue to block graceful release until delivered.
 
 Dolgorae is authoritative for the Orchestration Session Record, Primary Run,
 Brokered Hierarchy membership, parent-child lineage, role and Agent

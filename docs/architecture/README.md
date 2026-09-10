@@ -474,6 +474,14 @@ after possible Turn acceptance. Release is a graceful retirement operation that
 stops admission of new work and waits for authoritative task, mailbox, and
 delivery quiescence.
 
+Primary result collection uses the delivery-receipt sequence as a caller-held
+cursor. Each request names `after_sequence`; the broker replays receipts after
+that point, fills the bounded page with newly completed tasks in the same SQLite
+transaction, and returns the last delivered sequence as `next_after_sequence`.
+An empty page echoes the input cursor. This preserves ordered receipt replay
+without letting an old page consume the capacity needed to deliver later
+results.
+
 ### Collaboration Plane
 
 The Collaboration Plane provides logical direct Specialist communication while

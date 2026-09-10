@@ -629,11 +629,16 @@
       "additionalProperties": false,
       "required": [
         "operation",
+        "after_sequence",
         "limit"
       ],
       "properties": {
         "operation": {
           "const": "collect_specialist_results"
+        },
+        "after_sequence": {
+          "type": "integer",
+          "minimum": 0
         },
         "limit": {
           "type": "integer",
@@ -647,7 +652,8 @@
       "additionalProperties": false,
       "required": [
         "operation",
-        "tasks"
+        "tasks",
+        "next_after_sequence"
       ],
       "properties": {
         "operation": {
@@ -658,6 +664,10 @@
           "items": {
             "$ref": "#/$defs/task_result_summary"
           }
+        },
+        "next_after_sequence": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

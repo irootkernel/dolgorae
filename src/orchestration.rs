@@ -398,6 +398,7 @@ enum ToolRequest {
         transport_wait_seconds: u64,
     },
     CollectSpecialistResults {
+        after_sequence: u64,
         limit: usize,
     },
     CancelSpecialistTask {
@@ -566,11 +567,23 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                     "pending":pending,
                 }))
             }
-            ToolRequest::CollectSpecialistResults { limit } => {
-                let tasks = self.store.collect_results(context.session_id, 0, limit)?;
+            ToolRequest::CollectSpecialistResults {
+                after_sequence,
+                limit,
+            } => {
+                let tasks =
+                    self.store
+                        .collect_results(context.session_id, after_sequence, limit)?;
+                let next_after_sequence = match tasks.last() {
+                    Some(task) => task.delivery_sequence.ok_or_else(|| {
+                        integrity("collected result is missing its delivery sequence")
+                    })?,
+                    None => after_sequence,
+                };
                 Ok(serde_json::json!({
                     "operation":"collect_specialist_results_result",
                     "tasks":tasks.iter().map(task_summary).collect::<Vec<_>>(),
+                    "next_after_sequence":next_after_sequence,
                 }))
             }
             ToolRequest::CancelSpecialistTask { task_id, reason } => {
@@ -2861,7 +2874,7 @@ fn validate_tool_request_shape(payload: &Value) -> Result<(), MachineError> {
             "return_when",
             "transport_wait_seconds",
         ],
-        Some("collect_specialist_results") => &["operation", "limit"],
+        Some("collect_specialist_results") => &["operation", "after_sequence", "limit"],
         Some("cancel_specialist_task") => &["operation", "task_id", "reason"],
         Some("release_specialist") => &["operation", "run_id", "reason"],
         _ => &[],
@@ -4636,12 +4649,46 @@ mod tests {
                 &context(session.session_id, "dispatch-collect"),
                 &serde_json::json!({
                     "operation":"collect_specialist_results",
+                    "after_sequence":0,
                     "limit":8,
                 }),
             )
             .unwrap();
         assert_eq!(collected["operation"], "collect_specialist_results_result");
         assert_eq!(collected["tasks"][0]["task_id"], task_id.to_string());
+        assert_eq!(collected["next_after_sequence"], 1);
+
+        let later = service
+            .dispatch(
+                &context(session.session_id, "dispatch-assign-later"),
+                &serde_json::json!({
+                    "operation":"assign_specialist_task",
+                    "target":{"run_id":child},
+                    "objective":"Return a later review verdict.",
+                    "context_refs":[],
+                    "expected_output":["One later verdict"],
+                    "execution_intent":"read_only",
+                    "blocking":false,
+                    "deadline_seconds":60,
+                }),
+            )
+            .unwrap();
+        let later_task_id: Uuid = serde_json::from_value(later["task_id"].clone()).unwrap();
+        let later_collected = service
+            .dispatch(
+                &context(session.session_id, "dispatch-collect-later"),
+                &serde_json::json!({
+                    "operation":"collect_specialist_results",
+                    "after_sequence":collected["next_after_sequence"],
+                    "limit":1,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            later_collected["tasks"][0]["task_id"],
+            later_task_id.to_string()
+        );
+        assert_eq!(later_collected["next_after_sequence"], 2);
 
         let cancelled = service
             .dispatch(

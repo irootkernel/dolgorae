@@ -27,6 +27,8 @@ readiness envelope is written there instead of standard output. Success is one
 `ok: true` envelope containing the selected socket path, a new server instance
 ID, protocol range, and public descriptor digest. Connect only as the same OS
 user, call `GetCapabilities`, and use only the advertised methods.
+The global `--human` flag is accepted but never reformats the readiness
+envelope, which remains a supervisor-facing machine contract.
 
 Diagnose a failed start from that one machine envelope:
 

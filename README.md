@@ -44,9 +44,10 @@ dolgorae serve --socket /absolute/private-directory/dolgorae.sock
 
 The socket's parent must be owned by the current user with mode 0700. Startup
 prints one checked readiness result; `--ready-fd <fd>` sends it to an inherited
-descriptor instead. Clients negotiate with `GetCapabilities` and use its
-advertised methods and Controller carrier policy. Stopping or replacing the
-gateway preserves durable Runs and their workers.
+descriptor instead. The readiness result always remains machine JSON, including
+when the global `--human` flag is present. Clients negotiate with
+`GetCapabilities` and use its advertised methods and Controller carrier policy.
+Stopping or replacing the gateway preserves durable Runs and their workers.
 
 ## Specialist policies and orchestrated sessions
 
