@@ -1170,9 +1170,15 @@ remains ineligible until all three Tasks complete.
 
 ## EPIC-007: Dolgorae Orchestration Control Plane and Brokered Hierarchy Core
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [Orchestration control plane execution dossier](../todo/TODO-orchestration-control-plane.md).
+Canonical Outcomes: [orchestration specification](../specs/README.md#spec-012-orchestration-boundary-and-compatibility),
+[gateway specification](../specs/README.md#spec-015-supervised-local-grpc-and-gul-integration),
+[architecture](../architecture/README.md),
+[checked orchestration tool protocol](../protocol/dolgorae-orchestration-tool-v1.schema.json),
+[gateway implementation](../../src/gateway.rs),
+[orchestration implementation](../../src/orchestration.rs), and
+[native gateway tests](../../tests/gateway_native.rs)
 
 Goal: Add Dolgorae's own Primary orchestration authority and durable Brokered
 Hierarchy over the hardened independent Run and Specialist foundations.
