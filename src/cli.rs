@@ -599,9 +599,11 @@ pub fn validate_argument_contract(command: &Command) -> Result<(), String> {
     if command.machine_name() == "specialist.review" {
         let legacy = has(args, "--scope");
         let scoped = has(args, "--target-kind");
-        if legacy == scoped {
+        let v3 = has(args, "--request-stdin");
+        if usize::from(legacy) + usize::from(scoped) + usize::from(v3) != 1 {
             return Err(
-                "exactly one of --scope working-tree or --target-kind is required".to_owned(),
+                "exactly one of --scope working-tree, --target-kind, or --request-stdin is required"
+                    .to_owned(),
             );
         }
         if legacy && (has(args, "--revision") || has(args, "--deadline-seconds")) {
@@ -609,6 +611,18 @@ pub fn validate_argument_contract(command: &Command) -> Result<(), String> {
                 "--revision and --deadline-seconds are available only with --target-kind"
                     .to_owned(),
             );
+        }
+        if v3
+            && [
+                "--scope",
+                "--target-kind",
+                "--revision",
+                "--deadline-seconds",
+            ]
+            .into_iter()
+            .any(|flag| has(args, flag))
+        {
+            return Err("--request-stdin conflicts with legacy and v2 review options".to_owned());
         }
     }
     if let Command::Run(run) = command
@@ -886,7 +900,7 @@ fn leaf_spec(command: &str) -> LeafSpec {
                 "--deadline-seconds",
                 "--format",
             ],
-            &[],
+            &["--request-stdin"],
             &["--profile", "--format"],
             0,
             0,
@@ -1518,6 +1532,20 @@ mod tests {
         let cli = Cli::try_parse_from(scoped).unwrap();
         assert!(validate_argument_contract(&cli.command).is_ok());
 
+        let v3 = [
+            "dolgorae",
+            "specialist",
+            "review",
+            "--profile",
+            "reviewer",
+            "--request-stdin",
+            "--format",
+            "json",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(v3).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_ok());
+
         let mixed = [
             "dolgorae",
             "specialist",
@@ -1533,6 +1561,22 @@ mod tests {
         ]
         .map(OsString::from);
         let cli = Cli::try_parse_from(mixed).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_err());
+
+        let mixed_v3 = [
+            "dolgorae",
+            "specialist",
+            "review",
+            "--profile",
+            "reviewer",
+            "--request-stdin",
+            "--target-kind",
+            "head",
+            "--format",
+            "json",
+        ]
+        .map(OsString::from);
+        let cli = Cli::try_parse_from(mixed_v3).unwrap();
         assert!(validate_argument_contract(&cli.command).is_err());
 
         for (flag, value) in [("--revision", "HEAD"), ("--deadline-seconds", "30")] {

@@ -16,7 +16,7 @@ production infrastructure but do not add a user-facing product milestone.
 `EPIC-007`, `TASK-023`, and `TASK-024` are `COMPLETE`; they establish the
 supervised gateway and transport-independent Brokered Hierarchy core without
 claiming a live model-facing Primary tool. `EPIC-014` is `ACTIVE`, with
-`TASK-039` through `TASK-041` complete, `TASK-042` through `TASK-045` planned,
+`TASK-039` through `TASK-042` complete, `TASK-043` through `TASK-045` planned,
 and precedes
 `EPIC-008` in delivery order.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -1332,7 +1332,7 @@ tests.
 
 ### TASK-042: Additive v3 CLI and Reusable Facade Execution
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Add `specialist review --request-stdin --format json` for the checked v3 request
 and add the facade v3 assignment shape while preserving all legacy carriers.

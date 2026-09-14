@@ -7,6 +7,7 @@ use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind, InstructionSnapshot,
     ProfileSnapshot, RunManifest, agent_configuration_digest, runtime_profile_snapshot_digest,
 };
+use crate::task_request::SpecialistTaskRequest;
 use crate::turn::SessionSafetyPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +26,7 @@ pub const REVIEWER_ROLE_SNAPSHOT: &str = concat!(
 
 const MAX_SUMMARY_BYTES: usize = 8_192;
 const MAX_FINDINGS: usize = 64;
+const MAX_REVIEW_OUTPUT_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum ReviewSeverity {
@@ -52,6 +54,37 @@ pub struct ReviewFinding {
 pub struct ReviewerOutput {
     pub summary: String,
     pub findings: Vec<ReviewFinding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewAssessmentEvidence {
+    pub basis: String,
+    pub description: String,
+    pub path: Option<String>,
+    pub line_start: Option<u64>,
+    pub line_end: Option<u64>,
+    pub context_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionAssessment {
+    pub criterion_id: String,
+    pub status: String,
+    pub explanation: String,
+    pub evidence: Vec<ReviewAssessmentEvidence>,
+    pub remaining_gap: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewerOutputV3 {
+    pub summary: String,
+    pub findings: Vec<ReviewFinding>,
+    pub criterion_assessments: Vec<CriterionAssessment>,
+    pub evidence_limits: Vec<String>,
+    pub overall_assessment: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,6 +251,155 @@ pub fn validate_reviewer_output(value: Value) -> Result<ReviewerOutput, MachineE
     Ok(output)
 }
 
+pub fn validate_reviewer_output_v3(
+    value: Value,
+    task: &SpecialistTaskRequest,
+) -> Result<ReviewerOutputV3, MachineError> {
+    task.validate_review()?;
+    let mut output: ReviewerOutputV3 = serde_json::from_value(value)
+        .map_err(|_| output_invalid("output does not match structured_review_v3"))?;
+    if output.summary.is_empty()
+        || output.summary.len() > MAX_SUMMARY_BYTES
+        || output.findings.len() > MAX_FINDINGS
+        || output.criterion_assessments.len() != task.criteria.len()
+        || output.evidence_limits.len() > 64
+        || serde_json::to_vec(&output)
+            .map_err(|error| internal(error.to_string()))?
+            .len()
+            > MAX_REVIEW_OUTPUT_BYTES
+    {
+        return Err(output_invalid(
+            "v3 report or collection count is out of bounds",
+        ));
+    }
+    for finding in &output.findings {
+        validate_finding(finding)?;
+    }
+    output.findings.sort_by_key(|finding| finding.severity);
+    for (criterion, assessment) in task.criteria.iter().zip(&output.criterion_assessments) {
+        if assessment.criterion_id != criterion.id {
+            return Err(output_invalid(
+                "criterion assessments must cover the accepted criteria once in input order",
+            ));
+        }
+        if !matches!(
+            assessment.status.as_str(),
+            "met" | "unmet" | "unverified" | "not_applicable"
+        ) {
+            return Err(output_invalid("criterion status is invalid"));
+        }
+        output_text(&assessment.explanation, 8_192, "criterion explanation")?;
+        if assessment.evidence.is_empty() || assessment.evidence.len() > 64 {
+            return Err(output_invalid("criterion evidence count is invalid"));
+        }
+        if let Some(gap) = &assessment.remaining_gap {
+            output_text(gap, 8_192, "remaining gap")?;
+        }
+        let source_context_ids = criterion
+            .source_context_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        for evidence in &assessment.evidence {
+            validate_assessment_evidence(evidence, &source_context_ids)?;
+        }
+    }
+    for limit in &output.evidence_limits {
+        output_text(limit, 4_096, "evidence limit")?;
+    }
+    if !matches!(
+        output.overall_assessment.as_str(),
+        "requirements_met" | "requirements_not_met" | "insufficient_evidence"
+    ) {
+        return Err(output_invalid("overall assessment is invalid"));
+    }
+    let has_unmet = output
+        .criterion_assessments
+        .iter()
+        .any(|assessment| assessment.status == "unmet");
+    let has_unverified = output
+        .criterion_assessments
+        .iter()
+        .any(|assessment| assessment.status == "unverified");
+    if (has_unmet && output.overall_assessment != "requirements_not_met")
+        || (!has_unmet && has_unverified && output.overall_assessment != "insufficient_evidence")
+        || (!has_unmet && !has_unverified && output.overall_assessment != "requirements_met")
+    {
+        return Err(output_invalid(
+            "overall assessment conflicts with criterion statuses",
+        ));
+    }
+    Ok(output)
+}
+
+fn validate_assessment_evidence(
+    evidence: &ReviewAssessmentEvidence,
+    source_context_ids: &std::collections::BTreeSet<&str>,
+) -> Result<(), MachineError> {
+    if !matches!(
+        evidence.basis.as_str(),
+        "candidate" | "context" | "caller_reported" | "unavailable"
+    ) {
+        return Err(output_invalid("assessment evidence basis is invalid"));
+    }
+    output_text(
+        &evidence.description,
+        8_192,
+        "assessment evidence description",
+    )?;
+    if evidence.path.as_deref().is_some_and(invalid_relative_path) {
+        return Err(output_invalid("assessment evidence path is invalid"));
+    }
+    if evidence.line_start.is_some() != evidence.line_end.is_some()
+        || evidence
+            .line_start
+            .zip(evidence.line_end)
+            .is_some_and(|(start, end)| start == 0 || end < start)
+    {
+        return Err(output_invalid("assessment evidence line range is invalid"));
+    }
+    if evidence.line_start.is_some() && evidence.path.is_none() {
+        return Err(output_invalid(
+            "assessment evidence line range requires a candidate path",
+        ));
+    }
+    match evidence.basis.as_str() {
+        "context"
+            if !evidence
+                .context_id
+                .as_deref()
+                .is_some_and(|id| source_context_ids.contains(id)) =>
+        {
+            Err(output_invalid(
+                "assessment references context not declared for its criterion",
+            ))
+        }
+        "context" if evidence.path.is_some() || evidence.line_start.is_some() => Err(
+            output_invalid("context evidence cannot carry a candidate source location"),
+        ),
+        "context" => Ok(()),
+        _ if evidence.context_id.is_some() => Err(output_invalid(
+            "only context evidence may carry a context ID",
+        )),
+        "caller_reported" | "unavailable"
+            if evidence.path.is_some() || evidence.line_start.is_some() =>
+        {
+            Err(output_invalid(
+                "non-candidate evidence cannot carry a candidate source location",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn output_text(value: &str, maximum: usize, label: &str) -> Result<(), MachineError> {
+    if value.is_empty() || value.len() > maximum || value.contains('\0') {
+        Err(output_invalid(&format!("{label} is invalid")))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_finding(finding: &ReviewFinding) -> Result<(), MachineError> {
     for (name, value, maximum) in [
         ("title", finding.title.as_str(), 512),
@@ -231,16 +413,7 @@ fn validate_finding(finding: &ReviewFinding) -> Result<(), MachineError> {
     if !matches!(finding.confidence.as_str(), "high" | "medium" | "low") {
         return Err(output_invalid("finding confidence is invalid"));
     }
-    if finding.path.as_deref().is_some_and(|path| {
-        path.is_empty()
-            || path.len() > 4_096
-            || Path::new(path).components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-    }) {
+    if finding.path.as_deref().is_some_and(invalid_relative_path) {
         return Err(output_invalid("finding path is not repository-relative"));
     }
     if finding.line_start.is_some() != finding.line_end.is_some()
@@ -252,6 +425,17 @@ fn validate_finding(finding: &ReviewFinding) -> Result<(), MachineError> {
         return Err(output_invalid("finding line range is invalid"));
     }
     Ok(())
+}
+
+fn invalid_relative_path(path: &str) -> bool {
+    path.is_empty()
+        || path.len() > 4_096
+        || Path::new(path).components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 fn reject_recursive_review_adapter(profile: &ProfileSnapshot) -> Result<(), MachineError> {
@@ -338,6 +522,9 @@ fn internal(reason: impl Into<String>) -> MachineError {
 mod tests {
     use super::*;
     use crate::run::ExecutableIdentity;
+    use crate::task_request::{
+        STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest, TaskContext, TaskCriterion,
+    };
     use crate::workspace::LosslessPath;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -456,6 +643,191 @@ mod tests {
             })).unwrap_err();
             assert_eq!(error.code, "REVIEW_OUTPUT_INVALID");
         }
+    }
+
+    #[test]
+    fn v3_output_covers_each_accepted_criterion_in_order() {
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Assess completion.".to_owned(),
+            contexts: vec![TaskContext {
+                id: "requirements".to_owned(),
+                content: "C-1 is authoritative.".to_owned(),
+                provenance: "approved specification".to_owned(),
+            }],
+            criteria: vec![TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "The behavior exists.".to_owned(),
+                source_context_ids: vec!["requirements".to_owned()],
+            }],
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let output = validate_reviewer_output_v3(
+            serde_json::json!({
+                "summary":"criterion is not yet satisfied",
+                "findings":[],
+                "criterion_assessments":[{
+                    "criterion_id":"C-1",
+                    "status":"unmet",
+                    "explanation":"Production wiring is absent.",
+                    "evidence":[{
+                        "basis":"candidate",
+                        "description":"No call site exists in the captured candidate.",
+                        "path":null,
+                        "line_start":null,
+                        "line_end":null,
+                        "context_id":null
+                    }],
+                    "remaining_gap":"Add production wiring."
+                }],
+                "evidence_limits":[],
+                "overall_assessment":"requirements_not_met"
+            }),
+            &task,
+        )
+        .unwrap();
+        assert_eq!(output.criterion_assessments[0].criterion_id, "C-1");
+
+        let error = validate_reviewer_output_v3(
+            serde_json::json!({
+                "summary":"missing assessment",
+                "findings":[],
+                "criterion_assessments":[],
+                "evidence_limits":[],
+                "overall_assessment":"requirements_met"
+            }),
+            &task,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "REVIEW_OUTPUT_INVALID");
+    }
+
+    #[test]
+    fn v3_output_preserves_all_status_and_evidence_variants() {
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Assess every criterion.".to_owned(),
+            contexts: vec![TaskContext {
+                id: "requirements".to_owned(),
+                content: "authoritative criteria".to_owned(),
+                provenance: "approved specification".to_owned(),
+            }],
+            criteria: ["met", "unmet", "unverified", "not-applicable"]
+                .into_iter()
+                .map(|id| TaskCriterion {
+                    id: id.to_owned(),
+                    statement: format!("Assess {id}."),
+                    source_context_ids: vec!["requirements".to_owned()],
+                })
+                .collect(),
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let report = serde_json::json!({
+            "summary":"mixed assessment",
+            "findings":[],
+            "criterion_assessments":[
+                {
+                    "criterion_id":"met",
+                    "status":"met",
+                    "explanation":"candidate line proves it",
+                    "evidence":[{"basis":"candidate","description":"implementation","path":"src/lib.rs","line_start":1,"line_end":1,"context_id":null}],
+                    "remaining_gap":null
+                },
+                {
+                    "criterion_id":"unmet",
+                    "status":"unmet",
+                    "explanation":"the accepted requirement is not implemented",
+                    "evidence":[{"basis":"context","description":"approved requirement","path":null,"line_start":null,"line_end":null,"context_id":"requirements"}],
+                    "remaining_gap":"implement the requirement"
+                },
+                {
+                    "criterion_id":"unverified",
+                    "status":"unverified",
+                    "explanation":"runtime evidence is unavailable",
+                    "evidence":[{"basis":"unavailable","description":"live check not authorized","path":null,"line_start":null,"line_end":null,"context_id":null}],
+                    "remaining_gap":"run the authorized live check"
+                },
+                {
+                    "criterion_id":"not-applicable",
+                    "status":"not_applicable",
+                    "explanation":"the caller excluded this platform",
+                    "evidence":[{"basis":"caller_reported","description":"approved scope exclusion","path":null,"line_start":null,"line_end":null,"context_id":null}],
+                    "remaining_gap":null
+                }
+            ],
+            "evidence_limits":["no live provider check"],
+            "overall_assessment":"requirements_not_met"
+        });
+        let checked = validate_reviewer_output_v3(report.clone(), &task).unwrap();
+        assert_eq!(checked.criterion_assessments.len(), 4);
+
+        let mut reordered = report;
+        reordered["criterion_assessments"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 1);
+        assert_eq!(
+            validate_reviewer_output_v3(reordered, &task)
+                .unwrap_err()
+                .code,
+            "REVIEW_OUTPUT_INVALID"
+        );
+    }
+
+    #[test]
+    fn v3_output_rejects_undeclared_context_and_oversized_text() {
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Assess completion.".to_owned(),
+            contexts: vec![TaskContext {
+                id: "other".to_owned(),
+                content: "context for another criterion".to_owned(),
+                provenance: "approved specification".to_owned(),
+            }],
+            criteria: vec![TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "The behavior exists.".to_owned(),
+                source_context_ids: vec![],
+            }],
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let report = serde_json::json!({
+            "summary":"reviewed",
+            "findings":[],
+            "criterion_assessments":[{
+                "criterion_id":"C-1",
+                "status":"unverified",
+                "explanation":"context is unavailable",
+                "evidence":[{"basis":"context","description":"undeclared context","path":null,"line_start":null,"line_end":null,"context_id":"other"}],
+                "remaining_gap":"supply context"
+            }],
+            "evidence_limits":[],
+            "overall_assessment":"insufficient_evidence"
+        });
+        assert_eq!(
+            validate_reviewer_output_v3(report, &task).unwrap_err().code,
+            "REVIEW_OUTPUT_INVALID"
+        );
+
+        let oversized = serde_json::json!({
+            "summary":"x".repeat(MAX_SUMMARY_BYTES + 1),
+            "findings":[],
+            "criterion_assessments":[{
+                "criterion_id":"C-1",
+                "status":"met",
+                "explanation":"checked",
+                "evidence":[{"basis":"candidate","description":"candidate","path":null,"line_start":null,"line_end":null,"context_id":null}],
+                "remaining_gap":null
+            }],
+            "evidence_limits":[],
+            "overall_assessment":"requirements_met"
+        });
+        assert_eq!(
+            validate_reviewer_output_v3(oversized, &task)
+                .unwrap_err()
+                .code,
+            "REVIEW_OUTPUT_INVALID"
+        );
     }
 
     #[test]

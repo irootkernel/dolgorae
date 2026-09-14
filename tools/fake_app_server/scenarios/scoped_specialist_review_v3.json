@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "name": "scoped_specialist_review_v3",
+  "description": "One fresh managed Reviewer returns a criterion-complete v3 verdict.",
+  "codex_home": "/tmp/codex-home",
+  "steps": [
+    {
+      "method": "initialize",
+      "respond": {
+        "result": {
+          "codexHome": "${codex_home}",
+          "userAgent": "fake-app-server/1",
+          "capabilities": {"experimentalApi": false}
+        }
+      }
+    },
+    {
+      "method": "account/read",
+      "respond": {"result": {"requiresOpenaiAuth": false}}
+    },
+    {
+      "method": "model/list",
+      "respond": {
+        "result": {
+          "data": [
+            {
+              "model": "gpt-5.6",
+              "isDefault": true,
+              "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "method": "thread/read",
+      "respond": {"error": {"code": -32600, "message": "thread not found"}}
+    },
+    {
+      "method": "thread/start",
+      "respond": {"result": {"thread": {"id": "thread-scope-v3"}}}
+    },
+    {
+      "method": "turn/start",
+      "respond": {"result": {"turn": {"id": "turn-${turn_index}"}}},
+      "emit": [
+        {
+          "kind": "notification",
+          "method": "turn/completed",
+          "params": {
+            "threadId": "${thread_id}",
+            "turn": {
+              "id": "turn-${turn_index}",
+              "status": "completed",
+              "items": [
+                {
+                  "type": "agentMessage",
+                  "phase": "final_answer",
+                  "threadId": "${thread_id}",
+                  "turnId": "turn-${turn_index}",
+                  "status": "completed",
+                  "text": "{\"summary\":\"구조화 완료 검토\",\"findings\":[],\"criterion_assessments\":[{\"criterion_id\":\"C-korean\",\"status\":\"met\",\"explanation\":\"후보와 요구사항을 대조했습니다.\",\"evidence\":[{\"basis\":\"candidate\",\"description\":\"root.txt의 캡처된 내용\",\"path\":\"root.txt\",\"line_start\":1,\"line_end\":1,\"context_id\":null}],\"remaining_gap\":null},{\"criterion_id\":\"C-context\",\"status\":\"unverified\",\"explanation\":\"외부 실행 근거가 없습니다.\",\"evidence\":[{\"basis\":\"context\",\"description\":\"호출자가 제공한 완료 조건\",\"path\":null,\"line_start\":null,\"line_end\":null,\"context_id\":\"acceptance\"}],\"remaining_gap\":\"라이브 실행은 별도 권한이 필요합니다.\"}],\"evidence_limits\":[\"라이브 실행은 수행하지 않았습니다.\"],\"overall_assessment\":\"insufficient_evidence\"}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "thread/archive",
+      "respond": {"result": {"thread": {"id": "${thread_id}", "archived": true}}}
+    }
+  ]
+}

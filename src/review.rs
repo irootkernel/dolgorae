@@ -8,7 +8,12 @@ use crate::run::RunStore;
 use crate::semantic::{
     ReviewerStartContext, RunVerb, control_reviewer_run, prepare_reviewer, start_reviewer_run,
 };
-use crate::specialist::{ReviewerOutput, validate_reviewer_output};
+use crate::specialist::{
+    ReviewerOutput, ReviewerOutputV3, validate_reviewer_output, validate_reviewer_output_v3,
+};
+use crate::task_request::{
+    MAX_TASK_REQUEST_BYTES, SpecialistTaskRequest, TaskContext, TaskCriterion,
+};
 use crate::workspace::{SystemWorkspacePlatform, WorkspaceService};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,7 +21,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -30,6 +35,7 @@ use uuid::Uuid;
 pub const REVIEW_OBJECTIVE: &str = "Review the current working tree for concrete correctness, regression, concurrency, error-handling, security, test-coverage, and maintainability issues.";
 const DEFAULT_REVIEW_DEADLINE_SECONDS: u64 = 600;
 const MAX_REVIEW_REVISION_BYTES: usize = 1024;
+const REVIEW_REQUEST_V3_SCHEMA: &str = "dolgorae-specialist-review-request/v3";
 pub const REVIEW_FOCUS: [&str; 7] = [
     "correctness",
     "regressions",
@@ -60,6 +66,52 @@ pub struct ReviewTargetRequest {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRequestV3 {
+    pub schema: String,
+    pub operation: String,
+    pub target: ReviewTargetRequest,
+    pub purpose: String,
+    pub brief: String,
+    pub contexts: Vec<TaskContext>,
+    pub criteria: Vec<TaskCriterion>,
+    pub expected_output: String,
+    pub deadline_seconds: u64,
+}
+
+enum CheckedScopedOutput {
+    V2(ReviewerOutput),
+    V3(ReviewerOutputV3),
+}
+
+impl ReviewRequestV3 {
+    pub fn validate(&self) -> Result<SpecialistTaskRequest, MachineError> {
+        if self.schema != REVIEW_REQUEST_V3_SCHEMA || self.operation != "review_target" {
+            return Err(MachineError::invalid_argument(
+                "review_request",
+                "request must use the checked v3 review schema and operation",
+            ));
+        }
+        self.target.validate()?;
+        if !(1..=3_600).contains(&self.deadline_seconds) {
+            return Err(MachineError::invalid_argument(
+                "deadline_seconds",
+                "deadline must be between 1 and 3600 seconds",
+            ));
+        }
+        let task = SpecialistTaskRequest {
+            purpose: self.purpose.clone(),
+            brief: self.brief.clone(),
+            contexts: self.contexts.clone(),
+            criteria: self.criteria.clone(),
+            expected_output: self.expected_output.clone(),
+        };
+        task.validate_review()?;
+        Ok(task)
+    }
 }
 
 impl ReviewTargetRequest {
@@ -269,6 +321,37 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
             "--format",
             "the canonical specialist review format is json",
         ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--request-stdin")
+    {
+        if std::io::stdin().is_terminal() {
+            return Err(MachineError::invalid_argument(
+                "--request-stdin",
+                "v3 review request requires non-TTY stdin",
+            ));
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take((MAX_TASK_REQUEST_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                MachineError::invalid_argument("--request-stdin", "request read failed")
+            })?;
+        if bytes.len() > MAX_TASK_REQUEST_BYTES {
+            return Err(MachineError::invalid_argument(
+                "--request-stdin",
+                "v3 review request exceeds 1048576 bytes",
+            ));
+        }
+        let request: ReviewRequestV3 = serde_json::from_slice(&bytes).map_err(|_| {
+            MachineError::invalid_argument(
+                "--request-stdin",
+                "stdin does not match the checked v3 review request",
+            )
+        })?;
+        return execute_v3(workspace.as_deref(), &profile, &request, new_uuid_v7());
     }
     match (
         optional_value(arguments, "--scope")?,
@@ -537,6 +620,48 @@ pub fn execute_scoped(
     deadline_seconds: u64,
     request_ref: Uuid,
 ) -> Result<Value, MachineError> {
+    let mut request = ReviewRequest::fixed();
+    request.deadline_seconds = deadline_seconds;
+    execute_scoped_common(
+        workspace,
+        profile,
+        target,
+        deadline_seconds,
+        request_ref,
+        &request,
+        None,
+    )
+}
+
+pub fn execute_v3(
+    workspace: Option<&Path>,
+    profile: &str,
+    request: &ReviewRequestV3,
+    request_ref: Uuid,
+) -> Result<Value, MachineError> {
+    let task = request.validate()?;
+    let mut legacy_shape = ReviewRequest::fixed();
+    legacy_shape.deadline_seconds = request.deadline_seconds;
+    execute_scoped_common(
+        workspace,
+        profile,
+        &request.target,
+        request.deadline_seconds,
+        request_ref,
+        &legacy_shape,
+        Some((request, &task)),
+    )
+}
+
+fn execute_scoped_common(
+    workspace: Option<&Path>,
+    profile: &str,
+    target: &ReviewTargetRequest,
+    deadline_seconds: u64,
+    request_ref: Uuid,
+    request: &ReviewRequest,
+    v3: Option<(&ReviewRequestV3, &SpecialistTaskRequest)>,
+) -> Result<Value, MachineError> {
     install_interrupt_handler()?;
     let interrupt_epoch = INTERRUPT_EPOCH.load(Ordering::SeqCst);
     target.validate()?;
@@ -552,8 +677,6 @@ pub fn execute_scoped(
             "deadline must be between 1 and 3600 seconds",
         ));
     }
-    let mut request = ReviewRequest::fixed();
-    request.deadline_seconds = deadline_seconds;
     let prepared = prepare_reviewer(workspace, profile)?;
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
@@ -563,7 +686,16 @@ pub fn execute_scoped(
     drop(aggregate_carrier);
     let database = EngagementStore::workspace_database_path(&prepared.state_root);
     let mut store = EngagementStore::open(&database)?;
-    let key = |operation: &str| format!("scoped-specialist-review:{request_ref}:{operation}");
+    let key = |operation: &str| {
+        format!(
+            "{}:{request_ref}:{operation}",
+            if v3.is_some() {
+                "specialist-review-v3"
+            } else {
+                "scoped-specialist-review"
+            }
+        )
+    };
     let opened = store.open_engagement(
         &prepared.view.workspace_id,
         &aggregate_binding.capability_sha256,
@@ -674,51 +806,62 @@ pub fn execute_scoped(
             carriers.reviewer.clone(),
             hired.specialist_run_id,
         );
-        let turn_timeout = Duration::from_secs(request.deadline_seconds)
-            .saturating_sub(lifecycle_started.elapsed())
-            .max(Duration::from_nanos(1));
         let mut task_error = None;
-        let task = store.assign_review(
-            review_id,
-            hired.specialist_run_id,
-            &request.objective,
-            &key("assign"),
-            |reservation, _| {
-                let prompt = scoped_review_prompt(&request, target);
-                let arguments = reviewer_send_arguments(
-                    &canonical_workspace,
-                    &carriers.reviewer,
-                    hired.specialist_run_id,
-                    reservation.task_id,
-                    turn_timeout,
-                    &prompt,
-                );
-                match control_reviewer_run(RunVerb::Send, &arguments) {
-                    Ok(turn) => match checked_turn_output(&turn) {
-                        Ok(output) => (RuntimeOutcome::Accepted, Some(output)),
-                        Err(error) if error.code == "REVIEW_TIMEOUT" => {
-                            task_error = Some(error);
-                            (RuntimeOutcome::Unknown, None)
-                        }
-                        Err(error) => {
-                            task_error = Some(error);
-                            (RuntimeOutcome::Rejected, None)
-                        }
-                    },
-                    Err(error) if error.code == "TURN_INTERRUPTED" => {
-                        task_error = Some(review_error(
-                            "REVIEW_INTERRUPTED_UNKNOWN",
-                            "Reviewer Turn outcome is unknown and was not replayed",
-                        ));
-                        (RuntimeOutcome::Unknown, None)
-                    }
-                    Err(error) => {
-                        task_error = Some(error);
-                        (RuntimeOutcome::Rejected, None)
-                    }
-                }
-            },
-        );
+        let mut task_started = None;
+        let task = if let Some((v3_request, task_request)) = v3 {
+            let accepted_request = serde_json::to_value(v3_request).map_err(internal)?;
+            store.assign_task_v3(
+                review_id,
+                hired.specialist_run_id,
+                &accepted_request,
+                task_request,
+                &key("assign"),
+                |reservation, accepted_task, accepted_prompt| {
+                    task_started = Some(Instant::now());
+                    let prompt = scoped_review_prompt_v3(accepted_prompt, target);
+                    let turn_timeout = Duration::from_secs(deadline_seconds)
+                        .saturating_sub(
+                            task_started
+                                .expect("v3 task acceptance start was recorded")
+                                .elapsed(),
+                        )
+                        .max(Duration::from_nanos(1));
+                    execute_reviewer_turn(
+                        &canonical_workspace,
+                        &carriers.reviewer,
+                        hired.specialist_run_id,
+                        reservation.task_id,
+                        turn_timeout,
+                        &prompt,
+                        Some(accepted_task),
+                        &mut task_error,
+                    )
+                },
+            )
+        } else {
+            let turn_timeout = Duration::from_secs(request.deadline_seconds)
+                .saturating_sub(lifecycle_started.elapsed())
+                .max(Duration::from_nanos(1));
+            store.assign_review(
+                review_id,
+                hired.specialist_run_id,
+                &request.objective,
+                &key("assign"),
+                |reservation, _| {
+                    let prompt = scoped_review_prompt(request, target);
+                    execute_reviewer_turn(
+                        &canonical_workspace,
+                        &carriers.reviewer,
+                        hired.specialist_run_id,
+                        reservation.task_id,
+                        turn_timeout,
+                        &prompt,
+                        None,
+                        &mut task_error,
+                    )
+                },
+            )
+        };
         let task = task?;
         if interrupted_since(interrupt_epoch) {
             return Err(review_error(
@@ -726,8 +869,13 @@ pub fn execute_scoped(
                 "Specialist review was cancelled by the caller",
             ));
         }
+        let budget_started = if v3.is_some() {
+            task_started.unwrap_or_else(Instant::now)
+        } else {
+            lifecycle_started
+        };
         let remaining = Duration::from_secs(request.deadline_seconds)
-            .saturating_sub(lifecycle_started.elapsed())
+            .saturating_sub(budget_started.elapsed())
             .max(Duration::from_nanos(1));
         let terminal = store.await_terminal(review_id, remaining)?;
         if terminal.state == "interrupted_unknown" {
@@ -747,7 +895,11 @@ pub fn execute_scoped(
             }));
         }
         let collected = store.collect_review(review_id)?;
-        let output = validate_reviewer_output(collected.output)?;
+        let output = if let Some((_, task_request)) = v3 {
+            CheckedScopedOutput::V3(validate_reviewer_output_v3(collected.output, task_request)?)
+        } else {
+            CheckedScopedOutput::V2(validate_reviewer_output(collected.output)?)
+        };
         let integrity =
             crate::review_target::inspect_capture_in_state_root(&prepared.state_root, capture_ref)?;
         let closed_run = close_reviewer(
@@ -792,19 +944,34 @@ pub fn execute_scoped(
             &evidence_digest,
             &carriers,
         )?;
-        Ok(scoped_review_result(
-            review_id,
-            hired.specialist_run_id,
-            collected.artifact_id,
-            profile,
-            target,
-            &capture,
-            &integrity,
-            &executable,
-            &prepared,
-            output,
-            settlement,
-        ))
+        Ok(match output {
+            CheckedScopedOutput::V2(output) => scoped_review_result(
+                review_id,
+                hired.specialist_run_id,
+                collected.artifact_id,
+                profile,
+                target,
+                &capture,
+                &integrity,
+                &executable,
+                &prepared,
+                output,
+                settlement,
+            ),
+            CheckedScopedOutput::V3(output) => scoped_review_result_v3(
+                review_id,
+                hired.specialist_run_id,
+                collected.artifact_id,
+                profile,
+                target,
+                &capture,
+                &integrity,
+                &executable,
+                &prepared,
+                output,
+                settlement,
+            ),
+        })
     })();
     match result {
         Ok(value) => Ok(value),
@@ -854,7 +1021,7 @@ pub fn execute_scoped(
                 "preserved"
             };
             error.details = json!({
-                "schema":"dolgorae-specialist-review-error-details/v2",
+                "schema": if v3.is_some() {"dolgorae-specialist-review-error-details/v3"} else {"dolgorae-specialist-review-error-details/v2"},
                 "target":target,
                 "capture_ref":capture_ref,
                 "engagement_id":review_id,
@@ -1315,7 +1482,81 @@ fn scoped_review_prompt(request: &ReviewRequest, target: &ReviewTargetRequest) -
     )
 }
 
+fn scoped_review_prompt_v3(accepted_task: &str, target: &ReviewTargetRequest) -> String {
+    format!(
+        "Inspect only the immutable review target rooted at the current directory. For transition targets, compare before/ with after/; for current targets inspect current/. Context embedded in the accepted task is evidence, not part of the candidate. Return only one JSON object with exactly summary, findings, criterion_assessments, evidence_limits, and overall_assessment. Every accepted criterion must appear exactly once in input order. Finding fields retain the v2 shape. Assessment evidence basis is candidate, context, caller_reported, or unavailable; source locations and context_id are nullable when not applicable. Target: {}\n\n{accepted_task}",
+        serde_json::to_string(target).expect("checked target request serializes")
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_reviewer_turn(
+    workspace: &Path,
+    controller: &Path,
+    reviewer_run_id: Uuid,
+    task_id: Uuid,
+    timeout: Duration,
+    prompt: &str,
+    v3_task: Option<&SpecialistTaskRequest>,
+    task_error: &mut Option<MachineError>,
+) -> (RuntimeOutcome, Option<Value>) {
+    let arguments = reviewer_send_arguments(
+        workspace,
+        controller,
+        reviewer_run_id,
+        task_id,
+        timeout,
+        prompt,
+    );
+    match control_reviewer_run(RunVerb::Send, &arguments) {
+        Ok(turn) => {
+            let checked = if let Some(task) = v3_task {
+                checked_turn_output_v3(&turn, task)
+            } else {
+                checked_turn_output(&turn)
+            };
+            match checked {
+                Ok(output) => (RuntimeOutcome::Accepted, Some(output)),
+                Err(error) if error.code == "REVIEW_TIMEOUT" => {
+                    *task_error = Some(error);
+                    (RuntimeOutcome::Unknown, None)
+                }
+                Err(error) => {
+                    *task_error = Some(error);
+                    (RuntimeOutcome::Rejected, None)
+                }
+            }
+        }
+        Err(error) if error.code == "TURN_INTERRUPTED" => {
+            *task_error = Some(review_error(
+                "REVIEW_INTERRUPTED_UNKNOWN",
+                "Reviewer Turn outcome is unknown and was not replayed",
+            ));
+            (RuntimeOutcome::Unknown, None)
+        }
+        Err(error) => {
+            *task_error = Some(error);
+            (RuntimeOutcome::Rejected, None)
+        }
+    }
+}
+
 fn checked_turn_output(turn: &Value) -> Result<Value, MachineError> {
+    let value = turn_output_value(turn)?;
+    validate_reviewer_output(value.clone())?;
+    Ok(value)
+}
+
+fn checked_turn_output_v3(
+    turn: &Value,
+    task: &SpecialistTaskRequest,
+) -> Result<Value, MachineError> {
+    let value = turn_output_value(turn)?;
+    validate_reviewer_output_v3(value.clone(), task)?;
+    Ok(value)
+}
+
+fn turn_output_value(turn: &Value) -> Result<Value, MachineError> {
     let status = turn.get("status").and_then(Value::as_str);
     if matches!(status, Some("running" | "accepted")) {
         return Err(review_error(
@@ -1335,7 +1576,6 @@ fn checked_turn_output(turn: &Value) -> Result<Value, MachineError> {
         .ok_or_else(|| review_error("REVIEW_OUTPUT_INVALID", "Reviewer returned no inline JSON"))?;
     let value: Value = serde_json::from_str(text)
         .map_err(|_| review_error("REVIEW_OUTPUT_INVALID", "Reviewer output is not JSON"))?;
-    validate_reviewer_output(value.clone())?;
     Ok(value)
 }
 
@@ -1405,6 +1645,66 @@ fn scoped_review_result(
             "id":review_id,
             "state":"closed"
         },
+        "settlement":settlement,
+        "capture_time_source_identity":{
+            "workspace_id":prepared.view.workspace_id,
+            "resolved_base":capture["resolved_base"],
+            "resolved_head":capture["resolved_head"],
+            "manifest_digest":capture["manifest_digest"],
+            "whole_target_digest":capture["whole_target_digest"]
+        },
+        "workflow_issued_source_mutation":false
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the checked v3 result binds each independent authority"
+)]
+fn scoped_review_result_v3(
+    review_id: Uuid,
+    reviewer_run_id: Uuid,
+    artifact_id: Uuid,
+    profile: &str,
+    target: &ReviewTargetRequest,
+    capture: &Value,
+    integrity: &Value,
+    executable: &Value,
+    prepared: &crate::semantic::PreparedReviewer,
+    output: ReviewerOutputV3,
+    settlement: Value,
+) -> Value {
+    json!({
+        "schema":"dolgorae-specialist-review-result/v3",
+        "operation":"review_target_result",
+        "review_id":review_id,
+        "target":{
+            "request":target,
+            "capture_ref":capture["capture_ref"],
+            "capture_revision":capture["capture_revision"],
+            "resolved_base":capture["resolved_base"],
+            "resolved_head":capture["resolved_head"],
+            "manifest_digest":capture["manifest_digest"],
+            "whole_target_digest":capture["whole_target_digest"],
+            "capture_integrity":integrity["integrity"]
+        },
+        "reviewer":{
+            "profile":profile,
+            "run_id":reviewer_run_id,
+            "state":"closed",
+            "model":prepared.model,
+            "effort":prepared.effort,
+            "executable":executable,
+            "result_artifact_ref":artifact_id
+        },
+        "verdict":{
+            "summary":output.summary,
+            "findings":output.findings,
+            "criterion_assessments":output.criterion_assessments,
+            "evidence_limits":output.evidence_limits,
+            "overall_assessment":output.overall_assessment
+        },
+        "engagement":{"id":review_id,"state":"closed"},
         "settlement":settlement,
         "capture_time_source_identity":{
             "workspace_id":prepared.view.workspace_id,
@@ -1658,6 +1958,36 @@ mod tests {
             assert_eq!(error.code, "INVALID_ARGUMENT");
             assert_eq!(error.details["argument"], "--deadline-seconds");
         }
+    }
+
+    #[test]
+    fn accepted_context_stays_separate_from_the_review_target() {
+        let target = ReviewTargetRequest {
+            kind: "staged".to_owned(),
+            revision: None,
+        };
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "완료 여부를 검토하세요.\n\n`$HOME`은 그대로 둡니다.".to_owned(),
+            contexts: vec![TaskContext {
+                id: "requirements".to_owned(),
+                content: "첫째 줄\r\n둘째 줄".to_owned(),
+                provenance: "caller supplied requirements".to_owned(),
+            }],
+            criteria: vec![TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "요구사항을 충족한다.".to_owned(),
+                source_context_ids: vec!["requirements".to_owned()],
+            }],
+            expected_output: "structured_review_v3".to_owned(),
+        };
+        task.validate_review().unwrap();
+        let accepted_task = task.prompt().unwrap();
+        let prompt = scoped_review_prompt_v3(&accepted_task, &target);
+        assert!(prompt.contains("완료 여부를 검토하세요.\\n\\n`$HOME`은 그대로 둡니다."));
+        assert!(prompt.contains("첫째 줄\\r\\n둘째 줄"));
+        assert!(prompt.contains("Context embedded in the accepted task is evidence"));
+        assert!(!prompt.contains("/Users/"));
     }
 
     #[test]

@@ -22,6 +22,9 @@ PROTOCOL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol
 FACADE_SCHEMA = validator(
     PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v2.schema.json"
 )
+FACADE_V3_SCHEMA = validator(
+    PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v3.schema.json"
+)
 MACHINE_SCHEMA = validator(PROTOCOL_ROOT, "dolgorae-machine-v2.schema.json")
 
 
@@ -55,11 +58,16 @@ def call(
     environment_overrides: dict[str, str] | None = None,
     invalid_request: bool = False,
 ) -> dict[str, object]:
+    facade_schema = (
+        FACADE_V3_SCHEMA
+        if request.get("schema") == "dolgorae-external-specialist-facade/v3"
+        else FACADE_SCHEMA
+    )
     if invalid_request:
-        if FACADE_SCHEMA.is_valid(request):
+        if facade_schema.is_valid(request):
             raise AssertionError("negative request unexpectedly conforms to the schema")
     else:
-        assert_valid(request, FACADE_SCHEMA, f"{request.get('operation')} request")
+        assert_valid(request, facade_schema, f"{request.get('operation')} request")
     with tempfile.TemporaryFile() as request_file:
         os.fchmod(request_file.fileno(), 0o600)
         request_file.write(json.dumps(request, separators=(",", ":")).encode())
@@ -109,7 +117,7 @@ def call(
                 "message": error["message"],
                 "retryable": error["retryable"],
             },
-            FACADE_SCHEMA,
+            facade_schema,
             f"{request.get('operation')} error",
         )
         return envelope["error"]
@@ -118,7 +126,7 @@ def call(
     ):
         raise AssertionError("engagement response disclosed a credential carrier path")
     result = envelope["data"]
-    assert_valid(result, FACADE_SCHEMA, f"{request.get('operation')} result")
+    assert_valid(result, facade_schema, f"{request.get('operation')} result")
     return result
 
 
@@ -237,6 +245,7 @@ def validate(binary: pathlib.Path) -> None:
             raise AssertionError(f"operator initialization failed: {operator_envelope!r}")
 
         scenario = root / "scenario.json"
+        reusable_transcript = root / "reusable-transcript.jsonl"
         scenario.write_text(
             json.dumps(
                 {
@@ -253,7 +262,8 @@ def validate(binary: pathlib.Path) -> None:
                         {"method": "thread/read", "respond": {"error": {"code": -32600, "message": "thread not found"}}},
                         {"method": "turn/start", "occurrence": 1, "respond": {"result": {"turn": {"id": "turn-one"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-one", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-one", "status": "completed", "text": "first reusable answer"}]}}}]},
                         {"method": "turn/start", "occurrence": 2, "respond": {"result": {"turn": {"id": "turn-two"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-two", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-two", "status": "completed", "text": "second reusable answer"}]}}}]},
-                        {"method": "turn/start", "occurrence": 3, "respond": {"result": {"turn": {"id": "turn-abort"}}}},
+                        {"method": "turn/start", "occurrence": 3, "respond": {"result": {"turn": {"id": "turn-v3"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-v3", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-v3", "status": "completed", "text": json.dumps({"summary": "structured reusable review", "findings": [], "criterion_assessments": [{"criterion_id": "C-reusable", "status": "met", "explanation": "accepted context and candidate were checked", "evidence": [{"basis": "context", "description": "caller requirements", "path": None, "line_start": None, "line_end": None, "context_id": "requirements"}], "remaining_gap": None}], "evidence_limits": [], "overall_assessment": "requirements_met"}, separators=(",", ":"), ensure_ascii=False)}]}}}]},
+                        {"method": "turn/start", "occurrence": 4, "respond": {"result": {"turn": {"id": "turn-abort"}}}},
                         {"method": "turn/interrupt", "respond": {"result": {"interrupted": True}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-abort", "turn": {"id": "turn-abort", "status": "interrupted", "items": []}}}]},
                         {"method": "thread/archive", "respond": {"result": {"thread": {"id": "thread-reusable", "archived": True}}}},
                     ],
@@ -268,6 +278,7 @@ def validate(binary: pathlib.Path) -> None:
             scenario=scenario,
             codex_home=codex_home,
             schema_source=schema_source,
+            transcript=reusable_transcript,
         )
         isolated_scenario = root / "isolated-scenario.json"
         isolated_transcript = root / "isolated-transcript.jsonl"
@@ -573,6 +584,98 @@ def validate(binary: pathlib.Path) -> None:
                     record = json.loads(runtime.read_text(encoding="utf-8"))
                     pid = int(record["identity"]["pid"])
                     stop_worker(pid)
+
+            v3_request = {
+                "schema": "dolgorae-external-specialist-facade/v3",
+                "operation": "assign_external_specialist_task",
+                "engagement_id": engagement_id,
+                "specialist_run_id": run_id,
+                "external_request_ref": {
+                    "namespace": "dolgorae.e2e",
+                    "kind": "completion-review",
+                    "id": "v3-reusable",
+                },
+                "task": {
+                    "purpose": "completion",
+                    "brief": "재사용 Specialist로 완료를 검토하세요.\n`$HOME`은 데이터입니다.",
+                    "contexts": [{
+                        "id": "requirements",
+                        "content": '첫 줄\r\n"인용된" 둘째 줄',
+                        "provenance": "caller supplied requirements",
+                    }],
+                    "criteria": [{
+                        "id": "C-reusable",
+                        "statement": "승인된 문맥과 후보를 구분한다.",
+                        "source_context_ids": ["requirements"],
+                    }],
+                    "expected_output": "structured_review_v3",
+                },
+                "execution_intent": "read_only",
+                "deadline_seconds": 60,
+                "idempotency_key": "task-v3",
+            }
+            v3_assigned = call(binary, home, workspace, owner, v3_request)
+            v3_task_id = str(v3_assigned["task_id"])
+            if call(binary, home, workspace, owner, v3_request)["task_id"] != v3_task_id:
+                raise AssertionError("v3 task replay changed task identity")
+            changed_v3 = json.loads(json.dumps(v3_request))
+            changed_v3["task"]["contexts"][0]["content"] = "changed context"
+            call(
+                binary,
+                home,
+                workspace,
+                owner,
+                changed_v3,
+                expected_error="IDEMPOTENCY_CONFLICT",
+            )
+            v3_waited = call(binary, home, workspace, owner, {
+                "operation": "await_external_specialist_tasks",
+                "engagement_id": engagement_id,
+                "task_ids": [v3_task_id],
+                "return_when": "all",
+                "transport_wait_seconds": 10,
+            })
+            if v3_waited["tasks"][0]["state"] != "completed_not_delivered":
+                raise AssertionError(f"v3 task did not become collectable: {v3_waited!r}")
+            v3_collected = call(binary, home, workspace, owner, {
+                "operation": "collect_external_specialist_results",
+                "engagement_id": engagement_id,
+                "after_sequence": cursor,
+                "limit": 8,
+            })
+            v3_result = v3_collected["tasks"][0]["result"]
+            if (
+                v3_result["overall_assessment"] != "requirements_met"
+                or v3_result["criterion_assessments"][0]["criterion_id"] != "C-reusable"
+            ):
+                raise AssertionError(
+                    f"v3 report was not preserved through collection: {v3_result!r}"
+                )
+            cursor = int(v3_collected["next_after_sequence"])
+            with sqlite3.connect(database) as connection:
+                row = connection.execute(
+                    "SELECT request_json FROM tasks WHERE task_id=?", (v3_task_id,)
+                ).fetchone()
+            accepted_request = json.loads(row[0])
+            expected_request = {
+                key: value for key, value in v3_request.items() if key != "idempotency_key"
+            }
+            if accepted_request != expected_request:
+                raise AssertionError(
+                    "v3 durable task did not preserve the complete accepted request"
+                )
+            transcript_text = reusable_transcript.read_text(encoding="utf-8")
+            if any(
+                marker not in transcript_text
+                for marker in (
+                    "재사용 Specialist로 완료를 검토하세요.",
+                    "C-reusable",
+                    "$HOME",
+                )
+            ):
+                raise AssertionError(
+                    "v3 reusable task was not delivered as model-readable data"
+                )
 
             snapshot = call(binary, home, workspace, owner, {
                 "operation": "get_external_engagement",

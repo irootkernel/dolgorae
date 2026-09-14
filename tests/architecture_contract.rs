@@ -96,6 +96,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "paths",
                 "run",
                 "semantic",
+                "specialist",
+                "task_request",
                 "turn",
                 "worker",
                 "workspace",
@@ -194,6 +196,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "run",
                 "semantic",
                 "specialist",
+                "task_request",
                 "workspace",
             ][..],
         ),
@@ -264,7 +267,15 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         (
             "specialist",
-            &["domain", "jcs", "machine", "run", "turn", "workspace"][..],
+            &[
+                "domain",
+                "jcs",
+                "machine",
+                "run",
+                "task_request",
+                "turn",
+                "workspace",
+            ][..],
         ),
         ("task_request", &["machine"][..]),
         (

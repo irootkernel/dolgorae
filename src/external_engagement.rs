@@ -16,6 +16,8 @@ use crate::semantic::{
     ensure_external_specialist_worker, prepare_external_specialist, release_external_writer,
     start_external_specialist_run,
 };
+use crate::specialist::validate_reviewer_output_v3;
+use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use crate::turn::FinalResponse;
 use crate::worker::{ControlRequestV1, ControlResponseV1, TurnControlRequest, call_run_worker};
 use crate::workspace::{
@@ -35,6 +37,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MAX_REQUEST_BYTES: u64 = 1_048_576;
+const FACADE_V3_SCHEMA: &str = "dolgorae-external-specialist-facade/v3";
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +45,25 @@ struct OpaqueRef {
     namespace: String,
     kind: String,
     id: String,
+}
+
+#[derive(Debug, Default)]
+enum OptionalField<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+fn deserialize_optional_field<'de, D, T>(deserializer: D) -> Result<OptionalField<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Option::<T>::deserialize(deserializer)? {
+        Some(value) => OptionalField::Value(value),
+        None => OptionalField::Null,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,9 +90,16 @@ enum Request {
         engagement_id: Uuid,
         specialist_run_id: Uuid,
         external_request_ref: OpaqueRef,
-        objective: String,
-        context_refs: Vec<Uuid>,
-        expected_output: Vec<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        schema: OptionalField<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        objective: OptionalField<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        task: OptionalField<SpecialistTaskRequest>,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        context_refs: OptionalField<Vec<Uuid>>,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        expected_output: OptionalField<Vec<String>>,
         execution_intent: String,
         deadline_seconds: u64,
         idempotency_key: String,
@@ -188,6 +217,8 @@ impl Request {
                 specialist_run_id,
                 external_request_ref,
                 objective,
+                schema,
+                task,
                 context_refs,
                 expected_output,
                 execution_intent,
@@ -197,16 +228,45 @@ impl Request {
                 uuid7(*engagement_id, "engagement_id")?;
                 uuid7(*specialist_run_id, "specialist_run_id")?;
                 external_request_ref.validate("external_request_ref")?;
-                bounded(objective, 65_536, "objective")?;
-                unique_uuid7(context_refs, 64, "context_refs")?;
-                if expected_output.is_empty() || expected_output.len() > 32 {
-                    return Err(MachineError::invalid_argument(
-                        "expected_output",
-                        "expected output count is outside the checked bound",
-                    ));
-                }
-                for value in expected_output {
-                    bounded(value, 512, "expected_output")?;
+                match (schema, objective, task, context_refs, expected_output) {
+                    (
+                        OptionalField::Missing,
+                        OptionalField::Value(objective),
+                        OptionalField::Missing,
+                        OptionalField::Value(context_refs),
+                        OptionalField::Value(expected_output),
+                    ) => {
+                        bounded(objective, 65_536, "objective")?;
+                        unique_uuid7(context_refs, 64, "context_refs")?;
+                        if expected_output.is_empty() || expected_output.len() > 32 {
+                            return Err(MachineError::invalid_argument(
+                                "expected_output",
+                                "expected output count is outside the checked bound",
+                            ));
+                        }
+                        for value in expected_output {
+                            bounded(value, 512, "expected_output")?;
+                        }
+                    }
+                    (
+                        OptionalField::Value(schema),
+                        OptionalField::Missing,
+                        OptionalField::Value(task),
+                        OptionalField::Missing,
+                        OptionalField::Missing,
+                    ) if schema == FACADE_V3_SCHEMA => {
+                        if task.expected_output == STRUCTURED_REVIEW_OUTPUT {
+                            task.validate_review()?;
+                        } else {
+                            task.validate()?;
+                        }
+                    }
+                    _ => {
+                        return Err(MachineError::invalid_argument(
+                            "task",
+                            "use either the legacy objective/context_refs/expected_output shape or the checked facade v3 task shape",
+                        ));
+                    }
                 }
                 if !matches!(
                     execution_intent.as_str(),
@@ -504,7 +564,9 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
             engagement_id,
             specialist_run_id,
             external_request_ref,
+            schema,
             objective,
+            task,
             context_refs,
             expected_output,
             execution_intent,
@@ -520,12 +582,67 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
             )?;
             let external_request_ref =
                 serde_json::to_value(external_request_ref).map_err(internal)?;
-            let request_value = json!({
-                "engagement_id": engagement_id, "specialist_run_id": specialist_run_id,
-                "external_request_ref": external_request_ref, "objective": objective,
-                "context_refs": context_refs, "expected_output": expected_output,
-                "execution_intent": execution_intent, "deadline_seconds": deadline_seconds,
-            });
+            let (request_value, objective, prompt) = match (
+                schema,
+                objective,
+                task,
+                context_refs,
+                expected_output,
+            ) {
+                (
+                    OptionalField::Value(schema),
+                    OptionalField::Missing,
+                    OptionalField::Value(task),
+                    OptionalField::Missing,
+                    OptionalField::Missing,
+                ) => {
+                    let prompt = format!(
+                        "{}\n\nExecution intent: {execution_intent}\nTask deadline: {deadline_seconds} seconds after durable acceptance",
+                        task.prompt()?
+                    );
+                    let objective = task.brief.clone();
+                    (
+                        json!({
+                            "schema":schema,
+                            "operation":"assign_external_specialist_task",
+                            "engagement_id":engagement_id,
+                            "specialist_run_id":specialist_run_id,
+                            "external_request_ref":external_request_ref,
+                            "task":task,
+                            "execution_intent":execution_intent,
+                            "deadline_seconds":deadline_seconds,
+                        }),
+                        objective,
+                        prompt,
+                    )
+                }
+                (
+                    OptionalField::Missing,
+                    OptionalField::Value(objective),
+                    OptionalField::Missing,
+                    OptionalField::Value(context_refs),
+                    OptionalField::Value(expected_output),
+                ) => {
+                    let prompt = task_prompt(
+                        &objective,
+                        &context_refs,
+                        &expected_output,
+                        &execution_intent,
+                        deadline_seconds,
+                    );
+                    (
+                        json!({
+                            "engagement_id": engagement_id, "specialist_run_id": specialist_run_id,
+                            "external_request_ref": external_request_ref, "objective": objective,
+                            "context_refs": context_refs, "expected_output": expected_output,
+                            "execution_intent": execution_intent, "deadline_seconds": deadline_seconds,
+                        }),
+                        objective,
+                        prompt,
+                    )
+                }
+                _ => unreachable!("validated assignment shape is closed"),
+            };
             let reserved = store.reserve_external_task(
                 engagement_id,
                 specialist_run_id,
@@ -594,13 +711,6 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                 }
                 return Err(error);
             }
-            let prompt = task_prompt(
-                &objective,
-                &context_refs,
-                &expected_output,
-                &execution_intent,
-                deadline_seconds,
-            );
             if let Err(error) = store.mark_external_task_dispatching(
                 engagement_id,
                 reserved.task_id,
@@ -676,21 +786,28 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
             let turn_id = match response {
                 ControlResponseV1::Accepted { accepted } => accepted.turn_id,
                 ControlResponseV1::Terminal { terminal } => {
-                    let output = terminal_output(
-                        &store,
+                    let result = match finish_completed_task(
+                        &mut store,
                         &state_root,
                         engagement_id,
                         reserved.task_id,
                         specialist_run_id,
                         &terminal.final_response,
-                    )?;
-                    let result = store.finish_external_task(
-                        engagement_id,
-                        reserved.task_id,
-                        Some(&output),
-                        "completed_not_delivered",
-                        None,
-                    )?;
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            if execution_intent == "canonical_workspace_write" {
+                                release_external_writer_safely(
+                                    &view,
+                                    &state_root,
+                                    specialist_run_id,
+                                    engagement_id,
+                                    &owner,
+                                )?;
+                            }
+                            return Err(error);
+                        }
+                    };
                     if execution_intent == "canonical_workspace_write" {
                         release_external_writer_safely(
                             &view,
@@ -816,13 +933,26 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                         ),
                     },
                 );
-                reconcile_wait(
+                if let Err(error) = reconcile_wait(
                     &mut store,
                     &state_root,
                     engagement_id,
                     task.task_id,
                     response,
-                )?;
+                ) {
+                    if store.external_task_execution_intent(engagement_id, task.task_id)?
+                        == "canonical_workspace_write"
+                    {
+                        release_external_writer_safely(
+                            &view,
+                            &state_root,
+                            task.specialist_run_id,
+                            engagement_id,
+                            &owner,
+                        )?;
+                    }
+                    return Err(error);
+                }
                 let updated = store.external_task(engagement_id, task.task_id)?;
                 if terminal_state(&updated.state)
                     && store.external_task_execution_intent(engagement_id, task.task_id)?
@@ -1580,21 +1710,25 @@ fn reconcile_engagement(
                 ..
             }) if task.turn_id.as_deref() == Some(terminal.turn_id.as_str()) => {
                 if terminal.status == "completed" {
-                    let output = terminal_output(
+                    if let Err(error) = finish_completed_task(
                         store,
                         state_root,
                         engagement_id,
                         task.task_id,
                         task.specialist_run_id,
                         &terminal.final_response,
-                    )?;
-                    store.finish_external_task(
-                        engagement_id,
-                        task.task_id,
-                        Some(&output),
-                        "completed_not_delivered",
-                        None,
-                    )?;
+                    ) {
+                        if canonical_write {
+                            release_external_writer_safely(
+                                view,
+                                state_root,
+                                task.specialist_run_id,
+                                engagement_id,
+                                owner,
+                            )?;
+                        }
+                        return Err(error);
+                    }
                 } else {
                     store.finish_external_task(
                         engagement_id,
@@ -1963,20 +2097,13 @@ fn reconcile_wait(
     match response {
         Ok(ControlResponseV1::Terminal { terminal }) if terminal.status == "completed" => {
             let task = store.external_task(engagement_id, task_id)?;
-            let output = terminal_output(
+            finish_completed_task(
                 store,
                 state_root,
                 engagement_id,
                 task_id,
                 task.specialist_run_id,
                 &terminal.final_response,
-            )?;
-            store.finish_external_task(
-                engagement_id,
-                task_id,
-                Some(&output),
-                "completed_not_delivered",
-                None,
             )?;
         }
         Ok(ControlResponseV1::Terminal { terminal }) => {
@@ -2004,6 +2131,37 @@ fn reconcile_wait(
     Ok(())
 }
 
+fn finish_completed_task(
+    store: &mut EngagementStore,
+    state_root: &Path,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    run_id: Uuid,
+    response: &Option<FinalResponse>,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    let output = match terminal_output(store, state_root, engagement_id, task_id, run_id, response)
+    {
+        Ok(output) => output,
+        Err(error) => {
+            store.finish_external_task(
+                engagement_id,
+                task_id,
+                None,
+                "failed",
+                Some(&error.code),
+            )?;
+            return Err(error);
+        }
+    };
+    store.finish_external_task(
+        engagement_id,
+        task_id,
+        Some(&output),
+        "completed_not_delivered",
+        None,
+    )
+}
+
 fn terminal_output(
     store: &EngagementStore,
     state_root: &Path,
@@ -2012,6 +2170,10 @@ fn terminal_output(
     run_id: Uuid,
     response: &Option<FinalResponse>,
 ) -> Result<Value, MachineError> {
+    let accepted_request = store.external_task_request(engagement_id, task_id)?;
+    if let Some(output) = structured_task_output(&accepted_request, response)? {
+        return Ok(output);
+    }
     let response = serde_json::to_value(response).map_err(internal)?;
     if store.external_task_execution_intent(engagement_id, task_id)? != "isolated_write" {
         return Ok(response);
@@ -2022,6 +2184,46 @@ fn terminal_output(
         "final_response": response,
         "isolated_change": {"format":"git_diff_binary_base64","patch_base64":patch_base64}
     }))
+}
+
+fn structured_task_output(
+    accepted_request: &Value,
+    response: &Option<FinalResponse>,
+) -> Result<Option<Value>, MachineError> {
+    if accepted_request.get("schema").and_then(Value::as_str) == Some(FACADE_V3_SCHEMA) {
+        let task: SpecialistTaskRequest = serde_json::from_value(
+            accepted_request
+                .get("task")
+                .cloned()
+                .ok_or_else(|| integrity("v3 task record lost its accepted task"))?,
+        )
+        .map_err(|_| integrity("v3 task record no longer matches its accepted shape"))?;
+        if task.expected_output == "structured_review_v3" {
+            let text = match response {
+                Some(FinalResponse::Inline { text }) => text,
+                _ => {
+                    return Err(MachineError::new(
+                        "REVIEW_OUTPUT_INVALID",
+                        "structured review output must be one inline JSON object",
+                        false,
+                        json!({"required_action":"none"}),
+                    ));
+                }
+            };
+            let value = serde_json::from_str(text).map_err(|_| {
+                MachineError::new(
+                    "REVIEW_OUTPUT_INVALID",
+                    "structured review output is not JSON",
+                    false,
+                    json!({"required_action":"none"}),
+                )
+            })?;
+            return serde_json::to_value(validate_reviewer_output_v3(value, &task)?)
+                .map(Some)
+                .map_err(internal);
+        }
+    }
+    Ok(None)
 }
 
 fn capture_isolated_change(root: &Path, task_id: Uuid) -> Result<String, MachineError> {
@@ -2306,6 +2508,67 @@ mod tests {
         .unwrap();
         assert_eq!(invalid.validate().unwrap_err().code, "INVALID_ARGUMENT");
 
+        let unsupported_review_purpose: Request = serde_json::from_value(json!({
+            "schema":"dolgorae-external-specialist-facade/v3",
+            "operation":"assign_external_specialist_task",
+            "engagement_id":Uuid::now_v7(),
+            "specialist_run_id":Uuid::now_v7(),
+            "external_request_ref":{"namespace":"test","kind":"review","id":"x"},
+            "task":{
+                "purpose":"analysis",
+                "brief":"do not dispatch this malformed structured review",
+                "contexts":[],
+                "criteria":[],
+                "expected_output":"structured_review_v3"
+            },
+            "execution_intent":"read_only",
+            "deadline_seconds":600,
+            "idempotency_key":"invalid-review-purpose-v3"
+        }))
+        .unwrap();
+        assert_eq!(
+            unsupported_review_purpose.validate().unwrap_err().code,
+            "INVALID_ARGUMENT"
+        );
+
+        let mixed_null: Request = serde_json::from_value(json!({
+            "schema":"dolgorae-external-specialist-facade/v3",
+            "operation":"assign_external_specialist_task",
+            "engagement_id":Uuid::now_v7(),
+            "specialist_run_id":Uuid::now_v7(),
+            "external_request_ref":{"namespace":"test","kind":"task","id":"x"},
+            "objective":null,
+            "task":{
+                "purpose":"analysis",
+                "brief":"inspect",
+                "contexts":[],
+                "criteria":[],
+                "expected_output":"plain_text"
+            },
+            "execution_intent":"read_only",
+            "deadline_seconds":600,
+            "idempotency_key":"mixed-null-v3"
+        }))
+        .unwrap();
+        assert_eq!(mixed_null.validate().unwrap_err().code, "INVALID_ARGUMENT");
+
+        let incomplete_legacy: Request = serde_json::from_value(json!({
+            "operation":"assign_external_specialist_task",
+            "engagement_id":Uuid::now_v7(),
+            "specialist_run_id":Uuid::now_v7(),
+            "external_request_ref":{"namespace":"test","kind":"task","id":"x"},
+            "objective":"inspect",
+            "expected_output":["plain text"],
+            "execution_intent":"read_only",
+            "deadline_seconds":600,
+            "idempotency_key":"missing-context-refs"
+        }))
+        .unwrap();
+        assert_eq!(
+            incomplete_legacy.validate().unwrap_err().code,
+            "INVALID_ARGUMENT"
+        );
+
         let task = Uuid::now_v7();
         let duplicate: Request = serde_json::from_value(json!({
             "operation":"await_external_specialist_tasks",
@@ -2344,6 +2607,123 @@ mod tests {
         }))
         .unwrap();
         request.validate().unwrap();
+    }
+
+    #[test]
+    fn facade_v3_accepts_separate_multiline_task_and_readable_context() {
+        let request: Request = serde_json::from_value(json!({
+            "schema":"dolgorae-external-specialist-facade/v3",
+            "operation":"assign_external_specialist_task",
+            "engagement_id":Uuid::now_v7(),
+            "specialist_run_id":Uuid::now_v7(),
+            "external_request_ref":{
+                "namespace":"test",
+                "kind":"review",
+                "id":"TASK-039"
+            },
+            "task":{
+                "purpose":"completion",
+                "brief":"검토하세요.\n```sh\nprintf '$HOME'\n```",
+                "contexts":[{
+                    "id":"requirements",
+                    "content":"C-1 source\r\nsecond line",
+                    "provenance":"approved spec"
+                }],
+                "criteria":[{
+                    "id":"C-1",
+                    "statement":"Task content stays separate.",
+                    "source_context_ids":["requirements"]
+                }],
+                "expected_output":"structured_review_v3"
+            },
+            "execution_intent":"read_only",
+            "deadline_seconds":600,
+            "idempotency_key":"assign-v3"
+        }))
+        .unwrap();
+        request.validate().unwrap();
+
+        let invalid: Request = serde_json::from_value(json!({
+            "schema":"dolgorae-external-specialist-facade/v3",
+            "operation":"assign_external_specialist_task",
+            "engagement_id":Uuid::now_v7(),
+            "specialist_run_id":Uuid::now_v7(),
+            "external_request_ref":{"namespace":"test","kind":"review","id":"x"},
+            "task":{
+                "purpose":"completion",
+                "brief":"missing criteria",
+                "contexts":[],
+                "criteria":[],
+                "expected_output":"structured_review_v3"
+            },
+            "execution_intent":"read_only",
+            "deadline_seconds":600,
+            "idempotency_key":"invalid-v3"
+        }))
+        .unwrap();
+        assert_eq!(invalid.validate().unwrap_err().code, "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn facade_v3_structured_result_is_checked_before_artifact_commit() {
+        let accepted = json!({
+            "schema":"dolgorae-external-specialist-facade/v3",
+            "task":{
+                "purpose":"completion",
+                "brief":"Check completion.",
+                "contexts":[],
+                "criteria":[{
+                    "id":"C-1",
+                    "statement":"The requirement is met.",
+                    "source_context_ids":[]
+                }],
+                "expected_output":"structured_review_v3"
+            }
+        });
+        let report = json!({
+            "summary":"reviewed",
+            "findings":[],
+            "criterion_assessments":[{
+                "criterion_id":"C-1",
+                "status":"met",
+                "explanation":"candidate evidence is sufficient",
+                "evidence":[{
+                    "basis":"candidate",
+                    "description":"checked source",
+                    "path":"src/lib.rs",
+                    "line_start":1,
+                    "line_end":1,
+                    "context_id":null
+                }],
+                "remaining_gap":null
+            }],
+            "evidence_limits":[],
+            "overall_assessment":"requirements_met"
+        });
+        let response = Some(FinalResponse::Inline {
+            text: serde_json::to_string(&report).unwrap(),
+        });
+        assert_eq!(
+            structured_task_output(&accepted, &response).unwrap(),
+            Some(report)
+        );
+
+        let missing = Some(FinalResponse::Inline {
+            text: serde_json::to_string(&json!({
+                "summary":"reviewed",
+                "findings":[],
+                "criterion_assessments":[],
+                "evidence_limits":[],
+                "overall_assessment":"requirements_met"
+            }))
+            .unwrap(),
+        });
+        assert_eq!(
+            structured_task_output(&accepted, &missing)
+                .unwrap_err()
+                .code,
+            "REVIEW_OUTPUT_INVALID"
+        );
     }
 
     #[test]

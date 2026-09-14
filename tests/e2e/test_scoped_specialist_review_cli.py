@@ -21,6 +21,8 @@ def invoke(
     binary: pathlib.Path,
     home: pathlib.Path,
     arguments: list[str],
+    *,
+    stdin: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
@@ -29,6 +31,7 @@ def invoke(
         check=False,
         capture_output=True,
         text=True,
+        input=stdin,
         env=environment,
     )
     if completed.stderr:
@@ -48,6 +51,7 @@ def git(repository: pathlib.Path, *arguments: str) -> str:
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine_schema = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     v2_schema = validator(protocol_root, "dolgorae-specialist-review-tool-v2.schema.json")
+    v3_schema = validator(protocol_root, "dolgorae-specialist-review-tool-v3.schema.json")
     schema_source = native_codex.installed_codex()
     with tempfile.TemporaryDirectory(prefix="dolgorae-task015-") as temporary:
         root = pathlib.Path(temporary).resolve()
@@ -267,6 +271,122 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 raise AssertionError("Reviewer-visible app-server traffic disclosed the source path")
             if transcript_text.count('"method":"thread/start"') != len(cases):
                 raise AssertionError("the fake app-server did not observe one fresh thread per scope")
+
+            for index, kind in enumerate(("staged", "head")):
+                profile = f"task040-reviewer-{index}"
+                profiles.append(profile)
+                case_home = codex_home / f"v3-{index}"
+                case_bin = bin_root / f"v3-{index}"
+                case_home.mkdir(mode=0o700)
+                case_bin.mkdir(mode=0o700)
+                scenario = root / f"scenario-v3-{index}.json"
+                scenario.write_text(
+                    native_codex.scenario_path("scoped_specialist_review_v3.json")
+                    .read_text(encoding="utf-8")
+                    .replace("thread-scope-v3", f"thread-scope-v3-{index}"),
+                    encoding="utf-8",
+                )
+                transcript = root / f"app-server-transcript-v3-{index}.jsonl"
+                codex = case_bin / "codex"
+                native_codex.create_native_codex(
+                    codex,
+                    scenario=scenario,
+                    codex_home=case_home,
+                    schema_source=schema_source,
+                    transcript=transcript,
+                )
+                added, added_envelope = invoke(
+                    binary,
+                    home,
+                    [
+                        "profile", "add", profile,
+                        "--codex-home", str(case_home), "--native-subagents", "enabled",
+                        "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+                        "--env", "LANG=en_US.UTF-8", "--env", "LC_ALL=en_US.UTF-8",
+                        "--", str(codex),
+                    ],
+                )
+                if added.returncode != 0:
+                    raise AssertionError(f"v3 profile add failed: {added_envelope!r}")
+
+                brief = "완료 기준을 검토하세요.\n\n```sh\nprintf '$HOME'; $(touch should-not-run)\n```"
+                context_content = '문맥 첫 줄\r\n"quoted" 둘째 줄'
+                request = {
+                    "schema": "dolgorae-specialist-review-request/v3",
+                    "operation": "review_target",
+                    "target": {"kind": kind},
+                    "purpose": "completion",
+                    "brief": brief,
+                    "contexts": [{
+                        "id": "acceptance",
+                        "content": context_content,
+                        "provenance": "caller supplied requirements",
+                    }],
+                    "criteria": [
+                        {
+                            "id": "C-korean",
+                            "statement": "캡처된 후보를 검토한다.",
+                            "source_context_ids": [],
+                        },
+                        {
+                            "id": "C-context",
+                            "statement": "승인된 문맥의 한계를 명시한다.",
+                            "source_context_ids": ["acceptance"],
+                        },
+                    ],
+                    "expected_output": "structured_review_v3",
+                    "deadline_seconds": 60,
+                }
+                completed, result_envelope = invoke(
+                    binary,
+                    home,
+                    [
+                        "specialist", "review", "--workspace", str(workspace),
+                        "--profile", profile, "--request-stdin", "--format", "json",
+                    ],
+                    stdin=json.dumps(request, ensure_ascii=False),
+                )
+                if completed.returncode != 0:
+                    raise AssertionError(f"v3 scoped review failed for {kind}: {result_envelope!r}")
+                result = result_envelope["data"]
+                assert_valid(result, v3_schema, f"{kind} v3 result")
+                assert_valid(result_envelope, machine_schema, f"{kind} v3 Machine result")
+                if (
+                    result["schema"] != "dolgorae-specialist-review-result/v3"  # type: ignore[index]
+                    or result["target"]["request"] != {"kind": kind}  # type: ignore[index]
+                    or result["verdict"]["overall_assessment"] != "insufficient_evidence"  # type: ignore[index]
+                    or [assessment["criterion_id"] for assessment in result["verdict"]["criterion_assessments"]]  # type: ignore[index]
+                    != ["C-korean", "C-context"]
+                ):
+                    raise AssertionError("v3 result lost target or ordered criterion assessment")
+
+                messages = [
+                    json.loads(line)
+                    for line in transcript.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                starts = [message for message in messages if message.get("method") == "thread/start"]
+                turns = [message for message in messages if message.get("method") == "turn/start"]
+                if len(starts) != 1 or len(turns) != 1:
+                    raise AssertionError("v3 review did not use exactly one fresh Reviewer Turn")
+                role_text = starts[0]["params"]["developerInstructions"]
+                turn_text = json.dumps(turns[0]["params"]["input"], ensure_ascii=False)
+                if any(marker in role_text for marker in (brief, context_content, "C-korean")):
+                    raise AssertionError("accepted task leaked into stable Reviewer Role instructions")
+                for marker in (
+                    "완료 기준을 검토하세요.",
+                    "$HOME",
+                    "$(touch should-not-run)",
+                    "문맥 첫 줄",
+                    "quoted",
+                    "둘째 줄",
+                    "C-korean",
+                    "C-context",
+                ):
+                    if marker not in turn_text:
+                        raise AssertionError(f"v3 Turn lost accepted task marker: {marker!r}")
+                if (workspace / "should-not-run").exists():
+                    raise AssertionError("shell metacharacters in the task were executed")
         finally:
             for profile in profiles:
                 invoke(
