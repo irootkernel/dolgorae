@@ -668,9 +668,14 @@ impl EngagementStore {
         execute: F,
     ) -> Result<TaskReservation, MachineError>
     where
-        F: FnOnce(&TaskReservation, &SpecialistTaskRequest) -> (RuntimeOutcome, Option<Value>),
+        F: FnOnce(
+            &TaskReservation,
+            &SpecialistTaskRequest,
+            &str,
+        ) -> (RuntimeOutcome, Option<Value>),
     {
         task.validate()?;
+        let prompt = task.prompt()?;
         let request_json = canonical_string(accepted_request)?;
         let request_sha256 = sha256_hex(request_json.as_bytes());
         self.assign(
@@ -679,7 +684,7 @@ impl EngagementStore {
             &request_sha256,
             Some(&request_json),
             idempotency_key,
-            |reservation| execute(reservation, task),
+            |reservation| execute(reservation, task, &prompt),
         )
     }
 
@@ -5330,7 +5335,9 @@ mod tests {
                 &accepted,
                 &task,
                 "task-v3",
-                |_, _| {
+                |_, _, prompt| {
+                    assert!(prompt.contains("exact accepted context"));
+                    assert!(prompt.contains("never candidate bytes"));
                     (
                         RuntimeOutcome::Accepted,
                         Some(serde_json::json!({"summary":"accepted","findings":[]})),
@@ -5349,6 +5356,46 @@ mod tests {
         assert_eq!(stored, canonical_string(&accepted).unwrap());
         assert!(stored.contains("한글 brief\\nsecond line"));
         assert!(stored.contains("exact accepted context"));
+
+        let replayed = store
+            .assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "task-v3",
+                |_, _, _| panic!("an exact retry must not dispatch again"),
+            )
+            .unwrap();
+        assert_eq!(replayed.task_id, reserved.task_id);
+
+        let mut changed_task = task.clone();
+        changed_task.contexts[0].content = "later mutable content".to_owned();
+        let changed_accepted = serde_json::json!({
+            "schema":"dolgorae-specialist-review-request/v3",
+            "operation":"review_target",
+            "task":&changed_task
+        });
+        assert_eq!(
+            store
+                .assign_task_v3(
+                    opened.engagement_id,
+                    hired.specialist_run_id,
+                    &changed_accepted,
+                    &changed_task,
+                    "task-v3",
+                    |_, _, _| panic!("a changed retry must not dispatch"),
+                )
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            store
+                .external_task_request(opened.engagement_id, reserved.task_id)
+                .unwrap(),
+            accepted
+        );
         assert_eq!(
             store.collect_review(opened.engagement_id).unwrap().output["summary"],
             "accepted"

@@ -16,8 +16,8 @@ production infrastructure but do not add a user-facing product milestone.
 `EPIC-007`, `TASK-023`, and `TASK-024` are `COMPLETE`; they establish the
 supervised gateway and transport-independent Brokered Hierarchy core without
 claiming a live model-facing Primary tool. `EPIC-014` is `ACTIVE`, with
-`TASK-039` and `TASK-040` complete, `TASK-041` through `TASK-045` planned, and
-precedes
+`TASK-039` through `TASK-041` complete, `TASK-042` through `TASK-045` planned,
+and precedes
 `EPIC-008` in delivery order.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
@@ -1317,7 +1317,7 @@ failure tests.
 
 ### TASK-041: Inline Context Binding and Candidate Separation
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Validate at most 64 contexts with unique IDs, caller-declared provenance, and
 actual bounded content. Permit criteria to reference only accepted context IDs.
