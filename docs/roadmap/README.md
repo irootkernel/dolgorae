@@ -16,7 +16,7 @@ production infrastructure but do not add a user-facing product milestone.
 `EPIC-007`, `TASK-023`, and `TASK-024` are `COMPLETE`; they establish the
 supervised gateway and transport-independent Brokered Hierarchy core without
 claiming a live model-facing Primary tool. `EPIC-014` is `ACTIVE`, with
-`TASK-039` through `TASK-043` complete, `TASK-044` and `TASK-045` planned, and
+`TASK-039` through `TASK-044` complete, `TASK-045` planned, and
 precedes
 `EPIC-008` in delivery order.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -1361,7 +1361,7 @@ trip; crash and result-redelivery tests.
 
 ### TASK-044: Compatibility and Adversarial Regression
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Prove unchanged v1/v2 request, result, and persisted-state meaning together with
 v3 idempotency, deadline, cancellation, crash, disconnect, staged/committed
