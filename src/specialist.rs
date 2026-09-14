@@ -831,6 +831,79 @@ mod tests {
     }
 
     #[test]
+    fn v3_output_rejects_criterion_identity_evidence_and_overall_mismatches() {
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Assess both criteria.".to_owned(),
+            contexts: vec![TaskContext {
+                id: "requirements".to_owned(),
+                content: "Accepted requirements.".to_owned(),
+                provenance: "approved specification".to_owned(),
+            }],
+            criteria: ["C-1", "C-2"]
+                .into_iter()
+                .map(|id| TaskCriterion {
+                    id: id.to_owned(),
+                    statement: format!("Assess {id}."),
+                    source_context_ids: vec!["requirements".to_owned()],
+                })
+                .collect(),
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let report = serde_json::json!({
+            "summary":"both criteria are met",
+            "findings":[],
+            "criterion_assessments":[
+                {
+                    "criterion_id":"C-1",
+                    "status":"met",
+                    "explanation":"candidate evidence",
+                    "evidence":[{"basis":"candidate","description":"implementation","path":"src/lib.rs","line_start":1,"line_end":1,"context_id":null}],
+                    "remaining_gap":null
+                },
+                {
+                    "criterion_id":"C-2",
+                    "status":"met",
+                    "explanation":"accepted context",
+                    "evidence":[{"basis":"context","description":"requirement","path":null,"line_start":null,"line_end":null,"context_id":"requirements"}],
+                    "remaining_gap":null
+                }
+            ],
+            "evidence_limits":[],
+            "overall_assessment":"requirements_met"
+        });
+
+        for criterion_id in ["C-1", "unknown"] {
+            let mut invalid = report.clone();
+            invalid["criterion_assessments"][1]["criterion_id"] = criterion_id.into();
+            assert_eq!(
+                validate_reviewer_output_v3(invalid, &task)
+                    .unwrap_err()
+                    .code,
+                "REVIEW_OUTPUT_INVALID"
+            );
+        }
+
+        let mut malformed_evidence = report.clone();
+        malformed_evidence["criterion_assessments"][1]["evidence"][0]["context_id"] = Value::Null;
+        assert_eq!(
+            validate_reviewer_output_v3(malformed_evidence, &task)
+                .unwrap_err()
+                .code,
+            "REVIEW_OUTPUT_INVALID"
+        );
+
+        let mut inconsistent_overall = report;
+        inconsistent_overall["criterion_assessments"][0]["status"] = "unverified".into();
+        assert_eq!(
+            validate_reviewer_output_v3(inconsistent_overall, &task)
+                .unwrap_err()
+                .code,
+            "REVIEW_OUTPUT_INVALID"
+        );
+    }
+
+    #[test]
     fn aggregate_binding_is_complete_and_digest_bound() {
         let plan = ReviewerRuntimePlan::resolve(&profile(), request()).unwrap();
         let binding = plan

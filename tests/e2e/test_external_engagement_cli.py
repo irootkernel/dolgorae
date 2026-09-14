@@ -57,10 +57,12 @@ def call(
     expected_error: str | None = None,
     environment_overrides: dict[str, str] | None = None,
     invalid_request: bool = False,
+    v3_contract: bool = False,
 ) -> dict[str, object]:
     facade_schema = (
         FACADE_V3_SCHEMA
-        if request.get("schema") == "dolgorae-external-specialist-facade/v3"
+        if v3_contract
+        or request.get("schema") == "dolgorae-external-specialist-facade/v3"
         else FACADE_SCHEMA
     )
     if invalid_request:
@@ -263,7 +265,8 @@ def validate(binary: pathlib.Path) -> None:
                         {"method": "turn/start", "occurrence": 1, "respond": {"result": {"turn": {"id": "turn-one"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-one", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-one", "status": "completed", "text": "first reusable answer"}]}}}]},
                         {"method": "turn/start", "occurrence": 2, "respond": {"result": {"turn": {"id": "turn-two"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-two", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-two", "status": "completed", "text": "second reusable answer"}]}}}]},
                         {"method": "turn/start", "occurrence": 3, "respond": {"result": {"turn": {"id": "turn-v3"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-v3", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-v3", "status": "completed", "text": json.dumps({"summary": "structured reusable review", "findings": [], "criterion_assessments": [{"criterion_id": "C-reusable", "status": "met", "explanation": "accepted context and candidate were checked", "evidence": [{"basis": "context", "description": "caller requirements", "path": None, "line_start": None, "line_end": None, "context_id": "requirements"}], "remaining_gap": None}], "evidence_limits": [], "overall_assessment": "requirements_met"}, separators=(",", ":"), ensure_ascii=False)}]}}}]},
-                        {"method": "turn/start", "occurrence": 4, "respond": {"result": {"turn": {"id": "turn-abort"}}}},
+                        {"method": "turn/start", "occurrence": 4, "respond": {"result": {"turn": {"id": "turn-invalid-v3"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-invalid-v3", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-invalid-v3", "status": "completed", "text": json.dumps({"summary": "incomplete report", "findings": [], "criterion_assessments": [], "evidence_limits": [], "overall_assessment": "requirements_met"}, separators=(",", ":"))}]}}}]},
+                        {"method": "turn/start", "occurrence": 5, "respond": {"result": {"turn": {"id": "turn-abort"}}}},
                         {"method": "turn/interrupt", "respond": {"result": {"interrupted": True}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-abort", "turn": {"id": "turn-abort", "status": "interrupted", "items": []}}}]},
                         {"method": "thread/archive", "respond": {"result": {"thread": {"id": "thread-reusable", "archived": True}}}},
                     ],
@@ -675,6 +678,41 @@ def validate(binary: pathlib.Path) -> None:
             ):
                 raise AssertionError(
                     "v3 reusable task was not delivered as model-readable data"
+                )
+
+            invalid_v3 = json.loads(json.dumps(v3_request))
+            invalid_v3["external_request_ref"]["id"] = "v3-invalid"
+            invalid_v3["idempotency_key"] = "task-v3-invalid"
+            invalid_assigned = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                invalid_v3,
+            )
+            call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": engagement_id,
+                    "task_ids": [str(invalid_assigned["task_id"])],
+                    "return_when": "all",
+                    "transport_wait_seconds": 10,
+                },
+                expected_error="REVIEW_OUTPUT_INVALID",
+                v3_contract=True,
+            )
+            with sqlite3.connect(database) as connection:
+                invalid_state = connection.execute(
+                    "SELECT state,artifact_id,result_sha256,safe_error_code "
+                    "FROM tasks ORDER BY created_at_ms DESC,task_id DESC LIMIT 1"
+                ).fetchone()
+            if invalid_state != ("failed", None, None, "REVIEW_OUTPUT_INVALID"):
+                raise AssertionError(
+                    f"invalid v3 output reached durable result storage: {invalid_state!r}"
                 )
 
             snapshot = call(binary, home, workspace, owner, {

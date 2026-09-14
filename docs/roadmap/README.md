@@ -16,8 +16,8 @@ production infrastructure but do not add a user-facing product milestone.
 `EPIC-007`, `TASK-023`, and `TASK-024` are `COMPLETE`; they establish the
 supervised gateway and transport-independent Brokered Hierarchy core without
 claiming a live model-facing Primary tool. `EPIC-014` is `ACTIVE`, with
-`TASK-039` through `TASK-042` complete, `TASK-043` through `TASK-045` planned,
-and precedes
+`TASK-039` through `TASK-043` complete, `TASK-044` and `TASK-045` planned, and
+precedes
 `EPIC-008` in delivery order.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
@@ -1346,7 +1346,7 @@ disconnect, and authority regressions.
 
 ### TASK-043: Criterion-Complete Result and Recovery
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement `dolgorae-specialist-review-result/v3` with ordered criterion
 assessments, four checked statuses, bounded candidate/context/caller/unavailable

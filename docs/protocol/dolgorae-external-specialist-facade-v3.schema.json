@@ -5,9 +5,21 @@
   "description": "Additive accepted-task carrier with inline readable context. Facade v1 and v2 remain accepted unchanged.",
   "oneOf": [
     { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v2" },
-    { "$ref": "#/$defs/assign_request" }
+    { "$ref": "#/$defs/assign_request" },
+    { "$ref": "#/$defs/error_result" }
   ],
   "$defs": {
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "code", "message", "retryable"],
+      "properties": {
+        "operation": { "const": "external_specialist_error" },
+        "code": { "const": "REVIEW_OUTPUT_INVALID" },
+        "message": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 4096 },
+        "retryable": { "const": false }
+      }
+    },
     "context": {
       "type": "object",
       "additionalProperties": false,

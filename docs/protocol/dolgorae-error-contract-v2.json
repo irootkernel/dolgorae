@@ -12,6 +12,7 @@
     "ORCHESTRATION_SCHEMA_UNSUPPORTED": 4,
     "SPECIALIST_TASK_NOT_FOUND": 4,
     "SPECIALIST_RESULT_INVALID": 4,
+    "REVIEW_OUTPUT_INVALID": 4,
     "SPECIALIST_WRITER_CONFLICT": 4,
     "ENGAGEMENT_STATE_CONFLICT": 4,
     "REVIEW_TARGET_CARRIER_INVALID": 4,
@@ -399,6 +400,33 @@
               "properties": {
                 "task_id": {
                   "$ref": "https://dolgorae.local/schema/error-contract/v1#/$defs/uuid"
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "REVIEW_OUTPUT_INVALID"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason",
+                "required_action"
+              ],
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "required_action": {
+                  "const": "none"
                 }
               }
             },

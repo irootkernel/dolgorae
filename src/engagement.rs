@@ -3655,6 +3655,26 @@ mod tests {
                     .unwrap();
             }
             drop(initial);
+            let structured_report = serde_json::json!({
+                "summary":"fault result",
+                "findings":[],
+                "criterion_assessments":[{
+                    "criterion_id":"C-1",
+                    "status":"met",
+                    "explanation":"durable evidence",
+                    "evidence":[{
+                        "basis":"candidate",
+                        "description":"captured source",
+                        "path":"src/lib.rs",
+                        "line_start":1,
+                        "line_end":1,
+                        "context_id":null
+                    }],
+                    "remaining_gap":null
+                }],
+                "evidence_limits":[],
+                "overall_assessment":"requirements_met"
+            });
             let mut faulted = store_with_fault(&root, barrier);
             let error = if dispatch_boundary {
                 faulted
@@ -3678,7 +3698,7 @@ mod tests {
                     .finish_external_task(
                         opened.engagement_id,
                         task.task_id,
-                        Some(&serde_json::json!({"summary":"fault result"})),
+                        Some(&structured_report),
                         "completed_not_delivered",
                         None,
                     )
@@ -3719,7 +3739,7 @@ mod tests {
                     .finish_external_task(
                         opened.engagement_id,
                         task.task_id,
-                        Some(&serde_json::json!({"summary":"fault result"})),
+                        Some(&structured_report),
                         "completed_not_delivered",
                         None,
                     )
@@ -3757,6 +3777,7 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(artifacts, 1);
+                assert_eq!(recovered_task.result, Some(structured_report));
             }
             drop(recovered);
             std::fs::remove_dir_all(root).unwrap();
@@ -3777,11 +3798,31 @@ mod tests {
                 opened.engagement_id,
                 member.specialist_run_id,
             );
+            let structured_report = serde_json::json!({
+                "summary":"deliver",
+                "findings":[],
+                "criterion_assessments":[{
+                    "criterion_id":"C-1",
+                    "status":"unverified",
+                    "explanation":"runtime evidence is unavailable",
+                    "evidence":[{
+                        "basis":"unavailable",
+                        "description":"no live runtime",
+                        "path":null,
+                        "line_start":null,
+                        "line_end":null,
+                        "context_id":null
+                    }],
+                    "remaining_gap":"run an authorized live check"
+                }],
+                "evidence_limits":["no live runtime"],
+                "overall_assessment":"insufficient_evidence"
+            });
             initial
                 .finish_external_task(
                     opened.engagement_id,
                     task.task_id,
-                    Some(&serde_json::json!({"summary":"deliver"})),
+                    Some(&structured_report),
                     "completed_not_delivered",
                     None,
                 )
@@ -3797,11 +3838,17 @@ mod tests {
             );
             drop(faulted);
             let mut recovered = reopen(&root);
-            let (tasks, _) = recovered
+            let (tasks, first_cursor) = recovered
                 .collect_external_results(opened.engagement_id, 0, 8)
                 .unwrap();
             assert_eq!(tasks.len(), 1);
             assert_eq!(tasks[0].state, "delivered");
+            assert_eq!(tasks[0].result.as_ref(), Some(&structured_report));
+            let (redelivered, replay_cursor) = recovered
+                .collect_external_results(opened.engagement_id, 0, 8)
+                .unwrap();
+            assert_eq!(redelivered[0].result.as_ref(), Some(&structured_report));
+            assert_eq!(replay_cursor, first_cursor);
             let receipts: i64 = recovered
                 .connection
                 .query_row("SELECT COUNT(*) FROM delivery_receipts", [], |row| {
