@@ -79,6 +79,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "machine",
                 "run",
                 "specialist",
+                "task_request",
                 "workspace",
             ][..],
         ),
@@ -265,6 +266,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "specialist",
             &["domain", "jcs", "machine", "run", "turn", "workspace"][..],
         ),
+        ("task_request", &["machine"][..]),
         (
             "specialist_policy",
             &[

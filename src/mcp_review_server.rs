@@ -27,11 +27,7 @@ struct AdapterBinding {
 
 impl AdapterBinding {
     fn validate(workspace: &Path, profile: &str) -> Result<Self, MachineError> {
-        let prepared = prepare_reviewer(
-            Some(workspace),
-            profile,
-            "Independent read-only working-tree review",
-        )?;
+        let prepared = prepare_reviewer(Some(workspace), profile)?;
         let canonical = prepared.view.canonical_path.to_path_buf()?;
         Ok(Self {
             _workspace_sha256: Sha256::digest(canonical.as_os_str().as_encoded_bytes()).into(),

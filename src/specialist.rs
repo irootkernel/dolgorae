@@ -15,14 +15,14 @@ use uuid::Uuid;
 
 pub const REVIEWER_ROLE_REFERENCE: &str = "independent-reviewer-v1";
 pub const REVIEWER_ROLE_SNAPSHOT: &str = concat!(
-    "You are an Independent Specialist Reviewer. Inspect only the canonical working tree named ",
-    "by the trusted runtime. Never modify files, Git metadata, linked worktrees, credentials, ",
+    "You are an Independent Specialist Reviewer. Inspect only the candidate rooted in the current ",
+    "directory and named by the trusted runtime. Never modify files, Git metadata, linked ",
+    "worktrees, credentials, ",
     "runtime state, or another Run. Do not use approval requests, network access, nested ",
-    "Specialist hiring, or an external review adapter. Return only the requested summary and ",
-    "structured findings; never return hidden reasoning or raw protocol data."
+    "Specialist hiring, or an external review adapter. Return only the checked structured report ",
+    "requested by the accepted task; never return hidden reasoning or raw protocol data."
 );
 
-const MAX_OBJECTIVE_BYTES: usize = 65_536;
 const MAX_SUMMARY_BYTES: usize = 8_192;
 const MAX_FINDINGS: usize = 64;
 
@@ -59,7 +59,6 @@ pub struct ReviewerRuntimeRequest {
     pub runtime_profile: String,
     pub model: String,
     pub effort: String,
-    pub objective: String,
     pub required_capabilities: Vec<String>,
 }
 
@@ -89,7 +88,6 @@ impl ReviewerRuntimePlan {
         }
         validate_identity(&request.model, 128, "model")?;
         validate_identity(&request.effort, 64, "effort")?;
-        validate_objective(&request.objective)?;
         reject_recursive_review_adapter(profile)?;
 
         let mut required_capabilities = request.required_capabilities;
@@ -106,16 +104,7 @@ impl ReviewerRuntimePlan {
             ));
         }
 
-        let normalized_instructions = format!(
-            "{REVIEWER_ROLE_SNAPSHOT}\n\nReview objective:\n{}",
-            request.objective
-        );
-        if normalized_instructions.len() > MAX_OBJECTIVE_BYTES {
-            return Err(invalid(
-                "objective",
-                "Reviewer instructions exceed the checked 65536-byte bound",
-            ));
-        }
+        let normalized_instructions = REVIEWER_ROLE_SNAPSHOT.to_owned();
         let instructions = InstructionSnapshot {
             schema: "dolgorae.instructions/v1".to_owned(),
             common_prefix_version: 1,
@@ -310,19 +299,6 @@ fn recursive_review_command(configuration: &Value) -> bool {
             || arguments.contains(&"__specialist-review-mcp"))
 }
 
-fn validate_objective(objective: &str) -> Result<(), MachineError> {
-    if objective.is_empty()
-        || objective.len() > MAX_OBJECTIVE_BYTES
-        || objective.chars().any(|character| character.is_control())
-    {
-        return Err(invalid(
-            "objective",
-            "Reviewer objective must be nonempty, printable, and at most 65536 bytes",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_identity(value: &str, maximum: usize, field: &str) -> Result<(), MachineError> {
     if value.is_empty()
         || value.len() > maximum
@@ -403,7 +379,6 @@ mod tests {
             runtime_profile: "reviewer".to_owned(),
             model: "gpt-5".to_owned(),
             effort: "high".to_owned(),
-            objective: "Review the current working tree for correctness.".to_owned(),
             required_capabilities: vec!["thread_read".to_owned()],
         }
     }
@@ -509,14 +484,19 @@ mod tests {
     }
 
     #[test]
-    fn objective_is_bounded_before_configuration_exists() {
-        let mut request = request();
-        request.objective = "x".repeat(MAX_OBJECTIVE_BYTES + 1);
+    fn task_text_is_absent_from_stable_reviewer_configuration() {
+        let first = ReviewerRuntimePlan::resolve(&profile(), request()).unwrap();
+        let second = ReviewerRuntimePlan::resolve(&profile(), request()).unwrap();
+        assert_eq!(first.agent_configuration, second.agent_configuration);
         assert_eq!(
-            ReviewerRuntimePlan::resolve(&profile(), request)
-                .unwrap_err()
-                .code,
-            "INVALID_ARGUMENT"
+            first.agent_configuration.normalized_instructions,
+            REVIEWER_ROLE_SNAPSHOT
+        );
+        assert!(
+            !first
+                .agent_configuration
+                .normalized_instructions
+                .contains("Review objective")
         );
     }
 

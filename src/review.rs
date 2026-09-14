@@ -330,7 +330,7 @@ pub fn execute(
             "external request reference must be UUIDv7",
         ));
     }
-    let prepared = prepare_reviewer(workspace, profile, &request.objective)?;
+    let prepared = prepare_reviewer(workspace, profile)?;
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
     let before = workspace_fingerprint(&prepared.view, &canonical_workspace)?;
@@ -554,7 +554,7 @@ pub fn execute_scoped(
     }
     let mut request = ReviewRequest::fixed();
     request.deadline_seconds = deadline_seconds;
-    let prepared = prepare_reviewer(workspace, profile, &request.objective)?;
+    let prepared = prepare_reviewer(workspace, profile)?;
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
     let carriers = EphemeralCarriers::create(&prepared.state_root)?;

@@ -7,6 +7,7 @@ use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, ControllerBinding, agent_configuration_digest,
 };
 use crate::specialist::{ReviewerRuntimePlan, validate_reviewer_output};
+use crate::task_request::SpecialistTaskRequest;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -637,6 +638,7 @@ impl EngagementStore {
             engagement_id,
             specialist_run_id,
             &objective_sha256,
+            None,
             idempotency_key,
             |reservation| {
                 let (outcome, value) = execute(reservation, objective);
@@ -656,11 +658,37 @@ impl EngagementStore {
         )
     }
 
+    pub fn assign_task_v3<F>(
+        &mut self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+        accepted_request: &Value,
+        task: &SpecialistTaskRequest,
+        idempotency_key: &str,
+        execute: F,
+    ) -> Result<TaskReservation, MachineError>
+    where
+        F: FnOnce(&TaskReservation, &SpecialistTaskRequest) -> (RuntimeOutcome, Option<Value>),
+    {
+        task.validate()?;
+        let request_json = canonical_string(accepted_request)?;
+        let request_sha256 = sha256_hex(request_json.as_bytes());
+        self.assign(
+            engagement_id,
+            specialist_run_id,
+            &request_sha256,
+            Some(&request_json),
+            idempotency_key,
+            |reservation| execute(reservation, task),
+        )
+    }
+
     fn assign<F>(
         &mut self,
         engagement_id: Uuid,
         specialist_run_id: Uuid,
         objective_sha256: &str,
+        request_json: Option<&str>,
         idempotency_key: &str,
         execute: F,
     ) -> Result<TaskReservation, MachineError>
@@ -721,14 +749,15 @@ impl EngagementStore {
             transaction
                 .execute(
                     "INSERT INTO tasks(
-                       task_id,engagement_id,specialist_run_id,
-                       objective_sha256,state,result_sha256
-                     ) VALUES(?1,?2,?3,?4,'accepted',NULL)",
+                           task_id,engagement_id,specialist_run_id,
+                           objective_sha256,state,result_sha256,request_json
+                     ) VALUES(?1,?2,?3,?4,'accepted',NULL,?5)",
                     params![
                         task_id.to_string(),
                         engagement_id.to_string(),
                         specialist_run_id.to_string(),
-                        objective_sha256
+                        objective_sha256,
+                        request_json
                     ],
                 )
                 .map_err(internal)?;
@@ -2066,6 +2095,31 @@ impl EngagementStore {
             })
     }
 
+    pub fn external_task_request(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Value, MachineError> {
+        let request: String = self
+            .connection
+            .query_row(
+                "SELECT request_json FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| {
+                MachineError::new(
+                    "SPECIALIST_TASK_NOT_FOUND",
+                    "Specialist task was not found",
+                    false,
+                    serde_json::json!({"task_id":task_id}),
+                )
+            })?;
+        serde_json::from_str(&request).map_err(internal)
+    }
+
     pub fn external_task_deadline_expired(
         &self,
         engagement_id: Uuid,
@@ -3107,6 +3161,9 @@ mod tests {
     use crate::domain::{AggregateKind, ControllerIdentity, ControllerKind, ExecutionLane};
     use crate::run::{AggregateMemberKind, ExecutableIdentity, ProfileSnapshot};
     use crate::specialist::{REVIEWER_ROLE_REFERENCE, ReviewerRuntimeRequest};
+    use crate::task_request::{
+        STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest, TaskContext, TaskCriterion,
+    };
     use crate::workspace::LosslessPath;
     use std::collections::BTreeMap;
 
@@ -3174,7 +3231,7 @@ mod tests {
         (store, root)
     }
 
-    fn reviewer_plan(objective: &str) -> ReviewerRuntimePlan {
+    fn reviewer_plan(_objective: &str) -> ReviewerRuntimePlan {
         let mut profile = ProfileSnapshot {
             schema_version: 1,
             profile_name: "reviewer".to_owned(),
@@ -3210,7 +3267,6 @@ mod tests {
                 runtime_profile: "reviewer".to_owned(),
                 model: "gpt-5".to_owned(),
                 effort: "high".to_owned(),
-                objective: objective.to_owned(),
                 required_capabilities: vec!["thread_read".to_owned()],
             },
         )
@@ -4774,6 +4830,7 @@ mod tests {
                 opened.engagement_id,
                 hired.specialist_run_id,
                 &"c".repeat(64),
+                None,
                 "task-key",
                 |reservation| {
                     assert_eq!(
@@ -4821,6 +4878,7 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
+                    None,
                     &format!("task-{number}"),
                     |_| {
                         (
@@ -5234,6 +5292,71 @@ mod tests {
     }
 
     #[test]
+    fn v3_task_persists_the_complete_accepted_request() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_engagement("workspace", &"a".repeat(64), "open-v3")
+            .unwrap();
+        let plan = reviewer_plan("hire rationale only");
+        let hired = store
+            .hire_reviewer(opened.engagement_id, &plan, "hire-v3", |_, _, _| {
+                RuntimeOutcome::Accepted
+            })
+            .unwrap();
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "한글 brief\nsecond line".to_owned(),
+            contexts: vec![TaskContext {
+                id: "requirements".to_owned(),
+                content: "exact accepted context".to_owned(),
+                provenance: "approved spec".to_owned(),
+            }],
+            criteria: vec![TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "Role and task stay separate.".to_owned(),
+                source_context_ids: vec!["requirements".to_owned()],
+            }],
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let accepted = serde_json::json!({
+            "schema":"dolgorae-specialist-review-request/v3",
+            "operation":"review_target",
+            "task":&task
+        });
+        let reserved = store
+            .assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "task-v3",
+                |_, _| {
+                    (
+                        RuntimeOutcome::Accepted,
+                        Some(serde_json::json!({"summary":"accepted","findings":[]})),
+                    )
+                },
+            )
+            .unwrap();
+        let stored: String = store
+            .connection
+            .query_row(
+                "SELECT request_json FROM tasks WHERE task_id=?1",
+                [reserved.task_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, canonical_string(&accepted).unwrap());
+        assert!(stored.contains("한글 brief\\nsecond line"));
+        assert!(stored.contains("exact accepted context"));
+        assert_eq!(
+            store.collect_review(opened.engagement_id).unwrap().output["summary"],
+            "accepted"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn malformed_reviewer_output_is_failed_before_collection() {
         let (mut store, root) = store();
         let opened = store
@@ -5310,6 +5433,7 @@ mod tests {
                 opened.engagement_id,
                 hired.specialist_run_id,
                 &"c".repeat(64),
+                None,
                 "task",
                 |_| (RuntimeOutcome::Unknown, None),
             )
@@ -5374,6 +5498,7 @@ mod tests {
                 opened.engagement_id,
                 hired.specialist_run_id,
                 &"c".repeat(64),
+                None,
                 "task",
                 |_| {
                     (
@@ -5547,6 +5672,7 @@ mod tests {
                         opened.engagement_id,
                         hired.specialist_run_id,
                         &"c".repeat(64),
+                        None,
                         "task",
                         |_| {
                             executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5568,6 +5694,7 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
+                    None,
                     "task",
                     |_| {
                         executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5645,6 +5772,7 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
+                    None,
                     "task",
                     |_| {
                         (

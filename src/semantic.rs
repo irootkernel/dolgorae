@@ -783,7 +783,6 @@ fn prepare_external_specialist_with(
 pub(crate) fn prepare_reviewer(
     workspace: Option<&Path>,
     profile_name: &str,
-    objective: &str,
 ) -> Result<PreparedReviewer, MachineError> {
     let view = WorkspaceService::system()?.discover(workspace)?;
     let home = DolgoraeHome::system()?;
@@ -812,7 +811,6 @@ pub(crate) fn prepare_reviewer(
             runtime_profile: profile_name.to_owned(),
             model: model.clone(),
             effort: effort.clone(),
-            objective: objective.to_owned(),
             required_capabilities: Vec::new(),
         },
     )?;
