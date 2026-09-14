@@ -25,6 +25,7 @@ def schema_name(example_name: str) -> str:
         "collaboration-": "dolgorae-collaboration-tool-v1.schema.json",
         "controller-credential.": "dolgorae-controller-credential-v1.schema.json",
         "external-engagement-v2-": "dolgorae-external-specialist-facade-v2.schema.json",
+        "external-engagement-v3-": "dolgorae-external-specialist-facade-v3.schema.json",
         "external-engagement-": "dolgorae-external-specialist-facade-v1.schema.json",
         "idempotency-intent.": "dolgorae-idempotency-intent-v1.schema.json",
         "ledger-state.": "dolgorae-ledger-state-v1.schema.json",
@@ -41,6 +42,7 @@ def schema_name(example_name: str) -> str:
         "specialist-review-result.": "dolgorae-specialist-review-tool-v1.schema.json",
         "specialist-review-idempotency-conflict.": "dolgorae-specialist-review-tool-v1.schema.json",
         "specialist-review-v2-": "dolgorae-specialist-review-tool-v2.schema.json",
+        "specialist-review-v3-": "dolgorae-specialist-review-tool-v3.schema.json",
     }
     if example_name in {
         "engagement-call-machine-success.valid.json",
@@ -76,12 +78,34 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
 
+    negative_examples = sorted(
+        [
+            *EXAMPLES.glob("external-engagement-v3-*.invalid-*.json"),
+            *EXAMPLES.glob("specialist-review-v3-*.invalid-*.json"),
+        ]
+    )
+    for path in negative_examples:
+        try:
+            schema_path = PROTOCOL / schema_name(path.name)
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            instance = json.loads(path.read_text(encoding="utf-8"))
+            validator = Draft202012Validator(
+                schema, registry=registry, format_checker=FormatChecker()
+            )
+            if not list(validator.iter_errors(instance)):
+                errors.append(f"{path.name}: invalid example was accepted")
+        except Exception as exc:
+            errors.append(f"{path.name}: {exc}")
+
     if errors:
         print("Schema example validation failed:", file=sys.stderr)
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
-    print(f"Schema example validation passed: {len(examples)} positive examples")
+    print(
+        "Schema example validation passed: "
+        f"{len(examples)} positive and {len(negative_examples)} negative examples"
+    )
     return 0
 
 

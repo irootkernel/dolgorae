@@ -2269,3 +2269,63 @@ immutable snapshot.
   selection must remain explicit and frontend-independent.
 - Automatically migrate a legacy home: rejected because old Runs and server
   membership cannot be safely reinterpreted under the new authority boundary.
+
+## ADR-036: Separate Stable Specialist Roles from Accepted Task Content
+
+Status: Accepted
+
+### Context
+
+The original one-shot Reviewer construction included the current objective in
+its normalized instructions. That made task bytes part of the Agent
+Configuration identity and prevented a stable Role from being reused honestly.
+Legacy External Specialist assignment could name artifact references but did
+not make their content readable to the model, and its free-form final response
+could not prove criterion-by-criterion completion.
+
+### Decision
+
+Keep Role and Agent Configuration limited to reusable character, expertise,
+and persistent safety behavior. Retain hire `objective` only as non-executable
+hiring rationale for compatibility. Accept executable work in a separate
+durable task object containing purpose, an exact multiline brief, bounded
+inline contexts with declared provenance, ordered criteria, expected output,
+and deadline. Persist and digest the decoded request as JCS before dispatch;
+preserve string code points and line endings without trimming or Unicode
+normalization. Context is evidence and never changes the immutable candidate.
+
+Add v3 contracts rather than changing v1 or v2. The Machine CLI reads the v3
+one-shot request from non-TTY stdin while workspace, Profile, credentials, and
+request identity remain adapter-bound. The reusable facade accepts the same
+task object in a v3 assignment. A completion review must assess every criterion
+exactly once in input order, retain evidence and remaining gaps, and state a
+bounded overall assessment. Dolgorae validates structure and coverage but does
+not turn Reviewer judgment into business approval.
+
+Start the one-shot v3 deadline at durable task acceptance, after target capture,
+Profile preparation, and hire. Dispatch, the single Turn, terminal
+reconciliation, and result validation share that budget. Existing redelivery,
+outcome-unknown, closure, and settlement rules continue to govern recovery.
+
+### Consequences
+
+- Different tasks can use the same Role and Agent Configuration digest without
+  hiding task content in configuration identity.
+- Inline context becomes model-readable, immutable accepted input rather than
+  an opaque reference or host-path convention.
+- Criterion omissions, duplicates, reordering, malformed evidence, and
+  oversized or non-inline structured reports fail as `REVIEW_OUTPUT_INVALID`.
+- v1/v2 requests, results, and persisted records keep their original meaning;
+  generic legacy review is not advertised as completion-aware.
+
+### Rejected alternatives
+
+- Put the task brief in Role instructions: rejected because Role identity would
+  change for every assignment and reuse would be misleading.
+- Let the model read arbitrary host paths or resolve bare artifact UUIDs:
+  rejected because readability, authority, and captured bytes would be
+  ambiguous.
+- Infer completion from prose or empty findings: rejected because criterion
+  coverage and evidence gaps would not be machine-checkable.
+- Break or migrate v1/v2 contracts: rejected because additive v3 contracts can
+  provide the new semantics without reinterpreting durable history.

@@ -174,7 +174,9 @@ effects.
 
 The External Specialist Facade is a private CLI or MCP adapter over the shared
 semantic service. Its checked payload contract is
-[`dolgorae-external-specialist-facade-v2.schema.json`](../protocol/dolgorae-external-specialist-facade-v2.schema.json).
+[`dolgorae-external-specialist-facade-v2.schema.json`](../protocol/dolgorae-external-specialist-facade-v2.schema.json),
+with additive accepted-task assignments in
+[`dolgorae-external-specialist-facade-v3.schema.json`](../protocol/dolgorae-external-specialist-facade-v3.schema.json).
 It supports explicit engagement open and safe get, Specialist hire, task
 assignment, bounded await, result collection, cancellation, release, and
 engagement close. It does not add a planner, task graph, or autonomous scheduling
@@ -200,6 +202,15 @@ core through a write-ahead hire operation. Raw
 `StartRun`, reserved `parent_ref`, or later Run listing cannot be used to infer,
 attach, or regroup engagement membership. Existing generic Runs are not attached
 in place.
+
+Role and task bytes have separate lifecycles. Hire resolves one stable Role and
+Agent Configuration; the compatibility `objective` is stored only as a hiring
+rationale digest and never enters instructions. Facade v3 task acceptance JCS
+normalizes and persists the complete brief, inline contexts, criteria, target
+intent, and deadline before dispatch. The Turn prompt embeds that accepted task
+as data and distinguishes contexts from the candidate workspace. Task retry
+compares the full accepted request digest, while Role and Agent Configuration
+digests remain unchanged across different tasks.
 
 An accepted hire initially publishes only a logical, threadless Run and records
 the member as `unstarted`. Assignment reconstructs a missing Worker from the Run
@@ -228,6 +239,11 @@ effect boundary to an active outcome-unknown refusal until Run evidence proves
 quiescence; it never releases Writer authority after a transient control
 failure. Isolated terminal output captures a
 bounded binary Git patch into the result artifact before worktree cleanup.
+For `structured_review_v3`, terminal reconciliation parses the inline report,
+validates exact ordered criterion coverage and the evidence/status invariants,
+and commits only that normalized complete report to the artifact. Invalid
+output terminalizes the task with `REVIEW_OUTPUT_INVALID`; result collection
+cannot reinterpret or repair it.
 Canonical Writer release is completed before terminal lifecycle cleanup can be
 reported. Because task and Writer commits cross authorities, every facade
 reconciliation also checks the actual Writer holder and releases it when that
@@ -249,7 +265,9 @@ The One-Shot Specialist Review Coordinator is a convenience adapter over the
 External Specialist Facade. It is shared by the `dolgorae specialist review`
 Machine CLI command and the external stdio MCP tool `dolgorae_review`. Its
 checked model-visible shape is
-[`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
+[`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json),
+with the task-aware stdin successor in
+[`dolgorae-specialist-review-tool-v3.schema.json`](../protocol/dolgorae-specialist-review-tool-v3.schema.json).
 
 The Coordinator binds the canonical workspace, Reviewer Codex Profile,
 aggregate-owner and per-Run Controller credentials, external provenance,
@@ -273,6 +291,14 @@ cancellation, mutation detection, invalid output, and outcome uncertainty as
 checked non-success results. Cleanup is best effort after a transport failure,
 but success is returned only after the result artifact and read-only
 postcondition are authoritative.
+
+In v3, Profile preparation, target capture, and Reviewer hire occur before task
+acceptance. Acceptance persists the full JCS request and starts the deadline;
+dispatch, the one Turn, terminal reconciliation, and report validation consume
+that single budget. The immutable Reviewer Role is fixed independently of the
+brief and context. The result projection and immutable artifact preserve the
+same criterion assessments, evidence limits, and overall assessment. v1/v2
+coordinator state and result artifacts keep their prior interpretation.
 
 The external MCP adapter is intentionally distinct from the later run-bound
 Primary and collaboration bridges. It does not need to prove a Dolgorae source

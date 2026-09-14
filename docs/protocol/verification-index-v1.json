@@ -130,7 +130,11 @@
         "TASK-028",
         "TASK-029",
         "TASK-030",
-        "TASK-031"
+        "TASK-031",
+        "TASK-039",
+        "TASK-042",
+        "TASK-044",
+        "TASK-045"
       ],
       "catches": [
         "public CLI and RPC adapters",
@@ -152,7 +156,8 @@
         "explicit host-controlled MCP external request reference",
         "connection and process identity excluded from MCP idempotency",
         "immutable review-target capture and settlement Machine CLI carriers",
-        "protected settlement owner and terminal receipt carriers"
+        "protected settlement owner and terminal receipt carriers",
+        "task-aware Specialist Review request on non-TTY stdin"
       ]
     },
     "SPEC-006": {
@@ -181,7 +186,13 @@
         "TASK-032",
         "TASK-036",
         "TASK-037",
-        "TASK-038"
+        "TASK-038",
+        "TASK-039",
+        "TASK-040",
+        "TASK-041",
+        "TASK-042",
+        "TASK-043",
+        "TASK-044"
       ],
       "catches": [
         "machine and protobuf envelopes",
@@ -209,7 +220,8 @@
         "structured Specialist Review findings and checked safe errors",
         "working-tree review result artifact and mutation postcondition",
         "replay-safe external MCP identity or explicit MCP unavailability",
-        "same-reference input drift returning IDEMPOTENCY_CONFLICT without duplicate Reviewer allocation"
+        "same-reference input drift returning IDEMPOTENCY_CONFLICT without duplicate Reviewer allocation",
+        "additive v3 accepted task and criterion-complete result envelopes"
       ]
     },
     "SPEC-007": {
@@ -352,7 +364,11 @@
         "TASK-025",
         "TASK-026",
         "TASK-027",
-        "TASK-031"
+        "TASK-031",
+        "TASK-039",
+        "TASK-040",
+        "TASK-041",
+        "TASK-044"
       ],
       "catches": [
         "agent policy",
@@ -367,7 +383,8 @@
         "read-only Reviewer role policy and recursive review denial",
         "adapter-bound review authority without model-supplied workspace or profile",
         "MCP request reference supplied by trusted metadata rather than model arguments",
-        "review-target credentials, private tool state, and unsafe content excluded from captured evidence"
+        "review-target credentials, private tool state, and unsafe content excluded from captured evidence",
+        "stable Specialist Role separated from accepted task and inline context"
       ]
     },
     "SPEC-012": {
@@ -394,7 +411,14 @@
         "TASK-029",
         "TASK-031",
         "TASK-032",
-        "TASK-034"
+        "TASK-034",
+        "TASK-039",
+        "TASK-040",
+        "TASK-041",
+        "TASK-042",
+        "TASK-043",
+        "TASK-044",
+        "TASK-045"
       ],
       "catches": [
         "orchestration boundary",
@@ -444,7 +468,9 @@
         "external MCP replay safety selected by live per-request metadata probe",
         "Machine CLI remains mandatory SR1 path when MCP continuity is unavailable",
         "six-scope immutable review-target semantics and source non-mutation",
-        "owner-bound idempotent settlement, capture integrity, and unknown preservation"
+        "owner-bound idempotent settlement, capture integrity, and unknown preservation",
+        "JCS-bound task-aware facade assignment with readable inline context",
+        "ordered criterion assessment and full report redelivery"
       ]
     },
     "SPEC-013": {
@@ -469,7 +495,8 @@
         "TASK-029",
         "TASK-032",
         "TASK-033",
-        "TASK-034"
+        "TASK-034",
+        "TASK-044"
       ],
       "catches": [
         "coequal public adapters",
@@ -487,7 +514,8 @@
         "trusted-only reserved aggregate parent projection",
         "external Specialist Review CLI and MCP adapters share one semantic service",
         "minimum supervised local gRPC gateway before live Gul BH1",
-        "stage-aware capability advertisement"
+        "stage-aware capability advertisement",
+        "unchanged public gRPC boundary across Specialist Review v3"
       ]
     },
     "SPEC-014": {
@@ -512,7 +540,10 @@
         "TASK-027",
         "TASK-029",
         "TASK-030",
-        "TASK-034"
+        "TASK-034",
+        "TASK-040",
+        "TASK-042",
+        "TASK-044"
       ],
       "catches": [
         "control-mode compatibility",
@@ -532,7 +563,8 @@
         "passivation preserves logical lane and releases physical generation",
         "external facade to managed-agent Run compilation",
         "external review facade compiles to a read-only managed-agent Run",
-        "external review MCP is distinct from run-bound internal tool transport"
+        "external review MCP is distinct from run-bound internal tool transport",
+        "Reviewer Agent Configuration identity excludes assigned task content"
       ]
     },
     "SPEC-015": {

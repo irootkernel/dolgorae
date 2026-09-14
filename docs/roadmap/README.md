@@ -13,6 +13,11 @@ safety foundation. `EPIC-013` and `TASK-036` through `TASK-038` are also
 `COMPLETE` and establish the global Codex Profile cutover before `EPIC-007`.
 `EPIC-012` and `TASK-035` are `COMPLETE`; they provide development-channel
 production infrastructure but do not add a user-facing product milestone.
+`EPIC-007`, `TASK-023`, and `TASK-024` are `COMPLETE`; they establish the
+supervised gateway and transport-independent Brokered Hierarchy core without
+claiming a live model-facing Primary tool. `EPIC-014` is `ACTIVE`, with
+`TASK-039` complete and `TASK-040` through `TASK-045` planned, and precedes
+`EPIC-008` in delivery order.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -30,7 +35,8 @@ cutover, the supervised Gul Run gateway and Brokered Hierarchy core, live
 Primary control-plane integration, the durable Collaboration Plane, operator
 and audit interfaces, and final conformance and Personal Alpha acceptance.
 `TASK-025` remains the live run-bound transport probe and occurs only after the
-Brokered Hierarchy core is complete.
+Brokered Hierarchy core and EPIC-014 are complete. EPIC-014 does not change the
+`v0.1.3` release boundary; that version remains owned by EPIC-008.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -1269,6 +1275,125 @@ Epic acceptance: the complete Orchestration Session and Brokered Hierarchy state
 machine is implemented and proven through transport-independent fake adapters.
 No live Primary model tool is claimed until `EPIC-008` completes.
 
+## EPIC-014: Role/Task Separation and Structured Completion Review
+
+Status: `ACTIVE`
+
+Goal: Keep reusable Specialist character independent of assigned work, make
+accepted inline context model-readable and durable, and add criterion-complete
+review results without changing the v1/v2 contracts or the EPIC-008 release
+boundary. This Epic precedes EPIC-008 only in delivery order. It does not enable
+Aquarium, MCP, a public gRPC change, a stable release, or an installed runtime.
+
+### TASK-039: Freeze Role/Task and Completion-Review Contracts
+
+Status: `COMPLETE`
+
+Synchronize the specification, architecture, ADR, checked protocol, and roadmap
+for additive Specialist Review and External Specialist Facade v3 contracts.
+Fix request and report bounds, exact string preservation, accepted-task JCS
+identity, inline-context provenance, completion criteria, deadline start,
+recovery meaning, and v1/v2 compatibility. Do not advertise the capability as
+released or runtime-installed before the later completion gate.
+
+Verification: schema meta-validation and positive/negative examples; authority
+and compatibility review across the owning documents; unchanged public v1
+Protobuf source and descriptor.
+
+### TASK-040: Stable Reviewer Role and Accepted Task Composition
+
+Status: `PLANNED`
+
+Remove task objective bytes from the Reviewer Role and Agent Configuration.
+Treat hire objective as non-executable rationale, construct one shared bounded
+accepted-task type, preserve exact multiline UTF-8, and persist and digest the
+decoded request as JCS before dispatch. Different tasks and hiring rationales
+must retain the same stable Reviewer configuration identity.
+
+Verification: configuration-digest invariance, exact Unicode/line-ending and
+shell-metacharacter preservation, NUL and bound rejection, and pre-dispatch
+failure tests.
+
+### TASK-041: Inline Context Binding and Candidate Separation
+
+Status: `PLANNED`
+
+Validate at most 64 contexts with unique IDs, caller-declared provenance, and
+actual bounded content. Permit criteria to reference only accepted context IDs.
+Bind context to the durable task before the Turn and present it as evidence in a
+separate prompt section from the immutable review candidate. Reject arbitrary
+host paths, bare artifact references, mutation, and oversize instead of
+truncating or resolving them implicitly.
+
+Verification: readable-context delivery, unknown/duplicate reference rejection,
+candidate/context distinction, accepted-byte persistence, and retry conflict
+tests.
+
+### TASK-042: Additive v3 CLI and Reusable Facade Execution
+
+Status: `PLANNED`
+
+Add `specialist review --request-stdin --format json` for the checked v3 request
+and add the facade v3 assignment shape while preserving all legacy carriers.
+Route both through existing create/assign/collect/close semantics, keep the
+one-shot Reviewer fresh and read-only, bind Profile and credentials outside the
+request, and start the v3 deadline at durable task acceptance.
+
+Verification: stdin and option-conflict tests; staged and HEAD black-box
+reviews; one fresh Reviewer/Turn; reusable assignment, idempotency, deadline,
+disconnect, and authority regressions.
+
+### TASK-043: Criterion-Complete Result and Recovery
+
+Status: `PLANNED`
+
+Implement `dolgorae-specialist-review-result/v3` with ordered criterion
+assessments, four checked statuses, bounded candidate/context/caller/unavailable
+evidence, remaining gaps, evidence limits, and overall assessment. Validate the
+report before immutable artifact commit and preserve the same report in caller
+projection and redelivery. Never synthesize completion from prose or empty
+findings.
+
+Verification: every status and evidence basis; missing, duplicate, unknown, and
+reordered criteria; malformed or oversized output; artifact/collection round
+trip; crash and result-redelivery tests.
+
+### TASK-044: Compatibility and Adversarial Regression
+
+Status: `PLANNED`
+
+Prove unchanged v1/v2 request, result, and persisted-state meaning together with
+v3 idempotency, deadline, cancellation, crash, disconnect, staged/committed
+candidate, and adversarial task-content behavior. Confirm public gRPC descriptor
+identity and the existing MCP-unavailable disposition. Do not run live Codex
+targets without separate explicit authority.
+
+Verification: focused Rust/schema/E2E suites, fake-runtime payload canaries,
+legacy fixtures, outcome-unknown and settlement recovery, and the complete
+default repository gate.
+
+### TASK-045: Documentation, Full Gate, and Independent Review
+
+Status: `PLANNED`
+
+After implementation and compatibility checks, update README, operations,
+implementation tips, and the source-distributed `use-dolgorae` skill to the
+actually supported v3 contract. Run the complete deterministic gate and obtain
+an independent read-only review. Resolve every blocking finding before moving
+the Tasks and Epic through their completion states; task-scoped commits remain
+required by the ordinary completion gate.
+
+Verification: `make PYTHON_BIN=.venv/bin/python test`, source skill validation,
+Markdown links, independent review, no unresolved blocking findings, and exact
+task-scoped commit evidence.
+
+Epic acceptance: Role and Agent Configuration identity is stable across tasks;
+one-shot and reusable v3 assignments preserve and deliver exact accepted task
+and context; criterion-complete reports survive artifact collection and
+recovery; legacy contracts remain compatible; default gates and independent
+review pass; and no Aquarium, MCP, public gRPC, release, installation, or
+publication state is changed by this Epic.
+
 ## EPIC-008: Live Dolgorae Control Plane and Brokered Hierarchy
 
 Status: `PLANNED`
@@ -1281,7 +1406,7 @@ Hierarchy.
 
 Status: `PLANNED`
 
-Depends on `TASK-023` and `TASK-024`. Validate and close the live transport boundary for the
+Depends on `TASK-023`, `TASK-024`, and `EPIC-014`. Validate and close the live transport boundary for the
 private Primary orchestration tool and the later Brokered Specialist
 Collaboration tool. Prove that the pinned Codex App Server can provide a private
 run-bound MCP bridge whose source Run, source Turn, tool-call identity,

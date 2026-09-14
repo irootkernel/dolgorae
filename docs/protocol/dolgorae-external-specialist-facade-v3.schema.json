@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/external-specialist-facade/v3",
+  "title": "Dolgorae external Specialist facade v3",
+  "description": "Additive accepted-task carrier with inline readable context. Facade v1 and v2 remain accepted unchanged.",
+  "oneOf": [
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v2" },
+    { "$ref": "#/$defs/assign_request" }
+  ],
+  "$defs": {
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content", "provenance"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 },
+        "content": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 262144 },
+        "provenance": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 4096 }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "source_context_ids"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 },
+        "statement": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 8192 },
+        "source_context_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["purpose", "brief", "contexts", "criteria", "expected_output"],
+      "properties": {
+        "purpose": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 64 },
+        "brief": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 65536 },
+        "contexts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/context" }
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/criterion" }
+        },
+        "expected_output": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "expected_output": { "const": "structured_review_v3" } },
+            "required": ["expected_output"]
+          },
+          "then": {
+            "properties": { "purpose": { "enum": ["change", "completion"] } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "expected_output": { "const": "structured_review_v3" },
+              "purpose": { "const": "completion" }
+            },
+            "required": ["expected_output", "purpose"]
+          },
+          "then": { "properties": { "criteria": { "minItems": 1 } } }
+        }
+      ]
+    },
+    "assign_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "operation", "engagement_id", "specialist_run_id",
+        "external_request_ref", "task", "execution_intent", "deadline_seconds",
+        "idempotency_key"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-external-specialist-facade/v3" },
+        "operation": { "const": "assign_external_specialist_task" },
+        "engagement_id": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" },
+        "specialist_run_id": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" },
+        "external_request_ref": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/opaque_ref" },
+        "task": { "$ref": "#/$defs/task" },
+        "execution_intent": { "enum": ["read_only", "isolated_write", "canonical_workspace_write"] },
+        "deadline_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "idempotency_key": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 }
+      }
+    }
+  },
+  "x-limits": {
+    "maximumRequestBytes": 1048576,
+    "normalization": "decoded JSON values are persisted as JCS without text trimming, Unicode normalization, or line-ending conversion"
+  },
+  "x-compatibility": [
+    "v1 and v2 requests and persisted records retain their existing meaning",
+    "v3 inline context content is accepted and persisted before dispatch",
+    "legacy bare context_refs are not reinterpreted as model-readable v3 context"
+  ],
+  "x-invariants": [
+    "context IDs and criterion IDs are unique within one task",
+    "every criterion source_context_id names a context accepted in that task",
+    "structured_review_v3 accepts only change or completion purpose and completion has at least one criterion",
+    "a structured assessment may cite context evidence only from that criterion's source_context_ids"
+  ]
+}

@@ -3272,6 +3272,10 @@ precondition on the resolved immutable binding; a mismatch is rejected before
 admission. The legacy `runtime_profile` input field is rejected. The checked
 [current hire example](../protocol/examples/external-engagement-v2-hire.valid.json)
 shows this contract.
+The legacy hire `objective` is retained as non-executable hiring rationale. It
+MUST NOT be appended to Role instructions, included in the Role snapshot or
+Agent Configuration digest, or reused as an assigned task. Executable work
+begins only with a separately accepted task assignment.
 
 Facade v2 error projections preserve the original facade error-code vocabulary
 and include the closed Machine error-code vocabulary for Profile resolution,
@@ -3302,6 +3306,31 @@ The checked facade operations are `open_external_engagement`,
 only the empty durable aggregate; `get` exposes only safe operational membership
 and task counts. Cancellation follows the ordinary fail-closed Turn-acceptance
 boundary, and close applies explicit complete or abort semantics.
+The additive checked
+[`dolgorae-external-specialist-facade-v3`](../protocol/dolgorae-external-specialist-facade-v3.schema.json)
+assignment carries one explicit task containing `purpose`, a multiline `brief`,
+up to 64 inline contexts, up to 64 criteria, and an expected-output identifier.
+Each context has a caller-defined ID, its actual UTF-8 content, and declared
+provenance; a host path or bare artifact UUID is not readable v3 context.
+Criteria may reference only IDs present in the accepted task. The complete
+request is limited to 1,048,576 bytes, the brief to 65,536 bytes, and NUL is
+rejected before dispatch. Decoded strings retain their exact code points and
+line endings. The accepted request is persisted as JCS and bound to task
+idempotency before its content is delivered in the Turn message. Context is
+identified as evidence rather than candidate source.
+
+When a facade v3 task requests `structured_review_v3`, `completion` requires at
+least one criterion. Dolgorae accepts only a report that covers every criterion
+exactly once in input order with `met`, `unmet`, `unverified`, or
+`not_applicable`, bounded supporting evidence, evidence limits, and a consistent
+overall assessment. It stores the complete checked report in the immutable
+result artifact and returns the same report through collection. Missing,
+duplicate, unknown, reordered, malformed, non-inline, or oversized output is
+terminal `REVIEW_OUTPUT_INVALID`; Dolgorae never synthesizes a clean review.
+Context evidence for an assessment MUST name one of that criterion's declared
+`source_context_ids`; another accepted context is not interchangeable evidence.
+The assessment is Reviewer evidence, not Dolgorae approval of business
+completion.
 Await and collect return the immutable terminal result with its result artifact
 reference. A collection transaction creates receipts and marks `delivered` only
 for the cursor page returned by that call; later pages remain
@@ -3411,6 +3440,28 @@ dolgorae specialist review \
   --format json
 ```
 
+The additive task-aware v3 Machine CLI carrier reads one checked request from
+non-TTY standard input and does not accept Profile or authority data in that
+request:
+
+```text
+dolgorae specialist review \
+  --workspace <workspace> \
+  --profile <reviewer-profile> \
+  --request-stdin \
+  --format json
+```
+
+Its request and result are owned by
+[`dolgorae-specialist-review-tool-v3`](../protocol/dolgorae-specialist-review-tool-v3.schema.json).
+The request selects one existing immutable target and carries `purpose`,
+multiline `brief`, inline contexts, ordered criteria, fixed
+`expected_output: structured_review_v3`, and a 1..3600 second deadline.
+`completion` requires at least one criterion; `change` may have none.
+`--request-stdin` is mutually exclusive with `--scope`, `--target-kind`,
+`--revision`, and `--deadline-seconds`. Invalid UTF-8, NUL, unknown fields,
+unresolved context IDs, and bound violations fail before task dispatch.
+
 It uses
 [`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
 `--scope working-tree` retains the original working-tree request shape and
@@ -3420,6 +3471,14 @@ Turn execution and the following terminal wait share the remaining budget.
 The v2 result omits the immutable root and settlement credential
 carrier paths while binding the capture, source identity, Reviewer executable
 and capability evidence, engagement, verdict, integrity result, and settlement.
+The v3 deadline begins at durable task acceptance, after Profile preparation,
+Reviewer hire, and immutable-target capture. Dispatch, the single Turn, terminal
+reconciliation, and checked result acceptance share that budget; authoritative
+closure and capture settlement still complete after a timeout when safe. The
+accepted request, stable Role/Profile and Agent Configuration snapshots, target
+identity, task and Turn identity, and checked result artifact remain durably
+associated. v1 and v2 inputs, results, and historical records retain their
+existing meaning and are not promoted to completion-aware review.
 The opt-in acceptance carrier is `make test-live-scoped-specialist-review`; it
 requires `DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW=1`, an explicitly supplied
 `DOLGORAE_LIVE_WORKSPACE`, a prepared Reviewer profile, and the exact Codex

@@ -1,0 +1,23 @@
+{
+  "schema": "dolgorae-specialist-review-request/v3",
+  "operation": "review_target",
+  "target": { "kind": "staged" },
+  "purpose": "completion",
+  "brief": "TASK-039의 승인된 완료 기준을 검토하세요.\nUnstaged 구현은 계산하지 마세요.",
+  "contexts": [
+    {
+      "id": "requirements",
+      "content": "C-1: task content is absent from stable Role instructions.",
+      "provenance": "approved specification revision abc123"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "C-1",
+      "statement": "Task content is absent from stable Role instructions.",
+      "source_context_ids": ["requirements"]
+    }
+  ],
+  "expected_output": "structured_review_v3",
+  "deadline_seconds": 600
+}

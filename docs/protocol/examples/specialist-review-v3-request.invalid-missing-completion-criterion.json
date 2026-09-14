@@ -1,0 +1,11 @@
+{
+  "schema": "dolgorae-specialist-review-request/v3",
+  "operation": "review_target",
+  "target": {"kind": "head"},
+  "purpose": "completion",
+  "brief": "Check completion.",
+  "contexts": [],
+  "criteria": [],
+  "expected_output": "structured_review_v3",
+  "deadline_seconds": 60
+}

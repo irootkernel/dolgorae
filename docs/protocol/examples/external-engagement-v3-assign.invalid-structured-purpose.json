@@ -1,0 +1,21 @@
+{
+  "schema": "dolgorae-external-specialist-facade/v3",
+  "operation": "assign_external_specialist_task",
+  "engagement_id": "018f0000-0000-7000-8000-000000000001",
+  "specialist_run_id": "018f0000-0000-7000-8000-000000000002",
+  "external_request_ref": {
+    "namespace": "example.workflow",
+    "kind": "review",
+    "id": "TASK-039"
+  },
+  "task": {
+    "purpose": "analysis",
+    "brief": "This cannot request the structured review result contract.",
+    "contexts": [],
+    "criteria": [],
+    "expected_output": "structured_review_v3"
+  },
+  "execution_intent": "read_only",
+  "deadline_seconds": 600,
+  "idempotency_key": "invalid-structured-purpose"
+}
