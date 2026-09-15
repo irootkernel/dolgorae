@@ -15,10 +15,8 @@ safety foundation. `EPIC-013` and `TASK-036` through `TASK-038` are also
 production infrastructure but do not add a user-facing product milestone.
 `EPIC-007`, `TASK-023`, and `TASK-024` are `COMPLETE`; they establish the
 supervised gateway and transport-independent Brokered Hierarchy core without
-claiming a live model-facing Primary tool. `EPIC-014` is `ACTIVE`, with
-`TASK-039` through `TASK-044` complete, `TASK-045` planned, and
-precedes
-`EPIC-008` in delivery order.
+claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
+`TASK-045` are `COMPLETE`; the Epic precedes `EPIC-008` in delivery order.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -1278,9 +1276,17 @@ No live Primary model tool is claimed until `EPIC-008` completes.
 
 ## EPIC-014: Role/Task Separation and Structured Completion Review
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [Role/Task separation and structured completion review dossier](../todo/TODO-EPIC-014-role-task-separation.md).
+Canonical Outcomes: [external engagement specification](../specs/README.md#external-specialist-engagement),
+[one-shot review specification](../specs/README.md#one-shot-specialist-review-adapter),
+[facade architecture](../architecture/README.md#external-specialist-facade),
+[ADR-036](../architecture-decision-records/README.md#adr-036-separate-stable-specialist-roles-from-accepted-task-content),
+[one-shot v3 protocol](../protocol/dolgorae-specialist-review-tool-v3.schema.json),
+[facade v3 protocol](../protocol/dolgorae-external-specialist-facade-v3.schema.json),
+[task implementation](../../src/task_request.rs),
+[one-shot implementation](../../src/review.rs), and
+[facade implementation](../../src/external_engagement.rs)
 
 Goal: Keep reusable Specialist character independent of assigned work, make
 accepted inline context model-readable and durable, and add criterion-complete
