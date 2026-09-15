@@ -847,14 +847,18 @@ fn execute_scoped_common(
             ));
         }
         let task = task?;
-        let budget_started = if v3.is_some() {
-            task_started.unwrap_or_else(Instant::now)
+        let remaining = if v3.is_some() {
+            store
+                .task_deadline_remaining(review_id, task.task_id)?
+                .unwrap_or_else(|| {
+                    Duration::from_secs(request.deadline_seconds)
+                        .saturating_sub(task_started.unwrap_or_else(Instant::now).elapsed())
+                })
         } else {
-            lifecycle_started
-        };
-        let remaining = Duration::from_secs(request.deadline_seconds)
-            .saturating_sub(budget_started.elapsed())
-            .max(Duration::from_nanos(1));
+            Duration::from_secs(request.deadline_seconds)
+                .saturating_sub(lifecycle_started.elapsed())
+        }
+        .max(Duration::from_nanos(1));
         let terminal = store.await_terminal(review_id, remaining)?;
         if terminal.state == "interrupted_unknown" {
             return Err(task_error.unwrap_or_else(|| {

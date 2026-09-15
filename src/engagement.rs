@@ -675,6 +675,7 @@ impl EngagementStore {
             specialist_run_id,
             &objective_sha256,
             None,
+            None,
             idempotency_key,
             |reservation| {
                 let (outcome, value) = execute(reservation, objective);
@@ -726,11 +727,15 @@ impl EngagementStore {
         let prompt = task.prompt()?;
         let request_json = canonical_string(accepted_request)?;
         let request_sha256 = sha256_hex(request_json.as_bytes());
+        let deadline_seconds = accepted_request
+            .get("deadline_seconds")
+            .and_then(Value::as_u64);
         let result = self.assign(
             engagement_id,
             specialist_run_id,
             &request_sha256,
             Some(&request_json),
+            deadline_seconds,
             idempotency_key,
             |reservation| {
                 let (outcome, value) = match execute(reservation, task, &prompt) {
@@ -786,6 +791,7 @@ impl EngagementStore {
         specialist_run_id: Uuid,
         objective_sha256: &str,
         request_json: Option<&str>,
+        deadline_seconds: Option<u64>,
         idempotency_key: &str,
         execute: F,
     ) -> Result<TaskReservation, MachineError>
@@ -822,6 +828,7 @@ impl EngagementStore {
             return Ok(replay);
         }
         let task_id = Uuid::now_v7();
+        let created_at_ms = unix_time_ms()?;
         let reserved = TaskReservation {
             engagement_id,
             task_id,
@@ -853,14 +860,20 @@ impl EngagementStore {
                 .execute(
                     "INSERT INTO tasks(
                            task_id,engagement_id,specialist_run_id,
-                           objective_sha256,state,result_sha256,request_json
-                     ) VALUES(?1,?2,?3,?4,'accepted',NULL,?5)",
+                           objective_sha256,state,result_sha256,request_json,
+                           deadline_seconds,created_at_ms,updated_at_ms
+                     ) VALUES(?1,?2,?3,?4,'accepted',NULL,?5,?6,?7,?7)",
                     params![
                         task_id.to_string(),
                         engagement_id.to_string(),
                         specialist_run_id.to_string(),
                         objective_sha256,
-                        request_json
+                        request_json,
+                        deadline_seconds
+                            .map(i64::try_from)
+                            .transpose()
+                            .map_err(internal)?,
+                        created_at_ms
                     ],
                 )
                 .map_err(internal)?;
@@ -1077,6 +1090,31 @@ impl EngagementStore {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    pub fn task_deadline_remaining(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<Duration>, MachineError> {
+        let deadline: Option<(Option<i64>, Option<i64>)> = self
+            .connection
+            .query_row(
+                "SELECT created_at_ms,deadline_seconds FROM tasks \
+                 WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((Some(created_at_ms), Some(deadline_seconds))) = deadline else {
+            return Ok(None);
+        };
+        let deadline_ms = created_at_ms.saturating_add(deadline_seconds.saturating_mul(1_000));
+        let remaining_ms = deadline_ms.saturating_sub(unix_time_ms()?).max(0);
+        Ok(Some(Duration::from_millis(
+            u64::try_from(remaining_ms).map_err(internal)?,
+        )))
     }
 
     pub fn cancel(
@@ -5132,6 +5170,7 @@ mod tests {
                 hired.specialist_run_id,
                 &"c".repeat(64),
                 None,
+                None,
                 "task-key",
                 |reservation| {
                     assert_eq!(
@@ -5179,6 +5218,7 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
+                    None,
                     None,
                     &format!("task-{number}"),
                     |_| {
@@ -5622,6 +5662,7 @@ mod tests {
         let accepted = serde_json::json!({
             "schema":"dolgorae-specialist-review-request/v3",
             "operation":"review_target",
+            "deadline_seconds":60,
             "task":&task
         });
         let raw_report = serde_json::json!({
@@ -5687,6 +5728,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(replayed.task_id, reserved.task_id);
+        let (created_at_ms, deadline_seconds): (Option<i64>, Option<i64>) = store
+            .connection
+            .query_row(
+                "SELECT created_at_ms,deadline_seconds FROM tasks WHERE task_id=?1",
+                [reserved.task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(created_at_ms.is_some_and(|value| value > 0));
+        assert_eq!(deadline_seconds, Some(60));
+        store
+            .connection
+            .execute(
+                "UPDATE tasks SET created_at_ms=0 WHERE task_id=?1",
+                [reserved.task_id.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .task_deadline_remaining(opened.engagement_id, reserved.task_id)
+                .unwrap(),
+            Some(Duration::ZERO)
+        );
 
         let mut changed_task = task.clone();
         changed_task.contexts[0].content = "later mutable content".to_owned();
@@ -5957,6 +6021,7 @@ mod tests {
                 hired.specialist_run_id,
                 &"c".repeat(64),
                 None,
+                None,
                 "task",
                 |_| (RuntimeOutcome::Unknown, None),
             )
@@ -6021,6 +6086,7 @@ mod tests {
                 opened.engagement_id,
                 hired.specialist_run_id,
                 &"c".repeat(64),
+                None,
                 None,
                 "task",
                 |_| {
@@ -6196,6 +6262,7 @@ mod tests {
                         hired.specialist_run_id,
                         &"c".repeat(64),
                         None,
+                        None,
                         "task",
                         |_| {
                             executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -6217,6 +6284,7 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
+                    None,
                     None,
                     "task",
                     |_| {
@@ -6295,6 +6363,7 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
+                    None,
                     None,
                     "task",
                     |_| {
