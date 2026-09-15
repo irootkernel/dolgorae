@@ -27,9 +27,10 @@ development commits.
 
 - Bound transient Specialist result-capture recovery by the durable task
   deadline, restrict ledger fallback to fail-closed quiescent restart recovery,
-  preserve legacy review failure meanings, validate checked scoped-review
-  failures and v3 await/collect task results, and preserve structured-output
-  validation errors across exact retry.
+  anchor one-shot v3 waits to durable acceptance, preserve legacy review failure
+  meanings, validate checked scoped-review failures and v3 await/collect task
+  results, classify corrupt accepted v3 tasks as integrity failures, and preserve
+  structured-output validation errors across exact retry.
 - Set the Codex compatibility baseline to 0.153.4 while retaining completed-only forks.
 - Honor explicit Profile model and reasoning-effort settings for one-shot
   Specialist Review, rejecting unavailable selections without substitution.

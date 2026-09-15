@@ -2407,9 +2407,10 @@ fn structured_task_output(
                     }),
                 )
             })?;
-            return serde_json::to_value(validate_reviewer_output_v3(value, &task)?)
-                .map(Some)
-                .map_err(internal);
+            task.validate_review()
+                .map_err(|_| integrity("v3 task record no longer passes accepted validation"))?;
+            let output = validate_reviewer_output_v3(value, &task)?;
+            return serde_json::to_value(output).map(Some).map_err(internal);
         }
     }
     Ok(None)
@@ -3052,6 +3053,15 @@ mod tests {
                 "reason":"structured review output is not JSON",
                 "required_action":"none"
             })
+        );
+
+        let mut corrupted = accepted.clone();
+        corrupted["task"]["brief"] = json!("");
+        let integrity_error = structured_task_output(&corrupted, &response).unwrap_err();
+        assert_eq!(integrity_error.code, "INTERNAL_ERROR");
+        assert_eq!(
+            integrity_error.details["invariant"],
+            "v3 task record no longer passes accepted validation"
         );
     }
 
