@@ -122,6 +122,16 @@ followed by `add`; removal changes only future session selection. Existing
 Orchestrated Sessions retain their complete policy snapshots and remain
 recoverable without the source or registry entry.
 
+For a task-aware one-shot review, validate the v3 request against the checked
+protocol before piping it to `specialist review --request-stdin --format json`.
+Do not put workspace, Profile, credentials, or host paths in the request. Treat
+`REVIEW_OUTPUT_INVALID` as a terminal rejected report: inspect the accepted
+criteria and obtain a new explicitly authorized review rather than editing the
+artifact or interpreting empty findings as success. A timeout or disconnect
+does not authorize replay; preserve the returned engagement, capture, and
+settlement identities for diagnosis. Legacy v1/v2 output is not a
+completion-aware substitute.
+
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,
 configuration, immutable-target, one-shot review, and externally planned

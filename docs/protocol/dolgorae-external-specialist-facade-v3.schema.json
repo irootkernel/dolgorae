@@ -20,6 +20,93 @@
         "retryable": { "const": false }
       }
     },
+    "isolated_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "patch_base64"],
+      "properties": {
+        "format": { "const": "git_diff_binary_base64" },
+        "patch_base64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "x-maxUtf8Bytes": 22369624
+        }
+      }
+    },
+    "structured_task_result": {
+      "oneOf": [
+        { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["final_response", "isolated_change"],
+          "properties": {
+            "final_response": { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict" },
+            "isolated_change": { "$ref": "#/$defs/isolated_change" }
+          }
+        }
+      ]
+    },
+    "structured_task_summary": {
+      "allOf": [
+        { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/task_summary" },
+        {
+          "properties": {
+            "result": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/structured_task_result" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "structured_await_result": {
+      "description": "Strict homogeneous await result for pages containing only structured v3 tasks. Mixed-version pages validate each v3 task with structured_task_summary.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "tasks", "pending"],
+      "properties": {
+        "operation": { "const": "await_external_specialist_tasks_result" },
+        "tasks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/structured_task_summary" }
+        },
+        "pending": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" }
+        }
+      }
+    },
+    "structured_collect_result": {
+      "description": "Strict homogeneous collect result for pages containing only structured v3 tasks. Mixed-version pages validate each v3 task with structured_task_summary.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "tasks", "next_after_sequence"],
+      "properties": {
+        "operation": { "const": "collect_external_specialist_results_result" },
+        "tasks": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/structured_task_summary" },
+              {
+                "properties": {
+                  "state": { "enum": ["completed_not_delivered", "delivered"] },
+                  "result": { "$ref": "#/$defs/structured_task_result" }
+                }
+              }
+            ]
+          }
+        },
+        "next_after_sequence": { "type": "integer", "minimum": 0 }
+      }
+    },
     "context": {
       "type": "object",
       "additionalProperties": false,
@@ -121,5 +208,11 @@
     "every criterion source_context_id names a context accepted in that task",
     "structured_review_v3 accepts only change or completion purpose and completion has at least one criterion",
     "a structured assessment may cite context evidence only from that criterion's source_context_ids"
-  ]
+  ],
+  "x-validation": {
+    "structuredTaskSummary": "#/$defs/structured_task_summary",
+    "homogeneousAwaitResult": "#/$defs/structured_await_result",
+    "homogeneousCollectResult": "#/$defs/structured_collect_result",
+    "mixedPageRule": "For await or collect pages containing legacy and v3 tasks, validate the envelope with the facade root and every task accepted through facade v3 with expected_output structured_review_v3 with structuredTaskSummary. The homogeneous result schemas apply only when every task in the page is a structured v3 task."
+  }
 }

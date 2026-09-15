@@ -241,9 +241,23 @@ failure. Isolated terminal output captures a
 bounded binary Git patch into the result artifact before worktree cleanup.
 For `structured_review_v3`, terminal reconciliation parses the inline report,
 validates exact ordered criterion coverage and the evidence/status invariants,
-and commits only that normalized complete report to the artifact. Invalid
-output terminalizes the task with `REVIEW_OUTPUT_INVALID`; result collection
-cannot reinterpret or repair it.
+and commits that normalized complete report to the artifact. An isolated-write
+task stores the report as `final_response` beside its captured
+`isolated_change`. Invalid output terminalizes the task with
+`REVIEW_OUTPUT_INVALID`; result collection cannot reinterpret or repair it, and
+no isolated change is captured for that invalid report. Deterministic
+result-construction failures terminalize the task. A retryable
+result-construction failure, including transient patch-capture I/O, leaves the
+task active, withholds canonical Writer release when applicable, and is retried
+without blocking other task observation or collection only until the durable
+task deadline.
+Deadline exhaustion records terminal `expired` with `OPERATION_TIMEOUT` and no
+result artifact. Reconciliation restores the terminal Turn from the durable
+ledger only when the Worker reports `idle` or `paused` with no active or
+remembered terminal Turn; ordinary running polling does not replay the ledger.
+If that authoritative ledger cannot be verified, reconciliation fails closed
+for the engagement instead of treating corrupt or unreadable terminal evidence
+as absent and continuing with sibling results.
 Canonical Writer release is completed before terminal lifecycle cleanup can be
 reported. Because task and Writer commits cross authorities, every facade
 reconciliation also checks the actual Writer holder and releases it when that

@@ -980,7 +980,12 @@ pub fn error_status(error: &MachineError, method: &str) -> Status {
         ))
         .expect("checked gRPC mapping is valid")
     });
-    let code = if crate::machine::registered_errors().contains_key(&error.code) {
+    let private = mapping["private_machine_error_codes"]
+        .as_array()
+        .expect("checked private Machine error list")
+        .iter()
+        .any(|code| code.as_str() == Some(error.code.as_str()));
+    let code = if crate::machine::registered_errors().contains_key(&error.code) && !private {
         error.code.as_str()
     } else {
         "INTERNAL_ERROR"
@@ -1477,6 +1482,16 @@ mod tests {
     fn checked_error_tables_cover_every_public_method() {
         let descriptor =
             prost_types::FileDescriptorSet::decode(crate::protocol::PUBLIC_V1_DESCRIPTOR).unwrap();
+        let mapping: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-grpc-error-mapping-v1.json"
+        ))
+        .unwrap();
+        let private_codes = mapping["private_machine_error_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
         let mut methods = 0;
         for service in descriptor.file.iter().flat_map(|file| &file.service) {
             for method in &service.method {
@@ -1490,7 +1505,12 @@ mod tests {
                     let status =
                         error_status(&MachineError::new(code, "", false, json!({})), &name);
                     let detail = detail(&status);
-                    assert_eq!(detail.dolgorae_error_code, *code);
+                    let expected = if private_codes.contains(code.as_str()) {
+                        "INTERNAL_ERROR"
+                    } else {
+                        code
+                    };
+                    assert_eq!(detail.dolgorae_error_code, expected);
                     assert!(pb::RequiredClientAction::try_from(detail.action).is_ok());
                     assert!(pb::RetryClassification::try_from(detail.retry_classification).is_ok());
                     assert!(

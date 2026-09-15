@@ -1456,6 +1456,9 @@ The checked [version-output schema](../protocol/dolgorae-version-v1.schema.json)
 [Protobuf source](../protocol/dolgorae/public/v1/dolgorae.proto), and
 [descriptor manifest](../protocol/dolgorae-public-v1.descriptor.json)
 are normative.
+One-shot review codes listed by the checked gRPC map's
+`private_machine_error_codes` remain Machine-private and are reported as
+`INTERNAL_ERROR` on the public gRPC surface.
 
 Superseded machine, facade, and review-tool v1 contracts and examples remain
 frozen pre-cutover fixtures, not current producer payloads. In particular, the unversioned
@@ -3324,9 +3327,13 @@ least one criterion. Dolgorae accepts only a report that covers every criterion
 exactly once in input order with `met`, `unmet`, `unverified`, or
 `not_applicable`, bounded supporting evidence, evidence limits, and a consistent
 overall assessment. It stores the complete checked report in the immutable
-result artifact and returns the same report through collection. Missing,
+result artifact and returns the same normalized report through collection. For
+`isolated_write`, a valid report is the `final_response` member beside the
+captured `isolated_change`; the patch is not discarded merely because the task
+uses structured output. Missing,
 duplicate, unknown, reordered, malformed, non-inline, or oversized output is
-terminal `REVIEW_OUTPUT_INVALID`; Dolgorae never synthesizes a clean review.
+terminal `REVIEW_OUTPUT_INVALID`; Dolgorae never synthesizes a clean review and
+does not capture an isolated change for a report that failed validation.
 Context evidence for an assessment MUST name one of that criterion's declared
 `source_context_ids`; another accepted context is not interchangeable evidence.
 The assessment is Reviewer evidence, not Dolgorae approval of business
@@ -3334,10 +3341,19 @@ completion.
 Await and collect return the immutable terminal result with its result artifact
 reference. A collection transaction creates receipts and marks `delivered` only
 for the cursor page returned by that call; later pages remain
-`completed_not_delivered` until selected. Read-only and canonical-write results contain the FinalResponse
-projection; isolated-write results contain that projection together with the
-captured Git patch. Collection records a durable delivery receipt, and a later
+`completed_not_delivered` until selected. Except for `structured_review_v3`,
+read-only and canonical-write results contain the FinalResponse projection and
+isolated-write results contain that projection together with the captured Git
+patch. A structured v3 result instead uses the normalized report shapes defined
+above. Collection records a durable delivery receipt, and a later
 cursor replay returns the same result bytes without replaying the Turn.
+For a task accepted through facade v3 with
+`expected_output: structured_review_v3`, its await or collect task summary MUST
+validate against `#/$defs/structured_task_summary` in the facade v3 schema.
+The schema's `structured_await_result` and `structured_collect_result` pointers
+validate homogeneous pages containing only structured v3 tasks; a mixed-version
+page validates through the facade root and applies the task-summary pointer to
+each task known by the caller to have been accepted through v3.
 Facade v2 has no interaction-response operation and never transfers the member
 Controller credential. If a Specialist requests an interaction, reconciliation
 interrupts it and records `SPECIALIST_INTERACTION_UNSUPPORTED` after terminal
@@ -3368,8 +3384,26 @@ after terminal reconciliation, cancellation, or abort. Writes by external
 tools remain outside Dolgorae serialization.
 For `isolated_write`, terminal reconciliation captures the separate worktree as
 a bounded immutable binary Git patch inside the durable task result before the
-worktree may be removed. Result collection therefore preserves both the model's
-FinalResponse and the isolated change artifact across host or Dolgorae restart.
+worktree may be removed. For a valid structured v3 report, result collection
+therefore preserves both the normalized report and the isolated change artifact
+across host or Dolgorae restart; legacy tasks preserve the model's FinalResponse.
+A missing worktree or a patch above the 16 MiB bound is terminal
+`SPECIALIST_RESULT_INVALID`. A nonzero Git capture command is retryable only
+while the isolated worktree has an active `index.lock`; other nonzero Git
+capture exits are terminal `SPECIALIST_RESULT_INVALID`. A retryable
+result-construction failure leaves the task and any applicable canonical Writer
+active only while its total deadline
+budget remains. A fresh assigning call returns the accepted `running` task
+before terminal result construction. A transient patch-capture I/O failure
+first observed by get, await, or collect therefore leaves the task pending while
+later reconciliation retries from the durable terminal Turn. Await exposes
+`safe_error_code: OUTCOME_UNKNOWN` while that retryable result construction
+remains pending; collect omits the task from its page until the result is
+durable. If the deadline expires first, reconciliation records terminal `expired` with
+`OPERATION_TIMEOUT` and no result artifact.
+Quiescent restart recovery MUST fail closed when the authoritative Run ledger
+cannot be verified; it MUST NOT reinterpret corrupt or unreadable terminal
+evidence as an absent result merely to continue sibling task observation.
 Write access modes are distinct execution policies rather than an ordered
 capability lattice: an isolated-write task requires an `isolated_write` member,
 and a canonical-write task requires a `canonical_workspace_write` member.
@@ -3462,7 +3496,7 @@ multiline `brief`, inline contexts, ordered criteria, fixed
 `--revision`, and `--deadline-seconds`. Invalid UTF-8, NUL, unknown fields,
 unresolved context IDs, and bound violations fail before task dispatch.
 
-It uses
+The `--scope working-tree` and `--target-kind` carriers use
 [`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
 `--scope working-tree` retains the original working-tree request shape and
 rejects scoped-target-only options; its current result uses the v2 contract. A commit or range revision is bounded to 1024 UTF-8 bytes. The v2
@@ -3485,8 +3519,8 @@ requires `DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW=1`, an explicitly supplied
 executable to verify.
 
 The optional external stdio MCP adapter exposes exactly one corresponding
-model-facing tool named `dolgorae_review`. Both entry points use the checked
-review payloads in
+model-facing tool named `dolgorae_review`. The v1 and v2 CLI carriers and the
+MCP adapter use the checked review payloads in
 [`dolgorae-specialist-review-tool-v2.schema.json`](../protocol/dolgorae-specialist-review-tool-v2.schema.json).
 The CLI wraps a successful review result in the ordinary checked machine
 envelope with command tag `specialist.review`; an enabled MCP adapter returns
@@ -3589,7 +3623,9 @@ are `workspace`, `staged`, `dirty`, `head`, `commit`, and `range`:
 
 Task, Epic, and special-request identifiers MUST supply authority and review
 focus rather than another source kind. They MUST resolve to exactly one target
-kind before capture. Patch and stdin remain Mulgae-only extensions.
+kind before capture. Patch remains a Mulgae-only extension. Standard input
+carries only the checked v3 review request described by the One-Shot Specialist
+Review Adapter and is never a source scope.
 
 The Machine boundary MUST provide versioned `review-target.capture` and
 `review-target.settle` operations and a versioned Specialist Review target of

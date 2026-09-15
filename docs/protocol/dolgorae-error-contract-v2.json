@@ -12,7 +12,15 @@
     "ORCHESTRATION_SCHEMA_UNSUPPORTED": 4,
     "SPECIALIST_TASK_NOT_FOUND": 4,
     "SPECIALIST_RESULT_INVALID": 4,
+    "REVIEW_PROFILE_UNAVAILABLE": 4,
+    "REVIEWER_START_FAILED": 4,
+    "REVIEW_TASK_FAILED": 4,
+    "REVIEW_INTERRUPTED_UNKNOWN": 4,
+    "REVIEW_TIMEOUT": 4,
+    "REVIEW_CANCELLED": 4,
+    "REVIEW_WORKSPACE_MUTATION_DETECTED": 4,
     "REVIEW_OUTPUT_INVALID": 4,
+    "REVIEW_EXECUTABLE_DRIFT": 4,
     "SPECIALIST_WRITER_CONFLICT": 4,
     "ENGAGEMENT_STATE_CONFLICT": 4,
     "REVIEW_TARGET_CARRIER_INVALID": 4,
@@ -86,6 +94,15 @@
     },
     {
       "$ref": "#/$defs/engagement_error"
+    },
+    {
+      "$ref": "#/$defs/scoped_specialist_review_error"
+    },
+    {
+      "$ref": "#/$defs/review_profile_unavailable_error"
+    },
+    {
+      "$ref": "#/$defs/bare_specialist_review_error"
     },
     {
       "type": "object",
@@ -176,6 +193,163 @@
     }
   ],
   "$defs": {
+    "scoped_specialist_review_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "IDEMPOTENCY_CONFLICT",
+            "ENGAGEMENT_TIMEOUT",
+            "ENGAGEMENT_STATE_CONFLICT",
+            "REVIEW_PROFILE_UNAVAILABLE",
+            "REVIEWER_START_FAILED",
+            "REVIEW_TASK_FAILED",
+            "REVIEW_INTERRUPTED_UNKNOWN",
+            "REVIEW_TIMEOUT",
+            "REVIEW_CANCELLED",
+            "REVIEW_WORKSPACE_MUTATION_DETECTED",
+            "REVIEW_OUTPUT_INVALID",
+            "REVIEW_EXECUTABLE_DRIFT",
+            "REVIEW_TARGET_CARRIER_INVALID",
+            "REVIEW_TARGET_CONFLICT",
+            "REVIEW_TARGET_FOREIGN_OWNER",
+            "REVIEW_TARGET_GIT_FAILED",
+            "REVIEW_TARGET_IO_FAILURE",
+            "REVIEW_TARGET_LIFECYCLE_MISMATCH",
+            "REVIEW_TARGET_LIMIT_EXCEEDED",
+            "REVIEW_TARGET_MUTATED",
+            "REVIEW_TARGET_REVISION_INVALID",
+            "REVIEW_TARGET_SECRET_DETECTED",
+            "REVIEW_TARGET_SETTLEMENT_CONCURRENT",
+            "REVIEW_TARGET_SETTLEMENT_CONFLICT",
+            "REVIEW_TARGET_SOURCE_DRIFT",
+            "REVIEW_TARGET_STALE_REVISION",
+            "REVIEW_TARGET_STATE_INVALID",
+            "REVIEW_TARGET_TERMINAL_EVIDENCE_INVALID",
+            "REVIEW_TARGET_TIMEOUT",
+            "REVIEW_TARGET_UNSAFE_FILE",
+            "REVIEW_TARGET_UNSAFE_PATH"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/error_details"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/error_details"
+            }
+          ]
+        }
+      }
+    },
+    "review_profile_unavailable_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "REVIEW_PROFILE_UNAVAILABLE"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "profile"
+              ],
+              "properties": {
+                "profile": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_action"
+              ],
+              "properties": {
+                "required_action": {
+                  "enum": [
+                    "none",
+                    "remove_dolgorae_review_from_reviewer_profile"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "bare_specialist_review_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "REVIEWER_START_FAILED",
+            "REVIEW_TASK_FAILED",
+            "REVIEW_INTERRUPTED_UNKNOWN",
+            "REVIEW_TIMEOUT",
+            "REVIEW_CANCELLED",
+            "REVIEW_WORKSPACE_MUTATION_DETECTED",
+            "REVIEW_EXECUTABLE_DRIFT"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required_action"
+          ],
+          "properties": {
+            "required_action": {
+              "const": "none"
+            }
+          }
+        }
+      }
+    },
     "engagement_error": {
       "type": "object",
       "additionalProperties": false,

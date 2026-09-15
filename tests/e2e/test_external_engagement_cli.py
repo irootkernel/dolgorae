@@ -25,6 +25,23 @@ FACADE_SCHEMA = validator(
 FACADE_V3_SCHEMA = validator(
     PROTOCOL_ROOT, "dolgorae-external-specialist-facade-v3.schema.json"
 )
+FACADE_V3_TASK_SUMMARY_SCHEMA = validator(
+    PROTOCOL_ROOT,
+    "dolgorae-external-specialist-facade-v3.schema.json",
+    "#/$defs/structured_task_summary",
+)
+FACADE_V3_HOMOGENEOUS_RESULT_SCHEMAS = {
+    "await_external_specialist_tasks_result": validator(
+        PROTOCOL_ROOT,
+        "dolgorae-external-specialist-facade-v3.schema.json",
+        "#/$defs/structured_await_result",
+    ),
+    "collect_external_specialist_results_result": validator(
+        PROTOCOL_ROOT,
+        "dolgorae-external-specialist-facade-v3.schema.json",
+        "#/$defs/structured_collect_result",
+    ),
+}
 MACHINE_SCHEMA = validator(PROTOCOL_ROOT, "dolgorae-machine-v2.schema.json")
 
 
@@ -58,6 +75,7 @@ def call(
     environment_overrides: dict[str, str] | None = None,
     invalid_request: bool = False,
     v3_contract: bool = False,
+    structured_task_ids: set[str] | None = None,
 ) -> dict[str, object]:
     facade_schema = (
         FACADE_V3_SCHEMA
@@ -129,6 +147,30 @@ def call(
         raise AssertionError("engagement response disclosed a credential carrier path")
     result = envelope["data"]
     assert_valid(result, facade_schema, f"{request.get('operation')} result")
+    if structured_task_ids is not None:
+        tasks = {
+            str(task["task_id"]): task
+            for task in result.get("tasks", [])
+        }
+        missing = structured_task_ids - tasks.keys()
+        if missing:
+            raise AssertionError(
+                f"structured v3 result omitted requested tasks: {sorted(missing)!r}"
+            )
+        for task_id in sorted(structured_task_ids):
+            assert_valid(
+                tasks[task_id],
+                FACADE_V3_TASK_SUMMARY_SCHEMA,
+                f"structured v3 task {task_id}",
+            )
+        if tasks.keys() == structured_task_ids:
+            operation = str(result.get("operation"))
+            page_schema = FACADE_V3_HOMOGENEOUS_RESULT_SCHEMAS.get(operation)
+            if page_schema is None:
+                raise AssertionError(
+                    f"missing homogeneous v3 result schema for {operation}"
+                )
+            assert_valid(result, page_schema, f"homogeneous v3 {operation}")
     return result
 
 
@@ -299,6 +341,9 @@ def validate(binary: pathlib.Path) -> None:
                         {"method": "thread/read", "respond": {"error": {"code": -32600, "message": "thread not found"}}},
                         {"method": "thread/start", "respond": {"result": {"thread": {"id": "thread-isolated"}}}},
                         {"method": "turn/start", "respond": {"result": {"turn": {"id": "turn-isolated"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-isolated", "turn": {"id": "turn-isolated", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-isolated", "turnId": "turn-isolated", "status": "completed", "text": "isolated reusable answer"}]}}}]},
+                        {"method": "turn/start", "occurrence": 2, "respond": {"result": {"turn": {"id": "turn-isolated-v3"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-isolated", "turn": {"id": "turn-isolated-v3", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-isolated", "turnId": "turn-isolated-v3", "status": "completed", "text": json.dumps({"summary": "structured isolated review", "findings": [], "criterion_assessments": [{"criterion_id": "C-isolated", "status": "met", "explanation": "the isolated candidate was checked", "evidence": [{"basis": "candidate", "description": "isolated worktree evidence", "path": "isolated.txt", "line_start": 1, "line_end": 1, "context_id": None}], "remaining_gap": None}], "evidence_limits": [], "overall_assessment": "requirements_met"}, separators=(",", ":"))}]}}}]},
+                        {"method": "turn/start", "occurrence": 3, "respond": {"result": {"turn": {"id": "turn-isolated-transient"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-isolated", "turn": {"id": "turn-isolated-transient", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-isolated", "turnId": "turn-isolated-transient", "status": "completed", "text": json.dumps({"summary": "transient capture recovered", "findings": [], "criterion_assessments": [{"criterion_id": "C-transient", "status": "met", "explanation": "the durable terminal was reconciled", "evidence": [{"basis": "candidate", "description": "isolated worktree evidence", "path": "isolated.txt", "line_start": 1, "line_end": 1, "context_id": None}], "remaining_gap": None}], "evidence_limits": [], "overall_assessment": "requirements_met"}, separators=(",", ":"))}]}}}]},
+                        {"method": "turn/start", "occurrence": 4, "respond": {"result": {"turn": {"id": "turn-isolated-expired"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-isolated", "turn": {"id": "turn-isolated-expired", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-isolated", "turnId": "turn-isolated-expired", "status": "completed", "text": json.dumps({"summary": "capture deadline case", "findings": [], "criterion_assessments": [{"criterion_id": "C-expired", "status": "met", "explanation": "the candidate was checked", "evidence": [{"basis": "candidate", "description": "isolated worktree evidence", "path": "isolated.txt", "line_start": 1, "line_end": 1, "context_id": None}], "remaining_gap": None}], "evidence_limits": [], "overall_assessment": "requirements_met"}, separators=(",", ":"))}]}}}]},
                         {"method": "thread/archive", "respond": {"result": {"thread": {"id": "thread-isolated", "archived": True}}}},
                     ],
                 },
@@ -637,7 +682,7 @@ def validate(binary: pathlib.Path) -> None:
                 "task_ids": [v3_task_id],
                 "return_when": "all",
                 "transport_wait_seconds": 10,
-            })
+            }, structured_task_ids={v3_task_id})
             if v3_waited["tasks"][0]["state"] != "completed_not_delivered":
                 raise AssertionError(f"v3 task did not become collectable: {v3_waited!r}")
             v3_collected = call(binary, home, workspace, owner, {
@@ -645,7 +690,7 @@ def validate(binary: pathlib.Path) -> None:
                 "engagement_id": engagement_id,
                 "after_sequence": cursor,
                 "limit": 8,
-            })
+            }, structured_task_ids={v3_task_id})
             v3_result = v3_collected["tasks"][0]["result"]
             if (
                 v3_result["overall_assessment"] != "requirements_met"
@@ -668,16 +713,48 @@ def validate(binary: pathlib.Path) -> None:
                     "v3 durable task did not preserve the complete accepted request"
                 )
             transcript_text = reusable_transcript.read_text(encoding="utf-8")
-            if any(
-                marker not in transcript_text
-                for marker in (
-                    "재사용 Specialist로 완료를 검토하세요.",
-                    "C-reusable",
-                    "$HOME",
-                )
-            ):
+            task_markers = (
+                "재사용 Specialist로 완료를 검토하세요.",
+                "C-reusable",
+                "$HOME",
+            )
+            if any(marker not in transcript_text for marker in task_markers):
                 raise AssertionError(
                     "v3 reusable task was not delivered as model-readable data"
+                )
+            reusable_messages = [
+                json.loads(line)
+                for line in transcript_text.splitlines()
+                if line.strip()
+            ]
+            thread_starts = [
+                message
+                for message in reusable_messages
+                if message.get("method") == "thread/start"
+            ]
+            if not thread_starts:
+                raise AssertionError("v3 reusable task did not start a thread")
+            developer_instructions = [
+                message["params"]["developerInstructions"]
+                for message in thread_starts
+            ]
+            role_instructions = hire_request["agent_configuration"]["instructions"]
+            if any(
+                not isinstance(instructions, str)
+                or not instructions
+                or role_instructions not in instructions
+                for instructions in developer_instructions
+            ):
+                raise AssertionError(
+                    "v3 reusable Role was absent from developerInstructions"
+                )
+            if any(
+                marker in instructions
+                for instructions in developer_instructions
+                for marker in task_markers
+            ):
+                raise AssertionError(
+                    "v3 reusable task bytes leaked into developerInstructions"
                 )
 
             invalid_v3 = json.loads(json.dumps(v3_request))
@@ -790,6 +867,13 @@ def validate(binary: pathlib.Path) -> None:
                 isolated_child,
             )
             isolated_run_id = str(isolated_hired["specialist_run_id"])
+            isolated_root = (
+                state_root
+                / "orchestration"
+                / "isolated"
+                / engagement_id
+                / isolated_run_id
+            )
             isolated_request = task_request(engagement_id, isolated_run_id, 100)
             isolated_request["execution_intent"] = "isolated_write"
             isolated_assigned = call(binary, home, workspace, owner, isolated_request)
@@ -814,6 +898,293 @@ def validate(binary: pathlib.Path) -> None:
                 raise AssertionError(f"isolated result used the wrong format: {isolated_result!r}")
             base64.b64decode(isolated_result["patch_base64"], validate=True)
             cursor = int(isolated_collected["next_after_sequence"])
+
+            isolated_v3_request = {
+                "schema": "dolgorae-external-specialist-facade/v3",
+                "operation": "assign_external_specialist_task",
+                "engagement_id": engagement_id,
+                "specialist_run_id": isolated_run_id,
+                "external_request_ref": {
+                    "namespace": "dolgorae.e2e",
+                    "kind": "completion-review",
+                    "id": "v3-isolated",
+                },
+                "task": {
+                    "purpose": "completion",
+                    "brief": "Review the isolated result.",
+                    "contexts": [],
+                    "criteria": [{
+                        "id": "C-isolated",
+                        "statement": "The isolated candidate was checked.",
+                        "source_context_ids": [],
+                    }],
+                    "expected_output": "structured_review_v3",
+                },
+                "execution_intent": "isolated_write",
+                "deadline_seconds": 60,
+                "idempotency_key": "task-v3-isolated",
+            }
+            isolated_v3_assigned = call(
+                binary, home, workspace, owner, isolated_v3_request
+            )
+            isolated_v3_task_id = str(isolated_v3_assigned["task_id"])
+            isolated_v3_waited = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": engagement_id,
+                    "task_ids": [isolated_v3_task_id],
+                    "return_when": "all",
+                    "transport_wait_seconds": 10,
+                },
+                v3_contract=True,
+                structured_task_ids={isolated_v3_task_id},
+            )
+            if isolated_v3_waited["tasks"][0]["state"] != "completed_not_delivered":
+                raise AssertionError(
+                    f"isolated v3 task did not complete: {isolated_v3_waited!r}"
+                )
+            isolated_v3_cursor = cursor
+            isolated_v3_collected = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "collect_external_specialist_results",
+                    "engagement_id": engagement_id,
+                    "after_sequence": isolated_v3_cursor,
+                    "limit": 8,
+                },
+                v3_contract=True,
+                structured_task_ids={isolated_v3_task_id},
+            )
+            if (
+                len(isolated_v3_collected["tasks"]) != 1
+                or isolated_v3_collected["tasks"][0]["task_id"]
+                != isolated_v3_task_id
+            ):
+                raise AssertionError(
+                    f"isolated v3 collection selected the wrong page: {isolated_v3_collected!r}"
+                )
+            isolated_v3_summary = isolated_v3_collected["tasks"][0]
+            isolated_v3_result = isolated_v3_summary["result"]
+            if isolated_v3_result["final_response"]["overall_assessment"] != "requirements_met":
+                raise AssertionError(
+                    f"isolated v3 report was not normalized: {isolated_v3_result!r}"
+                )
+            isolated_v3_patch = isolated_v3_result["isolated_change"]
+            if isolated_v3_patch["format"] != "git_diff_binary_base64":
+                raise AssertionError(
+                    f"isolated v3 result used the wrong format: {isolated_v3_result!r}"
+                )
+            base64.b64decode(isolated_v3_patch["patch_base64"], validate=True)
+            isolated_v3_redelivered = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "collect_external_specialist_results",
+                    "engagement_id": engagement_id,
+                    "after_sequence": isolated_v3_cursor,
+                    "limit": 8,
+                },
+                v3_contract=True,
+                structured_task_ids={isolated_v3_task_id},
+            )
+            if isolated_v3_redelivered != isolated_v3_collected:
+                raise AssertionError(
+                    "isolated v3 redelivery changed the durable result or cursor"
+                )
+            cursor = int(isolated_v3_collected["next_after_sequence"])
+
+            isolated_git_dir = pathlib.Path(
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(isolated_root),
+                        "rev-parse",
+                        "--absolute-git-dir",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            isolated_index_lock = isolated_git_dir / "index.lock"
+            isolated_index_lock.write_text("capture blocked\n", encoding="utf-8")
+            transient_request = {
+                "schema": "dolgorae-external-specialist-facade/v3",
+                "operation": "assign_external_specialist_task",
+                "engagement_id": engagement_id,
+                "specialist_run_id": isolated_run_id,
+                "external_request_ref": {
+                    "namespace": "dolgorae.e2e",
+                    "kind": "completion-review",
+                    "id": "v3-isolated-transient",
+                },
+                "task": {
+                    "purpose": "completion",
+                    "brief": "Exercise transient isolated patch capture.",
+                    "contexts": [],
+                    "criteria": [{
+                        "id": "C-transient",
+                        "statement": "The durable terminal is reconciled after capture recovers.",
+                        "source_context_ids": [],
+                    }],
+                    "expected_output": "structured_review_v3",
+                },
+                "execution_intent": "isolated_write",
+                "deadline_seconds": 60,
+                "idempotency_key": "task-v3-isolated-transient",
+            }
+            transient_assigned = call(
+                binary, home, workspace, owner, transient_request
+            )
+            transient_task_id = str(transient_assigned["task_id"])
+            if transient_assigned["state"] != "running":
+                raise AssertionError(
+                    "transient capture did not leave the accepted task running: "
+                    f"{transient_assigned!r}"
+                )
+            transient_pending = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": engagement_id,
+                    "task_ids": [transient_task_id],
+                    "return_when": "all",
+                    "transport_wait_seconds": 1,
+                },
+                v3_contract=True,
+                structured_task_ids={transient_task_id},
+            )
+            pending_summary = transient_pending["tasks"][0]
+            if (
+                pending_summary["state"] != "running"
+                or pending_summary["safe_error_code"] != "OUTCOME_UNKNOWN"
+                or transient_pending["pending"] != [transient_task_id]
+            ):
+                raise AssertionError(
+                    "transient capture cause was not preserved while pending: "
+                    f"{transient_pending!r}"
+                )
+            isolated_index_lock.unlink()
+            transient_waited = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": engagement_id,
+                    "task_ids": [transient_task_id],
+                    "return_when": "all",
+                    "transport_wait_seconds": 10,
+                },
+                v3_contract=True,
+                structured_task_ids={transient_task_id},
+            )
+            if (
+                transient_waited["tasks"][0]["state"] != "completed_not_delivered"
+                or transient_waited["tasks"][0]["safe_error_code"] is not None
+            ):
+                raise AssertionError(
+                    f"transient capture did not recover: {transient_waited!r}"
+                )
+            transient_collected = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "collect_external_specialist_results",
+                    "engagement_id": engagement_id,
+                    "after_sequence": cursor,
+                    "limit": 8,
+                },
+                v3_contract=True,
+                structured_task_ids={transient_task_id},
+            )
+            if (
+                len(transient_collected["tasks"]) != 1
+                or transient_collected["tasks"][0]["task_id"] != transient_task_id
+                or transient_collected["tasks"][0]["state"] != "delivered"
+                or transient_collected["tasks"][0]["safe_error_code"] is not None
+            ):
+                raise AssertionError(
+                    f"recovered transient result was not delivered: {transient_collected!r}"
+                )
+            cursor = int(transient_collected["next_after_sequence"])
+
+            isolated_index_lock.write_text("capture blocked\n", encoding="utf-8")
+            expired_request = {
+                "schema": "dolgorae-external-specialist-facade/v3",
+                "operation": "assign_external_specialist_task",
+                "engagement_id": engagement_id,
+                "specialist_run_id": isolated_run_id,
+                "external_request_ref": {
+                    "namespace": "dolgorae.e2e",
+                    "kind": "completion-review",
+                    "id": "v3-isolated-expired",
+                },
+                "task": {
+                    "purpose": "completion",
+                    "brief": "Exercise isolated patch capture deadline expiry.",
+                    "contexts": [],
+                    "criteria": [{
+                        "id": "C-expired",
+                        "statement": "Deadline expiry is reported without a partial result.",
+                        "source_context_ids": [],
+                    }],
+                    "expected_output": "structured_review_v3",
+                },
+                "execution_intent": "isolated_write",
+                "deadline_seconds": 1,
+                "idempotency_key": "task-v3-isolated-expired",
+            }
+            expired_assigned = call(binary, home, workspace, owner, expired_request)
+            expired_task_id = str(expired_assigned["task_id"])
+            if expired_assigned["state"] not in {"running", "expired"}:
+                raise AssertionError(
+                    f"deadline task used an invalid assignment state: {expired_assigned!r}"
+                )
+            if expired_assigned["state"] == "running":
+                time.sleep(1.1)
+            expired_waited = call(
+                binary,
+                home,
+                workspace,
+                owner,
+                {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": engagement_id,
+                    "task_ids": [expired_task_id],
+                    "return_when": "all",
+                    "transport_wait_seconds": 10,
+                },
+                v3_contract=True,
+                structured_task_ids={expired_task_id},
+            )
+            isolated_index_lock.unlink()
+            expired_summary = expired_waited["tasks"][0]
+            if (
+                expired_summary["state"] != "expired"
+                or expired_summary["safe_error_code"] != "OPERATION_TIMEOUT"
+                or expired_summary["result"] is not None
+                or expired_summary["result_artifact_ref"] is not None
+            ):
+                raise AssertionError(
+                    f"capture deadline did not fail closed: {expired_waited!r}"
+                )
             isolated_release = call(binary, home, workspace, owner, {
                 "operation": "release_external_specialist",
                 "engagement_id": engagement_id,
@@ -823,13 +1194,6 @@ def validate(binary: pathlib.Path) -> None:
             })
             if isolated_release["state"] != "released":
                 raise AssertionError(f"isolated member was not released: {isolated_release!r}")
-            isolated_root = (
-                state_root
-                / "orchestration"
-                / "isolated"
-                / engagement_id
-                / isolated_run_id
-            )
             if isolated_root.exists():
                 raise AssertionError("isolated worktree survived member release")
             if call(binary, home, workspace, owner, {

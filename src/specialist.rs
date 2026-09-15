@@ -231,12 +231,7 @@ impl ReviewerRuntimePlan {
 
 pub fn validate_reviewer_output(value: Value) -> Result<ReviewerOutput, MachineError> {
     let mut output: ReviewerOutput = serde_json::from_value(value).map_err(|_| {
-        MachineError::new(
-            "REVIEW_OUTPUT_INVALID",
-            "Reviewer output does not match the checked structured finding shape",
-            false,
-            serde_json::json!({"required_action":"none"}),
-        )
+        output_invalid("output does not match the checked structured finding shape")
     })?;
     if output.summary.is_empty()
         || output.summary.len() > MAX_SUMMARY_BYTES
@@ -249,6 +244,31 @@ pub fn validate_reviewer_output(value: Value) -> Result<ReviewerOutput, MachineE
     }
     output.findings.sort_by_key(|finding| finding.severity);
     Ok(output)
+}
+
+pub(crate) fn reviewer_turn_output_value(turn: &Value) -> Result<Value, MachineError> {
+    let status = turn.get("status").and_then(Value::as_str);
+    if matches!(status, Some("running" | "accepted")) {
+        return Err(MachineError::new(
+            "REVIEW_TIMEOUT",
+            "Reviewer did not finish before the bounded deadline",
+            false,
+            serde_json::json!({"required_action":"none"}),
+        ));
+    }
+    if status != Some("completed") {
+        return Err(MachineError::new(
+            "REVIEW_TASK_FAILED",
+            "Reviewer Turn was not completed",
+            false,
+            serde_json::json!({"required_action":"none"}),
+        ));
+    }
+    let text = turn
+        .pointer("/final_response/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| output_invalid("Reviewer returned no inline JSON"))?;
+    serde_json::from_str(text).map_err(|_| output_invalid("Reviewer output is not JSON"))
 }
 
 pub fn validate_reviewer_output_v3(
@@ -500,7 +520,7 @@ fn invalid(argument: &str, reason: &str) -> MachineError {
     MachineError::invalid_argument(argument, reason)
 }
 
-fn output_invalid(reason: &str) -> MachineError {
+pub(crate) fn output_invalid(reason: &str) -> MachineError {
     MachineError::new(
         "REVIEW_OUTPUT_INVALID",
         "Reviewer output is invalid",

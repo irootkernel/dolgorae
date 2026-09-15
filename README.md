@@ -83,6 +83,31 @@ The transport-independent Primary orchestration service and durable Brokered
 Hierarchy core are available to internal adapters; a live model-facing Primary
 tool transport is a later release boundary.
 
+## Task-aware completion review
+
+Specialist Review v3 keeps the immutable Reviewer Role separate from the work
+being reviewed. Supply the checked request on non-TTY standard input; workspace
+and Profile selection remain trusted CLI arguments:
+
+```sh
+dolgorae specialist review \
+  --workspace /absolute/project \
+  --profile reviewer \
+  --request-stdin \
+  --format json < review-request-v3.json
+```
+
+The request names the target kind that Dolgorae captures immutably and includes
+`purpose` (`change` or `completion`), an exact multiline brief, inline contexts
+with provenance, ordered criteria, fixed `structured_review_v3` output, and a
+deadline. Completion review requires at least one criterion. The result reports
+each criterion exactly once with
+evidence and remaining gaps; its overall assessment is Reviewer evidence, not
+automatic business approval. See the checked
+[request example](docs/protocol/examples/specialist-review-v3-request.valid.json)
+and [protocol](docs/protocol/dolgorae-specialist-review-tool-v3.schema.json).
+Legacy v1/v2 review commands and results retain their existing meaning.
+
 ## Agent skill
 
 The source tree distributes the optional complete

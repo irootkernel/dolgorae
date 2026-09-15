@@ -1,0 +1,9 @@
+{
+  "code": "REVIEW_TASK_FAILED",
+  "message": "Reviewer task failed before producing a checked result",
+  "retryable": false,
+  "details": {
+    "required_action": "none",
+    "profile": "irrelevant"
+  }
+}

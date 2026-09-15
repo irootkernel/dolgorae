@@ -1,0 +1,20 @@
+{
+  "code": "REVIEW_OUTPUT_INVALID",
+  "message": "Reviewer output is invalid",
+  "retryable": false,
+  "details": {
+    "schema": "dolgorae-specialist-review-error-details/v3",
+    "target": {
+      "kind": "dirty"
+    },
+    "capture_ref": "018f0000-0000-7000-8000-000000000107",
+    "engagement_id": "018f0000-0000-7000-8000-000000000108",
+    "engagement_state": "failed",
+    "settlement_state": "settled",
+    "required_action": "none",
+    "cause_details": {
+      "reason": "criterion assessments must cover the accepted criteria once in input order",
+      "required_action": "none"
+    }
+  }
+}

@@ -29,6 +29,30 @@ def machine(binary: pathlib.Path, home: pathlib.Path, arguments: list[str]) -> t
     return completed.returncode, json.loads(completed.stdout)
 
 
+def machine_input(
+    binary: pathlib.Path,
+    home: pathlib.Path,
+    arguments: list[str],
+    request: dict[str, object],
+    environment_overrides: dict[str, str] | None = None,
+) -> tuple[int, dict[str, object]]:
+    environment = os.environ.copy()
+    environment["HOME"] = str(home)
+    if environment_overrides:
+        environment.update(environment_overrides)
+    completed = subprocess.run(
+        [str(binary), *arguments],
+        input=json.dumps(request, separators=(",", ":")),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    if completed.stderr:
+        raise AssertionError(f"unexpected stderr for {arguments}: {completed.stderr!r}")
+    return completed.returncode, json.loads(completed.stdout)
+
+
 def start(binary: pathlib.Path, home: pathlib.Path, arguments: list[str]) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
@@ -40,6 +64,30 @@ def start(binary: pathlib.Path, home: pathlib.Path, arguments: list[str]) -> sub
         text=True,
         env=environment,
     )
+
+
+def start_input(
+    binary: pathlib.Path,
+    home: pathlib.Path,
+    arguments: list[str],
+    request: dict[str, object],
+) -> subprocess.Popen[str]:
+    environment = os.environ.copy()
+    environment["HOME"] = str(home)
+    process = subprocess.Popen(
+        [str(binary), *arguments],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    if process.stdin is None:
+        raise AssertionError("review stdin pipe was not created")
+    process.stdin.write(json.dumps(request, separators=(",", ":")))
+    process.stdin.close()
+    process.stdin = None
+    return process
 
 
 def git(repository: pathlib.Path, *arguments: str) -> str:
@@ -64,8 +112,10 @@ def wait_for(path_root: pathlib.Path, predicate, process: subprocess.Popen[str])
     raise AssertionError("timed out waiting for the review fault-injection boundary")
 
 
-def finish(process: subprocess.Popen[str]) -> tuple[int, dict[str, object]]:
-    stdout, stderr = process.communicate(timeout=30)
+def finish(
+    process: subprocess.Popen[str], timeout: int = 30
+) -> tuple[int, dict[str, object]]:
+    stdout, stderr = process.communicate(timeout=timeout)
     if stderr:
         raise AssertionError(f"unexpected review stderr: {stderr!r}")
     return process.returncode, json.loads(stdout)
@@ -79,19 +129,39 @@ def add_profile(
     schema_source: pathlib.Path,
     name: str,
     scenario_name: str,
+    terminal_status: str | None = None,
+    recursive_adapter: bool = False,
 ) -> pathlib.Path:
     codex_home = root / f"codex-home-{name}"
     bin_root = root / f"bin-{name}"
     codex_home.mkdir(mode=0o700)
     bin_root.mkdir(mode=0o700)
+    if recursive_adapter:
+        config = codex_home / "config.toml"
+        config.write_text(
+            '[mcp_servers.dolgorae_review]\ncommand = "dolgorae"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
     codex = bin_root / "codex"
     scenario_source = native_codex.scenario_path(scenario_name)
     scenario = root / f"scenario-{name}.json"
-    scenario.write_text(
+    scenario_value = json.loads(
         scenario_source.read_text(encoding="utf-8").replace(
             "thread-timeout", f"thread-{name}"
-        ),
-        encoding="utf-8",
+        )
+    )
+    if terminal_status is not None:
+        turn_start = next(
+            step
+            for step in scenario_value["steps"]
+            if step.get("method") == "turn/start"
+        )
+        terminal = turn_start["emit"][0]["params"]["turn"]
+        terminal["status"] = terminal_status
+        terminal["items"] = []
+    scenario.write_text(
+        json.dumps(scenario_value, separators=(",", ":")), encoding="utf-8"
     )
     native_codex.create_native_codex(
         codex,
@@ -123,15 +193,35 @@ def review_args(workspace: pathlib.Path, profile: str, deadline: int = 600) -> l
     ]
 
 
+def v3_review_request() -> dict[str, object]:
+    return {
+        "schema": "dolgorae-specialist-review-request/v3",
+        "operation": "review_target",
+        "target": {"kind": "workspace"},
+        "purpose": "completion",
+        "brief": "Check the captured candidate.",
+        "contexts": [],
+        "criteria": [{
+            "id": "C-failure-envelope",
+            "statement": "The candidate is reviewed.",
+            "source_context_ids": [],
+        }],
+        "expected_output": "structured_review_v3",
+        "deadline_seconds": 60,
+    }
+
+
 def assert_failure(
     envelope: dict[str, object],
     code: str,
     settlement: str,
     details_schema,
+    machine_schema,
     *,
     engagement_state: str | None = None,
     required_action: str | None = None,
 ) -> str:
+    assert_valid(envelope, machine_schema, f"{code} Machine envelope")
     error = envelope["error"]  # type: ignore[index]
     if error["code"] != code:  # type: ignore[index]
         raise AssertionError(f"expected {code}, got {error!r}")
@@ -168,6 +258,12 @@ def terminate_owned(root: pathlib.Path) -> None:
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     details_schema = validator(protocol_root, "dolgorae-specialist-review-tool-v2.schema.json")
+    details_schema_v3 = validator(
+        protocol_root,
+        "dolgorae-specialist-review-tool-v3.schema.json",
+        "#/$defs/error_details",
+    )
+    machine_schema = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     schema_source = native_codex.installed_codex()
     with tempfile.TemporaryDirectory(prefix="dolgorae-task015-failures-") as temporary:
         root = pathlib.Path(temporary)
@@ -199,9 +295,132 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             returncode, envelope = finish(drift)
             if returncode == 0:
                 raise AssertionError("executable drift unexpectedly succeeded")
-            capture_ref = assert_failure(envelope, "REVIEW_EXECUTABLE_DRIFT", "settled", details_schema)
+            capture_ref = assert_failure(
+                envelope,
+                "REVIEW_EXECUTABLE_DRIFT",
+                "settled",
+                details_schema,
+                machine_schema,
+            )
             if (targets / capture_ref / "source").exists():
                 raise AssertionError("authoritative pre-launch drift retained source bytes")
+            drift_codex.unlink()
+            old_codex.rename(drift_codex)
+
+            add_profile(
+                binary,
+                home,
+                workspace,
+                root,
+                schema_source,
+                "recursive-reviewer",
+                "scoped_specialist_review.json",
+                recursive_adapter=True,
+            )
+
+            preflight_args = [
+                "specialist", "review", "--workspace", str(workspace),
+                "--profile", "recursive-reviewer", "--request-stdin", "--format", "json",
+            ]
+            code, envelope = machine_input(
+                binary,
+                home,
+                preflight_args,
+                v3_review_request(),
+            )
+            if code == 0:
+                raise AssertionError("recursive Reviewer adapter unexpectedly succeeded")
+            assert_valid(envelope, machine_schema, "bare v3 preflight failure")
+            preflight_error = envelope["error"]
+            if (
+                preflight_error["code"] != "REVIEW_PROFILE_UNAVAILABLE"
+                or preflight_error["details"]
+                != {"required_action": "remove_dolgorae_review_from_reviewer_profile"}
+            ):
+                raise AssertionError(
+                    f"preflight Reviewer failure used the wrong envelope: {envelope!r}"
+                )
+
+            add_profile(
+                binary,
+                home,
+                workspace,
+                root,
+                schema_source,
+                "failed-v2-reviewer",
+                "scoped_specialist_review.json",
+                terminal_status="failed",
+            )
+            code, envelope = machine(
+                binary, home, review_args(workspace, "failed-v2-reviewer")
+            )
+            if code == 0:
+                raise AssertionError("failed v2 Reviewer Turn unexpectedly succeeded")
+            assert_failure(
+                envelope,
+                "REVIEW_TASK_FAILED",
+                "settled",
+                details_schema,
+                machine_schema,
+            )
+
+            add_profile(
+                binary,
+                home,
+                workspace,
+                root,
+                schema_source,
+                "failed-v1-reviewer",
+                "scoped_specialist_review.json",
+                terminal_status="failed",
+            )
+            code, envelope = machine(
+                binary,
+                home,
+                [
+                    "specialist", "review", "--workspace", str(workspace),
+                    "--profile", "failed-v1-reviewer", "--scope", "working-tree",
+                    "--format", "json",
+                ],
+            )
+            if code != 7:
+                raise AssertionError(
+                    f"legacy failed Reviewer Turn changed exit class: {code} {envelope!r}"
+                )
+            assert_valid(envelope, machine_schema, "legacy Reviewer failure")
+            if envelope["error"]["code"] != "TURN_FAILED":
+                raise AssertionError(
+                    f"legacy Reviewer failure changed error meaning: {envelope!r}"
+                )
+
+            add_profile(
+                binary,
+                home,
+                workspace,
+                root,
+                schema_source,
+                "failed-v3-reviewer",
+                "scoped_specialist_review.json",
+                terminal_status="failed",
+            )
+            code, envelope = machine_input(
+                binary,
+                home,
+                [
+                    "specialist", "review", "--workspace", str(workspace),
+                    "--profile", "failed-v3-reviewer", "--request-stdin", "--format", "json",
+                ],
+                v3_review_request(),
+            )
+            if code == 0:
+                raise AssertionError("failed v3 Reviewer Turn unexpectedly succeeded")
+            assert_failure(
+                envelope,
+                "REVIEW_TASK_FAILED",
+                "settled",
+                details_schema_v3,
+                machine_schema,
+            )
 
             slow_tree = workspace / "post-drift-window"
             slow_tree.mkdir()
@@ -275,7 +494,11 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             if returncode == 0:
                 raise AssertionError("post-turn executable drift unexpectedly succeeded")
             capture_ref = assert_failure(
-                envelope, "REVIEW_EXECUTABLE_DRIFT", "settled", details_schema
+                envelope,
+                "REVIEW_EXECUTABLE_DRIFT",
+                "settled",
+                details_schema,
+                machine_schema,
             )
             if (targets / capture_ref / "source").exists():
                 raise AssertionError("authoritative post-turn drift retained source bytes")
@@ -293,7 +516,9 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             target_file = capture_root / "source" / "current" / "root.txt"
             target_file.chmod(0o644)
             target_file.write_text("tampered\n", encoding="utf-8")
-            returncode, envelope = finish(tamper)
+            # Capture publication precedes cold Reviewer bootstrap and the
+            # Turn. Leave room for both on a loaded native-test host.
+            returncode, envelope = finish(tamper, timeout=60)
             if returncode == 0:
                 raise AssertionError("capture tampering unexpectedly succeeded")
             capture_ref = assert_failure(
@@ -301,6 +526,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 "REVIEW_TARGET_MUTATED",
                 "preserved",
                 details_schema,
+                machine_schema,
                 engagement_state="result_ready",
                 required_action="inspect_authority",
             )
@@ -318,6 +544,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 "REVIEW_TIMEOUT",
                 "preserved",
                 details_schema,
+                machine_schema,
                 engagement_state="interrupted_unknown",
                 required_action="inspect_authority",
             )
@@ -360,6 +587,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 "REVIEW_CANCELLED",
                 "preserved",
                 details_schema,
+                machine_schema,
                 engagement_state="interrupted_unknown",
                 required_action="inspect_authority",
             )
@@ -372,6 +600,76 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             ]
             if methods.count("turn/start") != 1 or methods.count("turn/interrupt") != 1:
                 raise AssertionError("cancellation must interrupt the accepted Turn exactly once")
+
+            add_profile(
+                binary,
+                home,
+                workspace,
+                root,
+                schema_source,
+                "cancel-v3-reviewer",
+                "scoped_specialist_review_timeout.json",
+            )
+            known_targets = set(targets.iterdir())
+            cancelled_v3 = start_input(
+                binary,
+                home,
+                [
+                    "specialist", "review", "--workspace", str(workspace),
+                    "--profile", "cancel-v3-reviewer", "--request-stdin",
+                    "--format", "json",
+                ],
+                v3_review_request(),
+            )
+            wait_for(
+                targets,
+                lambda path: path not in known_targets
+                and not path.name.startswith(".")
+                and (path / "source").is_dir(),
+                cancelled_v3,
+            )
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if database.is_file():
+                    with sqlite3.connect(database) as connection:
+                        state = connection.execute(
+                            "SELECT state FROM engagements ORDER BY rowid DESC LIMIT 1"
+                        ).fetchone()
+                    if state is not None and state[0] == "executing":
+                        break
+                if cancelled_v3.poll() is not None:
+                    raise AssertionError(
+                        "v3 cancellation review exited before task acceptance"
+                    )
+                time.sleep(0.01)
+            else:
+                raise AssertionError(
+                    "v3 cancellation review never reached executing authority"
+                )
+            cancelled_v3.send_signal(signal.SIGINT)
+            returncode, envelope = finish(cancelled_v3)
+            if returncode == 0:
+                raise AssertionError("explicit v3 cancellation unexpectedly succeeded")
+            capture_ref = assert_failure(
+                envelope,
+                "REVIEW_CANCELLED",
+                "preserved",
+                details_schema_v3,
+                machine_schema,
+                engagement_state="interrupted_unknown",
+                required_action="inspect_authority",
+            )
+            if not (targets / capture_ref / "source").exists():
+                raise AssertionError("v3 cancellation removed unknown recovery bytes")
+            v3_methods = [
+                json.loads(line).get("method")
+                for line in (root / "transcript-cancel-v3-reviewer.jsonl")
+                .read_text(encoding="utf-8").splitlines()
+            ]
+            if v3_methods.count("turn/start") != 1 or v3_methods.count("turn/interrupt") != 1:
+                raise AssertionError(
+                    "v3 cancellation must interrupt the accepted Turn exactly once"
+                )
         finally:
             terminate_owned(root)
 

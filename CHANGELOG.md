@@ -9,6 +9,8 @@ development commits.
 
 ### Added
 
+- Add task-aware Specialist Review v3 for one-shot and reusable assignments,
+  with exact accepted briefs, inline contexts, ordered completion criteria, and criterion-complete structured results.
 - Foreground local gRPC gateway with same-user Unix socket ownership, bounded
   event subscriptions, and the 24-method Brokered Hierarchy bootstrap surface.
 - Shared Run, Controller, Writer, interaction, and artifact observations for Machine CLI and gRPC,
@@ -23,6 +25,11 @@ development commits.
 
 ### Changed
 
+- Bound transient Specialist result-capture recovery by the durable task
+  deadline, restrict ledger fallback to fail-closed quiescent restart recovery,
+  preserve legacy review failure meanings, validate checked scoped-review
+  failures and v3 await/collect task results, and preserve structured-output
+  validation errors across exact retry.
 - Set the Codex compatibility baseline to 0.153.4 while retaining completed-only forks.
 - Honor explicit Profile model and reasoning-effort settings for one-shot
   Specialist Review, rejecting unavailable selections without substitution.

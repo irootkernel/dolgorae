@@ -330,10 +330,23 @@ pub(crate) fn remove_git_worktree(canonical: &Path, root: &Path) -> std::io::Res
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum WorktreePatchCaptureError {
+    Transient,
+    Unavailable,
+    LimitExceeded,
+}
+
 pub(crate) fn capture_git_worktree_patch(
     root: &Path,
     maximum_bytes: usize,
-) -> std::io::Result<Vec<u8>> {
+) -> Result<Vec<u8>, WorktreePatchCaptureError> {
+    let root_metadata =
+        fs::symlink_metadata(root).map_err(|error| classify_patch_capture_io(&error))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(WorktreePatchCaptureError::Unavailable);
+    }
+    fs::symlink_metadata(root.join(".git")).map_err(|error| classify_patch_capture_io(&error))?;
     let intent = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(root)
@@ -341,9 +354,10 @@ pub(crate) fn capture_git_worktree_patch(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .status()
+        .map_err(|error| classify_patch_capture_io(&error))?;
     if !intent.success() {
-        return Err(std::io::Error::other("Git worktree intent-to-add failed"));
+        return Err(classify_patch_capture_command_failure(root));
     }
     let mut child = Command::new("/usr/bin/git")
         .arg("-C")
@@ -352,7 +366,8 @@ pub(crate) fn capture_git_worktree_patch(
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| classify_patch_capture_io(&error))?;
     let mut patch = Vec::new();
     let read = child
         .stdout
@@ -363,20 +378,66 @@ pub(crate) fn capture_git_worktree_patch(
     if let Err(error) = read {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error);
+        return Err(classify_patch_capture_io(&error));
     }
     if patch.len() > maximum_bytes {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(std::io::Error::other(
-            "Git worktree patch exceeds its bound",
-        ));
+        return Err(WorktreePatchCaptureError::LimitExceeded);
     }
-    let status = child.wait()?;
+    let status = child
+        .wait()
+        .map_err(|error| classify_patch_capture_io(&error))?;
     if !status.success() {
-        return Err(std::io::Error::other("Git worktree patch is unavailable"));
+        return Err(classify_patch_capture_command_failure(root));
     }
     Ok(patch)
+}
+
+fn classify_patch_capture_command_failure(root: &Path) -> WorktreePatchCaptureError {
+    let output = match Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return classify_patch_capture_io(&error),
+    };
+    if !output.status.success() {
+        return WorktreePatchCaptureError::Unavailable;
+    }
+    let Some(git_dir) = output.stdout.strip_suffix(b"\n") else {
+        return WorktreePatchCaptureError::Unavailable;
+    };
+    if git_dir.is_empty() || git_dir.contains(&b'\n') || git_dir.contains(&0) {
+        return WorktreePatchCaptureError::Unavailable;
+    }
+    classify_patch_capture_exit(
+        Path::new(&OsString::from_vec(git_dir.to_vec()))
+            .join("index.lock")
+            .exists(),
+    )
+}
+
+fn classify_patch_capture_exit(index_lock_exists: bool) -> WorktreePatchCaptureError {
+    if index_lock_exists {
+        WorktreePatchCaptureError::Transient
+    } else {
+        WorktreePatchCaptureError::Unavailable
+    }
+}
+
+fn classify_patch_capture_io(error: &std::io::Error) -> WorktreePatchCaptureError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::InvalidInput
+        | std::io::ErrorKind::Unsupported => WorktreePatchCaptureError::Unavailable,
+        _ => WorktreePatchCaptureError::Transient,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1689,6 +1750,39 @@ pub(crate) fn verify_secure_file(path: &Path, uid: u32) -> Result<(), MachineErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_capture_io_classification_separates_permanent_failures() {
+        assert_eq!(
+            classify_patch_capture_exit(false),
+            WorktreePatchCaptureError::Unavailable
+        );
+        assert_eq!(
+            classify_patch_capture_exit(true),
+            WorktreePatchCaptureError::Transient
+        );
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            assert_eq!(
+                classify_patch_capture_io(&std::io::Error::from(kind)),
+                WorktreePatchCaptureError::Unavailable
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert_eq!(
+                classify_patch_capture_io(&std::io::Error::from(kind)),
+                WorktreePatchCaptureError::Transient
+            );
+        }
+    }
 
     #[test]
     fn initialization_admission_precedes_shared_state_preparation() {

@@ -1,0 +1,8 @@
+{
+  "code": "REVIEW_PROFILE_UNAVAILABLE",
+  "message": "the selected Reviewer Profile is unavailable",
+  "retryable": false,
+  "details": {
+    "profile": "reviewer"
+  }
+}

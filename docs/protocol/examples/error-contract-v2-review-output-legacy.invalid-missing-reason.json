@@ -1,0 +1,8 @@
+{
+  "code": "REVIEW_OUTPUT_INVALID",
+  "message": "Reviewer output is invalid",
+  "retryable": false,
+  "details": {
+    "required_action": "none"
+  }
+}

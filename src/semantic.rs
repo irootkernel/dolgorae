@@ -4926,33 +4926,50 @@ fn terminal_refusal(run_id: Uuid, turn: &Value) -> Option<MachineError> {
     ))
 }
 
-/// The Run's last terminal Turn, reconstructed from its durable ledger.
-///
-/// A worker's control state is process memory: shutdown, restart, or a
-/// quarantine erases it, and a projection-only `status` has no worker to ask
-/// at all.  The `turn_terminal` record is the durable authority for the same
-/// fact, so it is what an offline read answers from.
 fn durable_last_terminal(
     state_root: &Path,
     run_id: Uuid,
     sources: &RunSources,
 ) -> Result<Value, MachineError> {
-    let head = sources.projection.ledger_head.sequence;
+    let terminal = read_durable_terminal(state_root, run_id, &sources.projection)?;
+    Ok(terminal.map_or(Value::Null, |terminal| {
+        terminal_turn_value(sources, &terminal)
+    }))
+}
+
+/// The Run's last terminal Turn, reconstructed from its durable ledger.
+///
+/// A worker's control state is process memory: shutdown, restart, or a
+/// quarantine erases it, and a projection-only `status` has no worker to ask
+/// at all. The `turn_terminal` record is the durable authority for the same
+/// fact, so it is what an offline read answers from.
+fn read_durable_terminal(
+    state_root: &Path,
+    run_id: Uuid,
+    projection: &crate::projection::RunStateProjection,
+) -> Result<Option<crate::turn::TerminalTurn>, MachineError> {
+    let head = projection.ledger_head.sequence;
     // A Run that never started a Turn has no terminal to reconstruct, and the
     // projection already knows that, so the ledger is not reopened to be told.
-    if head == 0 || sources.projection.latest_turn_id.is_none() {
-        return Ok(Value::Null);
+    if head == 0 || projection.latest_turn_id.is_none() {
+        return Ok(None);
     }
     let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
-    let Some(payload) = ledger
+    ledger
         .last_terminal()
         .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
-    else {
-        return Ok(Value::Null);
-    };
-    let terminal: crate::turn::TerminalTurn = serde_json::from_value(payload)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
-    Ok(terminal_turn_value(sources, &terminal))
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))
+}
+
+pub(crate) fn durable_terminal_turn(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<Option<crate::turn::TerminalTurn>, MachineError> {
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+    read_durable_terminal(state_root, run_id, &projection)
 }
 
 /// The checked `turn` object one recorded terminal describes.
@@ -6934,6 +6951,62 @@ impl RunMutationLock for RunStartupLock {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn durable_terminal_recovery_returns_only_the_latest_turn() {
+        let state_root =
+            std::env::temp_dir().join(format!("dolgorae-durable-terminal-{}", Uuid::now_v7()));
+        let run_id = Uuid::now_v7();
+        let run_root = state_root.join("runs").join(run_id.to_string());
+        std::fs::create_dir_all(run_root.join("recovery")).unwrap();
+        for directory in [
+            &state_root,
+            &state_root.join("runs"),
+            &run_root,
+            &run_root.join("recovery"),
+        ] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(run_root.join("audit.jsonl"), b"").unwrap();
+        std::fs::set_permissions(
+            run_root.join("audit.jsonl"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let mut ledger = crate::ledger::Ledger::open(&run_root, run_id).unwrap();
+        for (turn_id, status) in [("turn-1", "completed"), ("turn-2", "interrupted")] {
+            ledger
+                .append_required_payload(AuditKind::TurnStarted, &json!({"turn_id":turn_id}), 1)
+                .unwrap();
+            ledger
+                .append_required_payload(
+                    AuditKind::TurnTerminal,
+                    &json!({
+                        "thread_id":"thread-1",
+                        "turn_id":turn_id,
+                        "status":status,
+                        "effort":"medium",
+                        "final_response":{"kind":"inline","text":turn_id},
+                        "usage":{"inputTokens":1,"outputTokens":1}
+                    }),
+                    1,
+                )
+                .unwrap();
+        }
+        drop(ledger);
+
+        let terminal = durable_terminal_turn(&state_root, run_id).unwrap().unwrap();
+        assert_eq!(terminal.turn_id, "turn-2");
+        assert_eq!(terminal.status, "interrupted");
+        assert_eq!(
+            terminal.final_response,
+            Some(crate::turn::FinalResponse::Inline {
+                text: "turn-2".to_owned()
+            })
+        );
+        std::fs::remove_dir_all(state_root).unwrap();
+    }
 
     #[test]
     fn checked_interaction_rejects_an_oversized_payload() {

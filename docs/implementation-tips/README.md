@@ -50,6 +50,16 @@ production state and the user's real home must never be reused.
 Do not commit virtual environments, caches, generated review material, local
 workflow state, credentials, or run/session identifiers.
 
+For task-aware Specialist work, keep reusable Role behavior in the Agent
+Configuration and executable brief/context/criteria in `src/task_request.rs`.
+Exercise one-shot composition in `src/review.rs` and reusable facade behavior in
+`src/external_engagement.rs`; both must persist the accepted JCS request before
+dispatch and validate `structured_review_v3` before artifact commit. Test
+Korean, CRLF, quotes, Markdown, and shell metacharacters as data, plus every
+count and byte boundary. Fake-runtime E2E must assert that task bytes appear in
+the Turn input but not `developerInstructions`, and must not be described as a
+live-provider acceptance result.
+
 ## Orchestration core verification
 
 Keep Role and policy semantics in `src/specialist_policy.rs` and durable

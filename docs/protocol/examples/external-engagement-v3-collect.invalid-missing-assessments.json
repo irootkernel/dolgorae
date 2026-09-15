@@ -1,0 +1,18 @@
+{
+  "operation": "collect_external_specialist_results_result",
+  "tasks": [
+    {
+      "task_id": "018f0000-0000-7000-8000-000000000101",
+      "state": "delivered",
+      "result_artifact_ref": "018f0000-0000-7000-8000-000000000102",
+      "result": {
+        "summary": "The report is incomplete.",
+        "findings": [],
+        "evidence_limits": [],
+        "overall_assessment": "requirements_met"
+      },
+      "safe_error_code": null
+    }
+  ],
+  "next_after_sequence": 14
+}

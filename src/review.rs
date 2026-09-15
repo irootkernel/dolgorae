@@ -9,7 +9,8 @@ use crate::semantic::{
     ReviewerStartContext, RunVerb, control_reviewer_run, prepare_reviewer, start_reviewer_run,
 };
 use crate::specialist::{
-    ReviewerOutput, ReviewerOutputV3, validate_reviewer_output, validate_reviewer_output_v3,
+    ReviewerOutput, ReviewerOutputV3, reviewer_turn_output_value, validate_reviewer_output,
+    validate_reviewer_output_v3,
 };
 use crate::task_request::{
     MAX_TASK_REQUEST_BYTES, SpecialistTaskRequest, TaskContext, TaskCriterion,
@@ -497,48 +498,26 @@ pub fn execute(
             &key("assign"),
             |reservation, _| {
                 let prompt = review_prompt(request);
-                let arguments = reviewer_send_arguments(
+                execute_reviewer_turn(
                     &canonical_workspace,
                     &carriers.reviewer,
                     hired.specialist_run_id,
                     reservation.task_id,
                     Duration::from_secs(request.deadline_seconds),
                     &prompt,
-                );
-                match control_reviewer_run(RunVerb::Send, &arguments) {
-                    Ok(turn) => match checked_turn_output(&turn) {
-                        Ok(output) => (RuntimeOutcome::Accepted, Some(output)),
-                        Err(error) if error.code == "REVIEW_TIMEOUT" => {
-                            task_error = Some(error);
-                            (RuntimeOutcome::Unknown, None)
-                        }
-                        Err(error) => {
-                            task_error = Some(error);
-                            (RuntimeOutcome::Rejected, None)
-                        }
-                    },
-                    Err(error) if error.code == "TURN_INTERRUPTED" => {
-                        task_error = Some(review_error(
-                            "REVIEW_INTERRUPTED_UNKNOWN",
-                            "Reviewer Turn outcome is unknown and was not replayed",
-                        ));
-                        (RuntimeOutcome::Unknown, None)
-                    }
-                    Err(error) => {
-                        task_error = Some(error);
-                        (RuntimeOutcome::Rejected, None)
-                    }
-                }
+                    &mut task_error,
+                    false,
+                )
             },
         );
         watcher.stop();
-        let task = task?;
         if interrupted_since(interrupt_epoch) {
             return Err(review_error(
                 "REVIEW_CANCELLED",
                 "Specialist review was cancelled by the caller",
             ));
         }
+        let task = task?;
         let terminal =
             store.await_terminal(review_id, Duration::from_secs(request.deadline_seconds))?;
         if terminal.state == "interrupted_unknown" {
@@ -816,7 +795,7 @@ fn execute_scoped_common(
                 &accepted_request,
                 task_request,
                 &key("assign"),
-                |reservation, accepted_task, accepted_prompt| {
+                |reservation, _accepted_task, accepted_prompt| {
                     task_started = Some(Instant::now());
                     let prompt = scoped_review_prompt_v3(accepted_prompt, target);
                     let turn_timeout = Duration::from_secs(deadline_seconds)
@@ -826,14 +805,13 @@ fn execute_scoped_common(
                                 .elapsed(),
                         )
                         .max(Duration::from_nanos(1));
-                    execute_reviewer_turn(
+                    execute_reviewer_turn_v3(
                         &canonical_workspace,
                         &carriers.reviewer,
                         hired.specialist_run_id,
                         reservation.task_id,
                         turn_timeout,
                         &prompt,
-                        Some(accepted_task),
                         &mut task_error,
                     )
                 },
@@ -856,19 +834,19 @@ fn execute_scoped_common(
                         reservation.task_id,
                         turn_timeout,
                         &prompt,
-                        None,
                         &mut task_error,
+                        true,
                     )
                 },
             )
         };
-        let task = task?;
         if interrupted_since(interrupt_epoch) {
             return Err(review_error(
                 "REVIEW_CANCELLED",
                 "Specialist review was cancelled by the caller",
             ));
         }
+        let task = task?;
         let budget_started = if v3.is_some() {
             task_started.unwrap_or_else(Instant::now)
         } else {
@@ -1020,16 +998,18 @@ fn execute_scoped_common(
             } else {
                 "preserved"
             };
-            error.details = json!({
-                "schema": if v3.is_some() {"dolgorae-specialist-review-error-details/v3"} else {"dolgorae-specialist-review-error-details/v2"},
-                "target":target,
-                "capture_ref":capture_ref,
-                "engagement_id":review_id,
-                "engagement_state":state_before,
-                "settlement_state":settlement_state,
-                "required_action": if settlement_state == "preserved" {"inspect_authority"} else {"none"},
-                "cause_details":cause_details
-            });
+            if scoped_review_error_details(&error.code) {
+                error.details = json!({
+                    "schema": if v3.is_some() {"dolgorae-specialist-review-error-details/v3"} else {"dolgorae-specialist-review-error-details/v2"},
+                    "target":target,
+                    "capture_ref":capture_ref,
+                    "engagement_id":review_id,
+                    "engagement_state":state_before,
+                    "settlement_state":settlement_state,
+                    "required_action": if settlement_state == "preserved" {"inspect_authority"} else {"none"},
+                    "cause_details":cause_details
+                });
+            }
             Err(error)
         }
     }
@@ -1497,8 +1477,8 @@ fn execute_reviewer_turn(
     task_id: Uuid,
     timeout: Duration,
     prompt: &str,
-    v3_task: Option<&SpecialistTaskRequest>,
     task_error: &mut Option<MachineError>,
+    normalize_foreign_errors: bool,
 ) -> (RuntimeOutcome, Option<Value>) {
     let arguments = reviewer_send_arguments(
         workspace,
@@ -1509,24 +1489,17 @@ fn execute_reviewer_turn(
         prompt,
     );
     match control_reviewer_run(RunVerb::Send, &arguments) {
-        Ok(turn) => {
-            let checked = if let Some(task) = v3_task {
-                checked_turn_output_v3(&turn, task)
-            } else {
-                checked_turn_output(&turn)
-            };
-            match checked {
-                Ok(output) => (RuntimeOutcome::Accepted, Some(output)),
-                Err(error) if error.code == "REVIEW_TIMEOUT" => {
-                    *task_error = Some(error);
-                    (RuntimeOutcome::Unknown, None)
-                }
-                Err(error) => {
-                    *task_error = Some(error);
-                    (RuntimeOutcome::Rejected, None)
-                }
+        Ok(turn) => match checked_turn_output(&turn) {
+            Ok(output) => (RuntimeOutcome::Accepted, Some(output)),
+            Err(error) if error.code == "REVIEW_TIMEOUT" => {
+                *task_error = Some(error);
+                (RuntimeOutcome::Unknown, None)
             }
-        }
+            Err(error) => {
+                *task_error = Some(reviewer_task_error(error, normalize_foreign_errors));
+                (RuntimeOutcome::Rejected, None)
+            }
+        },
         Err(error) if error.code == "TURN_INTERRUPTED" => {
             *task_error = Some(review_error(
                 "REVIEW_INTERRUPTED_UNKNOWN",
@@ -1535,47 +1508,62 @@ fn execute_reviewer_turn(
             (RuntimeOutcome::Unknown, None)
         }
         Err(error) => {
-            *task_error = Some(error);
+            *task_error = Some(reviewer_task_error(error, normalize_foreign_errors));
             (RuntimeOutcome::Rejected, None)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_reviewer_turn_v3(
+    workspace: &Path,
+    controller: &Path,
+    reviewer_run_id: Uuid,
+    task_id: Uuid,
+    timeout: Duration,
+    prompt: &str,
+    task_error: &mut Option<MachineError>,
+) -> Result<(RuntimeOutcome, Option<Value>), MachineError> {
+    let arguments = reviewer_send_arguments(
+        workspace,
+        controller,
+        reviewer_run_id,
+        task_id,
+        timeout,
+        prompt,
+    );
+    match control_reviewer_run(RunVerb::Send, &arguments) {
+        Ok(turn) => match reviewer_turn_output_value(&turn) {
+            Ok(output) => Ok((RuntimeOutcome::Accepted, Some(output))),
+            Err(error) if error.code == "REVIEW_TIMEOUT" => {
+                *task_error = Some(error);
+                Ok((RuntimeOutcome::Unknown, None))
+            }
+            Err(error) => {
+                let error = normalize_reviewer_task_error(error);
+                *task_error = Some(error.clone());
+                Err(error)
+            }
+        },
+        Err(error) if error.code == "TURN_INTERRUPTED" => {
+            let error = review_error(
+                "REVIEW_INTERRUPTED_UNKNOWN",
+                "Reviewer Turn outcome is unknown and was not replayed",
+            );
+            *task_error = Some(error);
+            Ok((RuntimeOutcome::Unknown, None))
+        }
+        Err(error) => {
+            let error = normalize_reviewer_task_error(error);
+            *task_error = Some(error.clone());
+            Err(error)
+        }
+    }
+}
+
 fn checked_turn_output(turn: &Value) -> Result<Value, MachineError> {
-    let value = turn_output_value(turn)?;
+    let value = reviewer_turn_output_value(turn)?;
     validate_reviewer_output(value.clone())?;
-    Ok(value)
-}
-
-fn checked_turn_output_v3(
-    turn: &Value,
-    task: &SpecialistTaskRequest,
-) -> Result<Value, MachineError> {
-    let value = turn_output_value(turn)?;
-    validate_reviewer_output_v3(value.clone(), task)?;
-    Ok(value)
-}
-
-fn turn_output_value(turn: &Value) -> Result<Value, MachineError> {
-    let status = turn.get("status").and_then(Value::as_str);
-    if matches!(status, Some("running" | "accepted")) {
-        return Err(review_error(
-            "REVIEW_TIMEOUT",
-            "Reviewer did not finish before the bounded deadline",
-        ));
-    }
-    if status != Some("completed") {
-        return Err(review_error(
-            "REVIEW_TASK_FAILED",
-            "Reviewer Turn was not completed",
-        ));
-    }
-    let text = turn
-        .pointer("/final_response/text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| review_error("REVIEW_OUTPUT_INVALID", "Reviewer returned no inline JSON"))?;
-    let value: Value = serde_json::from_str(text)
-        .map_err(|_| review_error("REVIEW_OUTPUT_INVALID", "Reviewer output is not JSON"))?;
     Ok(value)
 }
 
@@ -1832,6 +1820,68 @@ fn review_error(code: &'static str, message: &'static str) -> MachineError {
     MachineError::new(code, message, false, json!({"required_action":"none"}))
 }
 
+fn normalize_reviewer_task_error(error: MachineError) -> MachineError {
+    if error.code.starts_with("REVIEW_") {
+        return error;
+    }
+    MachineError::new(
+        "REVIEW_TASK_FAILED",
+        "Reviewer task failed before producing a checked result",
+        false,
+        json!({
+            "cause_code": error.code,
+            "cause_message": error.message,
+            "cause_details": error.details,
+        }),
+    )
+}
+
+fn reviewer_task_error(error: MachineError, normalize_foreign_errors: bool) -> MachineError {
+    if normalize_foreign_errors {
+        normalize_reviewer_task_error(error)
+    } else {
+        error
+    }
+}
+
+const SCOPED_REVIEW_ERROR_CODES: &[&str] = &[
+    "IDEMPOTENCY_CONFLICT",
+    "REVIEW_PROFILE_UNAVAILABLE",
+    "REVIEWER_START_FAILED",
+    "REVIEW_TASK_FAILED",
+    "REVIEW_INTERRUPTED_UNKNOWN",
+    "REVIEW_TIMEOUT",
+    "REVIEW_CANCELLED",
+    "REVIEW_WORKSPACE_MUTATION_DETECTED",
+    "REVIEW_OUTPUT_INVALID",
+    "REVIEW_EXECUTABLE_DRIFT",
+    "ENGAGEMENT_TIMEOUT",
+    "ENGAGEMENT_STATE_CONFLICT",
+    "REVIEW_TARGET_CARRIER_INVALID",
+    "REVIEW_TARGET_CONFLICT",
+    "REVIEW_TARGET_FOREIGN_OWNER",
+    "REVIEW_TARGET_GIT_FAILED",
+    "REVIEW_TARGET_IO_FAILURE",
+    "REVIEW_TARGET_LIFECYCLE_MISMATCH",
+    "REVIEW_TARGET_LIMIT_EXCEEDED",
+    "REVIEW_TARGET_MUTATED",
+    "REVIEW_TARGET_REVISION_INVALID",
+    "REVIEW_TARGET_SECRET_DETECTED",
+    "REVIEW_TARGET_SETTLEMENT_CONCURRENT",
+    "REVIEW_TARGET_SETTLEMENT_CONFLICT",
+    "REVIEW_TARGET_SOURCE_DRIFT",
+    "REVIEW_TARGET_STALE_REVISION",
+    "REVIEW_TARGET_STATE_INVALID",
+    "REVIEW_TARGET_TERMINAL_EVIDENCE_INVALID",
+    "REVIEW_TARGET_TIMEOUT",
+    "REVIEW_TARGET_UNSAFE_FILE",
+    "REVIEW_TARGET_UNSAFE_PATH",
+];
+
+fn scoped_review_error_details(code: &str) -> bool {
+    SCOPED_REVIEW_ERROR_CODES.contains(&code)
+}
+
 fn internal(error: impl std::fmt::Display) -> MachineError {
     MachineError::new(
         "INTERNAL_ERROR",
@@ -1844,6 +1894,50 @@ fn internal(error: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_review_error_codes_match_the_checked_contract() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-error-contract-v2.json"
+        ))
+        .unwrap();
+        let checked = contract
+            .pointer("/$defs/scoped_specialist_review_error/properties/code/enum")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        let produced = SCOPED_REVIEW_ERROR_CODES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(checked, produced);
+        for code in produced {
+            assert!(
+                crate::machine::registered_errors().contains_key(code),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_reviewer_failures_are_normalized_without_losing_the_cause() {
+        let foreign = MachineError::new(
+            "TURN_FAILED",
+            "Reviewer Turn failed",
+            false,
+            json!({"turn_id":"turn-test","status":"failed"}),
+        );
+        let normalized = normalize_reviewer_task_error(foreign);
+        assert_eq!(normalized.code, "REVIEW_TASK_FAILED");
+        assert_eq!(normalized.details["cause_code"], "TURN_FAILED");
+        assert_eq!(normalized.details["cause_message"], "Reviewer Turn failed");
+        assert_eq!(normalized.details["cause_details"]["status"], "failed");
+
+        let native = review_error("REVIEW_CANCELLED", "cancelled");
+        assert_eq!(normalize_reviewer_task_error(native.clone()), native);
+    }
 
     #[test]
     fn fixed_request_contains_only_the_checked_model_visible_contract() {
@@ -2010,6 +2104,45 @@ mod tests {
     }
 
     #[test]
+    fn production_v3_output_pipeline_returns_the_normalized_report() {
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Assess completion.".to_owned(),
+            contexts: vec![],
+            criteria: vec![TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "The requirement is met.".to_owned(),
+                source_context_ids: vec![],
+            }],
+            expected_output: "structured_review_v3".to_owned(),
+        };
+        let turn = json!({
+            "status":"completed",
+            "final_response":{"kind":"inline","text":serde_json::to_string(&json!({
+                "summary":"reviewed",
+                "findings":[
+                    {"severity":"P3","title":"later","description":"d","path":null,"line_start":null,"line_end":null,"recommendation":"r","confidence":"low"},
+                    {"severity":"P1","title":"first","description":"d","path":"src/lib.rs","line_start":1,"line_end":1,"recommendation":"r","confidence":"high"}
+                ],
+                "criterion_assessments":[{
+                    "criterion_id":"C-1",
+                    "status":"met",
+                    "explanation":"candidate evidence is sufficient",
+                    "evidence":[{"basis":"candidate","description":"checked source","path":"src/lib.rs","line_start":1,"line_end":1,"context_id":null}],
+                    "remaining_gap":null
+                }],
+                "evidence_limits":[],
+                "overall_assessment":"requirements_met"
+            })).unwrap()}
+        });
+        let value = reviewer_turn_output_value(&turn).unwrap();
+        let output =
+            serde_json::to_value(validate_reviewer_output_v3(value, &task).unwrap()).unwrap();
+        assert_eq!(output["findings"][0]["severity"], "P1");
+        assert_eq!(output["findings"][1]["severity"], "P3");
+    }
+
+    #[test]
     fn malformed_or_nonterminal_turn_is_rejected() {
         assert_eq!(
             checked_turn_output(&json!({"status":"running"}))
@@ -2017,14 +2150,21 @@ mod tests {
                 .code,
             "REVIEW_TIMEOUT"
         );
+        let invalid = checked_turn_output(&json!({
+            "status":"completed",
+            "final_response":{"kind":"inline","text":"not json"}
+        }))
+        .unwrap_err();
+        assert_eq!(invalid.code, "REVIEW_OUTPUT_INVALID");
         assert_eq!(
-            checked_turn_output(&json!({
-                "status":"completed",
-                "final_response":{"kind":"inline","text":"not json"}
-            }))
-            .unwrap_err()
-            .code,
-            "REVIEW_OUTPUT_INVALID"
+            invalid.details,
+            json!({"reason":"Reviewer output is not JSON","required_action":"none"})
+        );
+        let missing = checked_turn_output(&json!({"status":"completed"})).unwrap_err();
+        assert_eq!(missing.code, "REVIEW_OUTPUT_INVALID");
+        assert_eq!(
+            missing.details,
+            json!({"reason":"Reviewer returned no inline JSON","required_action":"none"})
         );
         assert_eq!(
             checked_turn_output(&json!({"status":"accepted"}))

@@ -1,6 +1,16 @@
 {
   "contract_id": "dolgorae.grpc-error-mapping/v1",
   "schema_version": 1,
+  "private_machine_error_codes": [
+    "REVIEW_PROFILE_UNAVAILABLE",
+    "REVIEWER_START_FAILED",
+    "REVIEW_TASK_FAILED",
+    "REVIEW_INTERRUPTED_UNKNOWN",
+    "REVIEW_TIMEOUT",
+    "REVIEW_CANCELLED",
+    "REVIEW_WORKSPACE_MUTATION_DETECTED",
+    "REVIEW_EXECUTABLE_DRIFT"
+  ],
   "error_detail_type": "dolgorae.public.v1.DolgoraeErrorDetail",
   "error_detail_version": 1,
   "required_action_type": "dolgorae.public.v1.RequiredClientAction",

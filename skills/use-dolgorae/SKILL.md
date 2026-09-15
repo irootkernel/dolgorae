@@ -65,8 +65,8 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    workflow identifiers express authority or focus; they are not source scopes.
 2. `workspace`, `staged`, `dirty`, and `head` reject a revision. `commit`
    requires one commit revision. `range` requires one exact `A..B` or `A...B`
-   expression. Do not substitute patch or stdin semantics, which Dolgorae does
-   not provide.
+   expression. Stdin may carry a v3 request, but it is not a source scope and
+   cannot substitute patch semantics.
 3. Inspect the named global Codex Profile and run its offline diagnosis before an
    external review when current readiness is not already established:
 
@@ -94,6 +94,27 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    `--deadline-seconds <1..3600>` only when the caller established a non-default
    bound. Use the legacy `--scope working-tree` carrier only when v1 compatibility
    is explicitly required; never combine it with v2-only options.
+   For a task-aware change or completion review, construct the checked
+   `dolgorae-specialist-review-request/v3` object and pass only that object on
+   non-TTY stdin:
+
+   ```sh
+   dolgorae specialist review \
+     --workspace <path> \
+     --profile <profile> \
+     --request-stdin \
+     --format json < review-request-v3.json
+   ```
+
+   Follow `docs/protocol/examples/specialist-review-v3-request.valid.json` from
+   the exact version-matched source or package. The request must carry
+   `purpose` (`change` or `completion`) alongside the brief, contexts, criteria,
+   expected output, and deadline. Keep workspace, Profile, credentials, and
+   arbitrary host paths outside the request. Preserve exact brief and
+   inline-context bytes; do not trim, normalize, or replace content with a bare
+   artifact reference. Completion needs at least one uniquely identified
+   criterion. Do not combine `--request-stdin` with v1/v2 source or deadline
+   flags.
 5. Prefer the composed `specialist review` operation. It owns capture, one fresh
    Reviewer, checked result collection, integrity verification, and settlement.
    Do not replace it with manual `review-target capture` and `settle` merely to
@@ -103,6 +124,10 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    state, capture-time source identity, integrity evidence, and
    `workflow_issued_source_mutation:false` distinct. Empty findings do not make
    a failed, unknown, active, malformed, or unsettled review successful.
+   For v3, also require every input criterion exactly once in input order,
+   retain each status, evidence basis, remaining gap, and `evidence_limits`, and
+   report `overall_assessment` as Reviewer evidence rather than business
+   approval. `REVIEW_OUTPUT_INVALID` is terminal and never a clean result.
 
 The optional attached tool named `dolgorae_review` may be used only when the
 host actually exposes it. Its registration is the adapter's checked disposition;
@@ -121,7 +146,10 @@ or let a Specialist hire or contact another Specialist.
 
 1. Read the checked
    `docs/protocol/dolgorae-external-specialist-facade-v2.schema.json` contract
-   from the exact version-matched source or package. For hire requests, follow
+   from the exact version-matched source or package. For a v3 accepted-task
+   assignment, also read
+   `docs/protocol/dolgorae-external-specialist-facade-v3.schema.json` and its
+   `docs/protocol/examples/external-engagement-v3-assign.valid.json` example. For hire requests, follow
    `docs/protocol/examples/external-engagement-v2-hire.valid.json`: use
    `agent_configuration.schema_version: 2` and `selected_profile`. Supply the
    optional optimistic `global_profile_binding_sha256` only from the actual
@@ -134,6 +162,15 @@ or let a Specialist hire or contact another Specialist.
      --controller-fd <aggregate-owner-fd> \
      --request-fd <request-fd>
    ```
+
+   Treat hire `objective` only as non-executable rationale; put actual work in
+   the later task assignment. A v3 assignment carries its exact brief, inline
+   context and provenance, criteria, and expected output inside `task`, with
+   `execution_intent` and `deadline_seconds` beside it. When it
+   requests `structured_review_v3`, accept only the criterion-complete report
+   returned by collection. For `isolated_write`, that report is the
+   `final_response` member beside `isolated_change`; read criterion assessments
+   and `overall_assessment` from `final_response`, not from the outer result.
 
 2. The aggregate owner must be a generation-1 `workflow_orchestrator` or
    `automation` Controller. Preserve its carrier across reconnects; an

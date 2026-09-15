@@ -13,8 +13,8 @@ use crate::run::{
 };
 use crate::semantic::{
     ExternalAgentConfigurationInput, ExternalSpecialistStartContext, acquire_external_writer,
-    ensure_external_specialist_worker, prepare_external_specialist, release_external_writer,
-    start_external_specialist_run,
+    durable_terminal_turn, ensure_external_specialist_worker, prepare_external_specialist,
+    release_external_writer, start_external_specialist_run,
 };
 use crate::specialist::validate_reviewer_output_v3;
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
@@ -22,8 +22,9 @@ use crate::turn::FinalResponse;
 use crate::worker::{ControlRequestV1, ControlResponseV1, TurnControlRequest, call_run_worker};
 use crate::workspace::{
     SystemWorkspacePlatform, WorkspaceMode, WorkspaceService, WorkspaceView,
-    add_detached_git_worktree, capture_git_worktree_patch, is_registered_git_worktree,
-    isolated_specialist_root, remove_git_worktree, verify_secure_directory, verify_secure_file,
+    WorktreePatchCaptureError, add_detached_git_worktree, capture_git_worktree_patch,
+    is_registered_git_worktree, isolated_specialist_root, remove_git_worktree,
+    verify_secure_directory, verify_secure_file,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Deserializer};
@@ -786,17 +787,27 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
             let turn_id = match response {
                 ControlResponseV1::Accepted { accepted } => accepted.turn_id,
                 ControlResponseV1::Terminal { terminal } => {
-                    let result = match finish_completed_task(
+                    let result = match finish_assign_terminal(
                         &mut store,
                         &state_root,
                         engagement_id,
                         reserved.task_id,
                         specialist_run_id,
-                        &terminal.final_response,
+                        &idempotency_key,
+                        &terminal,
                     ) {
                         Ok(result) => result,
-                        Err(error) => {
-                            if execution_intent == "canonical_workspace_write" {
+                        Err(CompletionError::ResultConstructionPending(error)) => {
+                            debug_assert!(error.retryable);
+                            let task = store.external_task(engagement_id, reserved.task_id)?;
+                            return assign_result(&task);
+                        }
+                        Err(CompletionError::Failure(error)) => {
+                            let task = store.external_task(engagement_id, reserved.task_id)?;
+                            if should_release_writer_after_completion_failure(
+                                execution_intent == "canonical_workspace_write",
+                                &task.state,
+                            ) {
                                 release_external_writer_safely(
                                     &view,
                                     &state_root,
@@ -933,31 +944,40 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                         ),
                     },
                 );
-                if let Err(error) = reconcile_wait(
+                let wait_outcome = reconcile_wait(
                     &mut store,
                     &state_root,
                     engagement_id,
                     task.task_id,
                     response,
-                ) {
-                    if store.external_task_execution_intent(engagement_id, task.task_id)?
-                        == "canonical_workspace_write"
-                    {
-                        release_external_writer_safely(
-                            &view,
-                            &state_root,
-                            task.specialist_run_id,
-                            engagement_id,
-                            &owner,
-                        )?;
+                );
+                match wait_outcome {
+                    Ok(WaitReconciliation::Observed) => {}
+                    Ok(WaitReconciliation::ResultConstructionPending) => continue,
+                    Err(error) => {
+                        let updated = store.external_task(engagement_id, task.task_id)?;
+                        if should_release_writer(
+                            store.external_task_execution_intent(engagement_id, task.task_id)?
+                                == "canonical_workspace_write",
+                            &updated.state,
+                        ) {
+                            release_external_writer_safely(
+                                &view,
+                                &state_root,
+                                task.specialist_run_id,
+                                engagement_id,
+                                &owner,
+                            )?;
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
                 }
                 let updated = store.external_task(engagement_id, task.task_id)?;
-                if terminal_state(&updated.state)
-                    && store.external_task_execution_intent(engagement_id, task.task_id)?
-                        == "canonical_workspace_write"
-                {
+                if should_release_writer(
+                    store.external_task_execution_intent(engagement_id, task.task_id)?
+                        == "canonical_workspace_write",
+                    &updated.state,
+                ) {
                     release_external_writer_safely(
                         &view,
                         &state_root,
@@ -1594,6 +1614,43 @@ fn reconcile_engagement(
     engagement_id: Uuid,
     owner: &CredentialCarrier,
 ) -> Result<(), MachineError> {
+    reconcile_engagement_with(
+        store,
+        view,
+        state_root,
+        engagement_id,
+        owner,
+        |run_id| {
+            ensure_external_specialist_worker(view, state_root, run_id)?;
+            call_run_worker(
+                state_root,
+                run_id,
+                DarwinSystem.current_uid(),
+                None,
+                |expected| ControlRequestV1::RunStatus {
+                    expected,
+                    caller: None,
+                },
+            )
+            .map_err(|error| error.machine_error(run_id, state_root))
+        },
+        |run_id| durable_terminal_turn(state_root, run_id),
+    )
+}
+
+fn reconcile_engagement_with<F, D>(
+    store: &mut EngagementStore,
+    view: &WorkspaceView,
+    state_root: &Path,
+    engagement_id: Uuid,
+    owner: &CredentialCarrier,
+    mut worker_status: F,
+    mut durable_terminal: D,
+) -> Result<(), MachineError>
+where
+    F: FnMut(Uuid) -> Result<ControlResponseV1, MachineError>,
+    D: FnMut(Uuid) -> Result<Option<crate::turn::TerminalTurn>, MachineError>,
+{
     for (reservation, idempotency_key) in
         store.stale_external_hires(engagement_id, Duration::from_secs(300))?
     {
@@ -1693,24 +1750,20 @@ fn reconcile_engagement(
             }
             continue;
         }
-        ensure_external_specialist_worker(view, state_root, task.specialist_run_id)?;
-        let response = call_run_worker(
-            state_root,
-            task.specialist_run_id,
-            DarwinSystem.current_uid(),
-            None,
-            |expected| ControlRequestV1::RunStatus {
-                expected,
-                caller: None,
-            },
-        );
+        let response = worker_status(task.specialist_run_id);
+        let response = match response {
+            Ok(response) => Ok(recover_quiescent_terminal(response, || {
+                durable_terminal(task.specialist_run_id)
+            })?),
+            Err(error) => Err(error),
+        };
         match response {
             Ok(ControlResponseV1::Status {
                 last_terminal: Some(terminal),
                 ..
-            }) if task.turn_id.as_deref() == Some(terminal.turn_id.as_str()) => {
+            }) if terminal_matches_task(&task, &terminal) => {
                 if terminal.status == "completed" {
-                    if let Err(error) = finish_completed_task(
+                    match finish_completed_task(
                         store,
                         state_root,
                         engagement_id,
@@ -1718,16 +1771,21 @@ fn reconcile_engagement(
                         task.specialist_run_id,
                         &terminal.final_response,
                     ) {
-                        if canonical_write {
-                            release_external_writer_safely(
-                                view,
-                                state_root,
-                                task.specialist_run_id,
-                                engagement_id,
-                                owner,
-                            )?;
+                        Ok(_) => {}
+                        Err(CompletionError::ResultConstructionPending(_)) => continue,
+                        Err(CompletionError::Failure(error)) => {
+                            let updated = store.external_task(engagement_id, task.task_id)?;
+                            if should_release_writer(canonical_write, &updated.state) {
+                                release_external_writer_safely(
+                                    view,
+                                    state_root,
+                                    task.specialist_run_id,
+                                    engagement_id,
+                                    owner,
+                                )?;
+                            }
+                            return Err(error);
                         }
-                        return Err(error);
                     }
                 } else {
                     store.finish_external_task(
@@ -1788,12 +1846,10 @@ fn reconcile_engagement(
                     "Specialist status returned an unexpected response",
                 ));
             }
-            Err(error) => {
-                return Err(error.machine_error(task.specialist_run_id, state_root));
-            }
+            Err(error) => return Err(error),
         }
         let updated = store.external_task(engagement_id, task.task_id)?;
-        if terminal_state(&updated.state) && canonical_write {
+        if should_release_writer(canonical_write, &updated.state) {
             release_external_writer_safely(
                 view,
                 state_root,
@@ -1805,6 +1861,29 @@ fn reconcile_engagement(
     }
     reconcile_idle_canonical_writer(store, view, state_root, engagement_id, owner)?;
     Ok(())
+}
+
+fn recover_quiescent_terminal<F>(
+    response: ControlResponseV1,
+    durable_terminal: F,
+) -> Result<ControlResponseV1, MachineError>
+where
+    F: FnOnce() -> Result<Option<crate::turn::TerminalTurn>, MachineError>,
+{
+    match response {
+        ControlResponseV1::Status {
+            identity,
+            lifecycle,
+            active_turn: None,
+            last_terminal: None,
+        } if matches!(lifecycle.as_str(), "idle" | "paused") => Ok(ControlResponseV1::Status {
+            identity,
+            lifecycle,
+            active_turn: None,
+            last_terminal: durable_terminal()?,
+        }),
+        response => Ok(response),
+    }
 }
 
 fn dispatch_boundary_is_quiescent(
@@ -2087,24 +2166,79 @@ fn abort_member(
     }
 }
 
+#[derive(Debug)]
+enum CompletionError {
+    ResultConstructionPending(MachineError),
+    Failure(MachineError),
+}
+
+impl CompletionError {
+    #[cfg(test)]
+    fn machine_error(&self) -> &MachineError {
+        match self {
+            Self::ResultConstructionPending(error) | Self::Failure(error) => error,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitReconciliation {
+    Observed,
+    ResultConstructionPending,
+}
+
 fn reconcile_wait(
     store: &mut EngagementStore,
     state_root: &Path,
     engagement_id: Uuid,
     task_id: Uuid,
     response: Result<ControlResponseV1, crate::worker::WorkerProtocolError>,
-) -> Result<(), MachineError> {
+) -> Result<WaitReconciliation, MachineError> {
+    reconcile_wait_with(
+        store,
+        state_root,
+        engagement_id,
+        task_id,
+        response,
+        |store, engagement_id, task_id, run_id, response| {
+            finish_completed_task(store, state_root, engagement_id, task_id, run_id, response)
+        },
+    )
+}
+
+fn reconcile_wait_with<F>(
+    store: &mut EngagementStore,
+    state_root: &Path,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    response: Result<ControlResponseV1, crate::worker::WorkerProtocolError>,
+    mut finish_completed: F,
+) -> Result<WaitReconciliation, MachineError>
+where
+    F: FnMut(
+        &mut EngagementStore,
+        Uuid,
+        Uuid,
+        Uuid,
+        &Option<FinalResponse>,
+    ) -> Result<ExternalTaskSnapshot, CompletionError>,
+{
     match response {
         Ok(ControlResponseV1::Terminal { terminal }) if terminal.status == "completed" => {
             let task = store.external_task(engagement_id, task_id)?;
-            finish_completed_task(
+            match finish_completed(
                 store,
-                state_root,
                 engagement_id,
                 task_id,
                 task.specialist_run_id,
                 &terminal.final_response,
-            )?;
+            ) {
+                Ok(_) => {}
+                Err(CompletionError::ResultConstructionPending(_)) => {
+                    return Ok(WaitReconciliation::ResultConstructionPending);
+                }
+                Err(CompletionError::Failure(error)) => return Err(error),
+            }
         }
         Ok(ControlResponseV1::Terminal { terminal }) => {
             store.finish_external_task(
@@ -2128,7 +2262,7 @@ fn reconcile_wait(
             return Err(error.machine_error(task.specialist_run_id, state_root));
         }
     }
-    Ok(())
+    Ok(WaitReconciliation::Observed)
 }
 
 fn finish_completed_task(
@@ -2138,28 +2272,77 @@ fn finish_completed_task(
     task_id: Uuid,
     run_id: Uuid,
     response: &Option<FinalResponse>,
-) -> Result<ExternalTaskSnapshot, MachineError> {
-    let output = match terminal_output(store, state_root, engagement_id, task_id, run_id, response)
-    {
-        Ok(output) => output,
-        Err(error) => {
-            store.finish_external_task(
-                engagement_id,
-                task_id,
-                None,
-                "failed",
-                Some(&error.code),
-            )?;
-            return Err(error);
-        }
-    };
-    store.finish_external_task(
+) -> Result<ExternalTaskSnapshot, CompletionError> {
+    let output = terminal_output(store, state_root, engagement_id, task_id, run_id, response);
+    finish_completed_output(store, engagement_id, task_id, output)
+}
+
+fn finish_assign_terminal(
+    store: &mut EngagementStore,
+    state_root: &Path,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    run_id: Uuid,
+    idempotency_key: &str,
+    terminal: &crate::turn::TerminalTurn,
+) -> Result<ExternalTaskSnapshot, CompletionError> {
+    store
+        .mark_external_task_running(engagement_id, task_id, &terminal.turn_id, idempotency_key)
+        .map_err(CompletionError::Failure)?;
+    finish_completed_task(
+        store,
+        state_root,
         engagement_id,
         task_id,
-        Some(&output),
-        "completed_not_delivered",
-        None,
+        run_id,
+        &terminal.final_response,
     )
+}
+
+fn finish_completed_output(
+    store: &mut EngagementStore,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    output: Result<Value, MachineError>,
+) -> Result<ExternalTaskSnapshot, CompletionError> {
+    let output = match output {
+        Ok(output) => output,
+        Err(error) if error.retryable => {
+            if store
+                .external_task_deadline_expired(engagement_id, task_id)
+                .map_err(CompletionError::Failure)?
+            {
+                return store
+                    .finish_external_task(
+                        engagement_id,
+                        task_id,
+                        None,
+                        "expired",
+                        Some("OPERATION_TIMEOUT"),
+                    )
+                    .map_err(CompletionError::Failure);
+            }
+            store
+                .mark_external_task_result_pending(engagement_id, task_id, &error.code)
+                .map_err(CompletionError::Failure)?;
+            return Err(CompletionError::ResultConstructionPending(error));
+        }
+        Err(error) => {
+            store
+                .finish_external_task(engagement_id, task_id, None, "failed", Some(&error.code))
+                .map_err(CompletionError::Failure)?;
+            return Err(CompletionError::Failure(error));
+        }
+    };
+    store
+        .finish_external_task(
+            engagement_id,
+            task_id,
+            Some(&output),
+            "completed_not_delivered",
+            None,
+        )
+        .map_err(CompletionError::Failure)
 }
 
 fn terminal_output(
@@ -2171,17 +2354,17 @@ fn terminal_output(
     response: &Option<FinalResponse>,
 ) -> Result<Value, MachineError> {
     let accepted_request = store.external_task_request(engagement_id, task_id)?;
-    if let Some(output) = structured_task_output(&accepted_request, response)? {
-        return Ok(output);
-    }
-    let response = serde_json::to_value(response).map_err(internal)?;
+    let final_response = match structured_task_output(&accepted_request, response)? {
+        Some(output) => output,
+        None => serde_json::to_value(response).map_err(internal)?,
+    };
     if store.external_task_execution_intent(engagement_id, task_id)? != "isolated_write" {
-        return Ok(response);
+        return Ok(final_response);
     }
     let root = isolated_root(state_root, engagement_id, run_id);
     let patch_base64 = capture_isolated_change(&root, task_id)?;
     Ok(json!({
-        "final_response": response,
+        "final_response": final_response,
         "isolated_change": {"format":"git_diff_binary_base64","patch_base64":patch_base64}
     }))
 }
@@ -2206,7 +2389,10 @@ fn structured_task_output(
                         "REVIEW_OUTPUT_INVALID",
                         "structured review output must be one inline JSON object",
                         false,
-                        json!({"required_action":"none"}),
+                        json!({
+                            "reason":"structured review output must be one inline JSON object",
+                            "required_action":"none"
+                        }),
                     ));
                 }
             };
@@ -2215,7 +2401,10 @@ fn structured_task_output(
                     "REVIEW_OUTPUT_INVALID",
                     "structured review output is not JSON",
                     false,
-                    json!({"required_action":"none"}),
+                    json!({
+                        "reason":"structured review output is not JSON",
+                        "required_action":"none"
+                    }),
                 )
             })?;
             return serde_json::to_value(validate_reviewer_output_v3(value, &task)?)
@@ -2227,15 +2416,23 @@ fn structured_task_output(
 }
 
 fn capture_isolated_change(root: &Path, task_id: Uuid) -> Result<String, MachineError> {
-    let patch = capture_git_worktree_patch(root, 16 * 1024 * 1024).map_err(|_| {
-        MachineError::new(
-            "SPECIALIST_RESULT_INVALID",
-            "isolated Specialist change artifact is unavailable or exceeds 16 MiB",
-            false,
-            json!({"task_id":task_id}),
-        )
-    })?;
+    let patch = capture_git_worktree_patch(root, 16 * 1024 * 1024)
+        .map_err(|error| isolated_capture_error(task_id, error))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(patch))
+}
+
+fn isolated_capture_error(task_id: Uuid, error: WorktreePatchCaptureError) -> MachineError {
+    match error {
+        WorktreePatchCaptureError::Transient => outcome_unknown(task_id),
+        WorktreePatchCaptureError::Unavailable | WorktreePatchCaptureError::LimitExceeded => {
+            MachineError::new(
+                "SPECIALIST_RESULT_INVALID",
+                "isolated Specialist change artifact is unavailable or exceeds 16 MiB",
+                false,
+                json!({"task_id":task_id}),
+            )
+        }
+    }
 }
 fn terminal_state(state: &str) -> bool {
     matches!(
@@ -2247,6 +2444,21 @@ fn terminal_state(state: &str) -> bool {
             | "cancelled"
             | "expired"
     )
+}
+
+fn terminal_matches_task(
+    task: &ExternalTaskSnapshot,
+    terminal: &crate::turn::TerminalTurn,
+) -> bool {
+    task.turn_id.as_deref() == Some(terminal.turn_id.as_str())
+}
+
+fn should_release_writer(canonical_write: bool, task_state: &str) -> bool {
+    canonical_write && terminal_state(task_state)
+}
+
+fn should_release_writer_after_completion_failure(canonical_write: bool, task_state: &str) -> bool {
+    canonical_write && (terminal_state(task_state) || task_state == "dispatching")
 }
 fn task_values(tasks: Vec<ExternalTaskSnapshot>) -> Vec<Value> {
     tasks.into_iter().map(|task| json!({"task_id":task.task_id,"state":task.state,"result_artifact_ref":task.result_artifact_ref,"result":task.result,"safe_error_code":task.safe_error_code})).collect()
@@ -2366,7 +2578,30 @@ fn internal(error: impl ToString) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{
+        Assurance, ControllerIdentity, ControllerKind, ExecutionLane, Purpose, PurposeKind,
+    };
+    use crate::run::{AgentConfigurationSnapshot, ControllerBinding, InstructionSnapshot};
     use std::process::Command;
+
+    fn worker_identity(run_id: Uuid) -> crate::worker::WorkerIdentity {
+        crate::worker::WorkerIdentity {
+            workspace_id: "workspace".to_owned(),
+            run_id,
+            run_generation: 1,
+            boot_uuid: Uuid::now_v7(),
+            pid: std::process::id(),
+            process_group_id: std::process::id(),
+            session_id: std::process::id(),
+            uid: DarwinSystem.current_uid(),
+            start_tvsec: 1,
+            start_tvusec: 0,
+            executable_path: PathBuf::from("/usr/bin/true"),
+            executable_device: 1,
+            executable_inode: 1,
+            executable_sha256: "a".repeat(64),
+        }
+    }
 
     #[test]
     fn failure_projections_preserve_contract_details_and_retryability() {
@@ -2500,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn facade_request_validation_rejects_non_v7_and_duplicate_task_ids() {
+    fn facade_request_validation_rejects_non_v7_bounds_and_duplicate_task_ids() {
         let invalid: Request = serde_json::from_value(json!({
             "operation":"get_external_engagement",
             "engagement_id":Uuid::nil(),
@@ -2530,6 +2765,78 @@ mod tests {
             unsupported_review_purpose.validate().unwrap_err().code,
             "INVALID_ARGUMENT"
         );
+
+        let v3_request = |task: Value, idempotency_key: &str| -> Request {
+            serde_json::from_value(json!({
+                "schema":"dolgorae-external-specialist-facade/v3",
+                "operation":"assign_external_specialist_task",
+                "engagement_id":Uuid::now_v7(),
+                "specialist_run_id":Uuid::now_v7(),
+                "external_request_ref":{"namespace":"test","kind":"review","id":"bounds"},
+                "task":task,
+                "execution_intent":"read_only",
+                "deadline_seconds":600,
+                "idempotency_key":idempotency_key,
+            }))
+            .unwrap()
+        };
+        let too_many_contexts = (0..65)
+            .map(|index| {
+                json!({
+                    "id":format!("context-{index}"),
+                    "content":"accepted context",
+                    "provenance":"test",
+                })
+            })
+            .collect::<Vec<_>>();
+        let invalid = v3_request(
+            json!({
+                "purpose":"completion",
+                "brief":"reject 65 contexts",
+                "contexts":too_many_contexts,
+                "criteria":[{"id":"C-1","statement":"bounded","source_context_ids":[]}],
+                "expected_output":"structured_review_v3",
+            }),
+            "too-many-contexts",
+        );
+        assert_eq!(invalid.validate().unwrap_err().code, "INVALID_ARGUMENT");
+
+        let too_many_criteria = (0..65)
+            .map(|index| {
+                json!({
+                    "id":format!("criterion-{index}"),
+                    "statement":"bounded criterion",
+                    "source_context_ids":[],
+                })
+            })
+            .collect::<Vec<_>>();
+        let invalid = v3_request(
+            json!({
+                "purpose":"completion",
+                "brief":"reject 65 criteria",
+                "contexts":[],
+                "criteria":too_many_criteria,
+                "expected_output":"structured_review_v3",
+            }),
+            "too-many-criteria",
+        );
+        assert_eq!(invalid.validate().unwrap_err().code, "INVALID_ARGUMENT");
+
+        let invalid = v3_request(
+            json!({
+                "purpose":"completion",
+                "brief":"reject 65 context references",
+                "contexts":[{"id":"context-0","content":"accepted context","provenance":"test"}],
+                "criteria":[{
+                    "id":"C-1",
+                    "statement":"bounded references",
+                    "source_context_ids":vec!["context-0"; 65],
+                }],
+                "expected_output":"structured_review_v3",
+            }),
+            "too-many-context-references",
+        );
+        assert_eq!(invalid.validate().unwrap_err().code, "INVALID_ARGUMENT");
 
         let mixed_null: Request = serde_json::from_value(json!({
             "schema":"dolgorae-external-specialist-facade/v3",
@@ -2724,6 +3031,924 @@ mod tests {
                 .code,
             "REVIEW_OUTPUT_INVALID"
         );
+        let non_inline = structured_task_output(&accepted, &None).unwrap_err();
+        assert_eq!(
+            non_inline.details,
+            json!({
+                "reason":"structured review output must be one inline JSON object",
+                "required_action":"none"
+            })
+        );
+        let malformed = structured_task_output(
+            &accepted,
+            &Some(FinalResponse::Inline {
+                text: "not json".to_owned(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            malformed.details,
+            json!({
+                "reason":"structured review output is not JSON",
+                "required_action":"none"
+            })
+        );
+    }
+
+    #[test]
+    fn isolated_v3_result_preserves_report_and_retries_patch_capture() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-isolated-v3-result-{}", Uuid::now_v7()));
+        let state_root = root.join("state");
+        let mut store =
+            EngagementStore::open(&state_root.join("orchestration/orchestration.sqlite3")).unwrap();
+        let binding = ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: Uuid::now_v7(),
+                kind: ControllerKind::Automation,
+                instance_id: "test-host".to_owned(),
+                subject_id: Some("test-principal".to_owned()),
+                generation: 1,
+            },
+            capability_sha256: "a".repeat(64),
+        };
+        let opened = store
+            .open_external_engagement(
+                "workspace",
+                &binding,
+                &json!({"namespace":"test","kind":"workflow","id":"isolated-v3"}),
+                None,
+                "open-isolated-v3",
+            )
+            .unwrap();
+        let configuration = AgentConfigurationSnapshot {
+            schema_version: 2,
+            runtime_profile: "test".to_owned(),
+            runtime_profile_snapshot_sha256: "b".repeat(64),
+            model: "test-model".to_owned(),
+            default_effort: "medium".to_owned(),
+            purpose: Purpose {
+                kind: PurposeKind::Implementation,
+                external_label: None,
+            },
+            required_capabilities: vec![],
+            role_reference: Some("implementer".to_owned()),
+            normalized_instructions: "Implement the task.".to_owned(),
+            instructions: InstructionSnapshot {
+                schema: "dolgorae-instruction-snapshot/v1".to_owned(),
+                common_prefix_version: 1,
+                mode_prefix_version: 1,
+                purpose_prefix_version: 1,
+                normalized_byte_length: 19,
+                normalized_sha256: "c".repeat(64),
+            },
+            execution_lane: ExecutionLane::Dedicated,
+            required_assurance: Assurance::BestEffortPersonalAlpha,
+            native_subagent_policy: "enabled".to_owned(),
+        };
+        let hire = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "implementer",
+                &configuration,
+                "Produce an isolated review change.",
+                "isolated_write",
+                "hire-isolated-v3",
+            )
+            .unwrap();
+        let member = store
+            .finish_external_hire(&hire, RuntimeOutcome::Accepted, "hire-isolated-v3")
+            .unwrap();
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Check completion.".to_owned(),
+            contexts: vec![],
+            criteria: vec![crate::task_request::TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "The requirement is met.".to_owned(),
+                source_context_ids: vec![],
+            }],
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let accepted = json!({
+            "schema":FACADE_V3_SCHEMA,
+            "operation":"assign_external_specialist_task",
+            "task":&task
+        });
+        let external_ref = json!({"namespace":"test","kind":"review","id":"C-1"});
+        let reserved = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &accepted,
+                    objective: "Check completion.",
+                    external_request_ref: &external_ref,
+                    execution_intent: "isolated_write",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-isolated-v3",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(
+                opened.engagement_id,
+                reserved.task_id,
+                "task-isolated-v3",
+            )
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                reserved.task_id,
+                "turn-isolated-v3",
+                "task-isolated-v3",
+            )
+            .unwrap();
+        let report = json!({
+            "summary":"reviewed",
+            "findings":[],
+            "criterion_assessments":[{
+                "criterion_id":"C-1",
+                "status":"met",
+                "explanation":"candidate evidence is sufficient",
+                "evidence":[{"basis":"candidate","description":"checked source","path":"src/lib.rs","line_start":1,"line_end":1,"context_id":null}],
+                "remaining_gap":null
+            }],
+            "evidence_limits":[],
+            "overall_assessment":"requirements_met"
+        });
+        let response = Some(FinalResponse::Inline {
+            text: serde_json::to_string(&report).unwrap(),
+        });
+        let terminal_response = || {
+            Ok(ControlResponseV1::Terminal {
+                terminal: serde_json::from_value(json!({
+                    "thread_id":"thread-isolated-v3",
+                    "turn_id":"turn-isolated-v3",
+                    "status":"completed",
+                    "effort":"medium",
+                    "final_response":&response,
+                    "usage":{"inputTokens":1,"outputTokens":1}
+                }))
+                .unwrap(),
+            })
+        };
+        let pending = reconcile_wait_with(
+            &mut store,
+            &state_root,
+            opened.engagement_id,
+            reserved.task_id,
+            terminal_response(),
+            |store, engagement_id, task_id, run_id, observed_response| {
+                assert_eq!(run_id, member.specialist_run_id);
+                assert_eq!(observed_response, &response);
+                finish_completed_output(
+                    store,
+                    engagement_id,
+                    task_id,
+                    Err(outcome_unknown(task_id)),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(pending, WaitReconciliation::ResultConstructionPending);
+        let pending_task = store
+            .external_task(opened.engagement_id, reserved.task_id)
+            .unwrap();
+        assert_eq!(pending_task.state, "running");
+        assert_eq!(pending_task.result_artifact_ref, None);
+        assert_eq!(pending_task.result, None);
+        assert_eq!(
+            pending_task.safe_error_code.as_deref(),
+            Some("OUTCOME_UNKNOWN")
+        );
+
+        let other_hire = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "reviewer",
+                &configuration,
+                "Observe while another result remains retryable.",
+                "read_only",
+                "hire-other-member",
+            )
+            .unwrap();
+        let other_member = store
+            .finish_external_hire(&other_hire, RuntimeOutcome::Accepted, "hire-other-member")
+            .unwrap();
+        let other_ref = json!({"namespace":"test","kind":"review","id":"other"});
+        let other_task = store
+            .reserve_external_task(
+                opened.engagement_id,
+                other_member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &json!({"task":"other"}),
+                    objective: "Complete independently.",
+                    external_request_ref: &other_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-other-member",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(
+                opened.engagement_id,
+                other_task.task_id,
+                "task-other-member",
+            )
+            .unwrap();
+        let other_terminal = serde_json::from_value(json!({
+            "thread_id":"thread-other-member",
+            "turn_id":"turn-other-member",
+            "status":"completed",
+            "effort":"medium",
+            "final_response":{"kind":"inline","text":"other task completed"},
+            "usage":{"inputTokens":1,"outputTokens":1}
+        }))
+        .unwrap();
+        let other_finished = finish_assign_terminal(
+            &mut store,
+            &state_root,
+            opened.engagement_id,
+            other_task.task_id,
+            other_member.specialist_run_id,
+            "task-other-member",
+            &other_terminal,
+        )
+        .unwrap();
+        assert_eq!(other_finished.state, "completed_not_delivered");
+        assert_eq!(
+            store
+                .external_task(opened.engagement_id, other_task.task_id)
+                .unwrap()
+                .turn_id
+                .as_deref(),
+            Some("turn-other-member")
+        );
+        assert_eq!(
+            store
+                .external_task(opened.engagement_id, reserved.task_id)
+                .unwrap()
+                .state,
+            "running"
+        );
+
+        let isolated = isolated_root(&state_root, opened.engagement_id, member.specialist_run_id);
+        std::fs::create_dir_all(&isolated).unwrap();
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&isolated)
+            .output()
+            .unwrap();
+        std::fs::write(isolated.join("change.txt"), "baseline\n").unwrap();
+        Command::new("git")
+            .args(["add", "change.txt"])
+            .current_dir(&isolated)
+            .output()
+            .unwrap();
+        let committed = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Dolgorae Test",
+                "-c",
+                "user.email=dolgorae@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ])
+            .current_dir(&isolated)
+            .output()
+            .unwrap();
+        assert!(committed.status.success());
+        std::fs::write(isolated.join("change.txt"), "isolated change\n").unwrap();
+        assert_eq!(
+            reconcile_wait(
+                &mut store,
+                &state_root,
+                opened.engagement_id,
+                reserved.task_id,
+                terminal_response(),
+            )
+            .unwrap(),
+            WaitReconciliation::Observed
+        );
+        let finished = store
+            .external_task(opened.engagement_id, reserved.task_id)
+            .unwrap();
+        assert_eq!(finished.state, "completed_not_delivered");
+        let result = finished.result.unwrap();
+        assert_eq!(result["final_response"], report);
+        assert_eq!(
+            result["isolated_change"]["format"],
+            "git_diff_binary_base64"
+        );
+        assert!(
+            result["isolated_change"]["patch_base64"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        let expiring_ref = json!({"namespace":"test","kind":"review","id":"expiring"});
+        let expiring = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &accepted,
+                    objective: "Check completion.",
+                    external_request_ref: &expiring_ref,
+                    execution_intent: "isolated_write",
+                    deadline_seconds: 1,
+                    idempotency_key: "expiring-isolated-v3",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(
+                opened.engagement_id,
+                expiring.task_id,
+                "expiring-isolated-v3",
+            )
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                expiring.task_id,
+                "turn-expiring-isolated-v3",
+                "expiring-isolated-v3",
+            )
+            .unwrap();
+        store
+            .expire_external_task_for_test(opened.engagement_id, expiring.task_id)
+            .unwrap();
+        assert_eq!(
+            reconcile_wait_with(
+                &mut store,
+                &state_root,
+                opened.engagement_id,
+                expiring.task_id,
+                terminal_response(),
+                |store, engagement_id, task_id, _, _| {
+                    finish_completed_output(
+                        store,
+                        engagement_id,
+                        task_id,
+                        Err(outcome_unknown(task_id)),
+                    )
+                },
+            )
+            .unwrap(),
+            WaitReconciliation::Observed
+        );
+        let expired = store
+            .external_task(opened.engagement_id, expiring.task_id)
+            .unwrap();
+        assert_eq!(expired.state, "expired");
+        assert_eq!(
+            expired.safe_error_code.as_deref(),
+            Some("OPERATION_TIMEOUT")
+        );
+        assert_eq!(expired.result_artifact_ref, None);
+        assert_eq!(expired.result, None);
+        assert_eq!(
+            finish_completed_output(
+                &mut store,
+                opened.engagement_id,
+                expiring.task_id,
+                Err(outcome_unknown(expiring.task_id)),
+            )
+            .unwrap(),
+            expired
+        );
+        let invalid_ref = json!({"namespace":"test","kind":"review","id":"invalid"});
+        let invalid = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &accepted,
+                    objective: "Check an invalid report.",
+                    external_request_ref: &invalid_ref,
+                    execution_intent: "isolated_write",
+                    deadline_seconds: 60,
+                    idempotency_key: "invalid-isolated-v3",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(
+                opened.engagement_id,
+                invalid.task_id,
+                "invalid-isolated-v3",
+            )
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                invalid.task_id,
+                "turn-invalid-isolated-v3",
+                "invalid-isolated-v3",
+            )
+            .unwrap();
+        let invalid_error = finish_completed_task(
+            &mut store,
+            &state_root,
+            opened.engagement_id,
+            invalid.task_id,
+            member.specialist_run_id,
+            &Some(FinalResponse::Inline {
+                text: "not json".to_owned(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(invalid_error.machine_error().code, "REVIEW_OUTPUT_INVALID");
+        let invalid_task = store
+            .external_task(opened.engagement_id, invalid.task_id)
+            .unwrap();
+        assert_eq!(invalid_task.state, "failed");
+        assert_eq!(invalid_task.result_artifact_ref, None);
+        assert_eq!(invalid_task.result, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn isolated_capture_errors_distinguish_retryable_from_permanent_failures() {
+        let task_id = Uuid::now_v7();
+        let transient = isolated_capture_error(task_id, WorktreePatchCaptureError::Transient);
+        assert_eq!(transient.code, "OUTCOME_UNKNOWN");
+        assert!(transient.retryable);
+        for failure in [
+            WorktreePatchCaptureError::Unavailable,
+            WorktreePatchCaptureError::LimitExceeded,
+        ] {
+            let permanent = isolated_capture_error(task_id, failure);
+            assert_eq!(permanent.code, "SPECIALIST_RESULT_INVALID");
+            assert!(!permanent.retryable);
+        }
+    }
+
+    #[test]
+    fn reconciliation_uses_the_ledger_only_for_quiescent_restart_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-external-reconciliation-{}",
+            Uuid::now_v7()
+        ));
+        let state_root = root.join("state");
+        let runtime = state_root.join("runtime");
+        let locks = runtime.join("locks");
+        std::fs::create_dir_all(&locks).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for directory in [&state_root, &runtime, &locks] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let owner_path = root.join("owner.json");
+        crate::controller::create_controller_credential(
+            &owner_path,
+            ControllerKind::Automation,
+            "reconciliation-test".to_owned(),
+            Some("reconciliation-principal".to_owned()),
+            None,
+        )
+        .unwrap();
+        let owner = CredentialCarrier::open_path(&owner_path).unwrap();
+        let binding = binding_from_carrier(&owner, 1).unwrap();
+        let canonical = root.join("workspace");
+        std::fs::create_dir(&canonical).unwrap();
+        let view = WorkspaceView {
+            workspace_id: "a".repeat(64),
+            canonical_path: crate::workspace::LosslessPath::from_path(&canonical),
+            mode: WorkspaceMode::Git,
+            created: false,
+        };
+        crate::writer::WriterStore::initialize_layout(
+            &state_root,
+            &view.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+        .unwrap();
+        let mut store =
+            EngagementStore::open(&state_root.join("orchestration/orchestration.sqlite3")).unwrap();
+        let opened = store
+            .open_external_engagement(
+                &view.workspace_id,
+                &binding,
+                &json!({"namespace":"test","kind":"workflow","id":"reconcile"}),
+                None,
+                "open-reconcile",
+            )
+            .unwrap();
+        let configuration = AgentConfigurationSnapshot {
+            schema_version: 2,
+            runtime_profile: "test".to_owned(),
+            runtime_profile_snapshot_sha256: "b".repeat(64),
+            model: "test-model".to_owned(),
+            default_effort: "medium".to_owned(),
+            purpose: Purpose {
+                kind: PurposeKind::Review,
+                external_label: None,
+            },
+            required_capabilities: vec![],
+            role_reference: Some("reviewer".to_owned()),
+            normalized_instructions: "Review the task.".to_owned(),
+            instructions: InstructionSnapshot {
+                schema: "dolgorae-instruction-snapshot/v1".to_owned(),
+                common_prefix_version: 1,
+                mode_prefix_version: 1,
+                purpose_prefix_version: 1,
+                normalized_byte_length: 16,
+                normalized_sha256: "c".repeat(64),
+            },
+            execution_lane: ExecutionLane::Dedicated,
+            required_assurance: Assurance::BestEffortPersonalAlpha,
+            native_subagent_policy: "enabled".to_owned(),
+        };
+        let hire = store
+            .reserve_external_hire(
+                opened.engagement_id,
+                "reviewer",
+                &configuration,
+                "Recover a terminal result.",
+                "read_only",
+                "hire-reconcile",
+            )
+            .unwrap();
+        let member = store
+            .finish_external_hire(&hire, RuntimeOutcome::Accepted, "hire-reconcile")
+            .unwrap();
+        let request = json!({"task":"recover the terminal result"});
+        let external_ref = json!({"namespace":"test","kind":"task","id":"recover"});
+        let task = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &request,
+                    objective: "Recover the terminal result.",
+                    external_request_ref: &external_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-reconcile",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(opened.engagement_id, task.task_id, "task-reconcile")
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                task.task_id,
+                "turn-reconcile",
+                "task-reconcile",
+            )
+            .unwrap();
+        let identity = worker_identity(member.specialist_run_id);
+
+        reconcile_engagement_with(
+            &mut store,
+            &view,
+            &state_root,
+            opened.engagement_id,
+            &owner,
+            |_| {
+                Ok(ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "running".to_owned(),
+                    active_turn: Some("turn-reconcile".to_owned()),
+                    last_terminal: None,
+                })
+            },
+            |_| panic!("ordinary running polling must not read the durable ledger"),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .external_task(opened.engagement_id, task.task_id)
+                .unwrap()
+                .state,
+            "running"
+        );
+
+        let integrity_error = MachineError::new(
+            "AUDIT_INTEGRITY_FAILURE",
+            "durable terminal is unreadable",
+            false,
+            json!({"run_id":member.specialist_run_id,"sequence":1,"reason":"test"}),
+        );
+        let observed = reconcile_engagement_with(
+            &mut store,
+            &view,
+            &state_root,
+            opened.engagement_id,
+            &owner,
+            |_| {
+                Ok(ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "idle".to_owned(),
+                    active_turn: None,
+                    last_terminal: None,
+                })
+            },
+            |_| Err(integrity_error.clone()),
+        )
+        .unwrap_err();
+        assert_eq!(observed, integrity_error);
+        assert_eq!(
+            store
+                .external_task(opened.engagement_id, task.task_id)
+                .unwrap()
+                .state,
+            "running"
+        );
+
+        let terminal: crate::turn::TerminalTurn = serde_json::from_value(json!({
+            "thread_id":"thread-reconcile",
+            "turn_id":"turn-reconcile",
+            "status":"completed",
+            "effort":"medium",
+            "final_response":{"kind":"inline","text":"durable answer"},
+            "usage":{"inputTokens":1,"outputTokens":1}
+        }))
+        .unwrap();
+        reconcile_engagement_with(
+            &mut store,
+            &view,
+            &state_root,
+            opened.engagement_id,
+            &owner,
+            |_| {
+                Ok(ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "idle".to_owned(),
+                    active_turn: None,
+                    last_terminal: None,
+                })
+            },
+            |_| Ok(Some(terminal.clone())),
+        )
+        .unwrap();
+        let recovered = store
+            .external_task(opened.engagement_id, task.task_id)
+            .unwrap();
+        assert_eq!(recovered.state, "completed_not_delivered");
+        assert_eq!(
+            recovered.result,
+            Some(json!({"kind":"inline","text":"durable answer"}))
+        );
+
+        let mismatch_ref = json!({"namespace":"test","kind":"task","id":"mismatched-terminal"});
+        let mismatch = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &json!({"task":"do not adopt stale terminal bytes"}),
+                    objective: "Reject stale terminal recovery.",
+                    external_request_ref: &mismatch_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-mismatched-terminal",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(
+                opened.engagement_id,
+                mismatch.task_id,
+                "task-mismatched-terminal",
+            )
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                mismatch.task_id,
+                "turn-current",
+                "task-mismatched-terminal",
+            )
+            .unwrap();
+        reconcile_engagement_with(
+            &mut store,
+            &view,
+            &state_root,
+            opened.engagement_id,
+            &owner,
+            |_| {
+                Ok(ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "idle".to_owned(),
+                    active_turn: None,
+                    last_terminal: None,
+                })
+            },
+            |_| Ok(Some(terminal.clone())),
+        )
+        .unwrap();
+        let mismatch = store
+            .external_task(opened.engagement_id, mismatch.task_id)
+            .unwrap();
+        assert_eq!(mismatch.state, "interrupted_unknown");
+        assert_eq!(mismatch.result, None);
+
+        let paused_recovery_ref = json!({"namespace":"test","kind":"task","id":"paused-recovery"});
+        let paused_recovery = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &json!({"task":"recover a paused worker terminal"}),
+                    objective: "Recover matching terminal evidence from a paused Worker.",
+                    external_request_ref: &paused_recovery_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-paused-recovery",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(
+                opened.engagement_id,
+                paused_recovery.task_id,
+                "task-paused-recovery",
+            )
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                paused_recovery.task_id,
+                "turn-paused-recovery",
+                "task-paused-recovery",
+            )
+            .unwrap();
+        let paused_terminal: crate::turn::TerminalTurn = serde_json::from_value(json!({
+            "thread_id":"thread-paused-recovery",
+            "turn_id":"turn-paused-recovery",
+            "status":"completed",
+            "effort":"medium",
+            "final_response":{"kind":"inline","text":"paused durable answer"},
+            "usage":{"inputTokens":1,"outputTokens":1}
+        }))
+        .unwrap();
+        reconcile_engagement_with(
+            &mut store,
+            &view,
+            &state_root,
+            opened.engagement_id,
+            &owner,
+            |_| {
+                Ok(ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "paused".to_owned(),
+                    active_turn: None,
+                    last_terminal: None,
+                })
+            },
+            |_| Ok(Some(paused_terminal.clone())),
+        )
+        .unwrap();
+        let paused_recovery = store
+            .external_task(opened.engagement_id, paused_recovery.task_id)
+            .unwrap();
+        assert_eq!(paused_recovery.state, "completed_not_delivered");
+        assert_eq!(
+            paused_recovery.result,
+            Some(json!({"kind":"inline","text":"paused durable answer"}))
+        );
+
+        let paused_ref = json!({"namespace":"test","kind":"task","id":"paused"});
+        let paused = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &json!({"task":"recover a paused worker"}),
+                    objective: "Reconcile paused state without terminal evidence.",
+                    external_request_ref: &paused_ref,
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-paused",
+                },
+            )
+            .unwrap();
+        store
+            .mark_external_task_dispatching(opened.engagement_id, paused.task_id, "task-paused")
+            .unwrap();
+        store
+            .mark_external_task_running(
+                opened.engagement_id,
+                paused.task_id,
+                "turn-paused",
+                "task-paused",
+            )
+            .unwrap();
+        reconcile_engagement_with(
+            &mut store,
+            &view,
+            &state_root,
+            opened.engagement_id,
+            &owner,
+            |_| {
+                Ok(ControlResponseV1::Status {
+                    identity: identity.clone(),
+                    lifecycle: "paused".to_owned(),
+                    active_turn: None,
+                    last_terminal: None,
+                })
+            },
+            |_| Ok(None),
+        )
+        .unwrap();
+        let paused = store
+            .external_task(opened.engagement_id, paused.task_id)
+            .unwrap();
+        assert_eq!(paused.state, "interrupted_unknown");
+        assert_eq!(
+            paused.safe_error_code.as_deref(),
+            Some("INTERRUPTED_UNKNOWN")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retryable_worker_failure_is_not_result_construction_pending() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-external-wait-failure-{}", Uuid::now_v7()));
+        let mut store = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let error = reconcile_wait(
+            &mut store,
+            &root,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Ok(ControlResponseV1::Failed {
+                code: "RUN_BUSY".to_owned(),
+                message: "worker is busy".to_owned(),
+                retryable: true,
+                details: json!({
+                    "run_id":Uuid::now_v7(),
+                    "owner_kind":"startup"
+                }),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RUN_BUSY");
+        assert!(error.retryable);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_recovery_matches_exact_turn_and_releases_only_terminal_writers() {
+        let task = ExternalTaskSnapshot {
+            task_id: Uuid::now_v7(),
+            specialist_run_id: Uuid::now_v7(),
+            state: "running".to_owned(),
+            turn_id: Some("turn-current".to_owned()),
+            result_artifact_ref: None,
+            result: None,
+            safe_error_code: None,
+        };
+        let previous: crate::turn::TerminalTurn = serde_json::from_value(json!({
+            "thread_id":"thread-1",
+            "turn_id":"turn-previous",
+            "status":"completed",
+            "effort":"medium",
+            "final_response":{"kind":"inline","text":"previous"},
+            "usage":{"inputTokens":1,"outputTokens":1}
+        }))
+        .unwrap();
+        let current: crate::turn::TerminalTurn = serde_json::from_value(json!({
+            "thread_id":"thread-1",
+            "turn_id":"turn-current",
+            "status":"completed",
+            "effort":"medium",
+            "final_response":{"kind":"inline","text":"current"},
+            "usage":{"inputTokens":1,"outputTokens":1}
+        }))
+        .unwrap();
+        assert!(!terminal_matches_task(&task, &previous));
+        assert!(terminal_matches_task(&task, &current));
+
+        for active in ["accepted", "queued", "claimed", "dispatching", "running"] {
+            assert!(!should_release_writer(true, active));
+        }
+        assert!(should_release_writer_after_completion_failure(
+            true,
+            "dispatching"
+        ));
+        assert!(!should_release_writer_after_completion_failure(
+            false,
+            "dispatching"
+        ));
+        for terminal in [
+            "completed_not_delivered",
+            "delivered",
+            "failed",
+            "interrupted_unknown",
+            "cancelled",
+            "expired",
+        ] {
+            assert!(should_release_writer(true, terminal));
+            assert!(!should_release_writer(false, terminal));
+        }
     }
 
     #[test]

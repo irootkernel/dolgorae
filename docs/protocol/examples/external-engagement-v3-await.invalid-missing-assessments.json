@@ -1,0 +1,18 @@
+{
+  "operation": "await_external_specialist_tasks_result",
+  "tasks": [
+    {
+      "task_id": "018f0000-0000-7000-8000-000000000101",
+      "state": "completed_not_delivered",
+      "result_artifact_ref": "018f0000-0000-7000-8000-000000000102",
+      "result": {
+        "summary": "The report is incomplete.",
+        "findings": [],
+        "evidence_limits": [],
+        "overall_assessment": "requirements_met"
+      },
+      "safe_error_code": null
+    }
+  ],
+  "pending": []
+}

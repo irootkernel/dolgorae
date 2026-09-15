@@ -9,7 +9,11 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 
-def validator(protocol_root: Path, name: str) -> Draft202012Validator:
+def validator(
+    protocol_root: Path,
+    name: str,
+    fragment: str | None = None,
+) -> Draft202012Validator:
     registry = Registry()
     for path in sorted(protocol_root.glob("*.json")):
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -18,6 +22,8 @@ def validator(protocol_root: Path, name: str) -> Draft202012Validator:
                 document["$id"], Resource.from_contents(document)
             )
     schema = json.loads((protocol_root / name).read_text(encoding="utf-8"))
+    if fragment is not None:
+        schema = {"$ref": f"{schema['$id']}{fragment}"}
     return Draft202012Validator(schema, registry=registry)
 
 

@@ -6,8 +6,10 @@ use crate::machine::MachineError;
 use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, ControllerBinding, agent_configuration_digest,
 };
-use crate::specialist::{ReviewerRuntimePlan, validate_reviewer_output};
-use crate::task_request::SpecialistTaskRequest;
+use crate::specialist::{
+    ReviewerRuntimePlan, output_invalid, validate_reviewer_output, validate_reviewer_output_v3,
+};
+use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -50,6 +52,8 @@ pub enum EngagementBarrier {
     AfterExternalTaskDispatchCommit,
     BeforeExternalTaskRunningCommit,
     AfterExternalTaskRunningCommit,
+    BeforeExternalTaskPendingCommit,
+    AfterExternalTaskPendingCommit,
     BeforeExternalTaskTerminalCommit,
     AfterExternalTaskTerminalCommit,
     BeforeExternalTaskCancelCommit,
@@ -121,6 +125,30 @@ pub struct TaskReservation {
     pub task_id: Uuid,
     pub specialist_run_id: Uuid,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<MachineError>,
+}
+
+struct TaskExecution {
+    outcome: RuntimeOutcome,
+    value: Option<Value>,
+    terminal_error: Option<MachineError>,
+}
+
+struct OperationCompletion<'a, T> {
+    task_id: Option<Uuid>,
+    safe_error_code: Option<&'a str>,
+    response: &'a T,
+}
+
+impl From<(RuntimeOutcome, Option<Value>)> for TaskExecution {
+    fn from((outcome, value): (RuntimeOutcome, Option<Value>)) -> Self {
+        Self {
+            outcome,
+            value,
+            terminal_error: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -543,7 +571,11 @@ impl EngagementStore {
                     "hire_outcome_unknown_after_restart",
                     "hire",
                     idempotency_key,
-                    &replay,
+                    OperationCompletion {
+                        task_id: None,
+                        safe_error_code: None,
+                        response: &replay,
+                    },
                 )?;
             }
             return Ok(replay);
@@ -615,7 +647,11 @@ impl EngagementStore {
             "hire_runtime_outcome",
             "hire",
             idempotency_key,
-            &final_result,
+            OperationCompletion {
+                task_id: None,
+                safe_error_code: None,
+                response: &final_result,
+            },
         )?;
         Ok(final_result)
     }
@@ -648,11 +684,23 @@ impl EngagementStore {
                             .ok()
                             .and_then(|output| serde_json::to_value(output).ok())
                     }) {
-                        Some(value) => (RuntimeOutcome::Accepted, Some(value)),
-                        None => (RuntimeOutcome::Rejected, None),
+                        Some(value) => TaskExecution {
+                            outcome: RuntimeOutcome::Accepted,
+                            value: Some(value),
+                            terminal_error: None,
+                        },
+                        None => TaskExecution {
+                            outcome: RuntimeOutcome::Rejected,
+                            value: None,
+                            terminal_error: None,
+                        },
                     }
                 } else {
-                    (outcome, None)
+                    TaskExecution {
+                        outcome,
+                        value: None,
+                        terminal_error: None,
+                    }
                 }
             },
         )
@@ -672,23 +720,67 @@ impl EngagementStore {
             &TaskReservation,
             &SpecialistTaskRequest,
             &str,
-        ) -> (RuntimeOutcome, Option<Value>),
+        ) -> Result<(RuntimeOutcome, Option<Value>), MachineError>,
     {
         task.validate()?;
         let prompt = task.prompt()?;
         let request_json = canonical_string(accepted_request)?;
         let request_sha256 = sha256_hex(request_json.as_bytes());
-        self.assign(
+        let result = self.assign(
             engagement_id,
             specialist_run_id,
             &request_sha256,
             Some(&request_json),
             idempotency_key,
-            |reservation| execute(reservation, task, &prompt),
-        )
+            |reservation| {
+                let (outcome, value) = match execute(reservation, task, &prompt) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        return TaskExecution {
+                            outcome: RuntimeOutcome::Rejected,
+                            value: None,
+                            terminal_error: Some(error),
+                        };
+                    }
+                };
+                if outcome == RuntimeOutcome::Accepted
+                    && task.expected_output == STRUCTURED_REVIEW_OUTPUT
+                {
+                    let checked = value
+                        .ok_or_else(|| output_invalid("Reviewer returned no structured output"))
+                        .and_then(|value| validate_reviewer_output_v3(value, task))
+                        .and_then(|output| serde_json::to_value(output).map_err(internal));
+                    match checked {
+                        Ok(value) => TaskExecution {
+                            outcome: RuntimeOutcome::Accepted,
+                            value: Some(value),
+                            terminal_error: None,
+                        },
+                        Err(error) => TaskExecution {
+                            outcome: RuntimeOutcome::Rejected,
+                            value: None,
+                            terminal_error: Some(error),
+                        },
+                    }
+                } else {
+                    TaskExecution {
+                        outcome,
+                        value,
+                        terminal_error: None,
+                    }
+                }
+            },
+        );
+        match result {
+            Ok(reservation) => match reservation.terminal_error.clone() {
+                Some(error) => Err(error),
+                None => Ok(reservation),
+            },
+            Err(error) => Err(error),
+        }
     }
 
-    fn assign<F>(
+    fn assign<F, T>(
         &mut self,
         engagement_id: Uuid,
         specialist_run_id: Uuid,
@@ -698,7 +790,8 @@ impl EngagementStore {
         execute: F,
     ) -> Result<TaskReservation, MachineError>
     where
-        F: FnOnce(&TaskReservation) -> (RuntimeOutcome, Option<Value>),
+        F: FnOnce(&TaskReservation) -> T,
+        T: Into<TaskExecution>,
     {
         digest(objective_sha256, "objective_sha256")?;
         checked(idempotency_key, 256, "idempotency_key")?;
@@ -719,7 +812,11 @@ impl EngagementStore {
                     "task_outcome_unknown_after_restart",
                     "assign",
                     idempotency_key,
-                    &replay,
+                    OperationCompletion {
+                        task_id: Some(replay.task_id),
+                        safe_error_code: None,
+                        response: &replay,
+                    },
                 )?;
             }
             return Ok(replay);
@@ -730,6 +827,7 @@ impl EngagementStore {
             task_id,
             specialist_run_id,
             state: "accepted".to_owned(),
+            terminal_error: None,
         };
         {
             let faults = Arc::clone(&self.faults);
@@ -775,10 +873,12 @@ impl EngagementStore {
                 EngagementBarrier::AfterTaskReservationCommit,
             )?;
         }
-        let (outcome, result) = execute(&reserved);
-        match outcome {
+        let execution = execute(&reserved).into();
+        match execution.outcome {
             RuntimeOutcome::Accepted => {
-                let result = result.ok_or_else(|| conflict("accepted task has no result"))?;
+                let result = execution
+                    .value
+                    .ok_or_else(|| conflict("accepted task has no result"))?;
                 let bytes = canonical_json(&result)?;
                 let result_sha256 = sha256_hex(&bytes);
                 let artifact_id = Uuid::now_v7();
@@ -804,12 +904,15 @@ impl EngagementStore {
                         ],
                     )
                     .map_err(internal)?;
-                transaction
+                let changed = transaction
                     .execute(
-                        "UPDATE tasks SET state='result_ready',result_sha256=?2 WHERE engagement_id=?1",
-                        params![engagement_id.to_string(), result_sha256],
+                        "UPDATE tasks SET state='result_ready',result_sha256=?3 WHERE engagement_id=?1 AND task_id=?2",
+                        params![engagement_id.to_string(), task_id.to_string(), result_sha256],
                     )
                     .map_err(internal)?;
+                if changed != 1 {
+                    return Err(conflict("task result target is absent or concurrent"));
+                }
                 append_event(
                     &transaction,
                     engagement_id,
@@ -832,15 +935,24 @@ impl EngagementStore {
             RuntimeOutcome::Rejected => {
                 let final_result = TaskReservation {
                     state: "failed".to_owned(),
+                    terminal_error: execution.terminal_error,
                     ..reserved
                 };
+                let safe_error_code = final_result
+                    .terminal_error
+                    .as_ref()
+                    .map(|error| error.code.as_str());
                 self.finish_operation(
                     engagement_id,
                     "failed",
                     "task_rejected",
                     "assign",
                     idempotency_key,
-                    &final_result,
+                    OperationCompletion {
+                        task_id: Some(final_result.task_id),
+                        safe_error_code,
+                        response: &final_result,
+                    },
                 )?;
                 Ok(final_result)
             }
@@ -855,7 +967,11 @@ impl EngagementStore {
                     "task_outcome_unknown",
                     "assign",
                     idempotency_key,
-                    &final_result,
+                    OperationCompletion {
+                        task_id: Some(final_result.task_id),
+                        safe_error_code: None,
+                        response: &final_result,
+                    },
                 )?;
                 Ok(final_result)
             }
@@ -1862,6 +1978,69 @@ impl EngagementStore {
         Ok(result)
     }
 
+    pub fn mark_external_task_result_pending(
+        &mut self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+        safe_error_code: &str,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        checked(safe_error_code, 128, "safe_error_code")?;
+        let current = self.external_task(engagement_id, task_id)?;
+        if current.state != "running" {
+            if matches!(
+                current.state.as_str(),
+                "completed_not_delivered"
+                    | "delivered"
+                    | "failed"
+                    | "interrupted_unknown"
+                    | "cancelled"
+                    | "expired"
+            ) {
+                return Ok(current);
+            }
+            return Err(conflict("task is not running result construction"));
+        }
+        if current.safe_error_code.as_deref() == Some(safe_error_code) {
+            return Ok(current);
+        }
+        let now = unix_time_ms()?;
+        let faults = Arc::clone(&self.faults);
+        let transaction = self.transaction()?;
+        let changed = transaction
+            .execute(
+                "UPDATE tasks SET safe_error_code=?3,updated_at_ms=?4
+                 WHERE engagement_id=?1 AND task_id=?2 AND state='running'",
+                params![
+                    engagement_id.to_string(),
+                    task_id.to_string(),
+                    safe_error_code,
+                    now
+                ],
+            )
+            .map_err(internal)?;
+        if changed != 1 {
+            return external_task_in(&transaction, engagement_id, task_id);
+        }
+        transaction.execute(
+            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+            params![engagement_id.to_string(), now],
+        ).map_err(internal)?;
+        append_event(
+            &transaction,
+            engagement_id,
+            "external_task_result_pending",
+            safe_error_code,
+        )?;
+        let result = external_task_in(&transaction, engagement_id, task_id)?;
+        commit_with(
+            &faults,
+            transaction,
+            EngagementBarrier::BeforeExternalTaskPendingCommit,
+            EngagementBarrier::AfterExternalTaskPendingCommit,
+        )?;
+        Ok(result)
+    }
+
     pub fn mark_external_task_dispatching(
         &mut self,
         engagement_id: Uuid,
@@ -2151,6 +2330,31 @@ impl EngagementStore {
                     serde_json::json!({"task_id":task_id}),
                 )
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_external_task_for_test(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<(), MachineError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE tasks SET created_at_ms=0 WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+            )
+            .map_err(internal)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(MachineError::new(
+                "SPECIALIST_TASK_NOT_FOUND",
+                "Specialist task was not found",
+                false,
+                serde_json::json!({"task_id":task_id}),
+            ))
+        }
     }
 
     pub fn external_tasks(
@@ -2552,7 +2756,7 @@ impl EngagementStore {
         kind: &str,
         operation: &str,
         idempotency_key: &str,
-        response: &T,
+        completion: OperationCompletion<'_, T>,
     ) -> Result<(), MachineError> {
         let (before, after) = match operation {
             "hire" => (
@@ -2586,17 +2790,33 @@ impl EngagementStore {
                     .map_err(internal)?;
             }
             "assign" => {
-                transaction
+                let task_id = completion
+                    .task_id
+                    .ok_or_else(|| internal("assign completion lost its task identity"))?;
+                let changed = transaction
                     .execute(
-                        "UPDATE tasks SET state=?2 WHERE engagement_id=?1",
-                        params![engagement_id.to_string(), state],
+                        "UPDATE tasks SET state=?3,safe_error_code=?4 WHERE engagement_id=?1 AND task_id=?2",
+                        params![
+                            engagement_id.to_string(),
+                            task_id.to_string(),
+                            state,
+                            completion.safe_error_code
+                        ],
                     )
                     .map_err(internal)?;
+                if changed != 1 {
+                    return Err(conflict("task completion target is absent or concurrent"));
+                }
             }
             _ => {}
         }
         append_event(&transaction, engagement_id, kind, state)?;
-        update_response(&transaction, operation, idempotency_key, response)?;
+        update_response(
+            &transaction,
+            operation,
+            idempotency_key,
+            completion.response,
+        )?;
         commit_with(&faults, transaction, before, after)
     }
 }
@@ -3601,6 +3821,8 @@ mod tests {
             EngagementBarrier::AfterExternalTaskDispatchCommit,
             EngagementBarrier::BeforeExternalTaskRunningCommit,
             EngagementBarrier::AfterExternalTaskRunningCommit,
+            EngagementBarrier::BeforeExternalTaskPendingCommit,
+            EngagementBarrier::AfterExternalTaskPendingCommit,
             EngagementBarrier::BeforeExternalTaskTerminalCommit,
             EngagementBarrier::AfterExternalTaskTerminalCommit,
             EngagementBarrier::BeforeExternalTaskCancelCommit,
@@ -3629,6 +3851,11 @@ mod tests {
                 EngagementBarrier::BeforeExternalTaskTerminalCommit
                     | EngagementBarrier::AfterExternalTaskTerminalCommit
             );
+            let pending_boundary = matches!(
+                barrier,
+                EngagementBarrier::BeforeExternalTaskPendingCommit
+                    | EngagementBarrier::AfterExternalTaskPendingCommit
+            );
             if !dispatch_boundary
                 && !matches!(
                     barrier,
@@ -3644,7 +3871,7 @@ mod tests {
                     )
                     .unwrap();
             }
-            if terminal_boundary {
+            if terminal_boundary || pending_boundary {
                 initial
                     .mark_external_task_running(
                         opened.engagement_id,
@@ -3693,6 +3920,14 @@ mod tests {
                         "task-external",
                     )
                     .unwrap_err()
+            } else if pending_boundary {
+                faulted
+                    .mark_external_task_result_pending(
+                        opened.engagement_id,
+                        task.task_id,
+                        "OUTCOME_UNKNOWN",
+                    )
+                    .unwrap_err()
             } else if terminal_boundary {
                 faulted
                     .finish_external_task(
@@ -3734,6 +3969,14 @@ mod tests {
                         "task-external",
                     )
                     .unwrap()
+            } else if pending_boundary {
+                recovered
+                    .mark_external_task_result_pending(
+                        opened.engagement_id,
+                        task.task_id,
+                        "OUTCOME_UNKNOWN",
+                    )
+                    .unwrap()
             } else if terminal_boundary {
                 recovered
                     .finish_external_task(
@@ -3759,7 +4002,7 @@ mod tests {
                 recovered_task.state,
                 if dispatch_boundary {
                     "dispatching"
-                } else if running_boundary {
+                } else if running_boundary || pending_boundary {
                     "running"
                 } else if terminal_boundary {
                     "completed_not_delivered"
@@ -3778,6 +4021,12 @@ mod tests {
                     .unwrap();
                 assert_eq!(artifacts, 1);
                 assert_eq!(recovered_task.result, Some(structured_report));
+            }
+            if pending_boundary {
+                assert_eq!(
+                    recovered_task.safe_error_code.as_deref(),
+                    Some("OUTCOME_UNKNOWN")
+                );
             }
             drop(recovered);
             std::fs::remove_dir_all(root).unwrap();
@@ -5375,6 +5624,32 @@ mod tests {
             "operation":"review_target",
             "task":&task
         });
+        let raw_report = serde_json::json!({
+            "summary":"accepted",
+            "findings":[
+                {"severity":"P3","title":"later","description":"minor issue","path":null,"line_start":null,"line_end":null,"recommendation":"fix later","confidence":"low"},
+                {"severity":"P1","title":"first","description":"important issue","path":"src/lib.rs","line_start":1,"line_end":1,"recommendation":"fix first","confidence":"high"}
+            ],
+            "criterion_assessments":[{
+                "criterion_id":"C-1",
+                "status":"met",
+                "explanation":"The accepted task keeps the role separate.",
+                "evidence":[{
+                    "basis":"candidate",
+                    "description":"The request is stored separately.",
+                    "path":"src/engagement.rs",
+                    "line_start":1,
+                    "line_end":1,
+                    "context_id":null
+                }],
+                "remaining_gap":null
+            }],
+            "evidence_limits":[],
+            "overall_assessment":"requirements_met"
+        });
+        let expected_report =
+            serde_json::to_value(validate_reviewer_output_v3(raw_report.clone(), &task).unwrap())
+                .unwrap();
         let reserved = store
             .assign_task_v3(
                 opened.engagement_id,
@@ -5385,10 +5660,7 @@ mod tests {
                 |_, _, prompt| {
                     assert!(prompt.contains("exact accepted context"));
                     assert!(prompt.contains("never candidate bytes"));
-                    (
-                        RuntimeOutcome::Accepted,
-                        Some(serde_json::json!({"summary":"accepted","findings":[]})),
-                    )
+                    Ok((RuntimeOutcome::Accepted, Some(raw_report)))
                 },
             )
             .unwrap();
@@ -5443,10 +5715,167 @@ mod tests {
                 .unwrap(),
             accepted
         );
+        let collected = store.collect_review(opened.engagement_id).unwrap().output;
+        assert_eq!(collected, expected_report);
+        assert_eq!(collected["findings"][0]["severity"], "P1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v3_task_rejects_invalid_output_before_artifact_commit() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_engagement("workspace", &"a".repeat(64), "open-invalid-v3")
+            .unwrap();
+        let plan = reviewer_plan("hire rationale only");
+        let hired = store
+            .hire_reviewer(opened.engagement_id, &plan, "hire-invalid-v3", |_, _, _| {
+                RuntimeOutcome::Accepted
+            })
+            .unwrap();
+        let task = SpecialistTaskRequest {
+            purpose: "completion".to_owned(),
+            brief: "Assess completion.".to_owned(),
+            contexts: vec![],
+            criteria: vec![TaskCriterion {
+                id: "C-1".to_owned(),
+                statement: "The requirement is met.".to_owned(),
+                source_context_ids: vec![],
+            }],
+            expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+        };
+        let accepted = serde_json::json!({
+            "schema":"dolgorae-specialist-review-request/v3",
+            "operation":"review_target",
+            "task":&task
+        });
+        let error = store
+            .assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "invalid-task-v3",
+                |_, _, _| {
+                    Ok((
+                        RuntimeOutcome::Accepted,
+                        Some(serde_json::json!({"summary":"incomplete","findings":[]})),
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "REVIEW_OUTPUT_INVALID");
+        let artifact_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE engagement_id=?1",
+                [opened.engagement_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifact_count, 0);
+        let durable_error: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT safe_error_code FROM tasks WHERE engagement_id=?1",
+                [opened.engagement_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(durable_error.as_deref(), Some("REVIEW_OUTPUT_INVALID"));
+        drop(store);
+
+        let mut reopened = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let replay_error = reopened
+            .assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "invalid-task-v3",
+                |_, _, _| panic!("an invalid-output replay must not dispatch again"),
+            )
+            .unwrap_err();
+        assert_eq!(replay_error, error);
+        let artifact_count: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE engagement_id=?1",
+                [opened.engagement_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifact_count, 0);
+
+        let callback_opened = reopened
+            .open_engagement("workspace", &"d".repeat(64), "open-callback-invalid-v3")
+            .unwrap();
+        let callback_hired = reopened
+            .hire_reviewer(
+                callback_opened.engagement_id,
+                &reviewer_plan("production-shaped invalid output"),
+                "hire-callback-invalid-v3",
+                |_, _, _| RuntimeOutcome::Accepted,
+            )
+            .unwrap();
+        let malformed_turn = serde_json::json!({
+            "status":"completed",
+            "final_response":{"kind":"inline","text":"not json"}
+        });
+        let callback_error = reopened
+            .assign_task_v3(
+                callback_opened.engagement_id,
+                callback_hired.specialist_run_id,
+                &accepted,
+                &task,
+                "callback-invalid-task-v3",
+                |_, _, _| {
+                    crate::specialist::reviewer_turn_output_value(&malformed_turn)
+                        .map(|output| (RuntimeOutcome::Accepted, Some(output)))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(callback_error.code, "REVIEW_OUTPUT_INVALID");
         assert_eq!(
-            store.collect_review(opened.engagement_id).unwrap().output["summary"],
-            "accepted"
+            callback_error.details,
+            serde_json::json!({
+                "reason":"Reviewer output is not JSON",
+                "required_action":"none"
+            })
         );
+        let callback_row: (String, Option<String>, Option<String>, Option<String>) = reopened
+            .connection
+            .query_row(
+                "SELECT state,artifact_id,result_sha256,safe_error_code FROM tasks \
+                 WHERE engagement_id=?1",
+                [callback_opened.engagement_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            callback_row,
+            (
+                "failed".to_owned(),
+                None,
+                None,
+                Some("REVIEW_OUTPUT_INVALID".to_owned())
+            )
+        );
+        drop(reopened);
+
+        let mut replayed = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let callback_replay_error = replayed
+            .assign_task_v3(
+                callback_opened.engagement_id,
+                callback_hired.specialist_run_id,
+                &accepted,
+                &task,
+                "callback-invalid-task-v3",
+                |_, _, _| panic!("a durable callback error must not dispatch again"),
+            )
+            .unwrap_err();
+        assert_eq!(callback_replay_error, callback_error);
+        drop(replayed);
         std::fs::remove_dir_all(root).unwrap();
     }
 

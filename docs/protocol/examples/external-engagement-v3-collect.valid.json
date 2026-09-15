@@ -1,0 +1,42 @@
+{
+  "operation": "collect_external_specialist_results_result",
+  "tasks": [
+    {
+      "task_id": "018f0000-0000-7000-8000-000000000101",
+      "state": "delivered",
+      "result_artifact_ref": "018f0000-0000-7000-8000-000000000102",
+      "result": {
+        "final_response": {
+          "summary": "The completion criterion is met.",
+          "findings": [],
+          "criterion_assessments": [
+            {
+              "criterion_id": "C-1",
+              "status": "met",
+              "explanation": "The candidate contains the required behavior.",
+              "evidence": [
+                {
+                  "basis": "candidate",
+                  "description": "The checked implementation provides the behavior.",
+                  "path": "src/lib.rs",
+                  "line_start": 1,
+                  "line_end": 1,
+                  "context_id": null
+                }
+              ],
+              "remaining_gap": null
+            }
+          ],
+          "evidence_limits": [],
+          "overall_assessment": "requirements_met"
+        },
+        "isolated_change": {
+          "format": "git_diff_binary_base64",
+          "patch_base64": "ZGlmZiAtLWdpdCBhL3NyYy9saWIucnMgYi9zcmMvbGliLnJzCg=="
+        }
+      },
+      "safe_error_code": null
+    }
+  ],
+  "next_after_sequence": 14
+}
