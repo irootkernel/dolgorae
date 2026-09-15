@@ -675,7 +675,6 @@ impl EngagementStore {
             specialist_run_id,
             &objective_sha256,
             None,
-            None,
             idempotency_key,
             |reservation| {
                 let (outcome, value) = execute(reservation, objective);
@@ -727,15 +726,11 @@ impl EngagementStore {
         let prompt = task.prompt()?;
         let request_json = canonical_string(accepted_request)?;
         let request_sha256 = sha256_hex(request_json.as_bytes());
-        let deadline_seconds = accepted_request
-            .get("deadline_seconds")
-            .and_then(Value::as_u64);
         let result = self.assign(
             engagement_id,
             specialist_run_id,
             &request_sha256,
             Some(&request_json),
-            deadline_seconds,
             idempotency_key,
             |reservation| {
                 let (outcome, value) = match execute(reservation, task, &prompt) {
@@ -791,7 +786,6 @@ impl EngagementStore {
         specialist_run_id: Uuid,
         objective_sha256: &str,
         request_json: Option<&str>,
-        deadline_seconds: Option<u64>,
         idempotency_key: &str,
         execute: F,
     ) -> Result<TaskReservation, MachineError>
@@ -827,6 +821,10 @@ impl EngagementStore {
             }
             return Ok(replay);
         }
+        let deadline_seconds = request_json
+            .map(|value| serde_json::from_str::<Value>(value).map_err(internal))
+            .transpose()?
+            .and_then(|value| value.get("deadline_seconds").and_then(Value::as_u64));
         let task_id = Uuid::now_v7();
         let created_at_ms = unix_time_ms()?;
         let reserved = TaskReservation {
@@ -5170,7 +5168,6 @@ mod tests {
                 hired.specialist_run_id,
                 &"c".repeat(64),
                 None,
-                None,
                 "task-key",
                 |reservation| {
                     assert_eq!(
@@ -5218,7 +5215,6 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
-                    None,
                     None,
                     &format!("task-{number}"),
                     |_| {
@@ -6021,7 +6017,6 @@ mod tests {
                 hired.specialist_run_id,
                 &"c".repeat(64),
                 None,
-                None,
                 "task",
                 |_| (RuntimeOutcome::Unknown, None),
             )
@@ -6086,7 +6081,6 @@ mod tests {
                 opened.engagement_id,
                 hired.specialist_run_id,
                 &"c".repeat(64),
-                None,
                 None,
                 "task",
                 |_| {
@@ -6262,7 +6256,6 @@ mod tests {
                         hired.specialist_run_id,
                         &"c".repeat(64),
                         None,
-                        None,
                         "task",
                         |_| {
                             executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -6284,7 +6277,6 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
-                    None,
                     None,
                     "task",
                     |_| {
@@ -6363,7 +6355,6 @@ mod tests {
                     opened.engagement_id,
                     hired.specialist_run_id,
                     &"c".repeat(64),
-                    None,
                     None,
                     "task",
                     |_| {
