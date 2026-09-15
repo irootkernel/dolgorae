@@ -23,7 +23,10 @@ active Epics. It does not own roadmap identity, order, status, or dependencies.
 
 ## Adopted active-Epic dossiers
 
-There are no adopted active-Epic dossiers.
+- [Role/Task separation and structured completion review dossier](TODO-EPIC-014-role-task-separation.md)
+  maps the requirements, task boundaries, verification, and closeout for
+  [EPIC-014](../roadmap/README.md#epic-014-roletask-separation-and-structured-completion-review).
+  Delivery status remains exclusively in the roadmap.
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier only while the Epic is active, list it here, and link it from the

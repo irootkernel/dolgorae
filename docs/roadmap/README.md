@@ -1280,6 +1280,8 @@ No live Primary model tool is claimed until `EPIC-008` completes.
 
 Status: `ACTIVE`
 
+Detailed SOT: [Role/Task separation and structured completion review dossier](../todo/TODO-EPIC-014-role-task-separation.md).
+
 Goal: Keep reusable Specialist character independent of assigned work, make
 accepted inline context model-readable and durable, and add criterion-complete
 review results without changing the v1/v2 contracts or the EPIC-008 release
