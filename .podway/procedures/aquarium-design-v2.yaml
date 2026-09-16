@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-design-v2
-version: "2"
+version: "3"
 name: Aquarium Design
 purpose: Shape one approved project, feature epic, or refactor document set without implementing it.
 description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, challenge, guarded quality review, exact-diff approval, document application, and closeout.
@@ -10,6 +10,9 @@ node_definitions:
     type: action
     title: Capture design authority
     intent: Bind the workflow to its canonical identity, source authority, scope, and approved provider boundary.
+    instructions:
+      - Use the invoking design skill to record exact repository, document authority, scope, and approved discovery boundary.
+      - Do not implement product behavior, mutate unapproved files, stage, commit, or publish.
     items:
       - id: context-summary
         type: text
@@ -22,6 +25,9 @@ node_definitions:
     type: action
     title: Record Ouroboros discovery
     intent: Record bounded requirements and decision evidence returned by approved leaf operations.
+    instructions:
+      - Use the approved Ouroboros discovery leaf and independently verify its bounded requirements evidence.
+      - Discovery does not authorize implementation or applying draft documents.
     items:
       - id: discovery-summary
         type: text
@@ -34,6 +40,9 @@ node_definitions:
     type: action
     title: Record the proposed design
     intent: Bind quality review to one exact draft and its unresolved constraints.
+    instructions:
+      - Draft only the approved design documents and preserve target paths, alternatives, and unresolved constraints.
+      - Do not apply the draft or implement source behavior.
     items:
       - id: draft-summary
         type: text
@@ -46,6 +55,9 @@ node_definitions:
     type: action
     title: Challenge the proposed design
     intent: Test the current draft against counterarguments, uncertainty, and missing evidence before quality review.
+    instructions:
+      - Challenge the exact draft with relevant counterarguments and missing evidence without changing source behavior.
+      - Return bounded findings to the design owner; do not infer approval.
     items:
       - id: counterarguments
         type: list
@@ -67,6 +79,9 @@ node_definitions:
     type: action
     title: Record Ouroboros quality evidence
     intent: Record the QA result and local adjudication for the current draft.
+    instructions:
+      - Use the approved quality capability on the exact draft and adjudicate findings against repository authority.
+      - A passing record does not authorize document application, staging, commit, or implementation.
     items:
       - id: quality-result
         type: check_result
@@ -221,6 +236,9 @@ node_definitions:
     type: action
     title: Apply and validate documents
     intent: Record only approved document changes and current validation evidence.
+    instructions:
+      - Apply only the exact user-approved document diff to unchanged target paths and run current document validation.
+      - Do not implement product code, stage, commit, publish, or extend the approval.
     items:
       - id: application-summary
         type: text
@@ -259,6 +277,9 @@ node_definitions:
     type: action
     title: Record design closeout
     intent: Record final artifacts, unresolved constraints, residue, commit authority, and publication state.
+    instructions:
+      - Record the exact applied design artifacts and remaining boundaries without claiming implementation completion.
+      - Commit and publication remain separately authorized effects.
     items:
       - id: closeout-summary
         type: text

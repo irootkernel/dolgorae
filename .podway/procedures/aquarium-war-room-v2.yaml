@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-war-room-v2
-version: "2"
+version: "3"
 name: Aquarium War Room
 purpose: Diagnose one difficult bug and produce an approved task, epic, or incomplete-investigation record without implementing a fix.
 description: A Podway record of incident baseline or reproduction, investigation, semantic cause and scope decisions, guarded proposal quality, exact-diff approval, documentation, and closeout.
@@ -10,6 +10,9 @@ node_definitions:
     type: action
     title: Capture incident baseline
     intent: Bind the investigation to symptoms, authority, safe scope, and the approved provider boundary.
+    instructions:
+      - Use war-room to capture the exact symptoms, expected behavior, safe reproduction authority, and evidence limits.
+      - Do not implement a fix, change shared services, stage, commit, or publish.
     items:
       - id: reproduction-state
         type: choice
@@ -44,6 +47,9 @@ node_definitions:
     type: action
     title: Reproduce and investigate
     intent: Record isolated reproduction, hypotheses, tests, and observations without source mutation.
+    instructions:
+      - Investigate competing hypotheses with authorized read-only or isolated checks and preserve uncertainty.
+      - Do not modify the product or treat correlation as an established cause.
     items:
       - id: investigation-summary
         type: text
@@ -96,6 +102,9 @@ node_definitions:
     type: action
     title: Record the work-unit proposal
     intent: Bind approval to one exact task, epic, or incomplete-investigation draft.
+    instructions:
+      - Draft only the selected work-unit or incomplete-investigation document with exact scope and evidence limits.
+      - The proposal is not fix implementation or approval to change source.
     items:
       - id: proposal-summary
         type: text
@@ -108,6 +117,9 @@ node_definitions:
     type: action
     title: Record diagnostic quality review
     intent: Record the Ouroboros quality pass and local adjudication for the selected diagnostic draft.
+    instructions:
+      - Run the approved quality capability on the exact diagnostic draft and adjudicate findings locally.
+      - Quality evidence does not authorize applying documents or implementing the fix.
     items:
       - id: quality-result
         type: check_result
@@ -262,6 +274,9 @@ node_definitions:
     type: action
     title: Apply diagnostic documents
     intent: Record only the approved roadmap or investigation-note changes and validation.
+    instructions:
+      - Apply only the exact approved diagnostic document diff and run current document validation.
+      - Do not implement the fix, mutate shared services, stage, commit, or publish.
     items:
       - id: documentation-summary
         type: text
@@ -300,6 +315,9 @@ node_definitions:
     type: action
     title: Record war-room closeout
     intent: Record final classification, evidence, artifacts, residue, and publication state without a fix.
+    instructions:
+      - Record the approved diagnostic artifact and whether the underlying cause remains unresolved.
+      - Never claim that a task or epic proposal solved the defect; commit and publication remain separate.
     items:
       - id: closeout-summary
         type: text

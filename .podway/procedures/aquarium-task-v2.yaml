@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-task-v2
-version: "8"
+version: "12"
 name: Aquarium Task
 purpose: Deliver one approved roadmap task through the complete Aquarium evidence workflow.
 description: A Podway record of task-handler planning, implementation, refinement, verification, documentation, review, approval, and closeout.
@@ -10,6 +10,9 @@ node_definitions:
     type: action
     title: Record the approved plan
     intent: Bind execution to the approved task plan and authority.
+    instructions:
+      - Use task-handler after task-plan approval; record the exact task, plan, checks, and granted effects.
+      - Do not implement, stage, review, commit, or publish while recording the plan.
     items:
       - id: plan-summary
         type: text
@@ -28,6 +31,9 @@ node_definitions:
     type: action
     title: Prepare implementation entry
     intent: Bind implementation either to the approved plan or to an operationally complete failed review CI decision.
+    instructions:
+      - Reconstruct the approved plan and exact first-entry or rework cause before delegating implementation.
+      - Do not manufacture fresh authority or evidence from an older attempt.
     items:
       - id: implementation-entry-summary
         type: text
@@ -40,6 +46,9 @@ node_definitions:
     type: action
     title: Record implementation
     intent: Record the isolated implementation and focused evidence.
+    instructions:
+      - Use task-implement with the selected plan and implementation-entry basis.
+      - Do not stage, edit lifecycle state, invoke review, commit, or publish; return the exact task-owned delta and focused evidence.
     items:
       - id: implementation-summary
         type: text
@@ -59,6 +68,9 @@ node_definitions:
     type: action
     title: Record verification
     intent: Record current requirement-mapped verification evidence.
+    instructions:
+      - Use task-verify on the current refined target and map every applicable requirement to current evidence.
+      - Do not review or commit; report failed, stale, unavailable, and inconclusive evidence explicitly.
     items:
       - id: verification-result
         type: check_result
@@ -117,6 +129,9 @@ node_definitions:
     type: action
     title: Record refinement
     intent: Record deslop, optimization, staged baseline, and refreshed checks.
+    instructions:
+      - Use task-refine only for authorized cleanup and optimization of the current implementation.
+      - Return the exact refined target and refreshed evidence without review, lifecycle closeout, commit, or publication.
     items:
       - id: refinement-summary
         type: text
@@ -129,6 +144,9 @@ node_definitions:
     type: action
     title: Record documentation
     intent: Record durable documentation and roadmap review-state evidence.
+    instructions:
+      - Use task-document with the selected current implementation and verification evidence.
+      - Document current behavior in its canonical owner; do not copy runtime logs or perform review, commit, or publication.
     items:
       - id: documentation-summary
         type: text
@@ -141,6 +159,9 @@ node_definitions:
     type: action
     title: Record Mulgae review
     intent: Record complete review capture and adjudicated findings.
+    instructions:
+      - Use task-review for one exact authorized full target and preserve original-root lineage, operational evidence, CI, and finding identities.
+      - Review is report-only; do not edit files or start another root solely because eligible Low findings exist.
     items:
       - id: review-round
         type: integer
@@ -168,6 +189,23 @@ node_definitions:
         min_length: 1
         max_length: 6000
         multiline: true
+      - id: completion-assessment-summary
+        type: text
+        prompt: Record each actual requirement by stable criterion identity, responsible owner, met, unmet, unverified, or not-applicable state, and bounded evidence or reference provenance; do not copy full reports or private provider payloads.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-unmet-criteria
+        type: integer
+        prompt: Record the number of actual requirements assessed as unmet across all accepted selected-role reports.
+        required: true
+        minimum: 0
+      - id: completion-unverified-criteria
+        type: integer
+        prompt: Record the number of actual requirements assessed as unverified across all accepted selected-role reports.
+        required: true
+        minimum: 0
       - id: ci-decision
         type: choice
         prompt: Record the exact Mulgae CI decision for this operationally complete review.
@@ -192,6 +230,13 @@ node_definitions:
         prompt: Record the number of valid Low findings that require a completed shared disposition.
         required: true
         minimum: 0
+      - id: finding-count-consistency
+        type: choice
+        prompt: Record whether unresolved-valid-findings equals the sum of the effective Medium-or-higher and Low finding counts.
+        required: true
+        choices:
+          - consistent
+          - inconsistent
       - id: confirmation-needed-findings
         type: integer
         prompt: Record the number of findings whose validity still needs confirmation.
@@ -204,91 +249,77 @@ node_definitions:
         minimum: 0
       - id: unresolved-implementation-findings
         type: integer
-        prompt: Record the number of unresolved Medium-or-higher findings owned by implementation or refinement.
+        prompt: Record the native number of unresolved Medium-or-higher findings owned by implementation or refinement; this source fact is descriptive and does not select a rework owner.
         required: true
         minimum: 0
       - id: unresolved-documentation-findings
         type: integer
-        prompt: Record the number of unresolved Medium-or-higher findings owned by documentation.
+        prompt: Record the native number of unresolved Medium-or-higher findings owned by documentation; this source fact is descriptive and does not select a rework owner.
+        required: true
+        minimum: 0
+      - id: implementation-rework-obligations
+        type: integer
+        prompt: Record the routing total for CI remediation, unresolved implementation or refinement findings, and unmet completion criteria owned by implementation or refinement.
+        required: true
+        minimum: 0
+      - id: documentation-rework-obligations
+        type: integer
+        prompt: Record unresolved documentation findings plus unmet completion criteria owned by documentation.
+        required: true
+        minimum: 0
+      - id: verification-rework-obligations
+        type: integer
+        prompt: Record unmet completion criteria owned by verification. Assign every unmet criterion to implementation or refinement, verification, or documentation before routing.
         required: true
         minimum: 0
   review-decision:
     type: decision
-    title: Evaluate review
-    objective: Route Medium-or-higher findings to correction and re-review, Low findings to proportionate local disposition, approve only a clean review, and leave confirmation-only Medium-or-higher findings undecided for user direction.
-    prompt: Is the latest complete task target ready for goal assessment?
+    title: Classify review findings
+    objective: Classify the settled native finding state independently from CI, completion, and phase ownership.
+    prompt: What finding state remains after confirmation?
     evidence_guidance:
-      - Read the review ordinal, mode, exact Mulgae run, findings dispositions, and current post-review verification evidence.
-      - Select no option while a confirmation-only review retains a valid Medium-or-higher finding and the user has not authorized the next correction-and-review round.
+      - Use native finding counts only; completion and CI are admitted by earlier serial decisions.
     options:
-      - id: approved
-        label: Review approved
-        criteria: The root or verified composite review is operationally complete, CI passed, no valid unresolved finding remains, and the review pass changed no files.
+      - id: clean
+        label: Findings clean
+        criteria: No valid unresolved Medium-or-higher or Low finding remains.
         guards:
           - evidence:
               node: review
-              item: ci-decision
-            equals: pass
+              item: finding-count-consistency
+            equals: consistent
           - evidence:
               node: review
               item: unresolved-valid-findings
             equals: 0
           - evidence:
               node: review
+              item: effective-medium-or-higher-findings
+            equals: 0
+          - evidence:
+              node: review
               item: effective-low-findings
             equals: 0
-      - id: ci-failed
-        label: CI failed
-        criteria: The root or verified composite review is operationally complete, its CI decision failed, and every finding that needs confirmation has been resolved before implementation rework.
+      - id: blocking
+        label: Blocking findings remain
+        criteria: At least one valid Medium-or-higher finding requires owned remediation.
         guards:
           - evidence:
               node: review
-              item: ci-decision
-            equals: fail
-      - id: implementation-changes
-        label: Implementation changes requested
-        criteria: A remediation-eligible review whose CI passed has a valid implementation or refinement finding. Do not select this option for a confirmation-only hold without user authorization.
-        guards:
+              item: finding-count-consistency
+            equals: consistent
           - evidence:
               node: review
-              item: ci-decision
-            equals: pass
-          - evidence:
-              node: review
-              item: review-mode
-            equals: remediation-eligible
-          - evidence:
-              node: review
-              item: unresolved-implementation-findings
-            at_least: 1
-      - id: documentation-changes
-        label: Documentation changes requested
-        criteria: A remediation-eligible review has no implementation finding and at least one documentation finding.
-        guards:
-          - evidence:
-              node: review
-              item: ci-decision
-            equals: pass
-          - evidence:
-              node: review
-              item: review-mode
-            equals: remediation-eligible
-          - evidence:
-              node: review
-              item: unresolved-implementation-findings
-            equals: 0
-          - evidence:
-              node: review
-              item: unresolved-documentation-findings
+              item: effective-medium-or-higher-findings
             at_least: 1
       - id: low-disposition
         label: Complete Low dispositions
-        criteria: CI passed, no valid Medium-or-higher finding remains, and every valid Low finding can take one shared local disposition without another provider review.
+        criteria: No valid Medium-or-higher finding remains and at least one valid Low finding requires shared local disposition.
         guards:
           - evidence:
               node: review
-              item: ci-decision
-            equals: pass
+              item: finding-count-consistency
+            equals: consistent
           - evidence:
               node: review
               item: effective-medium-or-higher-findings
@@ -297,6 +328,14 @@ node_definitions:
               node: review
               item: effective-low-findings
             at_least: 1
+      - id: inconsistent
+        label: Finding evidence inconsistent
+        criteria: The unresolved total does not equal the sum of the supported severity buckets.
+        guards:
+          - evidence:
+              node: review
+              item: finding-count-consistency
+            equals: inconsistent
     reason:
       required: true
       prompt: Explain the decision using the recorded review evidence.
@@ -327,11 +366,227 @@ node_definitions:
     reason:
       required: true
       prompt: Explain the selection using the recorded finding dispositions.
+  completion-status-decision:
+    type: decision
+    title: Classify completion status
+    objective: Classify completion independently from CI, findings, and rework ownership.
+    prompt: What is the aggregate completion state?
+    evidence_guidance:
+      - Unmet criteria may proceed to owned rework; unverified criteria require current evidence or bounded confirmation first.
+    options:
+      - id: complete
+        label: Completion supported
+        criteria: No actual requirement is unmet or unverified.
+        guards:
+          - evidence:
+              node: review
+              item: completion-unmet-criteria
+            equals: 0
+          - evidence:
+              node: review
+              item: completion-unverified-criteria
+            equals: 0
+      - id: unmet
+        label: Completion requirements unmet
+        criteria: At least one requirement is unmet and no requirement remains unverified.
+        guards:
+          - evidence:
+              node: review
+              item: completion-unmet-criteria
+            at_least: 1
+          - evidence:
+              node: review
+              item: completion-unverified-criteria
+            equals: 0
+      - id: unverified
+        label: Completion evidence unverified
+        criteria: At least one requirement remains unverified.
+        guards:
+          - evidence:
+              node: review
+              item: completion-unverified-criteria
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the selection using the criterion assessment and current evidence.
+  review-ci-decision:
+    type: decision
+    title: Evaluate review CI
+    objective: Admit semantic decisions only after the native review CI result passes.
+    prompt: Did the operationally complete review pass CI?
+    options:
+      - id: passed
+        label: CI passed
+        criteria: The recorded native review CI decision passed.
+        guards:
+          - evidence:
+              node: review
+              item: ci-decision
+            equals: pass
+      - id: failed
+        label: CI failed
+        criteria: The recorded native review CI decision failed.
+        guards:
+          - evidence:
+              node: review
+              item: ci-decision
+            equals: fail
+    reason:
+      required: true
+      prompt: Explain the selection using the recorded CI decision.
+  task-rework-authority-decision:
+    type: decision
+    title: Evaluate task rework authority
+    objective: Keep the existence and phase ownership of task rework separate from authority for another correction and review pass.
+    prompt: What authority applies to the established task rework?
+    options:
+      - id: remediation
+        label: Use current remediation authority
+        criteria: The current review is remediation-eligible.
+        guards:
+          - evidence:
+              node: review
+              item: review-mode
+            equals: remediation-eligible
+      - id: user-direction
+        label: Await user direction
+        criteria: Confirmation-only rework always requires a fresh one-shot user decision.
+        guards:
+          - evidence:
+              node: review
+              item: review-mode
+            equals: confirmation-only
+    reason:
+      required: true
+      prompt: Explain the current bounded task rework authority.
+  implementation-owner-decision:
+    type: decision
+    title: Route implementation ownership
+    objective: Give implementation and refinement the first deterministic opportunity to own rework.
+    prompt: Does implementation or refinement own any current rework obligation?
+    options:
+      - id: required
+        label: Implementation rework required
+        criteria: Implementation or refinement owns at least one obligation after rework authority was admitted.
+        guards:
+          - evidence:
+              node: review
+              item: implementation-rework-obligations
+            at_least: 1
+      - id: clear
+        label: Implementation ownership clear
+        criteria: Implementation or refinement owns no obligation after rework authority was admitted.
+        guards:
+          - evidence:
+              node: review
+              item: implementation-rework-obligations
+            equals: 0
+    reason:
+      required: true
+      prompt: Explain the phase ownership decision.
+  verification-owner-decision:
+    type: decision
+    title: Route verification ownership
+    objective: Route verification work only after implementation ownership is clear.
+    prompt: Does verification own any current rework obligation?
+    options:
+      - id: required
+        label: Verification rework required
+        criteria: Verification owns at least one obligation after rework authority was admitted.
+        guards:
+          - evidence:
+              node: review
+              item: verification-rework-obligations
+            at_least: 1
+      - id: clear
+        label: Verification ownership clear
+        criteria: Verification owns no obligation after rework authority was admitted.
+        guards:
+          - evidence:
+              node: review
+              item: verification-rework-obligations
+            equals: 0
+    reason:
+      required: true
+      prompt: Explain the phase ownership decision.
+  documentation-owner-decision:
+    type: decision
+    title: Route documentation ownership
+    objective: Route documentation work only after implementation and verification ownership are clear.
+    prompt: Does documentation own any current rework obligation?
+    options:
+      - id: required
+        label: Documentation rework required
+        criteria: Documentation owns at least one obligation after rework authority was admitted.
+        guards:
+          - evidence:
+              node: review
+              item: documentation-rework-obligations
+            at_least: 1
+      - id: clear
+        label: Documentation ownership clear
+        criteria: Documentation owns no obligation, so the admitted gap evidence is inconsistent and must be reviewed again.
+        guards:
+          - evidence:
+              node: review
+              item: documentation-rework-obligations
+            equals: 0
+    reason:
+      required: true
+      prompt: Explain the phase ownership decision.
+  user-direction-record:
+    type: action
+    title: Await user direction
+    intent: Record exhausted task rework authority without choosing for the user.
+    instructions:
+      - Record the exact blocking issue set, reviewed target, and exhausted review authority, then stop at choose-user-direction until the user answers.
+      - Completing this action grants no source change, provider review, commit, or risk-acceptance authority.
+    items:
+      - id: direction-classification
+        type: choice
+        prompt: Record the classification that requires an external decision.
+        required: true
+        choices:
+          - user-direction
+      - id: direction-summary
+        type: text
+        prompt: Record the exact issue set, current target, remaining evidence, and bounded choices.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+  user-direction-decision:
+    type: decision
+    title: Record user direction
+    objective: Continue only from the user's actual bounded choice.
+    prompt: What did the user direct for the blocked task?
+    evidence_guidance:
+      - Leave this decision unset until the user explicitly selects one bounded outcome.
+    options:
+      - id: fix-and-review
+        label: Authorize one fix and review
+        criteria: The user authorized exactly one bounded correction and next-ordinal confirmation.
+      - id: stop
+        label: Stop the task
+        criteria: The user chose to stop without another correction or review.
+    reason:
+      required: true
+      prompt: Record the actual user direction and exact authority.
   low-disposition-record:
     type: action
     title: Record completed Low dispositions
     intent: Record proportionate Low handling without claiming that the provider reviewed corrected or newly recorded bytes.
+    instructions:
+      - Freeze the exact eligible Low set from the selected review and apply only the supported disposition-owned work.
+      - Run required local checks and preserve honest review coverage; do not request another provider review or broad audit solely for Low.
     items:
+      - id: source-review-basis
+        type: text
+        prompt: Record the original root or direct-audit basis, effective result, reviewed target, goal revision, and finite finding-set identity.
+        required: true
+        min_length: 1
+        max_length: 2000
+        multiline: true
       - id: low-disposition-summary
         type: text
         prompt: Record each finding ID, effective Low priority, selected disposition, affected paths, required local checks, canonical deferred-feedback or TODO owner when applicable, re-entry condition, and the preceding review that predates changed bytes.
@@ -339,6 +594,146 @@ node_definitions:
         min_length: 1
         max_length: 7000
         multiline: true
+      - id: completion-assessment-summary
+        type: text
+        prompt: Carry the exact criterion-level completion assessment from the admitted review basis.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-unmet-criteria
+        type: integer
+        prompt: Carry the number of unmet completion criteria from the admitted review basis.
+        required: true
+        minimum: 0
+      - id: completion-unverified-criteria
+        type: integer
+        prompt: Carry the number of unverified completion criteria from the admitted review basis.
+        required: true
+        minimum: 0
+      - id: pending-low-dispositions
+        type: integer
+        prompt: Record the number of frozen eligible Low findings without a completed required disposition.
+        required: true
+        minimum: 0
+      - id: current-blocking-findings
+        type: integer
+        prompt: Record newly established current blockers or effective Medium-or-higher findings after local checks.
+        required: true
+        minimum: 0
+      - id: before-target
+        type: text
+        prompt: Record the exact target reviewed by the source review or audit.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: after-target
+        type: text
+        prompt: Record the exact current target after the permitted disposition delta.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: coverage-relationship
+        type: choice
+        prompt: Record whether the current target is unchanged or contains only the accepted Low-only delta.
+        required: true
+        choices:
+          - same-as-review
+          - review-predates-low-delta
+      - id: low-disposition-verification
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-low-disposition-verification; Podway does not execute or attest the operation.
+        help: The operation verifies complete supported dispositions, exact target composition, and required local checks while preserving original review coverage.
+        required: true
+        operation_id: aquarium-low-disposition-verification
+        operation_digest: sha256:788e0961be2fcf797e891bb55e440d6779b4b9d745818ad186c840acc5df013c
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  low-result-decision:
+    type: decision
+    title: Evaluate Low verification
+    objective: Continue only when the required local Low verification passed.
+    prompt: Did the Low disposition verification pass on the current target?
+    evidence_guidance:
+      - A failed or inconclusive result returns to the local settlement owner and creates no review authority.
+    options:
+      - id: passed
+        label: Low verification passed
+        criteria: The required local verification passed on the recorded final target.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: low-disposition-verification
+            field: outcome
+            equals: pass
+      - id: incomplete
+        label: Low verification incomplete
+        criteria: The required local verification failed or is inconclusive.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: low-disposition-verification
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Explain the result using the exact local verification evidence.
+  low-completion-decision:
+    type: decision
+    title: Verify Low settlement
+    objective: Advance only after the frozen Low set and its exact permitted delta are fully verified and the carried completion assessment has no gap.
+    prompt: Is Low settlement complete for the current target?
+    evidence_guidance:
+      - Check the typed local result, pending dispositions, current blockers, carried completion assessment, exact before and after targets, and review coverage.
+      - Do not start another review to change the historical Low count.
+    options:
+      - id: completed
+        label: Low settlement completed
+        criteria: Required local verification passed, pending disposition and current blocker counts are zero, and the source review has no unmet or unverified completion criterion.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: pending-low-dispositions
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: completion-unmet-criteria
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: completion-unverified-criteria
+            equals: 0
+      - id: incomplete
+        label: Low settlement incomplete
+        criteria: A disposition or required local verification remains incomplete.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: pending-low-dispositions
+            at_least: 1
+      - id: blocker-found
+        label: Current blocker found
+        criteria: Local verification established a current blocker that must return to its owning phase within available authority.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the result using the frozen set, local checks, and current target.
   goal-assessment:
     type: decision
     title: Assess the task goal
@@ -346,6 +741,7 @@ node_definitions:
     prompt: What is the outcome of the current task goal?
     evidence_guidance:
       - Read the approved plan, latest implementation, verification, documentation, and review evidence.
+      - A path reached from choose-user-direction after the user selected stop cannot select achieved; use the carried direction and completion evidence when assessing every criterion.
     options:
       - id: achieved
         label: Goal achieved
@@ -369,6 +765,8 @@ node_definitions:
     type: action
     title: Record the assessed outcome
     intent: Record the outcome and any required follow-up before approval.
+    instructions:
+      - Preserve the actual assessment and remaining commitments; a terminal Procedure path does not imply roadmap success.
     items:
       - id: outcome-summary
         type: text
@@ -398,6 +796,9 @@ node_definitions:
     type: action
     title: Record task closeout
     intent: Record final roadmap, commit, worktree, and publication states.
+    instructions:
+      - Use task-close and, only with separate commit authority, task-commit on the exact accepted final-target composition.
+      - Reject stale or extra changes and do not invoke review, push, publish, install, or reset a session by implication.
     items:
       - id: closeout-summary
         type: text
@@ -431,6 +832,15 @@ graph:
       next: implement
     - id: implement
       use: implementation-record
+      evidence_from:
+        - node: record-plan
+          required: true
+          items:
+            - plan-summary
+        - node: prepare-implementation
+          required: true
+          items:
+            - implementation-entry-summary
       next: refine
     - id: refine
       use: refinement-record
@@ -462,10 +872,27 @@ graph:
           to: document
           effect: advance
         failed:
-          to: refine
+          to: verify
           effect: rework
     - id: document
       use: documentation-record
+      evidence_from:
+        - node: implement
+          required: true
+          items:
+            - implementation-summary
+            - source-revision
+        - node: refine
+          required: true
+          items:
+            - refinement-summary
+        - node: verify
+          required: true
+          items:
+            - verification-result
+            - verification-observations
+        - node: decide-verification
+          required: true
       next: review
     - id: review
       use: review-record
@@ -488,9 +915,42 @@ graph:
             - confirmation-needed-findings
       routes:
         resolved:
-          to: decide-review
+          to: decide-review-ci
           effect: advance
         unresolved:
+          to: review
+          effect: rework
+    - id: decide-review-ci
+      use: review-ci-decision
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - ci-decision
+      routes:
+        passed:
+          to: confirm-review-completion
+          effect: advance
+        failed:
+          to: decide-task-rework-authority
+          effect: advance
+    - id: confirm-review-completion
+      use: completion-status-decision
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+      routes:
+        complete:
+          to: decide-review
+          effect: advance
+        unmet:
+          to: decide-task-rework-authority
+          effect: advance
+        unverified:
           to: review
           effect: rework
     - id: decide-review
@@ -500,45 +960,176 @@ graph:
           required: true
           items:
             - review-round
+            - review-run-id
+            - review-summary
+            - reported-severity-summary
+            - effective-medium-or-higher-findings
+            - effective-low-findings
+            - finding-count-consistency
+            - unresolved-valid-findings
+      routes:
+        clean:
+          to: assess-goal
+          effect: advance
+        blocking:
+          to: decide-task-rework-authority
+          effect: advance
+        low-disposition:
+          to: record-low-disposition
+          effect: advance
+        inconsistent:
+          to: review
+          effect: rework
+    - id: decide-task-rework-authority
+      use: task-rework-authority-decision
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - review-mode
+      routes:
+        remediation:
+          to: decide-implementation-owner
+          effect: advance
+        user-direction:
+          to: await-user-direction
+          effect: advance
+    - id: await-user-direction
+      use: user-direction-record
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - review-round
             - review-mode
             - review-run-id
             - review-summary
             - ci-decision
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
             - reported-severity-summary
             - effective-medium-or-higher-findings
             - effective-low-findings
-            - confirmation-needed-findings
             - unresolved-valid-findings
-            - unresolved-implementation-findings
-            - unresolved-documentation-findings
+            - implementation-rework-obligations
+            - verification-rework-obligations
+            - documentation-rework-obligations
+      next: choose-user-direction
+    - id: choose-user-direction
+      use: user-direction-decision
+      evidence_from:
+        - node: await-user-direction
+          required: true
+          items:
+            - direction-classification
+            - direction-summary
       routes:
-        approved:
+        fix-and-review:
+          to: decide-implementation-owner
+          effect: advance
+        stop:
           to: assess-goal
           effect: advance
-        ci-failed:
-          to: prepare-implementation
-          effect: rework
-        implementation-changes:
+    - id: decide-implementation-owner
+      use: implementation-owner-decision
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - implementation-rework-obligations
+      routes:
+        required:
           to: implement
           effect: rework
-        documentation-changes:
+        clear:
+          to: decide-verification-owner
+          effect: advance
+    - id: decide-verification-owner
+      use: verification-owner-decision
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - verification-rework-obligations
+      routes:
+        required:
+          to: verify
+          effect: rework
+        clear:
+          to: decide-documentation-owner
+          effect: advance
+    - id: decide-documentation-owner
+      use: documentation-owner-decision
+      evidence_from:
+        - node: review
+          required: true
+          items:
+            - documentation-rework-obligations
+      routes:
+        required:
           to: document
           effect: rework
-        low-disposition:
-          to: record-low-disposition
-          effect: advance
+        clear:
+          to: review
+          effect: rework
     - id: record-low-disposition
       use: low-disposition-record
       evidence_from:
         - node: review
           required: true
           items:
+            - review-summary
             - review-run-id
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
             - reported-severity-summary
             - effective-medium-or-higher-findings
             - effective-low-findings
             - confirmation-needed-findings
-      next: assess-goal
+      next: decide-low-result
+    - id: decide-low-result
+      use: low-result-decision
+      evidence_from:
+        - node: record-low-disposition
+          required: true
+          items:
+            - low-disposition-verification
+      routes:
+        passed:
+          to: decide-low-completion
+          effect: advance
+        incomplete:
+          to: record-low-disposition
+          effect: rework
+    - id: decide-low-completion
+      use: low-completion-decision
+      evidence_from:
+        - node: record-low-disposition
+          required: true
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+            - pending-low-dispositions
+            - current-blocking-findings
+            - before-target
+            - after-target
+            - coverage-relationship
+            - low-disposition-verification
+      routes:
+        completed:
+          to: assess-goal
+          effect: advance
+        incomplete:
+          to: record-low-disposition
+          effect: rework
+        blocker-found:
+          to: implement
+          effect: rework
     - id: assess-goal
       use: goal-assessment
       evidence_from:
@@ -546,10 +1137,6 @@ graph:
           required: true
           items:
             - plan-summary
-        - node: prepare-implementation
-          required: true
-          items:
-            - implementation-entry-summary
         - node: implement
           required: true
           items:
@@ -575,6 +1162,10 @@ graph:
             - review-run-id
             - review-summary
             - ci-decision
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+            - finding-count-consistency
             - reported-severity-summary
             - effective-medium-or-higher-findings
             - effective-low-findings
@@ -582,10 +1173,22 @@ graph:
             - unresolved-valid-findings
             - unresolved-implementation-findings
             - unresolved-documentation-findings
+        - node: await-user-direction
+          required: false
+          items:
+            - direction-classification
+            - direction-summary
         - node: record-low-disposition
           required: false
           items:
+            - source-review-basis
             - low-disposition-summary
+            - pending-low-dispositions
+            - current-blocking-findings
+            - before-target
+            - after-target
+            - coverage-relationship
+            - low-disposition-verification
       routes:
         achieved:
           to: record-outcome

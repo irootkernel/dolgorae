@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-validation-v2
-version: "9"
+version: "14"
 name: Aquarium Validation
 purpose: Audit one completed epic through bounded remediation, confirmation, and explicit finding disposition.
 description: A bounded Podway procedure for epic-wide audit, one automatic confirmation, user-directed follow-up, and validation closeout.
@@ -10,6 +10,9 @@ node_definitions:
     type: action
     title: Record validation baseline
     intent: Bind validation to the completed committed epic and its authority.
+    instructions:
+      - Use the invoking validation handler to bind the exact committed epic, scope, checks, and approved remediation and review envelope.
+      - Do not mutate source, install assets, replace sessions, commit, or publish while recording the baseline.
     items:
       - id: baseline-summary
         type: text
@@ -28,6 +31,9 @@ node_definitions:
     type: action
     title: Audit the epic
     intent: Record a fresh requirement matrix, checks, review evidence, and confirmed gaps.
+    instructions:
+      - Audit the exact current candidate without source mutation and adjudicate gaps against canonical requirements.
+      - Separate blockers, eligible Low gaps, unresolved confirmation, and operational result; total confirmed count is descriptive only.
     items:
       - id: audit-result
         type: check_result
@@ -52,11 +58,33 @@ node_definitions:
         prompt: Record the number of confirmed in-scope gaps.
         required: true
         minimum: 0
+      - id: blocking-gap-count
+        type: integer
+        prompt: Record current blockers and effective Medium-or-higher gaps.
+        required: true
+        minimum: 0
+      - id: eligible-low-gap-count
+        type: integer
+        prompt: Record eligible Low gaps that require a supported disposition.
+        required: true
+        minimum: 0
+      - id: confirmation-needed-gap-count
+        type: integer
+        prompt: Record gaps whose validity or required evidence still needs confirmation.
+        required: true
+        minimum: 0
+      - id: blocking-rework-authority
+        type: choice
+        prompt: Record whether the current exact blocking set has an existing remediation envelope or requires user direction.
+        required: true
+        choices:
+          - current-envelope
+          - user-direction
   gap-decision:
     type: decision
     title: Evaluate audit gaps
-    objective: Route the initial confirmed gaps to remediation and every post-remediation audit to final review before any user disposition.
-    prompt: Does the fresh audit contain a confirmed gap?
+    objective: Route the initial audit by operational state, validity, and effective severity rather than total count.
+    prompt: What does the fresh initial audit require?
     evidence_guidance:
       - Read the audit snapshot, matrix, checks, review, and confirmed gap count.
     options:
@@ -71,11 +99,19 @@ node_definitions:
             equals: pass
           - evidence:
               node: audit
-              item: confirmed-gap-count
+              item: blocking-gap-count
             equals: 0
-      - id: gaps-found
-        label: Gaps found
-        criteria: At least one confirmed gap requires initial owned remediation or post-confirmation user direction.
+          - evidence:
+              node: audit
+              item: eligible-low-gap-count
+            equals: 0
+          - evidence:
+              node: audit
+              item: confirmation-needed-gap-count
+            equals: 0
+      - id: blocking-gaps
+        label: Blocking gaps found
+        criteria: At least one current blocker has an existing owned remediation envelope.
         guards:
           - evidence:
               node: audit
@@ -84,8 +120,71 @@ node_definitions:
             equals: pass
           - evidence:
               node: audit
-              item: confirmed-gap-count
+              item: blocking-gap-count
             at_least: 1
+          - evidence:
+              node: audit
+              item: confirmation-needed-gap-count
+            equals: 0
+          - evidence:
+              node: audit
+              item: blocking-rework-authority
+            equals: current-envelope
+      - id: low-only
+        label: Only eligible Low gaps remain
+        criteria: No blocker or confirmation gap remains; continue to the independently required final review without broad remediation.
+        guards:
+          - evidence:
+              node: audit
+              item: audit-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: audit
+              item: blocking-gap-count
+            equals: 0
+          - evidence:
+              node: audit
+              item: eligible-low-gap-count
+            at_least: 1
+          - evidence:
+              node: audit
+              item: confirmation-needed-gap-count
+            equals: 0
+      - id: confirmation-required
+        label: Gap confirmation required
+        criteria: At least one gap needs evidence or validity confirmation before severity routing.
+        guards:
+          - evidence:
+              node: audit
+              item: audit-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: audit
+              item: confirmation-needed-gap-count
+            at_least: 1
+      - id: user-direction
+        label: Blocking remediation needs direction
+        criteria: A blocking set exists without a current remediation envelope.
+        guards:
+          - evidence:
+              node: audit
+              item: audit-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: audit
+              item: blocking-gap-count
+            at_least: 1
+          - evidence:
+              node: audit
+              item: confirmation-needed-gap-count
+            equals: 0
+          - evidence:
+              node: audit
+              item: blocking-rework-authority
+            equals: user-direction
       - id: incomplete
         label: Audit incomplete
         criteria: The external audit result failed or is inconclusive and cannot support remediation or clean validation.
@@ -101,8 +200,8 @@ node_definitions:
   re-audit-decision:
     type: decision
     title: Evaluate remediation re-audit
-    objective: Route the remediated candidate only from its fresh re-audit result.
-    prompt: Does the fresh re-audit contain a confirmed gap?
+    objective: Route the remediated candidate by operational state, validity, severity, and remaining authority.
+    prompt: What does the fresh re-audit require?
     evidence_guidance:
       - Read the selected re-audit result, summary, and confirmed gap count.
     options:
@@ -117,11 +216,19 @@ node_definitions:
             equals: pass
           - evidence:
               node: re-audit
-              item: confirmed-gap-count
+              item: blocking-gap-count
             equals: 0
-      - id: gaps-found
-        label: Gaps remain
-        criteria: At least one confirmed gap remains after remediation.
+          - evidence:
+              node: re-audit
+              item: eligible-low-gap-count
+            equals: 0
+          - evidence:
+              node: re-audit
+              item: confirmation-needed-gap-count
+            equals: 0
+      - id: blocking-gaps
+        label: Blocking gaps remain with authority
+        criteria: At least one blocker remains and the existing caller envelope authorizes another owned remediation cycle.
         guards:
           - evidence:
               node: re-audit
@@ -130,8 +237,71 @@ node_definitions:
             equals: pass
           - evidence:
               node: re-audit
-              item: confirmed-gap-count
+              item: blocking-gap-count
             at_least: 1
+          - evidence:
+              node: re-audit
+              item: confirmation-needed-gap-count
+            equals: 0
+          - evidence:
+              node: re-audit
+              item: blocking-rework-authority
+            equals: current-envelope
+      - id: low-only
+        label: Only eligible Low gaps remain
+        criteria: Route Low-only re-audit evidence forward without another broad remediation or audit.
+        guards:
+          - evidence:
+              node: re-audit
+              item: audit-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: re-audit
+              item: blocking-gap-count
+            equals: 0
+          - evidence:
+              node: re-audit
+              item: eligible-low-gap-count
+            at_least: 1
+          - evidence:
+              node: re-audit
+              item: confirmation-needed-gap-count
+            equals: 0
+      - id: confirmation-required
+        label: Gap confirmation required
+        criteria: Re-audit evidence still needs confirmation before routing.
+        guards:
+          - evidence:
+              node: re-audit
+              item: audit-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: re-audit
+              item: confirmation-needed-gap-count
+            at_least: 1
+      - id: user-direction
+        label: Blocking remediation needs direction
+        criteria: A blocker remains after the current correction envelope is exhausted.
+        guards:
+          - evidence:
+              node: re-audit
+              item: audit-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: re-audit
+              item: blocking-gap-count
+            at_least: 1
+          - evidence:
+              node: re-audit
+              item: confirmation-needed-gap-count
+            equals: 0
+          - evidence:
+              node: re-audit
+              item: blocking-rework-authority
+            equals: user-direction
       - id: incomplete
         label: Re-audit incomplete
         criteria: The external re-audit result failed or is inconclusive.
@@ -148,6 +318,9 @@ node_definitions:
     type: action
     title: Remediate confirmed gaps
     intent: Record one completed owned remediation pass, commits, verification, and source findings.
+    instructions:
+      - Correct only the exact blocking set within the caller's current envelope and preserve its trigger identity.
+      - Do not start per-group review, reset the remediation budget, or use this phase for eligible Low-only gaps.
     items:
       - id: remediation-summary
         type: text
@@ -156,10 +329,57 @@ node_definitions:
         min_length: 1
         max_length: 8000
         multiline: true
+  audit-low-basis-record:
+    type: action
+    title: Preserve Low-only audit basis
+    intent: Carry the finite Low-only audit set to the independently required final review without broad remediation.
+    instructions:
+      - Preserve the exact audit target and Low identities; do not re-audit to reduce the historical count.
+      - This record does not waive a required first provider review or a confirmation already owed after blocking remediation.
+    items:
+      - id: audit-basis-target
+        type: text
+        prompt: Record the exact immutable audit or re-audit target that established this Low-only basis.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: audit-basis-status
+        type: choice
+        prompt: Record whether the basis still applies to the current candidate or was invalidated by a material change outside its accepted Low-only delta.
+        required: true
+        choices:
+          - applicable
+          - invalidated-by-material-change
+      - id: audit-low-finding-count
+        type: integer
+        prompt: Record the immutable number of eligible Low findings established by the selected audit basis.
+        required: true
+        minimum: 1
+      - id: audit-low-finding-identities
+        type: list
+        prompt: Record each audit Low finding under an audit-prefixed identity namespace; do not replace these identities with provider findings.
+        required: true
+        min_items: 1
+        max_items: 50
+        max_item_length: 512
+        max_total_length: 25000
+        unique: true
+      - id: audit-low-basis-summary
+        type: text
+        prompt: Record the exact audit or re-audit target, finite eligible Low set, required dispositions, and independently required next review if any.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
   final-review-record:
     type: action
     title: Record final validation evidence
     intent: Record the latest audit and complete whole-epic Mulgae result, including every confirmation finding that requires user direction.
+    instructions:
+      - Delegate only an independently required whole-epic review and preserve exact lineage, target, CI, coverage, publication, and finding query.
+      - Do not launch another provider root solely because Low findings or their accepted local delta remain.
+      - Compose the current obligation summary from the selected audit basis and provider findings under separate namespaces; provider counts never erase an applicable audit Low set.
     items:
       - id: review-round
         type: integer
@@ -187,6 +407,23 @@ node_definitions:
         min_length: 1
         max_length: 7000
         multiline: true
+      - id: completion-assessment-summary
+        type: text
+        prompt: Record each actual epic requirement by stable criterion identity, responsible owner, met, unmet, unverified, or not-applicable state, and bounded evidence or reference provenance; do not copy full reports or private provider payloads.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-unmet-criteria
+        type: integer
+        prompt: Record the number of actual epic requirements assessed as unmet across all accepted selected-role reports.
+        required: true
+        minimum: 0
+      - id: completion-unverified-criteria
+        type: integer
+        prompt: Record the number of actual epic requirements assessed as unverified across all accepted selected-role reports.
+        required: true
+        minimum: 0
       - id: final-review-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-validation-review; Podway does not execute or attest the operation.
@@ -272,100 +509,116 @@ node_definitions:
         min_length: 1
         max_length: 7000
         multiline: true
+      - id: applicable-obligation-summary
+        type: text
+        prompt: Record every currently applicable audit and provider obligation under separate identity namespaces, including completed and pending dispositions and any invalidated basis.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: pending-applicable-low-dispositions
+        type: integer
+        prompt: Record applicable audit and provider Low obligations that do not yet have one completed shared disposition.
+        required: true
+        minimum: 0
+      - id: current-applicable-blockers
+        type: integer
+        prompt: Record current valid Medium-or-higher findings, every unmet completion criterion, and any other blocking obligation across the applicable audit and provider evidence.
+        required: true
+        minimum: 0
+      - id: required-evidence-gaps
+        type: integer
+        prompt: Record every unverified completion criterion, unresolved confirmation, invalidated required audit basis, or another missing mandatory verification prerequisite.
+        required: true
+        minimum: 0
   final-review-decision:
     type: decision
-    title: Evaluate final validation
-    objective: Route Medium-or-higher findings to correction and re-review, Low findings to local disposition, a clean review to closeout, and incomplete evidence to a stop.
-    prompt: Is the latest epic snapshot ready for validation closeout?
+    title: Settle final Low obligations
+    objective: Choose between closeout and local Low settlement after every earlier validation prerequisite has passed.
+    prompt: Does any applicable Low obligation remain unsettled?
     evidence_guidance:
-      - Read the final audit, required checks, review ordinal and mode, exact Mulgae run, and roadmap states.
-      - Select no option while confirmation-needed-findings is non-zero.
-      - Resolve each finding to Valid or Invalid with authorized evidence or bounded confirmation authority, then manually rework final-review and evaluate this decision again.
-      - Use rework-required only for a remediation-eligible Medium-or-higher finding; confirmation-only Medium-or-higher work requires user-direction.
+      - Earlier serial decisions already admitted operation, confirmation, completion, mandatory evidence, and blockers.
     options:
       - id: validated
         label: Validation supported
-        criteria: The fresh audit is clean, the root or verified composite review is operationally complete with passing CI, and no unresolved valid finding remains.
+        criteria: Every applicable Low obligation is settled.
         guards:
           - evidence:
               node: final-review
-              item: final-review-result
-            field: outcome
-            equals: pass
-          - evidence:
-              node: final-review
-              item: unresolved-valid-findings
-            equals: 0
-          - evidence:
-              node: final-review
-              item: confirmation-needed-findings
-            equals: 0
-      - id: rework-required
-        label: Rework required
-        criteria: A remediation-eligible review has at least one valid Medium-or-higher finding and owns exactly one remediation plus confirmation review.
-        guards:
-          - evidence:
-              node: final-review
-              item: final-review-result
-            field: outcome
-            equals: pass
-          - evidence:
-              node: final-review
-              item: review-mode
-            equals: remediation-eligible
-          - evidence:
-              node: final-review
-              item: medium-or-higher-findings
-            at_least: 1
-          - evidence:
-              node: final-review
-              item: confirmation-needed-findings
+              item: pending-applicable-low-dispositions
             equals: 0
       - id: low-disposition
         label: Complete Low dispositions
-        criteria: No valid Medium-or-higher finding remains and at least one valid Low finding can take a shared local disposition without another provider review.
+        criteria: At least one applicable audit or provider Low obligation needs shared local disposition.
+        guards:
+          - evidence:
+              node: final-review
+              item: pending-applicable-low-dispositions
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the selection using the final validation evidence.
+  completion-status-decision:
+    type: decision
+    title: Confirm completion assessment
+    objective: Classify completion independently from operation, evidence, findings, and rework authority.
+    prompt: What is the aggregate epic completion state?
+    evidence_guidance:
+      - Unmet criteria use the current review mode and existing remediation authority; unverified criteria stop as incomplete evidence.
+    options:
+      - id: complete
+        label: Completion supported
+        criteria: No actual epic requirement is unmet or unverified.
+        guards:
+          - evidence:
+              node: final-review
+              item: completion-unmet-criteria
+            equals: 0
+          - evidence:
+              node: final-review
+              item: completion-unverified-criteria
+            equals: 0
+      - id: unmet
+        label: Completion requirements unmet
+        criteria: At least one criterion is unmet and none remains unverified.
+        guards:
+          - evidence:
+              node: final-review
+              item: completion-unmet-criteria
+            at_least: 1
+          - evidence:
+              node: final-review
+              item: completion-unverified-criteria
+            equals: 0
+      - id: unverified
+        label: Completion evidence incomplete
+        criteria: At least one actual epic requirement remains unverified.
+        guards:
+          - evidence:
+              node: final-review
+              item: completion-unverified-criteria
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the selection using the criterion assessment and current review authority.
+  final-review-operation-decision:
+    type: decision
+    title: Evaluate final review operation
+    objective: Admit semantic validation only after the whole-epic review operation passes.
+    prompt: Did the final review operation pass?
+    options:
+      - id: passed
+        label: Review operation passed
+        criteria: The complete review operation passed.
         guards:
           - evidence:
               node: final-review
               item: final-review-result
             field: outcome
             equals: pass
-          - evidence:
-              node: final-review
-              item: medium-or-higher-findings
-            equals: 0
-          - evidence:
-              node: final-review
-              item: low-findings
-            at_least: 1
-          - evidence:
-              node: final-review
-              item: confirmation-needed-findings
-            equals: 0
-      - id: user-direction
-        label: User direction required
-        criteria: A confirmation-only review has at least one valid Medium-or-higher finding and no later correction-and-review round has yet been authorized.
-        guards:
-          - evidence:
-              node: final-review
-              item: final-review-result
-            field: outcome
-            equals: pass
-          - evidence:
-              node: final-review
-              item: review-mode
-            equals: confirmation-only
-          - evidence:
-              node: final-review
-              item: medium-or-higher-findings
-            at_least: 1
-          - evidence:
-              node: final-review
-              item: confirmation-needed-findings
-            equals: 0
       - id: incomplete
-        label: Validation incomplete
-        criteria: Review evidence, CI, coverage, publication, findings query, or another required prerequisite is incomplete or failed operationally.
+        label: Review operation incomplete
+        criteria: The operation failed or was inconclusive.
         guards:
           - evidence:
               node: final-review
@@ -374,7 +627,128 @@ node_definitions:
             not_equals: pass
     reason:
       required: true
-      prompt: Explain the selection using the final validation evidence.
+      prompt: Explain the recorded operation result.
+  final-review-confirmation-decision:
+    type: decision
+    title: Confirm final findings
+    objective: Prevent unresolved finding validity from entering semantic validation.
+    prompt: Are all finding confirmations resolved?
+    options:
+      - id: resolved
+        label: Findings confirmed
+        criteria: No finding still needs confirmation.
+        guards:
+          - evidence:
+              node: final-review
+              item: confirmation-needed-findings
+            equals: 0
+      - id: unresolved
+        label: Finding confirmation incomplete
+        criteria: At least one finding still needs confirmation.
+        guards:
+          - evidence:
+              node: final-review
+              item: confirmation-needed-findings
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the current confirmation state.
+  required-evidence-decision:
+    type: decision
+    title: Evaluate required evidence
+    objective: Admit blocker and Low routing only when every mandatory evidence prerequisite is present.
+    prompt: Does any required evidence gap remain?
+    options:
+      - id: complete
+        label: Required evidence complete
+        criteria: No required evidence gap remains.
+        guards:
+          - evidence:
+              node: final-review
+              item: required-evidence-gaps
+            equals: 0
+      - id: incomplete
+        label: Required evidence incomplete
+        criteria: At least one required evidence gap remains.
+        guards:
+          - evidence:
+              node: final-review
+              item: required-evidence-gaps
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the mandatory evidence state.
+  applicable-blocker-decision:
+    type: decision
+    title: Evaluate applicable blockers
+    objective: Separate the existence of a blocker from authority to remediate it.
+    prompt: Does any current applicable blocker remain?
+    options:
+      - id: clear
+        label: No current blocker
+        criteria: No current applicable blocker remains.
+        guards:
+          - evidence:
+              node: final-review
+              item: current-applicable-blockers
+            equals: 0
+      - id: blocking
+        label: Current blocker remains
+        criteria: At least one current applicable blocker remains.
+        guards:
+          - evidence:
+              node: final-review
+              item: current-applicable-blockers
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the composed blocker state.
+  validation-rework-authority-decision:
+    type: decision
+    title: Evaluate validation rework authority
+    objective: Route established rework according to the current review mode.
+    prompt: Is another remediation and review pass authorized?
+    options:
+      - id: remediation
+        label: Remediate within current authority
+        criteria: The review is remediation-eligible.
+        guards:
+          - evidence:
+              node: final-review
+              item: review-mode
+            equals: remediation-eligible
+      - id: user-direction
+        label: Await user direction
+        criteria: The review is confirmation-only and no later pass is authorized.
+        guards:
+          - evidence:
+              node: final-review
+              item: review-mode
+            equals: confirmation-only
+    reason:
+      required: true
+      prompt: Explain the current review-mode authority.
+  user-direction-record:
+    type: action
+    title: Await user direction
+    intent: Record the need for user direction before waiting for the user's actual choice.
+    instructions:
+      - Record the exact blocking set and exhausted authority, complete this action, then stop at choose-user-direction with that decision unset until the user answers.
+      - Reaching or completing this action grants no source change, review, or re-audit authority.
+    items:
+      - id: direction-classification
+        type: choice
+        prompt: Record the classification that requires an external decision.
+        required: true
+        choices:
+          - user-direction
+      - id: direction-summary
+        type: text
+        prompt: Record the source audit or review, exact blocking findings, current target, and bounded choices.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
   review-direction-decision:
     type: decision
     title: Choose the next Medium-or-higher action
@@ -397,7 +771,17 @@ node_definitions:
     type: action
     title: Record completed Low dispositions
     intent: Record proportionate Low handling without claiming that the provider reviewed corrected or newly recorded bytes.
+    instructions:
+      - Freeze the eligible Low set across direct-audit and provider namespaces and apply only supported dispositions.
+      - Verify the exact permitted target delta locally; do not run another review or broad re-audit solely for Low.
     items:
+      - id: source-review-basis
+        type: text
+        prompt: Record validation goal revision, audit and original-root review basis, effective result, reviewed target, and finite finding-set identity.
+        required: true
+        min_length: 1
+        max_length: 2500
+        multiline: true
       - id: low-disposition-summary
         type: text
         prompt: Record each finding ID, selected shared disposition, exact correction or canonical owner, impact or reason, re-entry condition, focused checks, commit when applicable, and the preceding review that predates changed bytes.
@@ -405,10 +789,150 @@ node_definitions:
         min_length: 1
         max_length: 5000
         multiline: true
+      - id: completion-assessment-summary
+        type: text
+        prompt: Carry the exact criterion-level completion assessment from the admitted review basis.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-unmet-criteria
+        type: integer
+        prompt: Carry the number of unmet completion criteria from the admitted review basis.
+        required: true
+        minimum: 0
+      - id: completion-unverified-criteria
+        type: integer
+        prompt: Carry the number of unverified completion criteria from the admitted review basis.
+        required: true
+        minimum: 0
+      - id: pending-low-dispositions
+        type: integer
+        prompt: Record frozen eligible Low findings without a completed disposition.
+        required: true
+        minimum: 0
+      - id: current-blocking-findings
+        type: integer
+        prompt: Record current blockers established during local verification.
+        required: true
+        minimum: 0
+      - id: before-target
+        type: text
+        prompt: Record the exact target covered by the selected review or audit basis.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: after-target
+        type: text
+        prompt: Record the exact current target containing only the permitted disposition delta.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: coverage-relationship
+        type: choice
+        prompt: Record whether the current target is unchanged or contains the accepted Low-only delta.
+        required: true
+        choices:
+          - same-as-review
+          - review-predates-low-delta
+      - id: low-disposition-verification
+        type: check_result
+        prompt: Record the caller-supplied aquarium-low-disposition-verification result.
+        required: true
+        operation_id: aquarium-low-disposition-verification
+        operation_digest: sha256:788e0961be2fcf797e891bb55e440d6779b4b9d745818ad186c840acc5df013c
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  low-result-decision:
+    type: decision
+    title: Evaluate Low verification
+    objective: Continue only when required local settlement verification passed.
+    prompt: Did Low verification pass on the current target?
+    evidence_guidance:
+      - Failed or inconclusive local verification returns to settlement and creates no review authority.
+    options:
+      - id: passed
+        label: Low verification passed
+        criteria: The disposition delta and required local checks passed.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: low-disposition-verification
+            field: outcome
+            equals: pass
+      - id: incomplete
+        label: Low verification incomplete
+        criteria: The local result failed or is inconclusive.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: low-disposition-verification
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Explain the current local verification result.
+  low-completion-decision:
+    type: decision
+    title: Verify Low settlement
+    objective: Advance only after every frozen Low disposition and current local check is complete and the carried completion assessment has no gap.
+    prompt: Is the finite Low settlement complete?
+    evidence_guidance:
+      - Historical Low counts remain unchanged; use pending disposition and current blocker counts plus the completion assessment carried from final-review.
+    options:
+      - id: completed
+        label: Low settlement completed
+        criteria: Pending dispositions and current blockers are zero, and the source review has no unmet or unverified completion criterion.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: pending-low-dispositions
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: completion-unmet-criteria
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: completion-unverified-criteria
+            equals: 0
+      - id: incomplete
+        label: Low dispositions incomplete
+        criteria: At least one disposition remains and no blocker has been established.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: pending-low-dispositions
+            at_least: 1
+      - id: blocker-found
+        label: Current blocker found
+        criteria: Settlement evidence established a current blocker requiring owned remediation or direction.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the remaining disposition or blocking state.
   disposition-record:
     type: action
     title: Record validation disposition
     intent: Preserve one explicit user or operational disposition before goal assessment.
+    instructions:
+      - Record an actual stop or incomplete outcome without relabeling it successful or starting replacement work.
     items:
       - id: disposition-summary
         type: text
@@ -423,14 +947,17 @@ node_definitions:
     objective: Determine whether current evidence supports the validation goal.
     prompt: What is the outcome of the validation goal?
     evidence_guidance:
-      - Read the baseline, latest audit, remediation history, final review, and any explicit user disposition.
+      - Read the baseline, latest audit, remediation history, final review, any completed Low settlement, and any explicit user disposition.
+      - On the direct validated path, require the current final-review pending disposition, blocker, and evidence-gap counts to be zero.
+      - On the completed Low-settlement path, require the latest record-low-disposition zero pending and blocker counts, passing verification, and exact accepted final target.
+      - Treat the earlier positive final-review pending count as historical; it does not require another review after complete Low settlement.
     options:
       - id: achieved
         label: Goal achieved
-        criteria: This assessment was reached from validated or record-low-disposition; the review is operationally complete; no valid Medium-or-higher finding remains; and every Low finding has one completed shared disposition with its required local evidence.
+        criteria: This assessment was reached from validated with zero current final-review pending dispositions, blockers, and evidence gaps, or from completed record-low-disposition with zero pending dispositions and current blockers, a passing Low-disposition verification result, and the exact accepted final target; required audit and review evidence is operationally complete, and every historical finding remains recorded under its source namespace.
       - id: not-achieved
         label: Goal not achieved
-        criteria: Fresh evidence does not support the current validation goal, including every path reached from record-stopped or record-incomplete; those dispositions can never select achieved.
+        criteria: Fresh evidence does not support the current validation goal, including every path reached from record-stopped, record-incomplete, or record-review-operation-incomplete; those dispositions can never select achieved.
       - id: superseded
         label: Goal superseded
         criteria: The current validation goal is no longer desired.
@@ -447,6 +974,9 @@ node_definitions:
     type: action
     title: Record validation closeout
     intent: Record the final audited snapshot, any current-semantics repository change or explicit no-change result, residue, and publication state.
+    instructions:
+      - Close only from current achieved evidence and an exact required commit or supported no-change result.
+      - Do not install, activate, replace sessions, push, or publish by implication.
     items:
       - id: closeout-summary
         type: text
@@ -482,12 +1012,25 @@ graph:
             - audit-result
             - audit-summary
             - confirmed-gap-count
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+            - blocking-rework-authority
       routes:
         clean:
           to: final-review
           effect: advance
-        gaps-found:
+        blocking-gaps:
           to: remediate
+          effect: advance
+        low-only:
+          to: record-audit-low-basis
+          effect: advance
+        confirmation-required:
+          to: audit
+          effect: rework
+        user-direction:
+          to: await-user-direction
           effect: advance
         incomplete:
           to: record-incomplete
@@ -512,16 +1055,51 @@ graph:
             - audit-result
             - audit-summary
             - confirmed-gap-count
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+            - blocking-rework-authority
       routes:
         clean:
           to: final-review
           effect: advance
-        gaps-found:
+        blocking-gaps:
           to: remediate
           effect: rework
+        low-only:
+          to: record-audit-low-basis
+          effect: advance
+        confirmation-required:
+          to: re-audit
+          effect: rework
+        user-direction:
+          to: await-user-direction
+          effect: advance
         incomplete:
           to: record-incomplete
           effect: advance
+    - id: record-audit-low-basis
+      use: audit-low-basis-record
+      evidence_from:
+        - node: audit
+          required: false
+          items:
+            - audit-result
+            - audit-summary
+            - confirmed-gap-count
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+        - node: re-audit
+          required: false
+          items:
+            - audit-result
+            - audit-summary
+            - confirmed-gap-count
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+      next: final-review
     - id: final-review
       use: final-review-record
       evidence_from:
@@ -531,13 +1109,119 @@ graph:
             - audit-result
             - audit-summary
             - confirmed-gap-count
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+            - blocking-rework-authority
         - node: re-audit
           required: false
           items:
             - audit-result
             - audit-summary
             - confirmed-gap-count
-      next: decide-final-review
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+            - blocking-rework-authority
+        - node: record-audit-low-basis
+          required: false
+          items:
+            - audit-basis-target
+            - audit-basis-status
+            - audit-low-finding-count
+            - audit-low-finding-identities
+            - audit-low-basis-summary
+      next: decide-final-review-operation
+    - id: decide-final-review-operation
+      use: final-review-operation-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - final-review-result
+            - final-review-observations
+      routes:
+        passed:
+          to: confirm-final-review-findings
+          effect: advance
+        incomplete:
+          to: record-review-operation-incomplete
+          effect: advance
+    - id: confirm-final-review-findings
+      use: final-review-confirmation-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - confirmation-needed-findings
+      routes:
+        resolved:
+          to: confirm-completion-assessment
+          effect: advance
+        unresolved:
+          to: record-incomplete
+          effect: advance
+    - id: confirm-completion-assessment
+      use: completion-status-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+      routes:
+        complete:
+          to: decide-required-evidence
+          effect: advance
+        unmet:
+          to: decide-validation-rework-authority
+          effect: advance
+        unverified:
+          to: record-incomplete
+          effect: advance
+    - id: decide-required-evidence
+      use: required-evidence-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - required-evidence-gaps
+      routes:
+        complete:
+          to: decide-current-blockers
+          effect: advance
+        incomplete:
+          to: record-incomplete
+          effect: advance
+    - id: decide-current-blockers
+      use: applicable-blocker-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - current-applicable-blockers
+      routes:
+        clear:
+          to: decide-final-review
+          effect: advance
+        blocking:
+          to: decide-validation-rework-authority
+          effect: advance
+    - id: decide-validation-rework-authority
+      use: validation-rework-authority-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - review-mode
+      routes:
+        remediation:
+          to: audit
+          effect: rework
+        user-direction:
+          to: await-user-direction
+          effect: advance
     - id: decide-final-review
       use: final-review-decision
       evidence_from:
@@ -549,42 +1233,24 @@ graph:
             - review-run-id
             - final-review-summary
             - final-review-result
-            - final-review-observations
-            - unresolved-valid-findings
             - reported-severity-summary
-            - confirmation-needed-findings
-            - medium-or-higher-findings
-            - blocker-findings
-            - critical-findings
-            - high-findings
-            - medium-findings
-            - low-findings
-            - valid-finding-ids
-        - node: final-review
-          required: true
-          items:
             - finding-disposition-summary
+            - applicable-obligation-summary
+            - pending-applicable-low-dispositions
+            - current-applicable-blockers
+            - required-evidence-gaps
       routes:
         validated:
           to: assess-goal
           effect: advance
-        rework-required:
-          to: audit
-          effect: rework
         low-disposition:
           to: record-low-disposition
           effect: advance
-        user-direction:
-          to: await-user-direction
-          effect: advance
-        incomplete:
-          to: record-incomplete
-          effect: advance
     - id: await-user-direction
-      use: review-direction-decision
+      use: user-direction-record
       evidence_from:
         - node: final-review
-          required: true
+          required: false
           items:
             - review-mode
             - medium-or-higher-findings
@@ -596,6 +1262,44 @@ graph:
             - valid-finding-ids
             - confirmation-needed-findings
             - finding-disposition-summary
+            - applicable-obligation-summary
+            - pending-applicable-low-dispositions
+            - current-applicable-blockers
+            - required-evidence-gaps
+        - node: final-review
+          required: false
+          items:
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+        - node: audit
+          required: false
+          items:
+            - audit-summary
+            - blocking-gap-count
+            - blocking-rework-authority
+        - node: re-audit
+          required: false
+          items:
+            - audit-summary
+            - blocking-gap-count
+            - blocking-rework-authority
+        - node: record-low-disposition
+          required: false
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - current-blocking-findings
+            - after-target
+      next: choose-user-direction
+    - id: choose-user-direction
+      use: review-direction-decision
+      evidence_from:
+        - node: await-user-direction
+          required: true
+          items:
+            - direction-classification
+            - direction-summary
       routes:
         fix-and-review:
           to: audit
@@ -610,14 +1314,67 @@ graph:
           required: true
           items:
             - review-run-id
+            - final-review-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
             - medium-or-higher-findings
             - low-findings
+            - reported-severity-summary
             - finding-disposition-summary
-      next: assess-goal
+            - applicable-obligation-summary
+            - pending-applicable-low-dispositions
+            - current-applicable-blockers
+            - required-evidence-gaps
+      next: decide-low-result
+    - id: decide-low-result
+      use: low-result-decision
+      evidence_from:
+        - node: record-low-disposition
+          required: true
+          items:
+            - low-disposition-verification
+      routes:
+        passed:
+          to: decide-low-completion
+          effect: advance
+        incomplete:
+          to: record-low-disposition
+          effect: rework
+    - id: decide-low-completion
+      use: low-completion-decision
+      evidence_from:
+        - node: record-low-disposition
+          required: true
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+            - pending-low-dispositions
+            - current-blocking-findings
+            - before-target
+            - after-target
+            - coverage-relationship
+            - low-disposition-verification
+      routes:
+        completed:
+          to: assess-goal
+          effect: advance
+        incomplete:
+          to: record-low-disposition
+          effect: rework
+        blocker-found:
+          to: await-user-direction
+          effect: advance
     - id: record-stopped
       use: disposition-record
       next: assess-goal
     - id: record-incomplete
+      use: disposition-record
+      next: assess-goal
+    - id: record-review-operation-incomplete
       use: disposition-record
       next: assess-goal
     - id: assess-goal
@@ -640,17 +1397,41 @@ graph:
             - medium-findings
             - low-findings
             - finding-disposition-summary
+            - applicable-obligation-summary
+            - pending-applicable-low-dispositions
+            - current-applicable-blockers
+            - required-evidence-gaps
+        - node: final-review
+          required: false
+          items:
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
         - node: await-user-direction
           required: false
+          items:
+            - direction-classification
+            - direction-summary
         - node: record-low-disposition
           required: false
           items:
+            - source-review-basis
             - low-disposition-summary
+            - pending-low-dispositions
+            - current-blocking-findings
+            - before-target
+            - after-target
+            - coverage-relationship
+            - low-disposition-verification
         - node: record-stopped
           required: false
           items:
             - disposition-summary
         - node: record-incomplete
+          required: false
+          items:
+            - disposition-summary
+        - node: record-review-operation-incomplete
           required: false
           items:
             - disposition-summary

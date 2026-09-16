@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-goal-v2
-version: "9"
+version: "15"
 name: Aquarium Goal
 purpose: Deliver one epic member, remediation, or closeout goal with current evidence.
 description: A flexible goal-centered Podway procedure for epic-handler work.
@@ -10,6 +10,9 @@ node_definitions:
     type: action
     title: Complete the goal work
     intent: Record the bounded implementation, investigation, documentation, and lifecycle work.
+    instructions:
+      - Use epic-handler for one goal-centered member, remediation, or closeout goal; do not invoke task phase skills.
+      - Preserve the exact authorized scope and return current target and focused evidence without implicit commit, push, publication, or session replacement.
     items:
       - id: work-summary
         type: text
@@ -35,7 +38,25 @@ node_definitions:
     type: action
     title: Record verification and review
     intent: Record current checks and complete Mulgae evidence for this goal.
+    instructions:
+      - Reconstruct the exact work target, review lineage, pending invocation, checks, and remaining review authority before any new provider call.
+      - Do not start another review or broad audit solely for eligible Low findings or their permitted locally checked delta.
     items:
+      - id: goal-kind
+        type: choice
+        prompt: Record which epic-handler goal kind is being evaluated.
+        required: true
+        choices:
+          - member-task
+          - pre-validation-remediation
+          - epic-closeout
+      - id: review-evidence-kind
+        type: choice
+        prompt: Record whether readiness uses a native review or the narrow successful final-closeout validation substitute.
+        required: true
+        choices:
+          - native-review
+          - validated-closeout
       - id: review-mode
         type: choice
         prompt: Record the applicable member-goal review mode, or the final epic closeout exception after successful validation.
@@ -44,14 +65,6 @@ node_definitions:
           - remediation-eligible
           - hardening-deferral-eligible
           - closeout-not-required
-      - id: extra-review-authorization
-        type: choice
-        prompt: Record whether an additional hardening-deferral-eligible remediation-and-review pass is not required, awaiting user authorization, or explicitly authorized.
-        required: true
-        choices:
-          - not-required
-          - pending
-          - authorized
       - id: review-round
         type: integer
         prompt: Record the positive ordinal of this operationally complete Mulgae review, counting each original root once through its root or verified composite, for the current goal revision.
@@ -77,6 +90,43 @@ node_definitions:
         min_length: 1
         max_length: 7000
         multiline: true
+      - id: completion-assessment-summary
+        type: text
+        prompt: Record each actual requirement by stable criterion identity, responsible owner, met, unmet, unverified, or not-applicable state, and bounded evidence or reference provenance; do not copy full reports or private provider payloads.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-unmet-criteria
+        type: integer
+        prompt: Record the number of actual requirements assessed as unmet across all accepted selected-role reports.
+        required: true
+        minimum: 0
+      - id: completion-unverified-criteria
+        type: integer
+        prompt: Record the number of actual requirements assessed as unverified across all accepted selected-role reports.
+        required: true
+        minimum: 0
+      - id: goal-verification-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-goal-verification; Podway does not execute or attest the operation.
+        required: true
+        operation_id: aquarium-goal-verification
+        operation_digest: sha256:4977944247da6294e42d28323290e2449541d6524b6b21f1cf4596a4eae737d1
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: goal-review-readiness-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-goal-review-readiness; finding counts do not establish readiness.
+        required: true
+        operation_id: aquarium-goal-review-readiness
+        operation_digest: sha256:29a4a0a5aef98f8fb0d79143cafca65ce30c9d3e876c021e21ad1d1afbdfd541
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
       - id: unresolved-valid-findings
         type: integer
         prompt: Record the number of unresolved valid findings.
@@ -92,6 +142,13 @@ node_definitions:
         prompt: Record the number of valid Low findings that require a completed shared disposition.
         required: true
         minimum: 0
+      - id: finding-count-consistency
+        type: choice
+        prompt: Record whether unresolved-valid-findings equals the sum of the effective Medium-or-higher and Low finding counts.
+        required: true
+        choices:
+          - consistent
+          - inconsistent
       - id: confirmation-needed-findings
         type: integer
         prompt: Record the number of findings whose validity still needs confirmation.
@@ -104,10 +161,145 @@ node_definitions:
         min_length: 1
         max_length: 7000
         multiline: true
+  review-basis-decision:
+    type: decision
+    title: Validate goal review basis
+    objective: Prevent the final-closeout substitute from being used by member or pre-validation remediation goals.
+    prompt: Is the selected review evidence kind valid for this goal kind?
+    evidence_guidance:
+      - Native review is valid for every goal kind; validated closeout is valid only for epic-closeout.
+    options:
+      - id: native-review
+        label: Use native review evidence
+        criteria: The goal uses its required native review evidence.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: review-evidence-kind
+            equals: native-review
+      - id: final-closeout
+        label: Use final-closeout validation
+        criteria: This is the final closeout and its exact successful validation evidence is the supported substitute.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: goal-kind
+            equals: epic-closeout
+          - evidence:
+              node: record-evidence
+              item: review-evidence-kind
+            equals: validated-closeout
+      - id: invalid-substitute
+        label: Reject invalid closeout substitute
+        criteria: A member or pre-validation remediation goal attempted to use final-closeout evidence.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: goal-kind
+            not_equals: epic-closeout
+          - evidence:
+              node: record-evidence
+              item: review-evidence-kind
+            equals: validated-closeout
+    reason:
+      required: true
+      prompt: Explain the selected goal and review evidence kinds.
+  operational-evidence-decision:
+    type: decision
+    title: Evaluate goal operations
+    objective: Route required verification and review readiness independently of findings.
+    prompt: Did both required operations pass for the current goal target?
+    evidence_guidance:
+      - A zero finding count cannot replace passing current verification and review-readiness results.
+    options:
+      - id: passed
+        label: Operations passed
+        criteria: Both current operations passed.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: goal-verification-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: record-evidence
+              item: goal-review-readiness-result
+            field: outcome
+            equals: pass
+      - id: verification-incomplete
+        label: Verification incomplete
+        criteria: Required verification failed or is inconclusive.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: goal-verification-result
+            field: outcome
+            not_equals: pass
+      - id: review-incomplete
+        label: Review readiness incomplete
+        criteria: Verification passed but required review evidence or CI failed or is inconclusive.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: goal-verification-result
+            field: outcome
+            equals: pass
+          - evidence:
+              node: record-evidence
+              item: goal-review-readiness-result
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Explain the current operation results and their owner.
+  closeout-substitute-record:
+    type: action
+    title: Record final-closeout validation basis
+    intent: Bind the narrow review substitute to one exact successful validation session and current focused checks.
+    instructions:
+      - Use this record only for epic-closeout; it is not native review evidence and cannot be reused by member or pre-validation remediation goals.
+    items:
+      - id: closeout-substitute-summary
+        type: text
+        prompt: Record the successful validation session identity, terminal disposition, exact target, and current focused closeout checks.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+  finding-validity-decision:
+    type: decision
+    title: Confirm finding validity
+    objective: Do not route findings until every confirmation is resolved.
+    prompt: Have all findings received a supported validity disposition?
+    evidence_guidance:
+      - Resolve the same findings from authorized evidence; confirmation does not itself create a provider review round.
+    options:
+      - id: resolved
+        label: Findings confirmed
+        criteria: No finding still needs confirmation.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: confirmation-needed-findings
+            equals: 0
+      - id: unresolved
+        label: Confirmation required
+        criteria: At least one finding still needs confirmation.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: confirmation-needed-findings
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the current confirmation state and required evidence.
   hardening-deferral-record:
     type: action
     title: Record epic hardening deferral
     intent: Preserve the bounded second-review findings that epic hardening must reconcile.
+    instructions:
+      - Record this narrow handoff only when an independently required second review already established eligible Low future risk.
+      - Do not start a second review merely to qualify for hardening deferral.
     items:
       - id: hardening-deferral-state
         type: choice
@@ -180,106 +372,362 @@ node_definitions:
         multiline: false
   evidence-decision:
     type: decision
-    title: Evaluate goal evidence
-    objective: Only complete current evidence or an explicit bounded member-task deferral may proceed.
-    prompt: Does the current evidence support this goal?
+    title: Classify goal findings
+    objective: Classify native findings independently from operational evidence, completion, and rework authority.
+    prompt: What finding state remains for this goal?
     evidence_guidance:
-      - Read the goal work, checks, Mulgae status, and finding dispositions.
-      - Select no option while confirmation-needed-findings is non-zero.
-      - Resolve each finding to Valid or Invalid with authorized evidence or bounded confirmation authority, then manually rework record-evidence and evaluate this decision again.
+      - Use native finding counts only; earlier serial decisions admit operations, validity, and completion.
     options:
-      - id: supported
-        label: Evidence supports goal
-        criteria: Required checks and review are complete, CI passed, and no unresolved valid finding remains; for the final epic closeout only, successful current validation and closeout verification replace a redundant Mulgae review.
+      - id: clean
+        label: Findings clean
+        criteria: No valid unresolved Medium-or-higher or Low finding remains.
         guards:
+          - evidence:
+              node: record-evidence
+              item: finding-count-consistency
+            equals: consistent
           - evidence:
               node: record-evidence
               item: unresolved-valid-findings
             equals: 0
           - evidence:
-              node: record-hardening-deferral
-              item: hardening-deferral-state
-            equals: not-applicable
+              node: record-evidence
+              item: effective-medium-or-higher-findings
+            equals: 0
           - evidence:
               node: record-evidence
-              item: confirmation-needed-findings
+              item: effective-low-findings
             equals: 0
-      - id: deferred-for-hardening
-        label: Findings deferred to epic hardening
-        criteria: Required checks are current, this is an epic member task, its complete second review is recorded in hardening-deferral-eligible mode, no valid Medium-or-higher finding remains, and every remaining finding is a small independent Low future risk linked before this decision to its canonical deferred-feedback owner and a verified staged aquarium.promoted-evidence/v1 manifest and payload digests; structural work belongs in the TODO owner instead.
+      - id: blocking
+        label: Blocking findings remain
+        criteria: At least one valid Medium-or-higher finding requires rework authority.
         guards:
           - evidence:
               node: record-evidence
-              item: review-mode
-            equals: hardening-deferral-eligible
+              item: finding-count-consistency
+            equals: consistent
+          - evidence:
+              node: record-evidence
+              item: effective-medium-or-higher-findings
+            at_least: 1
+      - id: low-only
+        label: Low findings remain
+        criteria: No Medium-or-higher finding remains and the finite eligible Low set requires disposition or hardening deferral.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: finding-count-consistency
+            equals: consistent
           - evidence:
               node: record-evidence
               item: effective-medium-or-higher-findings
             equals: 0
           - evidence:
-              node: record-hardening-deferral
-              item: hardening-deferral-state
-            equals: recorded
+              node: record-evidence
+              item: effective-low-findings
+            at_least: 1
+      - id: inconsistent
+        label: Finding evidence inconsistent
+        criteria: The unresolved total does not equal the sum of the supported severity buckets.
+        guards:
           - evidence:
               node: record-evidence
-              item: confirmation-needed-findings
+              item: finding-count-consistency
+            equals: inconsistent
+    reason:
+      required: true
+      prompt: Explain the selection using the recorded evidence.
+  completion-status-decision:
+    type: decision
+    title: Classify completion status
+    objective: Classify completion independently from findings and rework authority.
+    prompt: What is the aggregate completion state?
+    evidence_guidance:
+      - Unmet criteria may proceed to rework or direction; unverified criteria require current evidence or bounded confirmation first.
+    options:
+      - id: complete
+        label: Completion supported
+        criteria: No actual requirement is unmet or unverified.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: completion-unmet-criteria
             equals: 0
-      - id: rework-required
-        label: Rework required
-        criteria: Evidence or CI failed, evidence is stale or incomplete, or a remediation-eligible review has an unresolved valid finding that requires rework.
+          - evidence:
+              node: record-evidence
+              item: completion-unverified-criteria
+            equals: 0
+      - id: unmet
+        label: Completion requirements unmet
+        criteria: At least one requirement is unmet and none remains unverified.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: completion-unmet-criteria
+            at_least: 1
+          - evidence:
+              node: record-evidence
+              item: completion-unverified-criteria
+            equals: 0
+      - id: unverified
+        label: Completion evidence unverified
+        criteria: At least one requirement remains unverified.
+        guards:
+          - evidence:
+              node: record-evidence
+              item: completion-unverified-criteria
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the selection using the criterion assessment and current evidence.
+  goal-rework-authority-decision:
+    type: decision
+    title: Evaluate goal rework authority
+    objective: Keep the existence of rework separate from authority for another remediation and review pass.
+    prompt: What authority applies to the established goal rework?
+    options:
+      - id: remediation
+        label: Use current remediation authority
+        criteria: The current review is remediation-eligible.
         guards:
           - evidence:
               node: record-evidence
               item: review-mode
             equals: remediation-eligible
-          - evidence:
-              node: record-evidence
-              item: effective-medium-or-higher-findings
-            at_least: 1
-          - evidence:
-              node: record-evidence
-              item: confirmation-needed-findings
-            equals: 0
-      - id: authorized-rework
-        label: Authorized additional rework
-        criteria: A hardening-deferral-eligible review has a valid Medium-or-higher finding and the user explicitly authorized one additional bounded remediation-and-review pass.
+      - id: user-direction
+        label: Await user direction
+        criteria: Hardening or closeout mode requires a fresh one-shot user decision before another pass.
         guards:
           - evidence:
               node: record-evidence
               item: review-mode
-            equals: hardening-deferral-eligible
-          - evidence:
-              node: record-evidence
-              item: extra-review-authorization
-            equals: authorized
-          - evidence:
-              node: record-evidence
-              item: effective-medium-or-higher-findings
-            at_least: 1
-          - evidence:
-              node: record-evidence
-              item: confirmation-needed-findings
-            equals: 0
+            not_equals: remediation-eligible
     reason:
       required: true
-      prompt: Explain the selection using the recorded evidence.
-  authorized-rework-decision:
+      prompt: Explain the current bounded rework authority.
+  low-handling-decision:
     type: decision
-    title: Confirm additional rework authority
-    objective: Re-enter goal work only while the recorded additional review authorization remains current.
-    prompt: Is the additional remediation-and-review pass still authorized?
-    evidence_guidance:
-      - Read the current extra-review authorization and account for any later change before starting another bounded work pass.
+    title: Choose Low handling
+    objective: Distinguish normal Low settlement from an already supported bounded hardening deferral.
+    prompt: How is the admitted Low-only finding set handled?
     options:
-      - id: proceed
-        label: Proceed with authorized rework
-        criteria: The user authorization remains current for exactly one additional remediation-and-review pass.
-      - id: reconsider
-        label: Reconsider authorization
-        criteria: The authorization is no longer current or its bounded scope must be reconsidered before work resumes.
+      - id: settle
+        label: Settle Low findings
+        criteria: No hardening deferral is applicable.
+        guards:
+          - evidence:
+              node: record-hardening-deferral
+              item: hardening-deferral-state
+            equals: not-applicable
+      - id: defer
+        label: Carry hardening deferral
+        criteria: The complete supported hardening deferral record is present.
+        guards:
+          - evidence:
+              node: record-hardening-deferral
+              item: hardening-deferral-state
+            equals: recorded
     reason:
       required: true
-      prompt: Explain the current authorization state and bounded next action.
+      prompt: Explain the selected Low-only handling.
+  low-disposition-record:
+    type: action
+    title: Record completed Low dispositions
+    intent: Verify the frozen Low set and exact permitted target delta without another provider review.
+    instructions:
+      - Apply only supported Low dispositions and their required local checks against the exact frozen finding set.
+      - Preserve the original review target and coverage; do not initiate review or broad audit solely for Low.
+    items:
+      - id: source-review-basis
+        type: text
+        prompt: Record goal revision, original root or audit basis, effective result, reviewed target, and finite finding-set identity.
+        required: true
+        min_length: 1
+        max_length: 2000
+        multiline: true
+      - id: low-disposition-summary
+        type: text
+        prompt: Record each source finding ID, effective priority, disposition, affected scope, owner, and local check.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-assessment-summary
+        type: text
+        prompt: Carry the exact criterion-level completion assessment from the admitted review basis.
+        required: true
+        min_length: 1
+        max_length: 7000
+        multiline: true
+      - id: completion-unmet-criteria
+        type: integer
+        prompt: Carry the number of unmet completion criteria from the admitted review basis.
+        required: true
+        minimum: 0
+      - id: completion-unverified-criteria
+        type: integer
+        prompt: Carry the number of unverified completion criteria from the admitted review basis.
+        required: true
+        minimum: 0
+      - id: pending-low-dispositions
+        type: integer
+        prompt: Record frozen eligible Low findings without a completed disposition.
+        required: true
+        minimum: 0
+      - id: current-blocking-findings
+        type: integer
+        prompt: Record current blockers established during settlement verification.
+        required: true
+        minimum: 0
+      - id: before-target
+        type: text
+        prompt: Record the exact reviewed target.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: after-target
+        type: text
+        prompt: Record the exact current target containing only the permitted delta.
+        required: true
+        min_length: 1
+        max_length: 512
+        multiline: true
+      - id: coverage-relationship
+        type: choice
+        prompt: Record the relationship between review coverage and current bytes.
+        required: true
+        choices:
+          - same-as-review
+          - review-predates-low-delta
+      - id: low-disposition-verification
+        type: check_result
+        prompt: Record the caller-supplied aquarium-low-disposition-verification result.
+        required: true
+        operation_id: aquarium-low-disposition-verification
+        operation_digest: sha256:788e0961be2fcf797e891bb55e440d6779b4b9d745818ad186c840acc5df013c
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  low-result-decision:
+    type: decision
+    title: Evaluate Low verification
+    objective: Continue only when required local settlement verification passed.
+    prompt: Did Low verification pass on the current target?
+    evidence_guidance:
+      - A failed or inconclusive result returns to local settlement and authorizes no review.
+    options:
+      - id: passed
+        label: Low verification passed
+        criteria: The exact disposition delta and local checks passed.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: low-disposition-verification
+            field: outcome
+            equals: pass
+      - id: incomplete
+        label: Low verification incomplete
+        criteria: The local result failed or is inconclusive.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: low-disposition-verification
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Explain the result from current local evidence.
+  low-completion-decision:
+    type: decision
+    title: Verify Low settlement
+    objective: Advance only with no pending disposition, current blocker, or carried semantic completion gap.
+    prompt: Is the finite Low settlement complete?
+    evidence_guidance:
+      - Historical Low counts remain unchanged; use pending dispositions, current blockers, and the completion assessment carried from record-evidence.
+    options:
+      - id: completed
+        label: Low settlement completed
+        criteria: Pending dispositions and current blockers are zero, and the source review has no unmet or unverified completion criterion.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: pending-low-dispositions
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: completion-unmet-criteria
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: completion-unverified-criteria
+            equals: 0
+      - id: incomplete
+        label: Low dispositions incomplete
+        criteria: At least one eligible Low disposition remains and no blocker has been established.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            equals: 0
+          - evidence:
+              node: record-low-disposition
+              item: pending-low-dispositions
+            at_least: 1
+      - id: blocker-found
+        label: Current blocker found
+        criteria: Settlement evidence established a current blocker requiring owned rework or direction.
+        guards:
+          - evidence:
+              node: record-low-disposition
+              item: current-blocking-findings
+            at_least: 1
+    reason:
+      required: true
+      prompt: Explain the remaining disposition or blocking state.
+  user-direction-record:
+    type: action
+    title: Await user direction
+    intent: Record the need for user direction without recording a choice that has not been given.
+    instructions:
+      - Record only the exact blocking finding set and exhausted authority, complete this action, then stop at choose-user-direction with that decision unset until the user answers.
+      - Reaching or completing this action grants no source change or provider-call authority.
+    items:
+      - id: direction-classification
+        type: choice
+        prompt: Record the classification that requires an external decision.
+        required: true
+        choices:
+          - user-direction
+      - id: direction-summary
+        type: text
+        prompt: Record the exact issue set, current target, remaining evidence, and bounded choices.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+  user-direction-decision:
+    type: decision
+    title: Record user direction
+    objective: Continue only from the user's actual bounded choice.
+    prompt: What did the user direct for the blocked goal?
+    evidence_guidance:
+      - Leave this decision unset until the user explicitly selects one bounded outcome.
+    options:
+      - id: fix-and-review
+        label: Authorize one fix and review
+        criteria: The user authorized exactly one bounded correction and next-ordinal confirmation.
+      - id: stop
+        label: Stop the goal
+        criteria: The user chose to stop without another correction or review.
+    reason:
+      required: true
+      prompt: Record the actual user direction and exact authority.
   goal-assessment:
     type: decision
     title: Assess the goal
@@ -287,6 +735,7 @@ node_definitions:
     prompt: What is the outcome of the current goal?
     evidence_guidance:
       - Read the latest work and evidence records and assess every goal criterion.
+      - A path reached from choose-user-direction after the user selected stop cannot select achieved; use the carried direction and completion evidence when assessing every criterion.
     options:
       - id: achieved
         label: Goal achieved
@@ -310,6 +759,8 @@ node_definitions:
     type: action
     title: Confirm epic hardening handoff
     intent: Record that the pre-decision deferral evidence is the bounded handoff for this member task.
+    instructions:
+      - Verify the exact promoted evidence, finding IDs, and canonical owner without calling the provider review clean.
     items:
       - id: hardening-handoff-summary
         type: text
@@ -322,6 +773,9 @@ node_definitions:
     type: action
     title: Record goal closeout
     intent: Record roadmap, commit, worktree, and publication handoff state.
+    instructions:
+      - Close only from current goal assessment and exact repository evidence; commit and publication remain separate.
+      - Do not install assets, replace sessions, push, or publish by implication.
     items:
       - id: closeout-summary
         type: text
@@ -338,7 +792,94 @@ graph:
       next: record-evidence
     - id: record-evidence
       use: evidence-record
-      next: record-hardening-deferral
+      evidence_from:
+        - node: complete-work
+          required: true
+          items:
+            - work-summary
+            - source-revision
+      next: decide-review-basis
+    - id: decide-review-basis
+      use: review-basis-decision
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - goal-kind
+            - review-evidence-kind
+      routes:
+        native-review:
+          to: decide-operational-evidence
+          effect: advance
+        final-closeout:
+          to: record-closeout-substitute
+          effect: advance
+        invalid-substitute:
+          to: record-evidence
+          effect: rework
+    - id: record-closeout-substitute
+      use: closeout-substitute-record
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - goal-kind
+            - review-evidence-kind
+            - evidence-summary
+            - goal-verification-result
+            - goal-review-readiness-result
+      next: decide-operational-evidence
+    - id: decide-operational-evidence
+      use: operational-evidence-decision
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - goal-verification-result
+            - goal-review-readiness-result
+      routes:
+        passed:
+          to: confirm-finding-validity
+          effect: advance
+        verification-incomplete:
+          to: complete-work
+          effect: rework
+        review-incomplete:
+          to: record-evidence
+          effect: rework
+    - id: confirm-finding-validity
+      use: finding-validity-decision
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - confirmation-needed-findings
+      routes:
+        resolved:
+          to: confirm-completion-assessment
+          effect: advance
+        unresolved:
+          to: record-evidence
+          effect: rework
+    - id: confirm-completion-assessment
+      use: completion-status-decision
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+      routes:
+        complete:
+          to: decide-evidence
+          effect: advance
+        unmet:
+          to: decide-goal-rework-authority
+          effect: advance
+        unverified:
+          to: record-evidence
+          effect: rework
     - id: record-hardening-deferral
       use: hardening-deferral-record
       evidence_from:
@@ -346,14 +887,35 @@ graph:
           required: true
           items:
             - review-mode
-            - extra-review-authorization
             - review-run-id
+            - goal-kind
+            - review-evidence-kind
             - unresolved-valid-findings
             - effective-medium-or-higher-findings
             - effective-low-findings
             - confirmation-needed-findings
             - finding-disposition-summary
-      next: decide-evidence
+      next: decide-low-handling
+    - id: decide-low-handling
+      use: low-handling-decision
+      evidence_from:
+        - node: record-hardening-deferral
+          required: true
+          items:
+            - hardening-deferral-state
+            - hardening-deferral-run-id
+            - hardening-deferral-finding-ids
+            - hardening-deferral-summary
+            - hardening-deferral-owner
+            - hardening-deferral-evidence-path
+            - hardening-deferral-evidence-sha256
+      routes:
+        settle:
+          to: record-low-disposition
+          effect: advance
+        defer:
+          to: record-hardening-handoff
+          effect: advance
     - id: decide-evidence
       use: evidence-decision
       evidence_from:
@@ -367,51 +929,138 @@ graph:
           items:
             - review-round
             - review-mode
-            - extra-review-authorization
             - review-run-id
             - evidence-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
             - unresolved-valid-findings
             - effective-medium-or-higher-findings
             - effective-low-findings
+            - finding-count-consistency
             - confirmation-needed-findings
             - finding-disposition-summary
-        - node: record-hardening-deferral
-          required: true
-          items:
-            - hardening-deferral-state
-            - hardening-deferral-run-id
-            - hardening-deferral-finding-ids
-            - hardening-deferral-summary
-            - hardening-deferral-owner
-            - hardening-deferral-evidence-path
-            - hardening-deferral-evidence-sha256
       routes:
-        supported:
+        clean:
           to: assess-goal
           effect: advance
-        deferred-for-hardening:
-          to: record-hardening-handoff
+        blocking:
+          to: decide-goal-rework-authority
           effect: advance
-        rework-required:
-          to: complete-work
+        low-only:
+          to: record-hardening-deferral
+          effect: advance
+        inconsistent:
+          to: record-evidence
           effect: rework
-        authorized-rework:
-          to: decide-authorized-rework
-          effect: advance
-    - id: decide-authorized-rework
-      use: authorized-rework-decision
+    - id: decide-goal-rework-authority
+      use: goal-rework-authority-decision
       evidence_from:
         - node: record-evidence
           required: true
           items:
-            - extra-review-authorization
+            - review-mode
       routes:
-        proceed:
+        remediation:
           to: complete-work
           effect: rework
-        reconsider:
-          to: record-evidence
+        user-direction:
+          to: await-user-direction
+          effect: advance
+    - id: await-user-direction
+      use: user-direction-record
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - review-mode
+            - review-run-id
+            - evidence-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+        - node: record-low-disposition
+          required: false
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - current-blocking-findings
+            - after-target
+      next: choose-user-direction
+    - id: choose-user-direction
+      use: user-direction-decision
+      evidence_from:
+        - node: await-user-direction
+          required: true
+          items:
+            - direction-classification
+            - direction-summary
+      routes:
+        fix-and-review:
+          to: complete-work
           effect: rework
+        stop:
+          to: assess-goal
+          effect: advance
+    - id: record-low-disposition
+      use: low-disposition-record
+      evidence_from:
+        - node: record-evidence
+          required: true
+          items:
+            - goal-kind
+            - review-mode
+            - review-run-id
+            - evidence-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+            - effective-medium-or-higher-findings
+            - effective-low-findings
+            - confirmation-needed-findings
+            - finding-disposition-summary
+      next: decide-low-result
+    - id: decide-low-result
+      use: low-result-decision
+      evidence_from:
+        - node: record-low-disposition
+          required: true
+          items:
+            - low-disposition-verification
+      routes:
+        passed:
+          to: decide-low-completion
+          effect: advance
+        incomplete:
+          to: record-low-disposition
+          effect: rework
+    - id: decide-low-completion
+      use: low-completion-decision
+      evidence_from:
+        - node: record-low-disposition
+          required: true
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+            - pending-low-dispositions
+            - current-blocking-findings
+            - before-target
+            - after-target
+            - coverage-relationship
+            - low-disposition-verification
+      routes:
+        completed:
+          to: assess-goal
+          effect: advance
+        incomplete:
+          to: record-low-disposition
+          effect: rework
+        blocker-found:
+          to: await-user-direction
+          effect: advance
     - id: record-hardening-handoff
       use: hardening-deferral-disposition
       evidence_from:
@@ -438,16 +1087,24 @@ graph:
           items:
             - review-round
             - review-mode
-            - extra-review-authorization
             - review-run-id
             - evidence-summary
+            - completion-assessment-summary
+            - completion-unmet-criteria
+            - completion-unverified-criteria
+            - finding-count-consistency
             - unresolved-valid-findings
             - effective-medium-or-higher-findings
             - effective-low-findings
             - confirmation-needed-findings
             - finding-disposition-summary
+        - node: await-user-direction
+          required: false
+          items:
+            - direction-classification
+            - direction-summary
         - node: record-hardening-deferral
-          required: true
+          required: false
           items:
             - hardening-deferral-state
             - hardening-deferral-run-id
@@ -460,6 +1117,17 @@ graph:
           required: false
           items:
             - hardening-handoff-summary
+        - node: record-low-disposition
+          required: false
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - pending-low-dispositions
+            - current-blocking-findings
+            - before-target
+            - after-target
+            - coverage-relationship
+            - low-disposition-verification
       routes:
         achieved:
           to: closeout
