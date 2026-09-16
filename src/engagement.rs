@@ -2320,12 +2320,21 @@ impl EngagementStore {
         engagement_id: Uuid,
         task_id: Uuid,
     ) -> Result<Value, MachineError> {
-        let request: String = self
+        let (request, receipt_count, recorded_sha256): (Option<String>, i64, Option<String>) = self
             .connection
             .query_row(
-                "SELECT request_json FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                "SELECT t.request_json,
+                   (SELECT COUNT(*) FROM operations o
+                    WHERE o.scope_id=t.engagement_id
+                      AND o.operation='assign_external_specialist_task'
+                      AND json_extract(o.response_json,'$.task_id')=t.task_id),
+                   (SELECT MIN(o.request_sha256) FROM operations o
+                    WHERE o.scope_id=t.engagement_id
+                      AND o.operation='assign_external_specialist_task'
+                      AND json_extract(o.response_json,'$.task_id')=t.task_id)
+                 FROM tasks t WHERE t.engagement_id=?1 AND t.task_id=?2",
                 params![engagement_id.to_string(), task_id.to_string()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(internal)?
@@ -2337,7 +2346,21 @@ impl EngagementStore {
                     serde_json::json!({"task_id":task_id}),
                 )
             })?;
-        serde_json::from_str(&request).map_err(internal)
+        if receipt_count != 1 {
+            return Err(integrity(
+                "external task assignment receipt is missing or ambiguous",
+            ));
+        }
+        let request = request.ok_or_else(|| integrity("external task request is missing"))?;
+        let recorded_sha256 = recorded_sha256
+            .ok_or_else(|| integrity("external task assignment receipt lost its request digest"))?;
+        if sha256_hex(request.as_bytes()) != recorded_sha256 {
+            return Err(integrity(
+                "external task request digest does not match its assignment receipt",
+            ));
+        }
+        serde_json::from_str(&request)
+            .map_err(|_| integrity("external task request is not valid JSON"))
     }
 
     pub fn external_task_deadline_expired(
@@ -3598,6 +3621,168 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn external_task_request_rechecks_its_assignment_receipt_digest() {
+        let (mut store, root) = store();
+        let opened = external_open(&mut store);
+        let member = external_ready_member(&mut store, opened.engagement_id);
+        let accepted = serde_json::json!({
+            "schema":"dolgorae-external-specialist-facade/v3",
+            "operation":"assign_external_specialist_task",
+            "task":{
+                "purpose":"completion",
+                "brief":"Check completion.",
+                "contexts":[],
+                "criteria":[{
+                    "id":"C-1",
+                    "statement":"The requirement is met.",
+                    "source_context_ids":[]
+                }],
+                "expected_output":"structured_review_v3"
+            }
+        });
+        let reserved = store
+            .reserve_external_task(
+                opened.engagement_id,
+                member.specialist_run_id,
+                ExternalTaskRequest {
+                    request_value: &accepted,
+                    objective: "Check completion.",
+                    external_request_ref: &serde_json::json!({"kind":"review"}),
+                    execution_intent: "read_only",
+                    deadline_seconds: 60,
+                    idempotency_key: "task-request-integrity",
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .external_task_request(opened.engagement_id, reserved.task_id)
+                .unwrap(),
+            accepted
+        );
+        let original: String = store
+            .connection
+            .query_row(
+                "SELECT request_json FROM tasks WHERE task_id=?1",
+                [reserved.task_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let mut changed_output = accepted.clone();
+        changed_output["task"]["expected_output"] = serde_json::json!("plain_text");
+        let mut missing_schema = accepted.clone();
+        missing_schema.as_object_mut().unwrap().remove("schema");
+        for corrupted in [changed_output, missing_schema] {
+            store
+                .connection
+                .execute(
+                    "UPDATE tasks SET request_json=?2 WHERE task_id=?1",
+                    params![
+                        reserved.task_id.to_string(),
+                        canonical_string(&corrupted).unwrap()
+                    ],
+                )
+                .unwrap();
+            let error = store
+                .external_task_request(opened.engagement_id, reserved.task_id)
+                .unwrap_err();
+            assert_eq!(error.code, "INTERNAL_ERROR");
+            assert_eq!(
+                error.details["invariant"],
+                "external task request digest does not match its assignment receipt"
+            );
+        }
+
+        store
+            .connection
+            .execute(
+                "UPDATE tasks SET request_json=?2 WHERE task_id=?1",
+                params![reserved.task_id.to_string(), original],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO operations(
+                   scope_id,operation,idempotency_key,request_sha256,response_json
+                 ) SELECT scope_id,operation,'task-request-integrity-duplicate',
+                          request_sha256,response_json
+                   FROM operations
+                  WHERE scope_id=?1
+                    AND operation='assign_external_specialist_task'
+                    AND idempotency_key='task-request-integrity'",
+                [opened.engagement_id.to_string()],
+            )
+            .unwrap();
+        let ambiguous = store
+            .external_task_request(opened.engagement_id, reserved.task_id)
+            .unwrap_err();
+        assert_eq!(ambiguous.code, "INTERNAL_ERROR");
+        assert_eq!(
+            ambiguous.details["invariant"],
+            "external task assignment receipt is missing or ambiguous"
+        );
+        store
+            .connection
+            .execute(
+                "DELETE FROM operations
+                  WHERE scope_id=?1
+                    AND operation='assign_external_specialist_task'
+                    AND idempotency_key='task-request-integrity-duplicate'",
+                [opened.engagement_id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE tasks SET request_json=NULL WHERE task_id=?1",
+                [reserved.task_id.to_string()],
+            )
+            .unwrap();
+        let missing_request = store
+            .external_task_request(opened.engagement_id, reserved.task_id)
+            .unwrap_err();
+        assert_eq!(missing_request.code, "INTERNAL_ERROR");
+        assert_eq!(
+            missing_request.details["invariant"],
+            "external task request is missing"
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE tasks SET request_json=?2 WHERE task_id=?1",
+                params![reserved.task_id.to_string(), original],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM operations
+                  WHERE scope_id=?1
+                    AND operation='assign_external_specialist_task'
+                    AND idempotency_key='task-request-integrity'",
+                [opened.engagement_id.to_string()],
+            )
+            .unwrap();
+        let missing_receipt = store
+            .external_task_request(opened.engagement_id, reserved.task_id)
+            .unwrap_err();
+        assert_eq!(missing_receipt.code, "INTERNAL_ERROR");
+        assert_eq!(
+            missing_receipt.details["invariant"],
+            "external task assignment receipt is missing or ambiguous"
+        );
+        let snapshot = store
+            .external_task(opened.engagement_id, reserved.task_id)
+            .unwrap();
+        assert_eq!(snapshot.state, "accepted");
+        assert_eq!(snapshot.result, None);
+        assert_eq!(snapshot.result_artifact_ref, None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn reopen(root: &Path) -> EngagementStore {
@@ -5768,12 +5953,6 @@ mod tests {
                 .unwrap_err()
                 .code,
             "IDEMPOTENCY_CONFLICT"
-        );
-        assert_eq!(
-            store
-                .external_task_request(opened.engagement_id, reserved.task_id)
-                .unwrap(),
-            accepted
         );
         let collected = store.collect_review(opened.engagement_id).unwrap().output;
         assert_eq!(collected, expected_report);

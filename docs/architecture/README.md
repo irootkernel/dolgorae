@@ -210,7 +210,11 @@ normalizes and persists the complete brief, inline contexts, criteria, target
 intent, and deadline before dispatch. The Turn prompt embeds that accepted task
 as data and distinguishes contexts from the candidate workspace. Task retry
 compares the full accepted request digest, while Role and Agent Configuration
-digests remain unchanged across different tasks.
+digests remain unchanged across different tasks. Terminal result construction
+joins the durable task to its unique assignment receipt and rechecks the
+persisted request JCS against that receipt's digest before inspecting schema or
+expected-output discriminators. Missing, ambiguous, or mismatched authority
+fails closed as engagement integrity corruption.
 
 An accepted hire initially publishes only a logical, threadless Run and records
 the member as `unstarted`. Assignment reconstructs a missing Worker from the Run

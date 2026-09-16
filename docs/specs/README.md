@@ -3320,7 +3320,11 @@ request is limited to 1,048,576 bytes, the brief to 65,536 bytes, and NUL is
 rejected before dispatch. Decoded strings retain their exact code points and
 line endings. The accepted request is persisted as JCS and bound to task
 idempotency before its content is delivered in the Turn message. Context is
-identified as evidence rather than candidate source.
+identified as evidence rather than candidate source. Before terminal result
+construction, Dolgorae MUST re-verify that persisted JCS against the unique
+assignment receipt digest. A missing or ambiguous receipt, absent request, or
+digest mismatch is an integrity failure and MUST NOT downgrade or bypass the
+accepted task's output contract.
 
 When a facade v3 task requests `structured_review_v3`, `completion` requires at
 least one criterion. Dolgorae accepts only a report that covers every criterion
