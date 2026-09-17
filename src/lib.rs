@@ -29,6 +29,7 @@ pub mod mcp_review_server;
 pub(crate) mod mutation_admission;
 pub mod orchestration;
 pub mod paths;
+pub mod process_inventory;
 pub mod profile;
 pub mod projection;
 pub mod protocol;

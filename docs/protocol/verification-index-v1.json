@@ -134,7 +134,8 @@
         "TASK-039",
         "TASK-042",
         "TASK-044",
-        "TASK-045"
+        "TASK-045",
+        "TASK-046"
       ],
       "catches": [
         "public CLI and RPC adapters",
@@ -157,7 +158,8 @@
         "connection and process identity excluded from MCP idempotency",
         "immutable review-target capture and settlement Machine CLI carriers",
         "protected settlement owner and terminal receipt carriers",
-        "task-aware Specialist Review request on non-TTY stdin"
+        "task-aware Specialist Review request on non-TTY stdin",
+        "inventory-backed orphan inspect and confirmed cleanup CLI"
       ]
     },
     "SPEC-006": {
@@ -192,7 +194,8 @@
         "TASK-041",
         "TASK-042",
         "TASK-043",
-        "TASK-044"
+        "TASK-044",
+        "TASK-046"
       ],
       "catches": [
         "machine and protobuf envelopes",
@@ -221,7 +224,8 @@
         "working-tree review result artifact and mutation postcondition",
         "replay-safe external MCP identity or explicit MCP unavailability",
         "same-reference input drift returning IDEMPOTENCY_CONFLICT without duplicate Reviewer allocation",
-        "additive v3 accepted task and criterion-complete result envelopes"
+        "additive v3 accepted task and criterion-complete result envelopes",
+        "orphan-only machine and error v3 envelopes"
       ]
     },
     "SPEC-007": {

@@ -1139,6 +1139,8 @@ dolgorae [--human] init [PATH] [--non-git]
 dolgorae [--human] serve --socket <absolute-private-socket-path> [--ready-fd <fd>]
 
 dolgorae [--human] runtime capabilities
+dolgorae [--human] runtime orphan inspect [--owner-root <absolute-path>]... [--owner-root-under <absolute-path>]... [--kind <kind>]... [--profile <name>]... [--run-id <id>]... [--pid <pid>]... [--all]
+dolgorae [--human] runtime orphan cleanup [the same selectors] --confirm-selection-sha256 <digest>
 dolgorae [--human] engagement call --workspace <path> --request-fd <fd> (--controller-file <path> | --controller-fd <fd>) [--new-controller-file <path> | --new-controller-fd <fd>]
 dolgorae [--human] controller credential create --kind <kind> --instance-id <id> [--subject-id <id>] [--orchestration-policy <name>] --output <new-path>
 dolgorae [--human] operator credential initialize --output <new-path>
@@ -1390,6 +1392,31 @@ returns `COMPATIBILITY_REJECTED` and requires a new run or profile definition.
 
 ## SPEC-006: Machine Output and Turn Control
 
+The `runtime orphan` commands are the exception to the v2 command vocabulary:
+they emit the checked [machine-output v3](../protocol/dolgorae-machine-v3.schema.json)
+and [error-contract v3](../protocol/dolgorae-error-contract-v3.json) envelopes.
+They work without an initialized Dolgorae home. `inspect` MUST enumerate only
+same-user, boot-matched registrations created by this binary and report each as
+`owned`, `orphan`, `absent`, or `unverifiable`. A process whose parent has become
+PID 1 is not an orphan merely for that reason. A missing or replaced owner root
+is necessary but insufficient: cleanup MUST revalidate a live leader's exact
+identity, executable, process group, and recorded launch fingerprint before
+signaling. If the leader has already exited, a signal MAY reach only surviving
+members whose UID, session, and group still match the registered group. A
+registration without activated process identity MUST remain `unverifiable`;
+a pathname search cannot prove its process absent. An unregistered legacy
+process or an unverifiable registration MUST NOT be signaled by this command.
+Failure to read the current boot UUID MUST be `unverifiable`, not `absent`.
+After a successful spawn, the launcher MUST retain a provisional registration
+until it verifies that the entire process group is absent, including on start
+failure. `cleanup` MUST require an explicit selector or `--all` and the digest
+returned by a fresh matching
+inspection. It MUST leave owned and unverifiable processes untouched; after
+verified graceful and forced
+termination it MAY remove only the recorded same-inode socket. Normal Profile
+Server lifetime remains independent of the CLI caller and MUST NOT be shortened
+solely because a shell or test invocation exits.
+
 JSON mode is the default. A finite command writes exactly one newline-terminated
 JSON object to stdout. Both success and structured failure use stdout; stderr is
 reserved for unstructured diagnostics. `--human` is an optional presentation
@@ -1442,6 +1469,9 @@ requires the matching binary; v1 defines no in-place migration.
 The checked [version-output schema](../protocol/dolgorae-version-v1.schema.json),
 [machine-output schema](../protocol/dolgorae-machine-v2.schema.json),
 [error contract](../protocol/dolgorae-error-contract-v2.json),
+[orphan machine-output schema](../protocol/dolgorae-machine-v3.schema.json),
+[orphan error contract](../protocol/dolgorae-error-contract-v3.json),
+[process-registration schema](../protocol/dolgorae-process-registration-v1.schema.json),
 [client-event-record schema](../protocol/dolgorae-event-record-v1.schema.json),
 [event-delivery schema](../protocol/dolgorae-event-delivery-v1.schema.json),
 [interaction schema](../protocol/dolgorae-interaction-v1.schema.json),

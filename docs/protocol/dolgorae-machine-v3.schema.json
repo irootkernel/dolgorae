@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/machine-output/v3",
+  "title": "Dolgorae orphan inspection and cleanup machine output v3",
+  "oneOf": [
+    {"$ref": "#/$defs/inspect_success"},
+    {"$ref": "#/$defs/cleanup_success"},
+    {"$ref": "#/$defs/failure"}
+  ],
+  "$defs": {
+    "command": {"enum": ["runtime.orphan.inspect", "runtime.orphan.cleanup"]},
+    "uuid": {"$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"},
+    "sha256": {"$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/sha256"},
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "owner_root", "profile", "run_id", "pid", "process_group_id", "socket", "verdict"],
+      "properties": {
+        "id": {"$ref": "#/$defs/uuid"},
+        "kind": {"enum": ["profile_server", "profile_log_drainer", "dedicated_server", "worker"]},
+        "owner_root": {"type": "string", "pattern": "^/"},
+        "profile": {"type": ["string", "null"]},
+        "run_id": {"anyOf": [{"$ref": "#/$defs/uuid"}, {"type": "null"}]},
+        "pid": {"type": ["integer", "null"], "minimum": 1},
+        "process_group_id": {"type": ["integer", "null"], "minimum": 1},
+        "socket": {"type": ["string", "null"]},
+        "verdict": {"enum": ["owned", "orphan", "absent", "unverifiable"]}
+      }
+    },
+    "inspect_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "ok", "command", "invocation_id", "data"],
+      "properties": {
+        "schema_version": {"const": 3},
+        "ok": {"const": true},
+        "command": {"const": "runtime.orphan.inspect"},
+        "invocation_id": {"$ref": "#/$defs/uuid"},
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selection_sha256", "candidates"],
+          "properties": {
+            "selection_sha256": {"$ref": "#/$defs/sha256"},
+            "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}}
+          }
+        }
+      }
+    },
+    "cleanup_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "ok", "command", "invocation_id", "data"],
+      "properties": {
+        "schema_version": {"const": 3},
+        "ok": {"const": true},
+        "command": {"const": "runtime.orphan.cleanup"},
+        "invocation_id": {"$ref": "#/$defs/uuid"},
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selection_sha256", "cleaned", "retired", "skipped"],
+          "properties": {
+            "selection_sha256": {"$ref": "#/$defs/sha256"},
+            "cleaned": {"type": "array", "items": {"$ref": "#/$defs/uuid"}},
+            "retired": {"type": "array", "items": {"$ref": "#/$defs/uuid"}},
+            "skipped": {"type": "array", "items": {"$ref": "#/$defs/uuid"}}
+          }
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "ok", "command", "invocation_id", "error"],
+      "properties": {
+        "schema_version": {"const": 3},
+        "ok": {"const": false},
+        "command": {"$ref": "#/$defs/command"},
+        "invocation_id": {"$ref": "#/$defs/uuid"},
+        "error": {"$ref": "https://dolgorae.local/schema/error-contract/v3"}
+      }
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/process-registration/v1",
+  "title": "Dolgorae boot-scoped detached process registration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "kind", "owner_root", "owner_device", "owner_inode",
+    "boot_uuid", "executable", "executable_device", "executable_inode", "expected_argument", "socket", "profile", "run_id",
+    "process", "fingerprint", "socket_device", "socket_inode"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"},
+    "kind": {"enum": ["profile_server", "profile_log_drainer", "dedicated_server", "worker"]},
+    "owner_root": {"type": "string", "pattern": "^/"},
+    "owner_device": {"type": "integer", "minimum": 1},
+    "owner_inode": {"type": "integer", "minimum": 1},
+    "boot_uuid": {"type": "string", "format": "uuid"},
+    "executable": {"type": "string", "pattern": "^/"},
+    "executable_device": {"type": "integer", "minimum": 1},
+    "executable_inode": {"type": "integer", "minimum": 1},
+    "expected_argument": {"type": "string", "minLength": 1},
+    "socket": {"type": ["string", "null"]},
+    "profile": {"type": ["string", "null"]},
+    "run_id": {"anyOf": [{"$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"}, {"type": "null"}]},
+    "process": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pid", "parent_pid", "uid", "process_group_id", "session_id", "start_tvsec", "start_tvusec", "zombie"],
+          "properties": {
+            "pid": {"type": "integer", "minimum": 1},
+            "parent_pid": {"type": "integer", "minimum": 0},
+            "uid": {"type": "integer", "minimum": 0},
+            "process_group_id": {"type": "integer", "minimum": 1},
+            "session_id": {"type": "integer", "minimum": 1},
+            "start_tvsec": {"type": "integer", "minimum": 0},
+            "start_tvusec": {"type": "integer", "minimum": 0, "maximum": 999999},
+            "zombie": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "fingerprint": {"type": ["string", "null"]},
+    "socket_device": {"type": ["integer", "null"], "minimum": 1},
+    "socket_inode": {"type": ["integer", "null"], "minimum": 1}
+  }
+}

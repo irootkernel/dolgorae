@@ -5,8 +5,8 @@ use dolgorae::cli::{
     Cli, Command, ControllerCommand, ControllerCredentialCommand, EngagementCommand,
     OperatorCommand, OperatorCredentialCommand, ProfileCommand, ProfileDiagnosticsCommand,
     ProfileMembershipCommand, ProfileServerCommand, ProfileStateCommand, ReviewTargetCommand,
-    RunCommand, RunControllerCommand, RuntimeCommand, SpecialistCommand, SpecialistPolicyCommand,
-    WorkspaceCommand, WorkspaceWriterCommand, option_path,
+    RunCommand, RunControllerCommand, RuntimeCommand, RuntimeOrphanCommand, SpecialistCommand,
+    SpecialistPolicyCommand, WorkspaceCommand, WorkspaceWriterCommand, option_path,
 };
 use dolgorae::machine::{FailureEnvelope, MachineError, SuccessEnvelope};
 use dolgorae::semantic::{
@@ -249,6 +249,31 @@ fn execute(cli: Cli) -> ExitCode {
         {
             return render_failure(cli.human, command_name, error);
         }
+    }
+    if let Command::Runtime {
+        command: RuntimeCommand::Orphan { command },
+    } = &cli.command
+    {
+        let (cleanup, arguments) = match command {
+            RuntimeOrphanCommand::Inspect(args) => (false, &args.args),
+            RuntimeOrphanCommand::Cleanup(args) => (true, &args.args),
+        };
+        return match dolgorae::process_inventory::execute(cleanup, arguments) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed orphan result")
+                    );
+                } else {
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    envelope.schema_version = 3;
+                    render_json(&envelope);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
     }
     if !matches!(
         &cli.command,
@@ -635,6 +660,9 @@ fn execute(cli: Cli) -> ExitCode {
         Command::Runtime {
             command: RuntimeCommand::Capabilities,
         } => SemanticCommand::RuntimeCapabilities,
+        Command::Runtime {
+            command: RuntimeCommand::Orphan { .. },
+        } => unreachable!("orphan handled before semantic dispatch"),
         Command::Init(args) => SemanticCommand::Initialize {
             path: args.path.clone(),
             mode: if args.non_git {
@@ -805,7 +833,11 @@ fn render_failure(human: bool, command: &str, error: MachineError) -> ExitCode {
     if human {
         eprintln!("{}: {}", error.code, error.message);
     } else {
-        render_json(&FailureEnvelope::new(command, error));
+        let mut envelope = FailureEnvelope::new(command, error);
+        if command.starts_with("runtime.orphan.") {
+            envelope.schema_version = 3;
+        }
+        render_json(&envelope);
     }
     ExitCode::from(status)
 }

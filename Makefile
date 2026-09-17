@@ -99,13 +99,15 @@ test-e2e:
 	}
 	@set -eu; \
 		test_root="$$(mktemp -d "$${TMPDIR:-/tmp}/dolgorae-e2e.XXXXXX")"; \
-		trap 'rm -rf -- "$$test_root"' EXIT HUP INT TERM; \
+		trap 'test_status=$$?; if [ -e "$$test_root.retired" ] || ! mv "$$test_root" "$$test_root.retired"; then echo "[test-e2e] could not retire $$test_root; preserving test data" >&2; test_status=1; elif $(PYTHON_BIN) tests/e2e/orphan_cleanup.py --binary "$(DOLGORAE_BIN)" --owner-root-under "$$test_root"; then rm -rf -- "$$test_root.retired" || test_status=1; else echo "[test-e2e] orphan cleanup failed; preserving $$test_root.retired" >&2; test_status=1; fi; exit "$$test_status"' EXIT; \
+		trap 'exit 1' HUP INT TERM; \
 		mkdir -p "$$test_root/home" "$$test_root/tmp" "$$test_root/config" "$$test_root/cache"; \
 		chmod 700 "$$test_root" "$$test_root/home" "$$test_root/tmp" "$$test_root/config" "$$test_root/cache"; \
 		export HOME="$$test_root/home"; \
 		export TMPDIR="$$test_root/tmp"; \
 		export XDG_CONFIG_HOME="$$test_root/config"; \
 		export XDG_CACHE_HOME="$$test_root/cache"; \
+		$(PYTHON_BIN) tests/e2e/test_orphan_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_socket_ownership.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_gateway_restart.py --binary "$(DOLGORAE_BIN)"; \

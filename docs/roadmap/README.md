@@ -17,6 +17,8 @@ production infrastructure but do not add a user-facing product milestone.
 supervised gateway and transport-independent Brokered Hierarchy core without
 claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
 `TASK-045` are `COMPLETE`; the Epic precedes `EPIC-008` in delivery order.
+`EPIC-015` and `TASK-046` are `COMPLETE` as the detached-process corrective
+boundary immediately before `EPIC-008`.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -1402,6 +1404,32 @@ and context; criterion-complete reports survive artifact collection and
 recovery; legacy contracts remain compatible; default gates and independent
 review pass; and no Aquarium, MCP, public gRPC, release, installation, or
 publication state is changed by this Epic.
+
+## EPIC-015: Detached Process Ownership Recovery
+
+Status: `COMPLETE`
+
+This corrective Epic precedes live Primary control-plane work. It addresses
+processes stranded when disposable development or E2E owner homes are removed,
+without changing ordinary shared Profile Server lifetime or the broader
+managed-session cleanup planned in TASK-031.
+
+### TASK-046: Register and Reap Verified Dolgorae Orphans
+
+Status: `COMPLETE`
+
+Add private boot-scoped registrations for shared servers, log drainers,
+dedicated servers, and workers; retire them on ordinary verified shutdown.
+Expose a versioned inspect/digest/cleanup CLI with exact identity and group
+checks, explicit selectors, and fail-closed ambiguity. Make E2E teardown
+remove temporary homes and then verify and clean only its own registered
+orphans. Do not infer orphan status from PPID 1, signal pre-registration legacy
+processes, or stop healthy shared servers on client exit.
+
+Verification: focused CLI/schema/identity tests, deletion and process-group
+regressions, repeated E2E execution with no surviving new test processes, the
+complete default repository gate, and independent adversarial review before
+the Task and Epic become `COMPLETE`.
 
 ## EPIC-008: Live Dolgorae Control Plane and Brokered Hierarchy
 

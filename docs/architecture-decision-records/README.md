@@ -2329,3 +2329,46 @@ outcome-unknown, closure, and settlement rules continue to govern recovery.
   coverage and evidence gaps would not be machine-checkable.
 - Break or migrate v1/v2 contracts: rejected because additive v3 contracts can
   provide the new semantics without reinterpreting durable history.
+
+## ADR-037: Index Detached Process Ownership Outside Disposable Homes
+
+Status: Accepted
+
+### Context
+
+Detached Dolgorae processes are intentionally reparented to PID 1 while their
+Profile or Run owner remains valid. E2E teardown sometimes ignored a refused
+Profile Server stop and then deleted the temporary home. That removed the
+normal process authority while the server and log drainer continued to consume
+resources. PID 1 alone cannot distinguish this case from a healthy server.
+
+### Decision
+
+Register detached servers and log drainers before spawn, and workers before
+they publish their control socket, in a private, per-user, boot-scoped inventory
+outside the owner home. Preserve immutable
+owner-root identity and exact process evidence. Ordinary shutdown retires the
+record. The separate `runtime orphan` inspect/confirm/cleanup path may reap
+only an inventory-backed process whose owner root is missing or replaced and
+whose boot, UID, start time, session, group, registered executable path or
+device/inode when a renamed image is available, and launch fingerprint
+still match. Ambiguous registrations fail closed. The CLI uses machine v3
+envelopes without changing existing v1/v2 command contracts. E2E teardown
+removes its isolated home and then uses this path to verify process absence.
+
+### Consequences
+
+The shared Profile Server still survives ordinary client exit. A test or
+development home deletion no longer silently strands registered processes.
+Processes launched before this inventory was added remain outside CLI cleanup
+authority and require a separately verified manual recovery. Abrupt termination
+between spawn and identity publication can leave provisional, unverifiable
+evidence; it cannot authorize an unsafe signal.
+
+### Rejected alternatives
+
+- Kill every process with PPID 1: that would terminate healthy detached servers.
+- Scan names or command substrings and kill matches: neither proves process
+  ownership or protects against PID reuse and unrelated same-user commands.
+- Tie shared-server lifetime to CLI process exit: that breaks intentional
+  reuse across independent invocations.

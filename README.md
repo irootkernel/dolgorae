@@ -35,6 +35,18 @@ cargo build --locked
 ./target/debug/dolgorae --human --help
 ```
 
+For a removed development or test home, inspect registered detached processes
+before cleanup. Use the exact digest from the inspection with the same selector:
+
+```sh
+dolgorae runtime orphan inspect --owner-root-under /absolute/removed-test-root
+dolgorae runtime orphan cleanup --owner-root-under /absolute/removed-test-root --confirm-selection-sha256 INSPECTION_DIGEST
+```
+
+This does not treat PPID 1 as proof of orphaning and cannot reap processes
+launched before the inventory was introduced. It leaves unverifiable processes
+untouched. Ordinary shared Profile Servers remain alive across CLI invocations.
+
 After initializing the Dolgorae home, a foreground local gateway can serve the
 [public v1 API](docs/protocol/dolgorae/public/v1/dolgorae.proto):
 

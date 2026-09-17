@@ -1,4 +1,5 @@
 use crate::providers::{MonotonicClock, ProcessIdentity, ProviderError};
+use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
 use std::mem::MaybeUninit;
@@ -82,7 +83,7 @@ pub struct LiveProcessIdentity {
     pub fingerprint: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BsdProcessIdentity {
     pub pid: u32,
     pub parent_pid: u32,

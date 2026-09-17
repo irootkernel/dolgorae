@@ -9,6 +9,7 @@ development commits.
 
 ### Added
 
+- Add verified orphan inspection and cleanup for detached Dolgorae processes, including disposable E2E owners.
 - Add task-aware Specialist Review v3 for one-shot and reusable assignments,
   with exact accepted briefs, inline contexts, ordered completion criteria, and criterion-complete structured results.
 - Foreground local gRPC gateway with same-user Unix socket ownership, bounded

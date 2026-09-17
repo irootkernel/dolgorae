@@ -1968,6 +1968,38 @@ worker.
 
 ## Process Cleanup
 
+Launchers register detached Profile Servers, their log drainers, and Dedicated
+Lane Servers before spawn; a worker registers itself before publishing its
+control socket. The private same-user boot-scoped inventory lives outside the
+disposable Dolgorae home. A registration becomes visible only after its full
+record has been synced and published. A successful launch adds BSD start-time,
+UID, session and process-group identity, executable path and device/inode,
+launch-command fingerprint, and socket inode when present. Ordinary verified
+shutdown retires its registration after group absence is proven. A recorded
+leader still awaiting reaping may be retired only when its exact start identity
+matches and it is a zombie with no other group members. A stale registration
+with the same PID but a different start time does not block retirement of the
+current generation. The inventory is a recovery index, never a replacement for
+Profile, Run, membership, or Controller authority.
+
+`runtime orphan inspect` compares each registration with its recorded owner-root
+device/inode and live process identity. A reparented process with an intact
+owner remains owned. A deleted or replaced owner alone does not authorize a
+signal. `runtime orphan cleanup` requires an exact inspection digest and
+revalidates group membership before TERM, before any forced KILL, and before
+removing a same-inode socket. If TERM ends the leader but leaves descendants,
+their UID, session, and process group must still match the registration before
+KILL. A provisional registration without a reliable PID, an identity mismatch,
+or a foreign group member is unverifiable and fails closed. An unreadable boot
+UUID is also unverifiable; only a verified different UUID makes the process
+absent. After spawn succeeds, the launcher retains the registration until it
+verifies that the entire group is absent, including when startup fails. Test
+harnesses move isolated homes away from their recorded owner paths, then clean
+up processes
+before deleting the moved homes. Failed cleanup preserves those homes for
+diagnosis. Descendants that escaped the registered session or process group are
+outside this command's absence claim.
+
 The detached worker owns only its worker process and private client connection.
 Pause, close and recovery may request `turn/interrupt`, close that connection,
 and terminate an identity-verified worker, but they cannot signal singleton

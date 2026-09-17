@@ -3166,7 +3166,7 @@ fn start_snapshot_inner(
         }
         StartPrepared::Reserved(reservation) => reservation,
     };
-    let applied = match apply_start(&paths, snapshot, &reservation) {
+    let mut applied = match apply_start(&paths, snapshot, &reservation) {
         Ok(applied) => applied,
         Err(error) => {
             release_reservation(&paths, snapshot, &reservation);
@@ -3176,11 +3176,7 @@ fn start_snapshot_inner(
     match commit_start(&paths, context, snapshot, &reservation, &applied) {
         Ok(state) => Ok(state),
         Err(error) => {
-            cleanup_failed_start(
-                &reservation.socket,
-                &applied.process_identity,
-                &applied.drainer_identity,
-            );
+            cleanup_failed_start(&reservation.socket, &mut applied);
             release_reservation(&paths, snapshot, &reservation);
             Err(error)
         }
@@ -3244,6 +3240,8 @@ struct StartApplied {
     socket_device: u64,
     socket_inode: u64,
     probe: ProbeResult,
+    server_registration: crate::process_inventory::Registration,
+    drainer_registration: crate::process_inventory::Registration,
 }
 
 /// PREPARE: under `home.lock` and `server.lock`, either attach to the live
@@ -3564,7 +3562,29 @@ fn apply_start(
 ) -> Result<StartApplied, MachineError> {
     let (stdout_read, stdout_write) = UnixStream::pair().map_err(io_error)?;
     let (stderr_read, stderr_write) = UnixStream::pair().map_err(io_error)?;
-    let mut drainer_command = Command::new(std::env::current_exe().map_err(io_error)?);
+    let drainer_executable = std::env::current_exe().map_err(io_error)?;
+    let mut drainer_registration = crate::process_inventory::Registration::prepare(
+        "profile_log_drainer",
+        &paths.root,
+        &drainer_executable,
+        format!("--root {}", paths.root.display()),
+        None,
+        Some(&snapshot.profile_name),
+        None,
+    )
+    .map_err(|error| transport(error.message))?;
+    let socket_argument = format!("unix://{}", path_utf8(&reservation.socket)?);
+    let mut server_registration = crate::process_inventory::Registration::prepare(
+        "profile_server",
+        &paths.root,
+        Path::new(&snapshot.executable_identity.resolved_path),
+        socket_argument.clone(),
+        Some(&reservation.socket),
+        Some(&snapshot.profile_name),
+        None,
+    )
+    .map_err(|error| transport(error.message))?;
+    let mut drainer_command = Command::new(&drainer_executable);
     drainer_command
         .arg(PROFILE_LOG_DRAINER_COMMAND)
         .arg("--root")
@@ -3581,21 +3601,29 @@ fn apply_start(
         )
         .map_err(transport)?;
     let drainer_pid = drainer.id();
+    drainer_registration.mark_spawned(drainer_pid);
     drop(stdout_read);
     drop(stderr_read);
     let drainer_identity = match wait_for_drainer_identity(drainer_pid) {
         Ok(identity) => identity,
         Err(error) => {
+            let _ = drainer_registration.abort_spawn();
             let _ = drainer.kill();
             let _ = drainer.wait();
             return Err(transport(error));
         }
     };
+    if let Err(error) = drainer_registration.activate(drainer_pid) {
+        let _ = drainer_registration.abort_spawn();
+        let _ = drainer.kill();
+        let _ = drainer.wait();
+        return Err(transport(error.message));
+    }
     std::mem::forget(drainer);
     let mut command = Command::new(&snapshot.normalized_argv[0]);
     command.args(&snapshot.normalized_argv[1..]);
     command.args(["app-server", "--listen"]);
-    command.arg(format!("unix://{}", path_utf8(&reservation.socket)?));
+    command.arg(socket_argument);
     command.current_dir(&snapshot.derived_launch_cwd);
     apply_environment(&mut command, &snapshot.sanitized_environment);
     command
@@ -3605,24 +3633,27 @@ fn apply_start(
     let mut child = match DarwinSystem.spawn_detached(&mut command) {
         Ok(child) => child,
         Err(error) => {
-            cleanup_verified_process(&drainer_identity);
+            let _ = drainer_registration.abort_spawn();
             return Err(transport(error));
         }
     };
     let pid = child.id();
+    server_registration.mark_spawned(pid);
     let mut process_identity = match wait_for_app_identity(pid) {
         Ok(identity) => identity,
         Err(error) => {
+            let _ = server_registration.abort_spawn();
             let _ = child.kill();
             let _ = child.wait();
-            cleanup_verified_process(&drainer_identity);
+            let _ = drainer_registration.abort_spawn();
             return Err(transport(error));
         }
     };
     std::mem::forget(child);
-    // `verified` always carries the newest proven identity, so the cleanup
-    // below signals the process this start actually last observed rather than
-    // a sample the app-server may have moved on from.
+    let mut server_registration = Some(server_registration);
+    let mut drainer_registration = Some(drainer_registration);
+    // The registration retains the exact BSD identity used to clean up the
+    // whole group if bind, probe, or commit fails.
     let applied = (|verified: &mut crate::darwin::LiveProcessIdentity| -> Result<StartApplied, MachineError> {
         // Record the PID before the bind wait so a crash inside APPLY leaves
         // the account home naming the process an operator has to reap, rather
@@ -3639,6 +3670,11 @@ fn apply_start(
         if !metadata.file_type().is_socket() {
             return Err(transport("app-server did not bind a Unix socket"));
         }
+        server_registration
+            .as_mut()
+            .expect("server registration is available")
+            .activate(pid)
+            .map_err(|error| transport(error.message))?;
         fs::set_permissions(&reservation.socket, fs::Permissions::from_mode(0o600))
             .map_err(io_error)?;
         let probe = probe_server(
@@ -3654,10 +3690,30 @@ fn apply_start(
             socket_device: metadata.dev(),
             socket_inode: metadata.ino(),
             probe,
+            server_registration: server_registration
+                .take()
+                .expect("server registration is available"),
+            drainer_registration: drainer_registration
+                .take()
+                .expect("drainer registration is available"),
         })
     })(&mut process_identity);
     applied.inspect_err(|_| {
-        cleanup_failed_start(&reservation.socket, &process_identity, &drainer_identity);
+        if server_registration
+            .as_mut()
+            .is_some_and(|registration| registration.abort_spawn().is_ok())
+        {
+            let _ = DarwinSystem.reap_child_nonblocking(pid);
+            if let Ok(metadata) = fs::symlink_metadata(&reservation.socket)
+                && metadata.file_type().is_socket()
+                && metadata.uid() == DarwinSystem.current_uid()
+            {
+                let _ = fs::remove_file(&reservation.socket);
+            }
+        }
+        if let Some(registration) = drainer_registration.as_mut() {
+            let _ = registration.abort_spawn();
+        }
     })
 }
 
@@ -4704,6 +4760,10 @@ fn commit_stop(
             "the Profile Server process group or log drainer is still present",
         ));
     }
+    crate::process_inventory::retire_pid(reservation.state.pid)
+        .map_err(|error| transport(error.message))?;
+    crate::process_inventory::retire_pid(reservation.state.drainer_pid)
+        .map_err(|error| transport(error.message))?;
     let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
         paths
             .root
@@ -4901,41 +4961,18 @@ fn verify_live_process_identity(state: &ServerState) -> Result<(), MachineError>
     Ok(())
 }
 
-fn cleanup_failed_start(
-    socket: &Path,
-    process: &crate::darwin::LiveProcessIdentity,
-    drainer: &crate::darwin::LiveProcessIdentity,
-) {
-    cleanup_verified_process(process);
-    let _ = DarwinSystem.reap_child_nonblocking(process.process_group_id);
-    cleanup_verified_process(drainer);
-    if let Ok(metadata) = fs::symlink_metadata(socket)
+fn cleanup_failed_start(socket: &Path, applied: &mut StartApplied) {
+    let server_stopped = applied.server_registration.abort_spawn().is_ok();
+    let _ = DarwinSystem.reap_child_nonblocking(applied.pid);
+    let _ = applied.drainer_registration.abort_spawn();
+    if server_stopped
+        && let Ok(metadata) = fs::symlink_metadata(socket)
         && metadata.file_type().is_socket()
         && metadata.uid() == DarwinSystem.current_uid()
+        && metadata.dev() == applied.socket_device
+        && metadata.ino() == applied.socket_inode
     {
         let _ = fs::remove_file(socket);
-    }
-}
-
-fn cleanup_verified_process(expected: &crate::darwin::LiveProcessIdentity) {
-    let pid = expected.process_group_id;
-    let verified = DarwinSystem
-        .live_process_identity(pid)
-        .is_ok_and(|live| live == *expected);
-    if !verified {
-        return;
-    }
-    let _ = DarwinSystem.signal_process_group(pid, libc::SIGTERM);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while process_exists(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    if process_exists(pid)
-        && DarwinSystem
-            .live_process_identity(pid)
-            .is_ok_and(|live| live == *expected)
-    {
-        let _ = DarwinSystem.signal_process_group(pid, libc::SIGKILL);
     }
 }
 

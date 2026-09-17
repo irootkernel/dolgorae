@@ -3394,7 +3394,7 @@ impl WorkerSession {
         let mut dedicated_server = session
             .dedicated_server
             .as_ref()
-            .map(start_dedicated_server)
+            .map(|config| start_dedicated_server(config, &facts))
             .transpose()?;
         let wire = match DuplexConnection::connect(
             &session.app_server_socket,
@@ -4033,6 +4033,7 @@ impl WorkerSession {
 #[cfg(target_os = "macos")]
 fn start_dedicated_server(
     config: &DedicatedServerBootstrap,
+    facts: &RunFacts,
 ) -> Result<OwnedDedicatedServer, WorkerProtocolError> {
     config.validate()?;
     let executable = Path::new(&config.argv[0]);
@@ -4060,6 +4061,18 @@ fn start_dedicated_server(
         .open(&config.log_path)
         .map_err(|_| WorkerProtocolError::Io)?;
     let stderr = log.try_clone().map_err(|_| WorkerProtocolError::Io)?;
+    let owner_root = crate::paths::DolgoraeHome::system()
+        .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+    let mut registration = crate::process_inventory::Registration::prepare(
+        "dedicated_server",
+        owner_root.root(),
+        executable,
+        format!("unix://{}", config.socket_path.display()),
+        Some(&config.socket_path),
+        Some(&facts.profile),
+        Some(facts.run_id),
+    )
+    .map_err(|_| WorkerProtocolError::Io)?;
     let mut command = Command::new(executable);
     command
         .args(&config.argv[1..])
@@ -4074,6 +4087,7 @@ fn start_dedicated_server(
     let mut child = DarwinSystem
         .spawn_detached(&mut command)
         .map_err(|_| WorkerProtocolError::WorkerStartFailed)?;
+    registration.mark_spawned(child.id());
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(10))
         .unwrap_or_else(Instant::now);
@@ -4082,20 +4096,18 @@ fn start_dedicated_server(
             if !socket_metadata.file_type().is_socket()
                 || socket_metadata.uid() != DarwinSystem.current_uid()
             {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_unpublished_child(&mut child, &mut registration);
                 return Err(WorkerProtocolError::SocketIdentityMismatch);
             }
             if fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)).is_err()
             {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_unpublished_child(&mut child, &mut registration);
                 return Err(WorkerProtocolError::Io);
             }
             let process = match DarwinSystem.bsd_process_identity(child.id()) {
                 Ok(process) => process,
                 Err(_) => {
-                    terminate_unpublished_child(&mut child);
+                    terminate_unpublished_child(&mut child, &mut registration);
                     return Err(WorkerProtocolError::InvalidIdentity);
                 }
             };
@@ -4104,17 +4116,20 @@ fn start_dedicated_server(
                 || process.session_id != child.id()
                 || process.uid != DarwinSystem.current_uid()
             {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_unpublished_child(&mut child, &mut registration);
                 return Err(WorkerProtocolError::InvalidIdentity);
             }
             let executable_path = match DarwinSystem.realpath(executable) {
                 Ok(path) => path,
                 Err(_) => {
-                    terminate_unpublished_child(&mut child);
+                    terminate_unpublished_child(&mut child, &mut registration);
                     return Err(WorkerProtocolError::InvalidIdentity);
                 }
             };
+            if registration.activate(child.id()).is_err() {
+                terminate_unpublished_child(&mut child, &mut registration);
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
             return Ok(OwnedDedicatedServer {
                 child,
                 identity: DedicatedServerIdentity {
@@ -4137,13 +4152,16 @@ fn start_dedicated_server(
             });
         }
         match child.try_wait() {
-            Ok(Some(_)) => return Err(WorkerProtocolError::WorkerStartFailed),
+            Ok(Some(_)) => {
+                terminate_unpublished_child(&mut child, &mut registration);
+                return Err(WorkerProtocolError::WorkerStartFailed);
+            }
             Err(_) => {
-                terminate_unpublished_child(&mut child);
+                terminate_unpublished_child(&mut child, &mut registration);
                 return Err(WorkerProtocolError::Io);
             }
             Ok(None) if Instant::now() >= deadline => {
-                terminate_unpublished_child(&mut child);
+                terminate_unpublished_child(&mut child, &mut registration);
                 return Err(WorkerProtocolError::WorkerStartFailed);
             }
             Ok(None) => {}
@@ -4155,11 +4173,16 @@ fn start_dedicated_server(
 #[cfg(not(target_os = "macos"))]
 fn start_dedicated_server(
     _config: &DedicatedServerBootstrap,
+    _facts: &RunFacts,
 ) -> Result<OwnedDedicatedServer, WorkerProtocolError> {
     Err(WorkerProtocolError::WorkerStartFailed)
 }
 
-fn terminate_unpublished_child(child: &mut Child) {
+fn terminate_unpublished_child(
+    child: &mut Child,
+    registration: &mut crate::process_inventory::Registration,
+) {
+    let _ = registration.abort_spawn();
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -4238,6 +4261,8 @@ fn stop_dedicated_server(
     {
         fs::remove_file(&server.socket_path).map_err(|_| WorkerProtocolError::Io)?;
     }
+    crate::process_inventory::retire_pid(server.identity.pid)
+        .map_err(|_| WorkerProtocolError::Io)?;
     Ok(BackgroundAbsenceEvidence {
         census_revision: server.identity.start_tvsec,
         consecutive_empty_samples: empty_samples,
@@ -5871,7 +5896,29 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
         executable_path_sha256: bootstrap.executable_path_sha256.clone(),
     };
     let owner_guard = startup_lock.claim(&owner, Duration::ZERO)?;
+    let owner_root = bootstrap
+        .state_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    let mut registration = crate::process_inventory::Registration::prepare(
+        "worker",
+        owner_root,
+        &identity.executable_path,
+        format!("--bootstrap {}", bootstrap_path.display()),
+        Some(&worker_socket_path(
+            uid,
+            &bootstrap.workspace_id,
+            bootstrap.run_id,
+        )?),
+        Some(&bootstrap.profile),
+        Some(bootstrap.run_id),
+    )
+    .map_err(|_| WorkerProtocolError::Io)?;
     let lease = bind_worker_socket(&identity, None)?;
+    registration
+        .activate(identity.pid)
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
     let mut record = WorkerRuntimeRecord {
         schema_version: 1,
         identity: identity.clone(),
@@ -6388,6 +6435,11 @@ pub fn remove_verified_absent_runtime(
     let record = read_runtime_record(runtime_record, uid)?;
     stop_orphaned_dedicated_server(&record)?;
     prove_worker_generation_absent(&record)?;
+    crate::process_inventory::retire_pid(record.identity.pid)
+        .map_err(|_| WorkerProtocolError::Io)?;
+    if let Some(dedicated) = &record.dedicated_server_identity {
+        crate::process_inventory::retire_pid(dedicated.pid).map_err(|_| WorkerProtocolError::Io)?;
+    }
     match fs::symlink_metadata(&record.socket_path) {
         Ok(metadata) => {
             if !metadata.file_type().is_socket()

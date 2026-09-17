@@ -5,16 +5,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import pathlib
+import shutil
 import signal
 import sqlite3
 import subprocess
 import tempfile
 import time
+import uuid
 
 import native_codex
+from orphan_cleanup import cleanup_removed_root
 from schema_support import assert_valid, validator
 
 
@@ -230,9 +234,23 @@ def task_request(engagement_id: str, run_id: str, sequence: int) -> dict[str, ob
     }
 
 
+@contextlib.contextmanager
+def cleaned_temporary_directory(binary: pathlib.Path):
+    temporary = pathlib.Path(tempfile.mkdtemp(prefix="dolgorae-task022-")).resolve()
+    try:
+        yield str(temporary)
+    finally:
+        retired = temporary.with_name(f"{temporary.name}.retired-{uuid.uuid4().hex}")
+        if temporary.exists():
+            temporary.rename(retired)
+        cleanup_removed_root(binary, temporary)
+        if retired.exists():
+            shutil.rmtree(retired)
+
+
 def validate(binary: pathlib.Path) -> None:
     schema_source = native_codex.installed_codex()
-    with tempfile.TemporaryDirectory(prefix="dolgorae-task022-") as temporary:
+    with cleaned_temporary_directory(binary) as temporary:
         root = pathlib.Path(temporary).resolve()
         home = root / "home"
         workspace = root / "workspace"

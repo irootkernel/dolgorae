@@ -89,7 +89,14 @@ impl Command {
             | Self::SpecialistReviewMcp(_)
             | Self::Version(_)
             | Self::Init(_)
-            | Self::Runtime { .. } => None,
+            | Self::Runtime {
+                command: RuntimeCommand::Capabilities,
+            } => None,
+            Self::Runtime {
+                command: RuntimeCommand::Orphan { command },
+            } => Some(match command {
+                RuntimeOrphanCommand::Inspect(args) | RuntimeOrphanCommand::Cleanup(args) => args,
+            }),
             Self::Serve(args) => Some(args),
             Self::Engagement {
                 command: EngagementCommand::Call(args),
@@ -153,10 +160,25 @@ pub struct SpecialistReviewMcpArgs {
 #[derive(Debug, Subcommand)]
 pub enum RuntimeCommand {
     Capabilities,
+    Orphan {
+        #[command(subcommand)]
+        command: RuntimeOrphanCommand,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum RuntimeOrphanCommand {
+    Inspect(LeafArgs),
+    Cleanup(LeafArgs),
 }
 impl RuntimeCommand {
     const fn machine_name(&self) -> &'static str {
-        "runtime.capabilities"
+        match self {
+            Self::Capabilities => "runtime.capabilities",
+            Self::Orphan { command } => match command {
+                RuntimeOrphanCommand::Inspect(_) => "runtime.orphan.inspect",
+                RuntimeOrphanCommand::Cleanup(_) => "runtime.orphan.cleanup",
+            },
+        }
     }
 }
 
@@ -705,6 +727,35 @@ fn leaf_spec(command: &str) -> LeafSpec {
     const W: &[&str] = &["--workspace"];
     const C: &[&str] = &["--workspace", "--controller-file", "--controller-fd"];
     match command {
+        "runtime.orphan.inspect" => spec(
+            &[
+                "--owner-root",
+                "--owner-root-under",
+                "--kind",
+                "--profile",
+                "--run-id",
+                "--pid",
+            ],
+            &["--all"],
+            &[],
+            0,
+            0,
+        ),
+        "runtime.orphan.cleanup" => spec(
+            &[
+                "--owner-root",
+                "--owner-root-under",
+                "--kind",
+                "--profile",
+                "--run-id",
+                "--pid",
+                "--confirm-selection-sha256",
+            ],
+            &["--all"],
+            &["--confirm-selection-sha256"],
+            0,
+            0,
+        ),
         "serve" => spec(&["--socket", "--ready-fd"], &[], &["--socket"], 0, 0),
         "engagement.call" => spec(
             &[
@@ -1229,7 +1280,18 @@ fn validate_leaf_tokens(command: &str, args: &[OsString], spec: &LeafSpec) -> Re
             return Err(format!("missing required option {required}"));
         }
     }
-    const REPEATABLE: &[&str] = &["--env", "--image", "--require-capability", "--artifact-ref"];
+    const REPEATABLE: &[&str] = &[
+        "--env",
+        "--image",
+        "--require-capability",
+        "--artifact-ref",
+        "--owner-root",
+        "--owner-root-under",
+        "--kind",
+        "--profile",
+        "--run-id",
+        "--pid",
+    ];
     for (flag, supplied) in &values {
         if supplied.len() > 1 && !REPEATABLE.contains(&flag.as_str()) {
             return Err(format!("option {flag} cannot be repeated"));
