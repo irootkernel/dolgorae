@@ -89,7 +89,10 @@
         "TASK-007",
         "TASK-020",
         "TASK-008",
-        "TASK-013"
+        "TASK-013",
+        "TASK-047",
+        "TASK-048",
+        "TASK-052"
       ],
       "catches": [
         "worker topology",
@@ -195,7 +198,11 @@
         "TASK-042",
         "TASK-043",
         "TASK-044",
-        "TASK-046"
+        "TASK-046",
+        "TASK-047",
+        "TASK-049",
+        "TASK-050",
+        "TASK-051"
       ],
       "catches": [
         "machine and protobuf envelopes",
@@ -242,7 +249,9 @@
         "TASK-020",
         "TASK-023",
         "TASK-024",
-        "TASK-029"
+        "TASK-029",
+        "TASK-049",
+        "TASK-052"
       ],
       "catches": [
         "sandbox mapping",
@@ -274,7 +283,13 @@
         "TASK-024",
         "TASK-025",
         "TASK-026",
-        "TASK-027"
+        "TASK-027",
+        "TASK-047",
+        "TASK-048",
+        "TASK-049",
+        "TASK-050",
+        "TASK-051",
+        "TASK-052"
       ],
       "catches": [
         "lifecycle",
@@ -295,14 +310,17 @@
     },
     "SPEC-009": {
       "tasks": [
-        "TASK-018"
+        "TASK-018",
+        "TASK-048",
+        "TASK-050"
       ],
       "catches": [
         "normalized interactions",
         "file snapshot and artifact correlation",
         "secret receipt non-binding",
         "idempotent resolution",
-        "generation staleness"
+        "generation staleness",
+        "broker approval responses remain distinct from Codex pending request responses"
       ]
     },
     "SPEC-010": {
@@ -326,7 +344,11 @@
         "TASK-027",
         "TASK-028",
         "TASK-030",
-        "TASK-031"
+        "TASK-031",
+        "TASK-047",
+        "TASK-049",
+        "TASK-051",
+        "TASK-052"
       ],
       "catches": [
         "JSON ingest",
@@ -372,7 +394,10 @@
         "TASK-039",
         "TASK-040",
         "TASK-041",
-        "TASK-044"
+        "TASK-044",
+        "TASK-047",
+        "TASK-049",
+        "TASK-051"
       ],
       "catches": [
         "agent policy",
@@ -422,10 +447,22 @@
         "TASK-042",
         "TASK-043",
         "TASK-044",
-        "TASK-045"
+        "TASK-045",
+        "TASK-047",
+        "TASK-048",
+        "TASK-049",
+        "TASK-050",
+        "TASK-051",
+        "TASK-052"
       ],
       "catches": [
         "orchestration boundary",
+        "BH1-P provider acceptance is independent of deferred real-Gul BH1",
+        "pinned MCP or native transport selection without implicit Codex upgrade",
+        "ready-only live admission with exact accepted-task replay before fresh busy rejection",
+        "unsupported queue collaboration and activation policies rejected before live Session allocation",
+        "accepted task Turn completion and delivery boundaries remain distinct",
+        "actual Primary consumption of authorized immutable Specialist results",
         "Independent Specialist Run composition",
         "capability authorization",
         "Codex compatibility and observations",
@@ -500,7 +537,11 @@
         "TASK-032",
         "TASK-033",
         "TASK-034",
-        "TASK-044"
+        "TASK-044",
+        "TASK-047",
+        "TASK-048",
+        "TASK-051",
+        "TASK-052"
       ],
       "catches": [
         "coequal public adapters",
@@ -547,7 +588,11 @@
         "TASK-034",
         "TASK-040",
         "TASK-042",
-        "TASK-044"
+        "TASK-044",
+        "TASK-047",
+        "TASK-048",
+        "TASK-049",
+        "TASK-052"
       ],
       "catches": [
         "control-mode compatibility",
@@ -589,7 +634,13 @@
         "TASK-029",
         "TASK-032",
         "TASK-033",
-        "TASK-034"
+        "TASK-034",
+        "TASK-047",
+        "TASK-048",
+        "TASK-049",
+        "TASK-050",
+        "TASK-051",
+        "TASK-052"
       ],
       "catches": [
         "RPC gateway lifecycle and socket ownership",
@@ -635,7 +686,10 @@
         "BH1 24-method public-v1 subset including both artifact RPCs before complete PA1 surface",
         "artifact-backed Gul result metadata bounded chunks exact length digest authorization and redaction",
         "comprehensive gRPC validation coverage registry and exact executed-section equality",
-        "Controller credential schema digest synchronized across checked derivatives"
+        "Controller credential schema digest synchronized across checked derivatives",
+        "actual public-provider client acceptance plus separately authorized pinned live Codex",
+        "provider BH1-P eligibility does not certify actual-Gul BH1 integration",
+        "historical BH1 method inventory keys remain unchanged across the provider-consumer split"
       ]
     }
   }

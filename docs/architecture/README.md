@@ -75,11 +75,13 @@ The v1 public boundary contains the Machine CLI and supervised local gRPC
 gateway. Both call one semantic service. The checked public Protobuf source and
 descriptor remain unchanged by this internal composition revision. The gRPC
 adapter is not durable authority. For an active Dolgorae-Orchestrated Session,
-the same Gul-supervised foreground `dolgorae serve` process hosts the
-reconstructable ControlPlaneRuntime, including the Orchestration Broker,
-Collaboration Plane, Mailbox Scheduler, Activation Manager, and sole SQLite
-mutation owner. Worker sockets and App Server transports remain private. No
-installed daemon is introduced.
+the same trusted-client-supervised foreground `dolgorae serve` process hosts the
+reconstructable ControlPlaneRuntime and the sole SQLite mutation owner.
+EPIC-008 includes the Orchestration Broker and private Primary tool bridge.
+EPIC-009 adds the Collaboration Plane, Mailbox Scheduler, and Activation
+Manager; EPIC-008 does not require empty hosts or placeholder services for
+those future components. Worker sockets and App Server transports remain
+private. No installed daemon is introduced.
 
 ## Component Model
 
@@ -479,8 +481,9 @@ checked model-facing payload contract is
 [`dolgorae-orchestration-tool-v1.schema.json`](../protocol/dolgorae-orchestration-tool-v1.schema.json).
 It implements Specialist request and operation wait, safe listing, bounded task
 assignment, task wait and result collection, and graceful release. The live
-run-bound MCP adapter is replaceable and is selected only after the transport
-probe; unit tests use an internal fake adapter against the same service.
+run-bound adapter is selected only after TASK-025 proves one supported MCP or
+native tool path. Neither candidate is assumed available on the pinned Codex
+version. Unit tests use an internal fake adapter against the same service.
 
 The bridge binds session, Primary Run, source Turn, tool-call ID, inherited root
 priority, Controller authority, and idempotency outside model arguments. The
@@ -493,8 +496,11 @@ outside that policy.
 
 For `user_approval_required`, the service records one approval-waiting spawn
 operation and opens one normalized Primary Run `user_input` interaction before
-child provisioning. Gul resolves that interaction through the existing
-Controller path. Approval commits the operation transition before provisioning;
+child provisioning. A trusted client, including the provider acceptance client
+or Gul, resolves that interaction through the existing Controller path. The
+semantic service distinguishes broker-owned approvals from Codex-owned pending
+requests and routes the response to the durable spawn operation, not to an
+unrelated App Server request. Approval commits the operation transition before provisioning;
 rejection closes it without allocating a child Run. For `fully_delegated`, the
 service provisions only a role and access combination explicitly admitted by
 the immutable policy. Neither mode bypasses cardinality, capabilities, writer,
@@ -502,9 +508,17 @@ idempotency, or recovery checks.
 
 Before allocating a child, the service applies the role's deterministic reuse
 policy. Compatible means identical active-session membership, role reference,
-role snapshot digest, Agent Configuration digest, and admitted access. Reuse
-selection is idle first, then lower pending mail count, then lower Run ID. A
-reuse result exposes the existing member's original spawn operation ID and is
+role snapshot digest, Agent Configuration digest, and admitted access. The
+target collaboration algorithm selects idle first, then lower pending mail
+count, then lower Run ID. Busy-member and mail-count-based live selection
+belongs to EPIC-009. For EPIC-008, TASK-048 follows the
+[v0.1.3 live provider slice](../specs/README.md#v013-live-provider-slice):
+only `never` and `reuse_idle_compatible` are admitted, with deterministic
+selection among compatible idle members and no live mailbox requirement.
+Existing target schemas and historical core fixtures retain their meaning.
+
+The durable reuse and replay guarantees apply to both delivery stages. A reuse
+result exposes the existing member's original spawn operation ID and is
 first committed in an aggregate reuse receipt keyed by the session, trusted
 idempotency key, and normalized request digest; it appends no new spawn or
 membership row. The Primary Run tool-call/result ledger then persists the
@@ -515,8 +529,11 @@ is lost before the ledger append.
 Task assignment never auto-hires a missing role. A bounded tool wait may expire
 without cancelling the durable operation or task. Cancellation is fail-closed
 after possible Turn acceptance. Release is a graceful retirement operation that
-stops admission of new work and waits for authoritative task, mailbox, and
-delivery quiescence.
+stops admission of new work. In EPIC-008, it waits for authoritative task and
+result-delivery quiescence under the existing Run lifecycle, writer,
+interaction, and process-safety rules. Mailbox quiescence is an additional
+requirement only when EPIC-009 adds collaboration; EPIC-008 must not introduce
+placeholder mailbox waits.
 
 Primary result collection uses the delivery-receipt sequence as a caller-held
 cursor. Each request names `after_sequence`; the broker replays receipts after
@@ -526,15 +543,84 @@ An empty page echoes the input cursor. This preserves ordered receipt replay
 without letting an old page consume the capacity needed to deliver later
 results.
 
+### Live Provider Integration Boundary
+
+EPIC-008 connects existing orchestration, Run, Worker, Controller, writer,
+artifact, and process-ownership components. It does not rebuild their stores or
+introduce a general scheduling framework. The normative release slice is
+[v0.1.3 Live Provider Slice](../specs/README.md#v013-live-provider-slice).
+
+The production tool bridge constructs trusted call context and delegates to the
+Primary Orchestration Service. Request identity is derived from a proved source
+Run/Turn/tool-call identity, not model arguments, environment markers, socket
+identity alone, or a reconnect-local JSON-RPC request number. Worker/server
+generation is checked as an authority fence, not used to manufacture a fresh
+semantic idempotency key on retry. Preserve durable call and reuse receipts.
+The future-collaboration portion of TASK-025 probes only source Run/Turn/call
+binding through an inert schema-shaped stub in an isolated test environment.
+Temporary test-only tool registration is allowed when needed for that proof.
+Production Specialist collaboration registration, advertisement, operation
+handlers, and mailbox/scheduler services remain in EPIC-009. This limit does
+not reduce TASK-025's retry, cancellation, bounded-wait, disconnect, or restart
+proof for the selected Primary transport.
+
+The production OrchestrationAdapter connects preallocated child identities to
+existing semantic Run operations. Raw managed-Run admission stays separate from
+broker-owned admission. Global Profile and Agent Configuration snapshots remain
+immutable; bridge registration must not edit a shared Profile for one Run.
+If a separate bridge process is unavoidable, use the existing TASK-046 ownership
+registration and shutdown rules instead of a new cleanup mechanism.
+
+The accepted-task boundary reuses task-content validation/composition where
+applicable without calling the External Specialist CLI/facade as the Broker's
+backend. Its aggregate and Controller ownership are different. Policy/access
+checks and a single active member-task reservation precede writer or Turn
+effects. Exact acceptance replay is checked before fresh busy admission.
+Unsupported queue/collaboration/activation policies are refused before live
+Session allocation; future schema values and historical snapshots remain valid.
+
+Turn dispatch must return an acceptance outcome independently from completion.
+The runtime observes accepted Turns and settles results without blocking its
+approval, cancellation, or event handling. SQLite remains authority for request,
+deadline, dispatch evidence, and delivery; in-memory notifications and in-flight
+handles are reconstructable. No SQLite transaction or global mutation lock may
+span a model Turn or client wait. Known pre-effect work may be resumed, but an
+unknown publication/Turn boundary may not be replayed. This is a bounded
+execution adapter, not the EPIC-009 Mailbox Scheduler.
+
+Task-result validation checks the original accepted request before inspecting
+an output discriminator. Actual immutable result bytes must exist before the
+Broker publishes completion or a readable artifact reference. Use a durable
+write-ahead association and idempotent reconciliation between existing artifact
+storage and SQLite; do not claim atomicity across them. A Primary-owned result
+projection or narrowly authorized private reader gives the Primary and its
+Controller access without exposing a child credential or arbitrary child files.
+TASK-025 fixes the minimal checked result/read contract; TASK-051 implements it.
+
+Each implementation Task owns its effect-boundary recovery tests. TASK-052 adds
+cross-component restart/retirement acceptance, including isolated working
+roots, pinned thread/Profile identity, writer ownership, retained results, and
+unknown outcomes. It cannot be used to defer unsafe intermediate behavior.
+Provider conformance uses generated public clients and the real gateway; only
+the upstream Codex boundary may be faked in explicitly labeled deterministic
+cases. Pinned live Codex evidence is separately required. Gul UI and consumer
+integration remain a later acceptance boundary, not a provider dependency.
+
 ### Collaboration Plane
 
-The Collaboration Plane provides logical direct Specialist communication while
-preserving hub-and-spoke authority. It contains five reconstructable components:
+EPIC-009 adds the Collaboration Plane for logical direct Specialist
+communication while preserving hub-and-spoke authority. The five components
+below describe that target plane. Component 1 reuses the bridge established by
+EPIC-008; components 2 through 5 are added by EPIC-009:
 
-1. **Run-Bound Internal Tool Bridge**: a private MCP bridge with two checked
-   surfaces. The Primary surface implements orchestration operations, and the
-   Specialist surface implements collaboration operations. Both bind source Run,
-   source Turn, and tool-call identity outside model-controlled arguments.
+1. **Run-Bound Internal Tool Bridge**: EPIC-009 reuses the transport selected by
+   TASK-025 and the Primary orchestration surface connected by TASK-047, then
+   adds the Specialist collaboration surface. The Primary surface remains
+   EPIC-008 functionality; this composition requires neither a second bridge
+   nor a placeholder collaboration surface in EPIC-008. Both surfaces bind
+   source Run, source Turn, and tool-call identity outside model-controlled
+   arguments. The Specialist surface remains unregistered and unadvertised in
+   production until EPIC-009.
 2. **Collaboration Service**: validation, role resolution, idempotency, artifact
    normalization, wait-cycle checks, and transactional enqueue.
 3. **Durable Mailbox Store**: SQLite tables for exchanges, mailbox items,
@@ -578,12 +664,13 @@ ownership transfers.
 
 `dolgorae serve --socket <absolute-path>` is a supervised foreground
 re-execution of the same binary. It is optional for finite Machine CLI or
-low-level external-AI operations and mandatory for every live Gul
+low-level external-AI operations and mandatory for every live
 Dolgorae-Orchestrated Session, from Standalone Primary through Brokered
 Hierarchy and later Brokered Specialist Collaboration. The process hosts the
 reconstructable `ControlPlaneRuntime`. Deterministic aggregate tests may host
-the same runtime in-process behind a fake adapter, but no Gul-usable milestone
-is claimed without the real foreground gateway. Gul or another trusted
+the same runtime in-process behind a fake adapter, but provider acceptance
+requires the real foreground gateway. Actual Gul acceptance is separate.
+Gul or another trusted
 same-user client starts and supervises it; Dolgorae never installs a launchd
 unit. It binds only the supplied Unix socket, checks every accepted
 connection with the platform peer-credential API, and offers unary operations
@@ -595,7 +682,8 @@ authoritative global in-memory Run registry. Dirty sets, activation leases, and
 scheduler caches are reconstructable from SQLite.
 
 Gateway delivery is staged without changing the frozen Protobuf descriptor.
-`TASK-023` implements the 24-method path required by `MILESTONE-BH1`,
+`TASK-023` implements the 24-method path shared by `MILESTONE-BH1-P` and
+`MILESTONE-BH1`,
 including metadata-only artifact lookup and bounded artifact reads, and
 advertises only that method set through capabilities. `TASK-029` completes
 the remaining timeline, diagnostics, advanced Run, writer-handoff, delete,

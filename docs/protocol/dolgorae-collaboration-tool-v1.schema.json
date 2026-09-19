@@ -344,5 +344,5 @@
       }
     }
   },
-  "x-privateTransport": "run-bound MCP bridge; not part of dolgorae.public.v1"
+  "x-privateTransport": "Private run-bound tool transport selected by TASK-025; production collaboration is deferred to EPIC-009; outside dolgorae.public.v1"
 }

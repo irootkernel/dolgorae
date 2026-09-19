@@ -36,8 +36,10 @@ cutover, the supervised Gul Run gateway and Brokered Hierarchy core, live
 Primary control-plane integration, the durable Collaboration Plane, operator
 and audit interfaces, and final conformance and Personal Alpha acceptance.
 `TASK-025` remains the live run-bound transport probe and occurs only after the
-Brokered Hierarchy core and EPIC-014 are complete. EPIC-014 does not change the
-`v0.1.3` release boundary; that version remains owned by EPIC-008.
+Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
+EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through eight
+Tasks, without waiting for Gul. `v0.1.3` remains owned by EPIC-008; actual Gul
+acceptance is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -57,13 +59,16 @@ Document roles and the required synchronization procedure are defined by the
 | `MILESTONE-SR1` | `EPIC-003` | Codex CLI can request one independent read-only working-tree review through `dolgorae specialist review`. The `dolgorae_review` MCP tool is additionally available only when its per-request identity carrier passes `TASK-011` and `TASK-012`. |
 | `MILESTONE-IR1` | `EPIC-004` | Aquarium independent-review uses Dolgorae, rather than an Orca-created Codex terminal, for immutable workspace, staged, dirty, HEAD, commit, and range review with a fresh Codex Reviewer. |
 | `MILESTONE-ES1` | `EPIC-006` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
-| `MILESTONE-BH1` | `EPIC-008` | Gul can use Dolgorae as the live Primary control plane and operate a durable Brokered Hierarchy. |
+| `MILESTONE-BH1-P` | `EPIC-008` | Dolgorae operates a live Primary and durable Brokered Hierarchy, with its public provider interface and pinned Codex execution independently verified without Gul. |
+| `MILESTONE-BH1` | [Deferred Gul acceptance](../todo/README.md#actual-gul-consumer-acceptance) | Actual Gul integration is verified against the provider; provider QA alone does not unlock this milestone. |
 | `MILESTONE-BC1` | `EPIC-009` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
 | `MILESTONE-PA1` | `EPIC-011` | The complete Personal Alpha acceptance campaign passes. |
 
-Milestones are cumulative. An earlier milestone remains usable while later
-Epics are implemented. A milestone does not waive its own Task completion gate
-or any safety limitation stated in its owning Epic.
+Delivered provider capabilities are cumulative. An earlier capability remains
+usable while later Epics are implemented. `MILESTONE-BH1` is a separate consumer
+acceptance branch: neither BH1-P nor later provider work implies actual Gul QA.
+A milestone does not waive its own Task completion gate or any safety limitation
+stated in its owning Epic.
 
 ## Release Train
 
@@ -72,8 +77,8 @@ or any safety limitation stated in its owning Epic.
 | `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
-| `v0.1.3` | Milestone Preview | `EPIC-008` complete, including the preceding `EPIC-007` control-plane core | Through `MILESTONE-BH1` |
-| `v0.1.4` | Milestone Preview | `EPIC-009` complete | Through `MILESTONE-BC1` |
+| `v0.1.3` | Milestone Preview | Revised `EPIC-008` complete, including the preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` changes; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
+| `v0.1.4` | Milestone Preview | `EPIC-009` complete on the verified provider boundary | v0.1.3 provider capabilities plus `MILESTONE-BC1`; no automatic Gul acceptance claim |
 | `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
@@ -125,8 +130,10 @@ A Task is `COMPLETE` only when all of the following are true:
 6. Deferred findings are assigned to an owning roadmap task or public issue.
 7. One or more task-scoped Git commits contain the completed change.
 
-This gate does not prescribe how an implementer divides commits or stages files.
-Push always requires separate explicit user authorization.
+This general gate does not prescribe how an implementer divides commits or
+stages files. EPIC-008 additionally requires one initial completion commit per
+Task as described in its adopted execution rules below. Push always requires
+separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
 
@@ -1229,8 +1236,9 @@ ControlPlaneRuntime without treating memory as durable authority.
 
 Task acceptance: Gul can launch `dolgorae serve`, negotiate public v1, create and
 operate ordinary low-level Runs through the minimum frozen Run path, and survive
-a controlled gateway restart. No Brokered Hierarchy milestone is claimed until
-TASK-024, TASK-025, and TASK-026 also complete.
+a controlled gateway restart. The minimum gateway alone claims neither BH1-P nor actual Gul acceptance.
+BH1-P additionally requires TASK-024 and all eight revised EPIC-008 Tasks;
+actual-Gul BH1 retains its separate consumer gate.
 
 ### TASK-024: Durable Orchestration Session and Brokered Hierarchy Core
 
@@ -1431,89 +1439,280 @@ regressions, repeated E2E execution with no surviving new test processes, the
 complete default repository gate, and independent adversarial review before
 the Task and Epic become `COMPLETE`.
 
-## EPIC-008: Live Dolgorae Control Plane and Brokered Hierarchy
+## EPIC-008: Live Dolgorae Provider and Brokered Hierarchy
 
 Status: `PLANNED`
 
-Goal: Select and integrate the live run-bound Primary tool transport so Gul can
-use Dolgorae as the active semantic control plane with a durable Brokered
-Hierarchy.
+Detailed SOT: [EPIC-008 execution dossier](../todo/EPIC-008-live-provider.md)
 
-### TASK-025: Run-Bound Internal Tool Transport Probe
+Goal: Connect the existing gateway and durable Broker to actual pinned Codex
+Primary/Specialist execution and deliver a verified public provider interface.
+Complete `MILESTONE-BH1-P` without waiting for Gul. Actual Gul consumer QA stays
+outside this Epic and does not become a blocked placeholder Task.
 
-Status: `PLANNED`
+Authorities: [provider slice](../specs/README.md#v013-live-provider-slice),
+[provider acceptance](../specs/README.md#provider-and-gul-acceptance-boundaries),
+[live integration architecture](../architecture/README.md#live-provider-integration-boundary),
+and [ADR-038](../architecture-decision-records/README.md#adr-038-deliver-the-live-provider-independently-of-gul).
 
-Depends on `TASK-023`, `TASK-024`, and `EPIC-014`. Validate and close the live transport boundary for the
-private Primary orchestration tool and the later Brokered Specialist
-Collaboration tool. Prove that the pinned Codex App Server can provide a private
-run-bound MCP bridge whose source Run, source Turn, tool-call identity,
-cancellation, and bounded wait behavior are known without exposing a Controller
-credential or allowing model-controlled source identity.
+Scope: both approval modes; trusted tool identity; ready-member task acceptance,
+actual dispatch, bounded wait, deadline/cancellation; admitted access and writer
+safety; readable checked results/artifacts; redelivery; release/abort; and
+restart recovery. Preserve existing external v1/v2/v3 review behavior.
 
-This Task owns registration and source binding for both checked run-bound tool
-schemas, source identity and idempotency derivation outside model arguments,
-Dedicated Lane fallback when shared-profile invocation identity is ambiguous,
-bounded await, cancellation, bridge restart, connection-loss behavior, and
-credential, private-socket, database-path, and source-identity canaries. The
-external `dolgorae_review` MCP adapter from `EPIC-003` is a separate external
-control-plane adapter and is not blocked or redesigned by this probe.
+Non-goals: Gul code or UI, busy-target queues, lateral collaboration, mailbox
+scheduling, activation/passivation, new generic task/artifact frameworks,
+multiple supported internal transports, the TASK-029 operator surface, and
+release/publication/installation operations. Unsupported live policies fail
+closed under the provider slice rather than silently losing future semantics.
 
-The durable aggregate broker, Primary Orchestration Service, tool-dispatch
-interfaces, and fake handlers are implemented and unit-tested in
-`TASK-024`. This Task selects the supported live model-facing transport.
-Mailbox, Scheduler, Activation Manager, and collaboration outbox implementation
-remain in `TASK-027`.
+Execution order is exactly TASK-025, TASK-047, TASK-048, TASK-049, TASK-050,
+TASK-051, TASK-052, TASK-026. These are eight integration Tasks, not sixteen
+previously proposed work packages compressed into eight commits. Each Task
+contains its implementation, targeted tests, directly affected contracts/docs,
+and independent review before one initial task-scoped completion commit.
+The general completion gate still applies. Fix task-local crash/security
+behavior before that commit; later Tasks do not excuse unsafe intermediate
+behavior. Incomplete paths remain explicitly unavailable, never placeholder
+success. A later discovered defect gets explicit corrective ownership without
+rewriting completed history to preserve a count. Planning adoption and stable
+release metadata are separate operations, not extra implementation Tasks.
+Until TASK-025 is `COMPLETE`, work is limited to its probe, fixtures, and
+contract closure; later production implementation must not start in parallel.
+No staging, commit, live credentials, publication, or installation is authorized
+merely by this plan; use the existing applicable approval boundaries.
 
-Verification: live pinned transport probes for both run-bound tool surfaces,
-source Run and Turn correlation, concurrent calls, bounded wait timeout,
-cancellation, bridge restart, connection loss, and credential canaries;
-ambiguous shared identity selects the Dedicated Lane fallback; public Protobuf
-source and descriptor remain byte-identical.
-
-Task acceptance: ADR-027, ADR-028, SPEC-012, architecture, both run-bound private
-tool schemas, fixtures, verification index, and implementation memos agree; the
-probe selects a supported bridge or explicitly blocks `TASK-026` and
-`TASK-027`; and an independent read-only review reports no unresolved
-blocking finding.
-
-### TASK-026: Live Primary Orchestration Tool and Brokered Hierarchy Acceptance
+### TASK-025: Pinned Transport Probe and Live Provider Contract
 
 Status: `PLANNED`
 
-Depends on `TASK-023`, `TASK-025`, and `TASK-024`. Integrate only the checked Primary
-orchestration tool through the transport selected by the probe. Bind session,
-Primary Run, source Turn, tool-call ID, inherited root priority, Controller
-authority, and idempotency outside model arguments. Allow the Primary Agent to
-request, await approval for, list, assign, await, collect, cancel, and release
-policy-admitted Specialists without receiving a child Controller credential or
-mutating another Run directly.
+Depends on `TASK-023`, `TASK-024`, `EPIC-014`, and `EPIC-015`. Start here.
+Compare private MCP and native run-bound tool candidates on the checked Codex
+pin and select one supported path. Prove source Run/Turn/call binding, stable
+retry identity, concurrent-call separation, cancellation, bounded wait,
+connection loss, and bridge restart without model-controlled identity or
+credentials. Verify Dedicated Lane requirements when shared identity is
+ambiguous; isolation is not a substitute for Turn/call proof. The
+future-collaboration portion checks only source Run/Turn/call binding through an
+isolated inert stub. Temporary test-only registration is allowed when needed
+for that proof. Production Specialist collaboration tool registration,
+advertisement, operation handlers, mailbox, and scheduler implementation belong
+to EPIC-009. This limit does not reduce the Primary transport proof above.
+Preserve the separate external review MCP disposition. Do not upgrade Codex
+implicitly.
 
-Run one live integration with the actual supported Gul client against the
-TASK-023 local gRPC gateway. Create an Orchestrated Session in Standalone
-Primary composition, transition it to Brokered Hierarchy by provisioning a
-Reviewer, execute and collect one bounded Specialist task, return at least one
-Primary or Specialist result above the inline bound through an artifact
-reference, retrieve its metadata and one or more bounded chunks, verify total
-length and SHA-256, recover the hierarchy after a controlled Dolgorae restart,
-and return to a clean completed or active state. A mock, fake adapter, or merely Gul-shaped harness cannot satisfy this
-acceptance step. Specialist
-messages still route through Primary task operations in this Task; lateral
-Specialist collaboration is deferred to `EPIC-009`.
+Freeze the selected minimal private request/response and result-read contract,
+including text/context bounds, accepted-call replay versus new observation,
+`blocking`/wait semantics, busy and unsupported-policy error mapping, and
+Primary-authorized artifact consumption. Preserve existing v1 meanings; add a
+narrow private successor only where required. Register no incomplete live
+capability. Synchronize owning docs, checked schemas/examples, and the
+verification index before later implementation. Record the exact pin and
+sanitized verdicts without retaining credentials, raw provider prose, or local
+runtime identifiers in tracked docs.
 
-Verification: actual Gul client private-boundary integration;
-user-approval-required and fully-delegated live paths; exact tool retry; source
-identity canaries; Primary restart; Specialist task result
-redelivery; missing, unauthorized, run-lifetime-expired, malformed, oversized,
-out-of-range, and integrity-failed artifact reads with their documented typed
-errors; Primary degradation and recovery; release and abort; writer
-conflict; no credential exposure; no direct peer control; unchanged public Gul
-wire; and independent review of the live hierarchy path.
+Verification: deterministic positive/negative schema and trust-boundary tests;
+separately authorized isolated pinned-live probes with an explicit adversarial
+budget; unchanged public Protobuf source/descriptor; independent read-only
+review. If no candidate meets the contract, this Task is `BLOCKED` and later
+Tasks cannot start. A negative result does not justify fake-only release.
+Plan approval does not authorize a Profile/account or token use. Required live
+execution needs separate approval and isolated test state; missing live evidence
+prevents completion, even when deterministic probes pass.
 
-Epic acceptance: completion unlocks `MILESTONE-BH1` only together with the
-minimum supervised Gul gateway completed in TASK-023. Gul can use the real
-local gRPC path to operate Dolgorae as the live Primary control plane, and
-Dolgorae can create, persist, recover, and operate a Brokered Hierarchy. Lateral Specialist collaboration is not yet part
-of this milestone.
+Task acceptance: one proved transport and a complete bounded contract for the
+remaining Tasks, including executable probe/fixture code and no unresolved
+blocking findings. Next: TASK-047.
+
+### TASK-047: Trusted Live Primary Tool Bridge
+
+Status: `PLANNED`
+
+Depends on `TASK-025`. Implement the selected bridge through the production
+Primary Orchestration Service. Bind session, source Run/Turn/call, current
+authority, inherited priority, and idempotency outside model arguments. Use
+existing durable call/reuse receipts. Separate generation fencing from semantic
+retry identity; a reconnect must not manufacture new work. Keep registration
+Run-scoped without mutating a shared global Profile. Use existing process
+ownership rules if the selected bridge requires a process. Only fully wired
+operations may execute; incomplete operations reject before effects.
+
+Verification: source substitution, stale generation, duplicate/different-input
+call, concurrent call isolation, cancellation/disconnect, and bridge restart;
+credential/socket/database/raw-frame canaries; focused pinned-live dispatch
+check as required by the completion gate. No collaboration registration or
+external-review MCP change.
+
+Task acceptance: the actual Primary tool reaches the existing service with
+verified authority and replay behavior, while unsupported effects remain
+unavailable. Next: TASK-048.
+
+### TASK-048: Brokered Run Provisioning and Approval Binding
+
+Status: `PLANNED`
+
+Depends on `TASK-047`. Connect the existing spawn operation and preallocated
+child identity to real semantic Run/Worker/thread creation and the fixed Role,
+Agent Configuration, global Profile, and admitted access. Reuse protected
+broker-held Controller carriers. Implement both approval policies. Connect
+broker-originated Primary Interactions to their durable spawn operation through
+the shared Controller resolution path; distinguish them from Codex requests.
+Apply the v0.1.3 provider slice rather than the general target reuse algorithm:
+admit only `never` and `reuse_idle_compatible` for live reuse. Reject unsupported
+live queue/collaboration/activation policies before Session allocation; do not
+implement busy/mail-count selection. Preserve durable reuse receipts, exact
+replay, raw managed-Run rejection, and reserved-parent rejection.
+
+Verification: approval before allocation, reject/approve/retry and response loss,
+registry/snapshot invariance, cardinality and allowlist denial, duplicate spawn,
+credential canaries, cross-store publication failure and known/unknown recovery.
+Use real adapters with isolated fake Codex for deterministic cases and the
+required separately authorized live behavior checks.
+
+Task acceptance: policy-admitted actual Specialists can be created once through
+either approval mode without changing existing aggregate ownership. Next:
+TASK-049.
+
+### TASK-049: Accepted Task Admission and Live Dispatch
+
+Status: `PLANNED`
+
+Depends on `TASK-048`. Connect separate work assignment to existing ready
+Specialists. Reuse applicable task-content helpers without making the External
+Facade the Broker backend or requiring review criteria for ordinary work.
+Preserve exact bounded multiline UTF-8 and bind authorized artifact context to
+readable immutable bytes. Validate policy/member access before task reservation
+or writer effects. Replay an existing accepted request before applying fresh
+busy admission; refuse new busy assignments without queueing or auto-hiring.
+
+Persist accepted request identity and deadline origin before effects. Separate
+Turn acceptance from completion instead of synchronously returning
+`CompletedTask`. Add only the necessary bounded runtime observer and durable
+acceptance evidence. No transaction/global mutation lock spans execution.
+Connect admitted writes to existing writer/isolated-root mechanisms now;
+unsupported active-Primary writer yield is a typed pre-effect conflict, not an
+implicit interrupt. Never claim atomic cross-Controller handoff.
+
+Verification: Role/task digest separation, Unicode/CRLF/context bounds and
+integrity, forged access, same-key replay/conflict, concurrent admission, busy
+rejection, independent members, correct working root/sandbox, writer conflicts,
+acceptance-response loss, pre/post-dispatch crash, and no automatic replay after
+unknown acceptance. Preserve external review and reusable engagement contracts.
+
+Task acceptance: actual tasks are durably accepted and dispatched once with
+correct authority and traceable Turn acceptance. Next: TASK-050.
+
+### TASK-050: Bounded Wait, Durable Deadline, and Cancellation
+
+Status: `PLANNED`
+
+Depends on `TASK-049`. Implement the selected tool contract's operation/task
+waits, `any`/`all`, and `blocking` behavior with a bounded transport budget.
+Serve approvals, cancellation, and other Run observations while waiting. Anchor
+execution expiry to durable acceptance across retry/restart; the transport wait
+neither refreshes that deadline nor cancels work on timeout/disconnect. Exact
+call retry returns its original receipt; a new call observes new state.
+
+Handle known pre-dispatch cancellation and ordinary running-Turn interrupt with
+authoritative terminal proof. Preserve `interrupted_unknown` when acceptance or
+outcome is ambiguous. Do not implement mailbox priority, queueing, or activation.
+
+Verification: injected-clock boundary tests, `any`/`all`, same-call/new-call
+behavior, approval responsiveness, wait disconnect, remaining budget after
+restart, cancel/complete/expiry races, and interrupt acknowledgement without
+terminal proof. New live/OS assumptions require their designated empirical
+checks before completion.
+
+Task acceptance: waits are responsive and bounded, deadlines survive retries,
+and cancellation never manufactures a known outcome. Next: TASK-051.
+
+### TASK-051: Readable Results, Artifacts, and Redelivery
+
+Status: `PLANNED`
+
+Depends on `TASK-050`. Connect terminal observation to the accepted request,
+applicable output validator, existing immutable artifact store, and Broker
+completion/delivery receipts. Verify accepted-request integrity before output
+discriminator selection. Preserve existing v3 structured review when requested;
+do not make it mandatory for general work. Implement the minimal checked
+Primary result/read contract selected by TASK-025, including a permitted public
+result projection without exposing child credentials or arbitrary child files.
+
+Completion must reference real bytes and verified length/SHA-256. Coordinate
+artifact and SQLite publication with write-ahead recovery, not imaginary
+cross-store atomicity. Preserve collect cursors and exact-call/reuse receipts.
+Lost delivery returns the same result, not a new target Turn. No new generic
+artifact service or public Protobuf change.
+
+Verification: actual Primary content consumption; above-inline-bound Specialist
+results; metadata/chunk reads, length/digest, authorization, redaction, range,
+missing/expired/malformed/oversized/integrity failures; corrupted accepted task
+and discriminator downgrade; artifact/receipt crash windows; page replay and
+later-page delivery without repeat execution.
+
+Task acceptance: Primary and its authorized client can consume actual Specialist
+results through the intended private/public boundaries. Next: TASK-052.
+
+### TASK-052: Live Hierarchy Retirement and Restart Recovery
+
+Status: `PLANNED`
+
+Depends on `TASK-051`. Connect graceful release, session completion/abort, and
+cross-component restart to existing lifecycle and recovery owners. Stop new
+admission while retiring; retain accepted/unknown work and undelivered results
+until their authoritative disposition. Reconstruct bridge bindings, pinned
+Run/Profile/thread identity, access, isolated working roots, deadline, writer
+state, and delivery receipts after gateway/Worker replacement. Reuse TASK-046
+process identity and orphan rules. A client disconnect does not stop a healthy
+shared Profile Server. Do not add unsolicited Primary Turns or auto-resume
+paused Runs.
+
+Verification: controlled and crash restart during approval, dispatch, execution,
+result publication/delivery, and retirement; original Run/thread identities;
+no duplicate/orphan child; writer and credential-carrier lifetime; unknown
+preservation; isolated-root recovery failure; clean verified test teardown.
+These supplement, rather than defer, prior Task-local recovery checks.
+
+Task acceptance: the connected live hierarchy safely retires or reconstructs
+its existing durable work without semantic replay. Next: TASK-026.
+
+### TASK-026: Provider Conformance and v0.1.3 Handoff
+
+Status: `PLANNED`
+
+Depends on `TASK-052` and therefore every preceding EPIC-008 Task. Implement the
+planned `private_boundary` driver using generated public-v1 clients against an
+actual isolated `dolgorae serve` process and production semantic/Broker paths.
+Extend existing native gateway fixtures; do not build a Gul clone or new SDK.
+Deterministic cases may fake Codex and must say so. Separately authorized pinned
+live Codex must demonstrate actual Primary calls, both approval policies,
+Specialist execution, readable result consumption, and supported recovery.
+Missing live prerequisites block this Task; missing Gul does not.
+
+Verification: protocol-zero negotiation and exact 24-method inventory; Session
+bootstrap; approvals; event cursor replay; ready/busy task behavior; existing
+access/writer safety; a Specialist result above the inline bound consumed by
+Primary and retrieved by the external client using bounded artifact reads;
+length/SHA-256; typed failure/redaction matrix; exact retries; restart/redelivery;
+release/abort; complete deterministic repository gate, required live evidence,
+source-skill/Markdown checks, and independent read-only review with no unresolved
+blocking findings. Do not promote planned test paths to passing evidence.
+
+Update operations, implementation tips, source skill, and user-facing guidance
+to actual capabilities. Provide verified request/response examples, Controller
+carrier handling, call sequence, retries, deadlines, event reconnect, artifact
+reads, and explicit version limits. At closeout promote enduring dossier content
+to canonical owners, remove the dossier/TODO entry, and replace `Detailed SOT`
+with `Canonical Outcomes` links. No stable release, tag, publication, install,
+or real Gul integration is performed by this Task.
+
+Epic acceptance: all eight Tasks and their completion gates pass; the actual
+provider and pinned Codex operate a durable live hierarchy; existing features
+remain compatible; public Protobuf stays byte-identical; no unsupported
+capability is advertised; and `MILESTONE-BH1-P` is complete. v0.1.3 becomes
+eligible for separate release-candidate QA and authorized publication as a
+Milestone Preview, not Personal Alpha. Actual-Gul `MILESTONE-BH1` remains
+unclaimed until its deferred consumer campaign passes.
 
 ## EPIC-009: Brokered Specialist Collaboration
 
@@ -1526,8 +1725,12 @@ Brokered Hierarchy without making the Primary Agent a message relay.
 
 Status: `PLANNED`
 
-Depends on `TASK-023`, `TASK-025`, `TASK-026`, and `TASK-024`. Integrate the checked
-Specialist collaboration tool through the selected run-bound transport. Add the
+Depends on completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
+foundations, including selected transport TASK-025 and provider acceptance
+TASK-026. It does not depend on actual Gul acceptance. Integrate the checked
+Specialist collaboration tool through the selected run-bound transport. Enable
+the deferred busy-target queue, reuse-any and activation policies only with their
+checked implementation and compatibility tests. Add the
 Collaboration Service, SQLite Collaboration Exchange and mailbox tables,
 transactional result outbox, dirty-set Mailbox Scheduler, Activation Manager,
 actor passivation, activation leases, deterministic role selection, inherited

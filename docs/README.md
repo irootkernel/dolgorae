@@ -15,7 +15,7 @@ contracts, implementation, validation, or local operations.
 | Implementation tips | [implementation-tips/README.md](implementation-tips/README.md) |
 | Operations | [ops/README.md](ops/README.md) |
 | Roadmap | [roadmap/README.md](roadmap/README.md) |
-| TODO candidates and active dossiers | [todo/README.md](todo/README.md) |
+| TODO candidates and adopted dossiers | [todo/README.md](todo/README.md) |
 | Deferred feedback | [deferred-feedback/README.md](deferred-feedback/README.md) |
 
 The checked [protocol](protocol/) artifacts derive wire, persisted-state, and
@@ -46,6 +46,12 @@ records own accepted rationale, and the roadmap alone owns delivery identity,
 order, lifecycle vocabulary, and status. Protocol artifacts, implementation,
 tests, and summaries are derived where they overlap those authorities.
 
+The checked [verification index](protocol/verification-index-v1.json) maps
+Tasks and verification concerns at SPEC-section granularity. A Task listed for
+a section does not own every requirement or every other Task's work in that
+section, and a mapping is not executed evidence. The roadmap defines each
+Task's scope and completion gate; its adopted dossier supplies detailed checks.
+
 If canonical documents disagree, stop and resolve the contradiction in the
 owning documents before changing implementation. Update affected protocol
 artifacts, implementation, tests, and roadmap references only after the owners
@@ -59,11 +65,13 @@ lifecycle vocabulary; the roadmap's identity rules remain authoritative.
 Cross-scope qualification is unnecessary while Dolgorae has one delivery scope.
 
 Future epic-sized ideas live in the TODO owner without roadmap status. When an
-idea is adopted as an active Epic with tasks, its temporary dossier is listed
-as adopted TODO work and linked from the roadmap with `Detailed SOT`. Epic
-closeout promotes durable outcomes to their owners, removes the dossier, and
-replaces that link with `Canonical Outcomes`. Historical completed work without
-these lifecycle fields remains unchanged.
+idea is adopted into the roadmap as an Epic with tasks, its temporary dossier
+is listed as adopted TODO work and linked from the roadmap with `Detailed SOT`.
+Adoption does not set the roadmap state to `ACTIVE`: a `PLANNED` Epic may have
+an adopted dossier. Keep that dossier through execution and review until Epic
+closeout, which promotes durable outcomes to their owners, removes the dossier,
+and replaces that link with `Canonical Outcomes`. Historical completed work
+without these lifecycle fields remains unchanged.
 
 ## Language and validation
 

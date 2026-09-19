@@ -270,7 +270,7 @@
     {
       "id": "private_boundary",
       "owner": "TASK-026",
-      "required_evidence": "real_gul_harness"
+      "required_evidence": "provider_grpc_e2e_and_pinned_live_codex"
     },
     {
       "id": "run_configuration_restart",
@@ -1678,6 +1678,24 @@
       "expected": "refresh_capabilities_fail_closed"
     }
   ],
+  "acceptance_boundaries": {
+    "MILESTONE-BH1-P": {
+      "owner": "TASK-026",
+      "required_runtime_case": "private_boundary",
+      "gateway_inventory": "delivery_stages.MILESTONE-BH1",
+      "required_evidence": "provider_grpc_e2e_and_pinned_live_codex",
+      "requires_real_gul": false,
+      "release_eligibility": "v0.1.3 after all revised EPIC-008 completion gates; publication remains separate"
+    },
+    "MILESTONE-BH1": {
+      "owner": "deferred_gul_consumer_acceptance",
+      "tracking_document": "docs/todo/README.md#actual-gul-consumer-acceptance",
+      "requires_provider_boundary": "MILESTONE-BH1-P",
+      "required_evidence": "real_gul_harness",
+      "blocks_epic_008": false,
+      "blocks_v0_1_3_provider_release": false
+    }
+  },
   "delivery_stages": {
     "MILESTONE-BH1": {
       "owner": "TASK-023",
@@ -1730,7 +1748,7 @@
         "verify_total_byte_length": true,
         "verify_sha256": true
       },
-      "description": "Twenty-four-method frozen public-v1 path required for a live Gul Orchestrated Session and Brokered Hierarchy, including artifact metadata and bounded chunk retrieval."
+      "description": "Historical BH1 inventory key for the twenty-four-method frozen public-v1 path shared by provider BH1-P and later actual-Gul BH1 acceptance, including artifact metadata and bounded chunk retrieval. Inventory membership does not claim either acceptance campaign has passed."
     },
     "MILESTONE-PA1": {
       "owner": "TASK-029",

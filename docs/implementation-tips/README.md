@@ -78,3 +78,67 @@ and disappear only after authoritative Specialist release. Schema examples and
 the fake adapter prove the transport-independent core. They do not prove the
 later live model-facing tool transport, and the opt-in live Codex targets remain
 outside the complete repository gate.
+
+## Live provider implementation
+
+EPIC-008 follows eight integration Tasks: TASK-025, TASK-047 through TASK-052,
+then TASK-026. Follow the roadmap's Detailed SOT link for the adopted execution
+checklists. Specifications own the v0.1.3 ready-member-only provider slice;
+actual Gul acceptance is separate. Tests, directly affected docs, and independent
+review belong in each Task's initial completion commit. Never defer a newly
+introduced effect's crash safety or return placeholder success for an unwired
+operation. Required commit and live-runtime approvals remain separate.
+TASK-025 must be `COMPLETE` with a proved transport and frozen contract before
+later production work starts. Its isolated probes are not permission to build
+bridge, provisioning, or dispatch paths in parallel. General collaboration and
+busy/mail-count reuse descriptions are EPIC-009 targets, not instructions to
+create placeholder services in EPIC-008.
+
+Reuse the existing Broker, Run/Worker, writer, artifact, and process inventory
+owners. Share task-content helpers and applicable result validators without
+using the External Specialist CLI/facade as the Broker backend or forcing review
+criteria onto ordinary tasks. Do not mutate shared global Profiles for one
+Run's tool registration. TASK-025 selects one proved MCP or native path on the
+pinned Codex version; neither is an assumed capability.
+
+Separate durable task acceptance, Turn acceptance, completion, and delivery.
+Replay an accepted receipt before fresh busy checks. Validate immutable policy,
+member access, and writer/working-root conditions before reservation or effects.
+No SQLite transaction or global mutation owner spans a model Turn, approval,
+or bounded wait. Route broker approvals to their spawn operation, not a Codex
+pending request. Use injected clocks and retain the original durable deadline.
+Transport timeout or disconnect is not cancellation; interrupt acknowledgement
+alone is not terminal proof. Never replay possibly accepted work.
+
+Check accepted-request identity before its output discriminator. Validate the
+requested output before publishing completion. An artifact ID must name real
+immutable bytes with matching length and digest. Use write-ahead reconciliation
+between existing artifact storage and SQLite, not a cross-store atomicity claim.
+Expose only a permitted Primary result projection or bounded private reader,
+never child credentials or arbitrary child files. Preserve cursor redelivery.
+
+Restore pinned Run/thread/Profile/access, isolated work roots, writer state,
+deadlines, and receipts on restart. The existing external-engagement isolated-
+write branch does not automatically cover brokered members. Reuse TASK-046 for
+any new bridge process and test teardown; healthy shared servers survive client
+exit. Do not add unsolicited Primary Turns or auto-resume paused Runs.
+
+Extend the existing native gateway fixtures with generated public-v1 clients
+against real dolgorae serve and production semantics. Label fake Codex scenarios;
+separately authorized pinned-live evidence must prove actual Primary calls,
+both approval modes, Specialist execution, and actual result consumption.
+Plan approval does not authorize live Profile/account or token use. Missing
+required live evidence prevents Task completion. Scope live checks to new or
+changed external behavior; reuse earlier evidence only when its tested
+conditions and coverage still apply. TASK-026 still needs assembled-provider
+live acceptance, not only isolated probes. Planned test paths and schema checks
+are not live evidence. Publish verified call-order, Controller-carrier, retry,
+deadline, event-cursor, artifact, and version-limit examples in canonical guidance. Keep raw logs, provider prose,
+credentials, and local runtime identifiers out of tracked docs.
+
+Use non-writing Markdown/schema/example/descriptor/skill checks for plan changes.
+Implementation completion still requires the full deterministic gate and
+applicable live evidence. Epic completion gives release eligibility only:
+exact-candidate build/installation QA, tag, publication, and runtime installation
+retain separate authority. v0.1.3 remains a Milestone Preview, not Personal Alpha
+or proof of actual Gul integration.

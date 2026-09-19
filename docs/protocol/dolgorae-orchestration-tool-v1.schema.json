@@ -806,7 +806,7 @@
       }
     }
   },
-  "x-privateTransport": "run-bound MCP bridge; not part of dolgorae.public.v1",
+  "x-privateTransport": "One run-bound MCP or native transport selected by TASK-025 after pinned proof; not part of dolgorae.public.v1. Existing v1 shapes are preserved; any necessary live successor is separately checked.",
   "x-transportBoundFields": [
     "orchestrated_session_id",
     "source_primary_run_id",

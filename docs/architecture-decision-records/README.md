@@ -1205,7 +1205,7 @@ guarantee.
 
 The public v1 surface does not add an MCP adapter, installed daemon,
 parent-held delegation capability, nested authority transfer, or arbitrary peer
-control. ADR-027 adds only a private run-bound MCP bridge and bounded durable
+control. ADR-027 adds only a private run-bound tool bridge and bounded durable
 Collaboration Exchanges inside a Dolgorae-Orchestrated Session. A future public
 stdio MCP adapter must remain a thin wrapper over the stable semantic service.
 
@@ -1625,7 +1625,8 @@ by the same Controller identity.
 
 ## ADR-027: Use Durable Virtual-Actor Mailboxes for Brokered Specialist Collaboration
 
-Status: Accepted
+Status: Accepted; transport selection and provider/client separation amended by
+ADR-038. Mailbox, scheduling, and activation remain EPIC-009 work.
 
 ### Context
 
@@ -1651,7 +1652,7 @@ activation operations, result-delivery state, and a hash-chained append-only
 event table in the same authority. JSON and JSONL are exports only.
 
 Treat each Independent Specialist Run as a Virtual Actor. Specialists never
-poll SQLite. The Gul-supervised foreground `dolgorae serve` process hosts one
+poll SQLite. The trusted-client-supervised foreground `dolgorae serve` process hosts one
 Mailbox Scheduler and Activation Manager. After a database commit it marks the
 target Run dirty and sends an in-memory wake. Startup and one low-frequency
 global reconciliation scan recover lost wake signals and expired pre-dispatch
@@ -1669,7 +1670,9 @@ inherited root priority, dependency-unblock boost, deadline, and mailbox
 sequence, with source fairness and bounded queues. Specialists cannot choose a
 higher priority than their root task.
 
-Use a private run-bound MCP bridge for submit, await, and collect operations.
+Use the private run-bound transport proved by TASK-025 for submit, await, and
+collect operations. ADR-038 permits MCP or native transport selection without
+requiring both implementations.
 Bind source Run, source Turn, tool-call identity, and idempotency outside model-
 controlled arguments. If the pinned shared-profile transport cannot prove that
 binding, require Dedicated Lanes for collaboration-capable members. A live probe
@@ -1695,8 +1698,9 @@ Controller authority, hidden reasoning, or raw protocol frames.
   one ordered mailbox.
 - Queue, scheduling, activation, and delivery behavior become explicit,
   testable, and crash recoverable.
-- Active Dolgorae-Orchestrated Sessions depend on the Gul-supervised foreground
-  control-plane runtime, but no installed daemon is introduced.
+- Active Dolgorae-Orchestrated Sessions depend on a trusted-client-supervised
+  foreground control-plane runtime, but no installed daemon is introduced and
+  the supervising client need not be Gul.
 - SQLite schema migrations, claim leases, transport probes, crash injection, and
   cycle tests are required.
 
@@ -1799,8 +1803,10 @@ orchestration database. A future additive typed aggregate query may improve
 observability without changing ownership.
 
 Place the live run-bound tool transport probe after the transport-independent
-durable broker implementation and immediately before live collaboration-tool
-integration. Earlier foundation work does not depend on that probe.
+durable broker implementation and before live Primary-tool integration.
+Collaboration-tool integration follows in EPIC-009. ADR-038 narrows the provider
+release gate without changing the aggregate authority or public Run contract.
+Earlier foundation work does not depend on that probe.
 
 ### Consequences
 
@@ -1918,7 +1924,9 @@ Specialist collaboration.
 
 ## ADR-030: Establish the Supervised Gul Runtime Before the Brokered Hierarchy Milestone
 
-Status: Accepted
+Status: Accepted; ADR-038 separates the EPIC-008 provider completion boundary
+from the actual-Gul BH1 milestone. The actual-Gul evidence requirement below
+remains unchanged for BH1, not for v0.1.3 provider release eligibility.
 
 ### Context
 
@@ -2372,3 +2380,88 @@ evidence; it cannot authorize an unsafe signal.
   ownership or protects against PID reuse and unrelated same-user commands.
 - Tie shared-server lifetime to CLI process exit: that breaks intentional
   reuse across independent invocations.
+
+## ADR-038: Deliver the Live Provider Independently of Gul
+
+Status: Accepted
+
+### Context
+
+EPIC-007 already supplies the local gateway and transport-independent Broker.
+EPIC-014 and EPIC-015 add stable Role/task separation and detached-process
+ownership recovery. EPIC-008 must connect those foundations to actual Codex
+execution rather than rebuild them. Gul is not yet ready, so requiring a real
+Gul client at this stage would block independent provider delivery.
+
+The initial sixteen-task proposal mixed implementation boundaries, repeated
+verification, and later queue/generalization work. The accepted plan instead
+uses eight bounded integration Tasks, each with its own tests and documentation,
+while keeping the original live safety and result-consumption obligations.
+
+### Decision
+
+Add `MILESTONE-BH1-P` for a live Dolgorae provider verified through its actual
+public gRPC gateway and a separately authorized pinned-live-Codex campaign.
+EPIC-008 and v0.1.3 eligibility depend on that provider boundary, not Gul.
+Keep `MILESTONE-BH1` as the actual-Gul consumer milestone and retain its real
+client evidence requirement in a deferred TODO acceptance item. Provider
+conformance is not a substitute claim for Gul acceptance. EPIC-009 depends on
+the provider implementation and need not await Gul readiness.
+
+Preserve the existing public-v1 Protobuf source, descriptor, 24-method gateway
+inventory, protected Controller carriers, and shared semantic ownership.
+Existing BH1 method-set keys in checked artifacts remain inventory labels,
+not assertions that Gul integration has passed. No SDK, GUI clone, additional
+service, installed daemon, or full operator surface is added.
+
+TASK-025 evaluates private MCP and native run-bound tool candidates on the
+pinned Codex version and selects one proved transport. Source Run/Turn/call
+identity, retry, wait, cancellation, restart, and credential isolation remain
+mandatory. Dedicated execution is a possible isolation requirement, not proof
+of Turn/call identity by itself. No unproved fallback or automatic Codex upgrade
+is accepted. The external review MCP disposition is unchanged.
+
+The v0.1.3 provider accepts work only for ready members and does not add a
+general busy-target queue. `reuse_any_compatible`, collaboration-enabled roles,
+and automatic on-mail activation are rejected at live-session admission until
+their owning EPIC-009 implementation is delivered; historical schemas and
+snapshots remain readable. Explicit busy rejection and exact accepted-task
+replay are distinct. This is a documented version boundary, not silent policy
+coercion or removal of the later collaboration contract.
+
+Keep stable Role/task separation, request integrity, and applicable v3 result
+validators. Do not require review criteria for every Specialist or copy all
+external facade v3 fields into the Primary tool without an actual need.
+Fix live admission, actual result readability, async execution, and recovery
+holes inside the owning integration Tasks. Reuse existing writer, artifact,
+Run, and process-ownership mechanisms. A transport-specific or minimally
+necessary private schema successor must be checked before live registration;
+public v1 is not reopened.
+
+Use exactly eight planned integration Tasks with one initial completion commit
+per Task: TASK-025, TASK-047 through TASK-052, then TASK-026. Independent review,
+required verification, and affected docs belong to each Task before its initial
+completion commit. Do not put unsafe behavior in an intermediate commit or
+rewrite completed history merely to preserve a commit count. Later defects get
+explicit corrective ownership. Planning adoption, stable release metadata,
+publication, and installation retain their separate authorization boundaries.
+
+### Consequences
+
+Gul can develop against a tested provider contract without becoming a blocker.
+The real provider must still execute model-originated orchestration and return
+readable Specialist results; schema-only or fake-only success is insufficient.
+The v0.1.3 changelog remains Unreleased until separate release work completes.
+Broader queue/collaboration behavior and advanced public methods retain their
+existing later owners. Planned evidence references never count as executed QA.
+
+### Rejected alternatives
+
+- Wait for Gul before completing the provider: couples independent delivery to
+  a client that is not ready.
+- Rename a provider test as real Gul acceptance: misstates what was verified.
+- Publish only interface declarations or fake adapters: does not deliver live
+  Primary/Specialist operation.
+- Restore the sixteen-task scope or pull in EPIC-009 scheduling: adds work not
+  needed by the accepted provider slice.
+- Remove safety checks to force eight commits: task count is not a release gate.
