@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/live-transport-selection/v1",
+  "title": "Dolgorae live internal transport selection v1",
+  "description": "Checked TASK-025 probe verdict for one private MCP or native run-bound path. codex_pin is the isolated-home live campaign CLI version, not a change to the product compatibility baseline. Live host hashes and runtime identities are omitted from tracked instances.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "codex_pin",
+    "status",
+    "selected",
+    "live_evidence",
+    "required_scenarios",
+    "deterministic_probe",
+    "registration_mechanism",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "operation": { "const": "select_live_internal_transport" },
+    "codex_pin": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "status": {
+      "enum": ["unselected", "fixture_proved", "selected", "blocked"]
+    },
+    "selected": {
+      "type": ["string", "null"],
+      "enum": ["private_mcp", "native_run_bound", null]
+    },
+    "live_evidence": {
+      "enum": ["required", "recorded", "unavailable"]
+    },
+    "required_scenarios": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "source_binding",
+          "model_identity_injection",
+          "same_call_retry",
+          "different_input_conflict",
+          "concurrent_call_isolation",
+          "cancellation",
+          "bounded_wait_expiry",
+          "connection_loss",
+          "bridge_restart",
+          "stale_generation",
+          "credential_canary",
+          "shared_identity_ambiguity"
+        ]
+      }
+    },
+    "deterministic_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "native_run_bound",
+        "private_mcp_shared",
+        "private_mcp_dedicated_without_meta",
+        "collaboration_stub"
+      ],
+      "properties": {
+        "native_run_bound": { "const": "fixture_proved" },
+        "private_mcp_shared": { "const": "ambiguous_without_host_meta" },
+        "private_mcp_dedicated_without_meta": {
+          "const": "isolation_does_not_prove_turn_or_call"
+        },
+        "collaboration_stub": { "const": "inert_binding_only" }
+      }
+    },
+    "registration_mechanism": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "selected" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "selected": { "type": "string" },
+          "live_evidence": { "const": "recorded" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "unselected" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "selected": { "type": "null" },
+          "live_evidence": { "const": "required" }
+        }
+      }
+    }
+  ]
+}

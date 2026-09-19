@@ -1,0 +1,6 @@
+{
+  "operation": "orchestration_error",
+  "code": "RUN_STATE_CONFLICT",
+  "retryable": false,
+  "message": "the ready member already has an active task."
+}

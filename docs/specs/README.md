@@ -3102,8 +3102,67 @@ checked operations are:
 
 - request and await a Specialist instance;
 - list safe Specialist status;
-- assign, await, collect, and cancel Specialist tasks; and
+- assign, await, collect, cancel, and read Specialist tasks; and
 - request graceful Specialist release.
+
+`read_specialist_result` is the private reader for actual Primary content;
+`collect_specialist_results` remains the delivery-receipt cursor. A fresh busy
+assignment maps to `RUN_STATE_CONFLICT`. Unsupported live
+`reuse_any_compatible`, collaboration-enabled roles, and on-mail activation map
+to `LIVE_POLICY_UNSUPPORTED` on the private tool envelope and `POLICY_REJECTED`
+at live-session admission before Run allocation, without removing those future
+schema values. Identity fields stay outside model-controlled arguments.
+
+For a fresh successful `assign_specialist_task`, persist the acceptance receipt
+with `state: accepted` before dispatch. `blocking: false` returns that receipt
+without waiting for task completion. `blocking: true` delays its initial delivery
+until the task reaches a checked terminal state or the earlier of 60 seconds
+after durable acceptance and the original task deadline. Admission and
+validation before acceptance are not part of that wait budget. Both modes
+return the same immutable acceptance shape, never a current or terminal task
+observation. Even when work completes, fails, or expires during the wait, the
+response remains the accepted receipt; a new await/collect call observes the
+outcome. A durable acceptance MUST NOT become a fresh assignment error solely
+because the subsequent execution failed. Pre-acceptance rejection returns the
+ordinary checked error and creates no acceptance receipt.
+
+Exact retry returns the original persisted assignment receipt without another
+dispatch or another blocking wait. The 60-second wait ceiling and durable task
+deadline MUST NOT refresh after retry or restart. Cancellation of the tool wait,
+its expiry, and client disconnect stop waiting only; cancelling semantic work
+requires the explicit task-cancellation operation. Await operations use their
+own requested `transport_wait_seconds` in 1..60, observe the checked `any`/`all`
+terminal sets, and return a state snapshot plus pending IDs when the condition
+is met or the budget ends. Every response echoes results in request-ID order.
+Exact replay returns that call's original snapshot; a new call may see newer
+state. Waiting MUST NOT hold the SQLite mutation owner.
+
+The result reader operates on one already published, immutable, authorized
+Primary-owned UTF-8 artifact. `length` and `sha256` describe that complete
+artifact, including the exact original line endings; pages MUST NOT trim,
+normalize, redact again, replace undecodable bytes, or reserialize content.
+Authorization and whole-artifact integrity/UTF-8 validation precede a successful
+page. `offset` is an exact UTF-8 byte position, and `limit` is a maximum byte
+count in 1..65,536, not a character count. Neither value is silently rounded.
+The response echoes the requested offset and returns the longest complete UTF-8
+prefix of the remaining bytes that fits within the limit. The next offset is
+`offset + utf8_byte_length(content)`; no extra cursor field is needed.
+
+At `offset == length`, return empty content and `truncated: false`. Before EOF,
+a successful page MUST contain at least one complete character and advance the
+offset. An offset past EOF or inside a UTF-8 character, or a limit too small to
+fit the next complete character, returns `SPECIALIST_RESULT_UNREADABLE` with
+`retryable: false`, without partial content. The caller must correct the range
+and use a new call identity, not retry identical arguments. `truncated` is true
+exactly when the next offset is less than the artifact length. Request offset
+and result offset/length are bounded by the exact-integer limit 9,007,199,254,740,991;
+actual stored artifacts remain subject to the stricter existing storage quotas.
+Missing, unauthorized, not-yet-published, corrupt, or non-UTF-8 results also
+return `SPECIALIST_RESULT_UNREADABLE` with `retryable: false`, revealing no
+artifact metadata. An authorized caller uses a new await call to observe
+readiness before a new read; exact replay of an earlier read error does not
+become a later success. These are internal reader errors and do not change the
+public ArtifactService error contract.
 
 Under `user_approval_required`, every new Specialist instance creates a durable
 request and a typed `user_input` Controller Interaction on the Primary Run before
@@ -3183,15 +3242,84 @@ MUST NOT be reported as completed Gul integration. Neither Gul implementation
 nor Gul UI acceptance blocks the provider slice or its release eligibility.
 The roadmap owns completion status and the version boundary.
 
-The supported internal transport is selected by TASK-025 against the pinned
-Codex App Server baseline. A private MCP bridge and native run-bound tool
-support are candidates, not assumed capabilities. Select one proved path;
-do not build a multi-transport framework or upgrade the Codex pin implicitly.
+TASK-025 selected native run-bound `item/tool/call` on the locally installed
+Codex CLI isolated-home campaign pin (0.155.1). That campaign pin is not a
+change to the pinned Codex App Server 0.153.4 compatibility baseline. Do not
+build a multi-transport framework or upgrade the product pin implicitly.
 The probe MUST establish registration, source Run/Turn/call binding, retry
 identity, cancellation, bounded wait, disconnect, and restart behavior.
 Dedicated Lane isolation alone does not prove Turn or call identity. An
 unproved transport blocks live implementation, not a downgrade to fake-only
 acceptance. External review MCP availability remains independently gated.
+
+#### Live Primary Internal Contract
+
+These boundaries are frozen here. Production wiring belongs to the existing
+EPIC-008 Tasks named below. Do not add a job framework, collaboration mailbox,
+second scheduler, or public API to satisfy them.
+
+**Accepted execution identity (TASK-049/050, recovery in TASK-052).** Task
+admission reserves the Broker `task_id`, accepted content, request digest,
+deadline origin, and acceptance receipt before dispatch can cause effects. Turn
+submission receives that accepted identity and an immutable execution
+description; it reports accepted execution with a Run/Turn reference, a known
+pre-effect rejection, or an ambiguous submission. Completion observation
+watches the already associated Turn and MUST NOT submit another Turn to obtain
+the result. Task settlement binds the terminal outcome to the original task and
+delivers separately. The adapter MUST NOT invent a second semantic task ID from
+prompt text. Two identical briefs with different task identities remain
+distinct. A missing outer tool response is recovered from the accepted
+operation. A known accepted or running Turn is not unknown merely because the
+caller lost its reply. Assignment still returns the original accepted receipt;
+`blocking` only delays that receipt. Await/collect expose later state.
+
+**Worker/Broker routing (TASK-047/048, wait in TASK-050).** The Worker/App
+Server adapter receives and classifies the upstream tool request. The run-bound
+bridge authenticates its source and forwards a bounded request. The Broker
+admits the semantic operation and owns durable state. The bridge retains the
+ephemeral upstream response destination bound to the owning Worker generation.
+Approval and completion are observed through existing control-plane and Run
+events without occupying the Worker processing loop. The owning Worker returns
+the result after validating that destination. A replaced connection or Worker
+generation invalidates the destination; it does not mint a new task or erase an
+accepted operation. Duplicate completion notifications MUST NOT resolve an
+upstream request twice. Broker-created approvals carry an internal origin and a
+durable spawn-operation reference; responses route to that operation, not to an
+unrelated Codex pending request that shares an identifier. A waiting tool
+request MUST NOT block approvals, interrupts, App Server events, or other Runs.
+
+**Outcome classification (TASK-047 response handling; operations in
+TASK-048/049/050/051).** Distinguish a final business outcome from an
+infrastructure failure. Reuse existing call-result and operation records.
+
+| Outcome | Treatment |
+| --- | --- |
+| Accepted task or successful read | Return or reconstruct the recorded response; do not repeat work. |
+| Final business rejection for an authenticated call | Commit the safe error before replying; exact retry returns it; a new call identity may request a new decision. |
+| Lost connection, uncertain submission, or storage failure before a durable decision | Preserve known state and reconcile. Do not cache a business rejection or replay possibly accepted work. |
+| Unauthenticated or forged source | Reject at the trust boundary. Do not reserve a legitimate call identity or return a cached result. |
+
+Do not persist every `MachineError`, freeze transient infrastructure failures as
+permanent business results, or store sensitive diagnostics in replayable errors.
+Exact replay still requires current caller authority. Semantic call identity and
+normalized request digest MUST agree across bridge, reservation, and ledger.
+Generation fences are not that identity. If a final operation decision commits
+before the outer tool response is recorded, reconstruct the response from the
+committed decision.
+
+**Authorization ownership (TASK-047/048/049).** Worker/bridge answers whether
+the request belongs to the expected Run, Thread, Turn, and current
+transport/Worker generation. Broker answers whether that caller may request the
+operation in this aggregate. Task admission answers whether immutable policy,
+member access, requested intent, membership, and current readiness permit the
+work. The execution boundary rechecks Run, writer, and working-root conditions
+immediately before effects. Authenticated call context is constructed only by
+the component that performs source validation. Deserialization, a
+caller-created struct, an environment marker, or the probe `TrustedBinding`
+helper is not that validation. Fresh-call admission is separate from authorized
+receipt replay. Validate requested access against the member's admitted rights
+and Role policy, not only the enum vocabulary, and reject disallowed work
+before creating a task, moving writers, or dispatching a Turn.
 
 Both `user_approval_required` and `fully_delegated` MUST work through the live
 Broker. Hiring rationale MUST NOT become executable work or alter the stable
@@ -3217,9 +3345,11 @@ A ready member accepts at most one active task. Concurrent independent members
 may execute work, but v0.1.3 MUST NOT enqueue additional work for a busy member,
 preempt it, or auto-hire a replacement. A fresh busy-target assignment returns
 the existing checked `RUN_STATE_CONFLICT` before task acceptance or external
-effects. Exact retry of an already accepted assignment instead returns its
-durable acceptance receipt and does not fail merely because its target is now
-busy. `never` and `reuse_idle_compatible` are the live reuse policies.
+effects and commits that rejection to the trusted call identity. Exact retry of
+that authenticated rejection returns the same `RUN_STATE_CONFLICT`; a new call
+identity may assign later if the member is idle. Exact retry of an already
+accepted assignment returns its durable acceptance receipt and does not fail
+merely because its target is now busy. `never` and `reuse_idle_compatible` are the live reuse policies.
 `reuse_any_compatible`, collaboration-enabled roles, and automatic on-mail
 activation policies remain valid target-schema concepts but MUST be rejected
 as unsupported at live-session admission before Run allocation. They MUST NOT

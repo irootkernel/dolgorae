@@ -1,0 +1,6 @@
+{
+  "operation": "orchestration_error",
+  "code": "LIVE_POLICY_UNSUPPORTED",
+  "retryable": false,
+  "message": "live admission rejects collaboration-enabled roles until EPIC-009."
+}

@@ -1,0 +1,9 @@
+{
+  "operation": "read_specialist_result_result",
+  "task_id": "018f0000-0000-7000-8000-0000000000aa",
+  "length": 12,
+  "sha256": "bbbae5d4a00bd54097dee5cef6677f9f25cb5aeb43f2a84e10c2e1a862e0c4de",
+  "offset": 0,
+  "content": "hello result",
+  "truncated": false
+}

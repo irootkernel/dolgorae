@@ -480,10 +480,16 @@ The Primary Orchestration Service is a transport-independent broker adapter. Its
 checked model-facing payload contract is
 [`dolgorae-orchestration-tool-v1.schema.json`](../protocol/dolgorae-orchestration-tool-v1.schema.json).
 It implements Specialist request and operation wait, safe listing, bounded task
-assignment, task wait and result collection, and graceful release. The live
-run-bound adapter is selected only after TASK-025 proves one supported MCP or
-native tool path. Neither candidate is assumed available on the pinned Codex
-version. Unit tests use an internal fake adapter against the same service.
+assignment, task wait, result collection, private `read_specialist_result`, and
+graceful release. TASK-025 selected native Codex `item/tool/call` on the
+isolated-home campaign pin (locally installed Codex CLI 0.155.1). That campaign
+pin is not a change to the Codex App Server 0.153.4 product compatibility
+baseline, and the isolated probe is not the production adapter. Deterministic
+fixtures prove native worker Turn/call binding and show that shared MCP identity
+is ambiguous without a host-controlled carrier; Dedicated Lane isolation does
+not invent Turn or call identity. Unit tests use an internal fake adapter
+against the same service. The fake `dispatch_task` helper still returns a
+completed task; production TASK-049/050 must not keep that seam.
 
 The bridge binds session, Primary Run, source Turn, tool-call ID, inherited root
 priority, Controller authority, and idempotency outside model arguments. The
@@ -541,7 +547,9 @@ that point, fills the bounded page with newly completed tasks in the same SQLite
 transaction, and returns the last delivered sequence as `next_after_sequence`.
 An empty page echoes the input cursor. This preserves ordered receipt replay
 without letting an old page consume the capacity needed to deliver later
-results.
+results. `read_specialist_result` is the frozen private reader for actual
+Primary-owned bytes; `collect_specialist_results` remains only the delivery
+cursor.
 
 ### Live Provider Integration Boundary
 
@@ -556,6 +564,14 @@ Run/Turn/tool-call identity, not model arguments, environment markers, socket
 identity alone, or a reconnect-local JSON-RPC request number. Worker/server
 generation is checked as an authority fence, not used to manufacture a fresh
 semantic idempotency key on retry. Preserve durable call and reuse receipts.
+Native registration is the App Server `item/tool/call` server request on a
+Run-scoped host tool advertisement, not a shared Profile edit or MCP
+`config.toml` registration. The isolated TASK-025 probe lives in
+`src/live_transport.rs` and the hidden `__live-transport-mcp` stdio entry; it
+must not be wired as the production adapter in TASK-025. TASK-047 performs
+source authentication on the live request and MUST NOT treat the probe
+`TrustedBinding` helper as that proof.
+
 The future-collaboration portion of TASK-025 probes only source Run/Turn/call
 binding through an inert schema-shaped stub in an isolated test environment.
 Temporary test-only tool registration is allowed when needed for that proof.
@@ -588,14 +604,43 @@ span a model Turn or client wait. Known pre-effect work may be resumed, but an
 unknown publication/Turn boundary may not be replayed. This is a bounded
 execution adapter, not the EPIC-009 Mailbox Scheduler.
 
+Internal live-Primary ownership, frozen by TASK-025:
+
+1. **Admission versus execution.** The Broker reserves `task_id` and the
+   acceptance receipt before effects. The adapter submits that identity and
+   reports Turn acceptance, a known pre-effect rejection, or ambiguous
+   submission. Completion is observed on the associated Turn. Settlement and
+   delivery stay with the Broker.
+2. **Request versus response destination.** The Worker classifies the App Server
+   tool request. The run-bound bridge authenticates and forwards it, and holds
+   the pending reply destination for the current Worker generation. The Broker
+   owns durable operation state. Existing Run/control-plane events observe
+   approval and completion without occupying `drain_run`. The owning Worker
+   replies only after validating that destination. Broker approvals carry an
+   internal origin and spawn-operation reference.
+3. **Business rejection versus infrastructure failure.** Commit authenticated
+   final rejections, including busy assignment, onto the trusted call identity
+   so exact retry returns them. Reconstruct an accepted result from the
+   operation receipt if the outer tool ledger missed the reply. Do not cache
+   unauthenticated or incomplete attempts.
+4. **Authentication versus admission.** Probe `TrustedBinding` is not production
+   source authentication. Worker/bridge binds Run/Thread/Turn/generation.
+   Broker authorizes the aggregate operation. Task admission compares requested
+   access with the member's admitted rights and Role policy before writer
+   movement or Turn dispatch. Execution rechecks writer and working-root
+   conditions immediately before effects.
+
 Task-result validation checks the original accepted request before inspecting
 an output discriminator. Actual immutable result bytes must exist before the
 Broker publishes completion or a readable artifact reference. Use a durable
 write-ahead association and idempotent reconciliation between existing artifact
 storage and SQLite; do not claim atomicity across them. A Primary-owned result
-projection or narrowly authorized private reader gives the Primary and its
-Controller access without exposing a child credential or arbitrary child files.
-TASK-025 fixes the minimal checked result/read contract; TASK-051 implements it.
+projection or the frozen private `read_specialist_result` reader gives the
+Primary and its Controller access without exposing a child credential or
+arbitrary child files. The specification fixes assignment receipt/wait and UTF-8 result-page rules.
+TASK-051 implements the reader. A page is a nonempty UTF-8-boundary-preserving
+prefix before EOF; invalid byte ranges or an undersized next-character budget
+return a checked error, not a lossy or non-progressing page.
 
 Each implementation Task owns its effect-boundary recovery tests. TASK-052 adds
 cross-component restart/retirement acceptance, including isolated working

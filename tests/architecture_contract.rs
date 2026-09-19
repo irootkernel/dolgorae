@@ -158,6 +158,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
+        ("live_transport", &["jcs", "machine"][..]),
+        ("live_transport_mcp", &["live_transport", "machine"][..]),
         ("mcp_review", &[][..]),
         (
             "mcp_review_server",

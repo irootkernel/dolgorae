@@ -118,6 +118,10 @@ into TASK-025.
 | Request shape | Supported operations and exact text/context bounds; existing v1 preserved or a minimal checked private successor |
 | Task content | Accepted bytes and context provenance; artifact authorization/resolution before dispatch; hiring rationale remains non-executable |
 | Wait behavior | Define `blocking`, `any`/`all`, terminal sets, transport budget, cancellation, and durable deadline independently |
+| Submission versus completion | Broker `task_id` and acceptance receipt before effects; adapter reports Turn acceptance; completion is observed, not resubmitted |
+| Worker/Broker routing | Authenticated forward, durable Broker state, ephemeral Worker-generation reply destination; no Worker-loop wait for approval |
+| Outcome classification | Commit authenticated business rejections for exact replay; reconstruct accepted results; do not cache incomplete or forged calls |
+| Authorization ownership | Source authentication, aggregate authorization, task-access admission, and pre-effect recheck are distinct |
 | Unsupported policies | Checked error mapping for live queue/collaboration/activation rejection, without removing future schema values |
 | Result access | Bounded actual Primary consumption and authorized client access; no child Controller disclosure |
 | Public compatibility | Byte-identical public Protobuf source and descriptor; unchanged minimum method inventory |
@@ -140,29 +144,62 @@ Tests and recovery for a newly introduced effect belong to that same Task.
 
 Prerequisites: TASK-023, TASK-024, EPIC-014, EPIC-015 complete.
 
-- [ ] Reconcile baseline code with the accepted slice; preserve unrelated work.
-- [ ] Implement isolated probe/fixtures and obtain required live authorization.
-- [ ] Prove one MCP or native path, including ambiguous-shared-identity handling.
-- [ ] Limit the future-collaboration probe to source Run/Turn/call binding with
+- [x] Reconcile baseline code with the accepted slice; preserve unrelated work.
+- [x] Implement isolated probe/fixtures; live authorization remains a separate
+  completion gate.
+- [x] Prove native worker Turn/call binding in fixtures, including ambiguous
+  shared MCP identity and Dedicated Lane isolation that does not invent Turn/call.
+- [x] Limit the future-collaboration probe to source Run/Turn/call binding with
   an isolated inert stub; use temporary test-only registration only when needed
   for that proof.
-- [ ] Freeze every contract item in section 4 and synchronize checked artifacts.
-- [ ] Confirm source identity, retry, cancellation, wait, restart, and secret canaries.
-- [ ] Complete independent review and one initial completion commit.
+- [x] Freeze section 4 plus the D1-D4 internal live-Primary contract and
+  synchronize checked artifacts.
+- [x] Define immutable assignment receipts, the fixed acceptance-anchored blocking budget, and lossless UTF-8 page/error rules in the specification and schema.
+- [x] Confirm source identity, retry, cancellation, wait, restart, and secret
+  canaries in deterministic probes.
+- [x] Obtain isolated live evidence on the locally installed Codex CLI 0.155.1
+  and select native `item/tool/call`. That campaign pin is not a product-baseline
+  change; cancellation and stale-generation remain fixture_proved without a
+  model turn.
+- [x] Complete independent review and one initial completion commit.
 
 Production Specialist collaboration registration, advertisement, operation
 handlers, mailbox, and scheduler implementation remain in EPIC-009. The inert
 probe is not collaboration acceptance. This restriction does not reduce the
 selected Primary transport's retry, cancellation, wait, disconnect, or restart
 proof. Do not implicitly upgrade Codex or accept fake-only transport proof.
-Next: TASK-047, only after TASK-025 is `COMPLETE`.
+Next: TASK-047.
+
+Internal handoff for TASK-047:
+
+- Reference the selected transport in
+  `docs/protocol/dolgorae-live-transport-selection-v1.json`: native
+  `item/tool/call` on local Codex CLI 0.155.1.
+- Bind session, source Run, Turn, and tool-call from the app-server request
+  fields `threadId`, `turnId`, and `callId` plus Dolgorae Run identity, never
+  from model-controlled arguments or the probe `TrustedBinding` helper.
+- Authenticate the live request on the Worker/bridge; keep Broker authorization
+  and task-access admission as separate checks.
+- Hold the pending tool reply on the current Worker generation without waiting
+  inside `drain_run` for Broker approval or completion.
+- Record authenticated business rejections, including busy assignment, so exact
+  retry returns them; reconstruct accepted results from operation receipts.
+- Do not edit a shared global Profile to register the tool.
+- Revalidate the `item/tool/call` required-field contract if the installed
+  Codex CLI version changes.
+- Do not implement production collaboration handlers or a second transport.
 
 ### TASK-047: Trusted live bridge
 
 Input: the selected checked transport and contract.
 
 - [ ] Wire only the Primary tool to the existing orchestration semantic service.
-- [ ] Construct trusted call context outside model arguments; validate Run/Turn/call.
+- [ ] Construct trusted call context outside model arguments; validate Run/Turn/call
+  and current Worker generation. Do not treat the probe `TrustedBinding` helper
+  as production authentication.
+- [ ] Hold the pending upstream reply on the owning Worker generation and observe
+  Broker approval/completion through existing Run events; do not wait inside
+  `drain_run`.
 - [ ] Preserve semantic retry identity while fencing stale generations.
 - [ ] Retain existing call/reuse receipts across lost replies and reconnect.
 - [ ] Isolate registration without editing a shared global Profile.
@@ -194,8 +231,11 @@ Next: TASK-049.
 Input: an actual ready Specialist with an admitted immutable configuration.
 
 - [ ] Compose separate bounded task content and authorized immutable context.
-- [ ] Validate member/session/access and replay before fresh busy admission.
+- [ ] Validate member/session/access, including requested intent versus admitted
+  member access and Role policy, and replay before fresh busy admission.
 - [ ] Commit accepted bytes, identity, and deadline origin before execution effects.
+- [ ] Pass the Broker `task_id` into Turn submission; do not wait on
+  `CompletedTask` from the fake adapter seam.
 - [ ] Split acceptance from completion and record authoritative target Turn evidence.
 - [ ] Connect existing writer/isolated roots; refuse unsafe active-source writer yield.
 - [ ] Test concurrent admission, Role/task invariance, busy rejection, and every dispatch crash boundary.

@@ -23,6 +23,8 @@ pub(crate) mod interaction;
 pub(crate) mod interaction_payload;
 pub mod jcs;
 pub mod ledger;
+pub mod live_transport;
+pub mod live_transport_mcp;
 pub mod machine;
 pub mod mcp_review;
 pub mod mcp_review_server;

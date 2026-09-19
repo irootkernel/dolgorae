@@ -344,5 +344,5 @@
       }
     }
   },
-  "x-privateTransport": "Private run-bound tool transport selected by TASK-025; production collaboration is deferred to EPIC-009; outside dolgorae.public.v1"
+  "x-privateTransport": "TASK-025 probes source Run/Turn/call binding through an isolated inert stub only; production collaboration registration, handlers, mailbox, and scheduler remain EPIC-009; outside dolgorae.public.v1"
 }

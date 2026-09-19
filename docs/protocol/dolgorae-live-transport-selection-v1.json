@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "operation": "select_live_internal_transport",
+  "codex_pin": "0.155.1",
+  "status": "selected",
+  "selected": "native_run_bound",
+  "live_evidence": "recorded",
+  "required_scenarios": [
+    "source_binding",
+    "model_identity_injection",
+    "same_call_retry",
+    "different_input_conflict",
+    "concurrent_call_isolation",
+    "cancellation",
+    "bounded_wait_expiry",
+    "connection_loss",
+    "bridge_restart",
+    "stale_generation",
+    "credential_canary",
+    "shared_identity_ambiguity"
+  ],
+  "registration_mechanism": "Codex App Server server request item/tool/call on a Run-scoped host tool advertisement. Not shared Profile mutation and not MCP config.toml.",
+  "deterministic_probe": {
+    "native_run_bound": "fixture_proved",
+    "private_mcp_shared": "ambiguous_without_host_meta",
+    "private_mcp_dedicated_without_meta": "isolation_does_not_prove_turn_or_call",
+    "collaboration_stub": "inert_binding_only"
+  },
+  "reason": "Local Codex CLI 0.155.1 is the TASK-025 isolated-home campaign pin, not a change to the 0.153.4 product baseline. Live schema required fields prove native item/tool/call identity. Isolated-home MCP forwarding proved host _meta, retry, conflict, injection, concurrency, canaries, wait expiry, in-flight disconnect, restart replay, and shared-identity ambiguity. Cancellation and stale-generation remain fixture_proved without a model turn."
+}

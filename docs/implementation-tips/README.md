@@ -98,8 +98,20 @@ Reuse the existing Broker, Run/Worker, writer, artifact, and process inventory
 owners. Share task-content helpers and applicable result validators without
 using the External Specialist CLI/facade as the Broker backend or forcing review
 criteria onto ordinary tasks. Do not mutate shared global Profiles for one
-Run's tool registration. TASK-025 selects one proved MCP or native path on the
-pinned Codex version; neither is an assumed capability.
+Run's tool registration. TASK-025 selected native `item/tool/call` on the isolated-home live campaign
+pin (locally installed Codex CLI, currently 0.155.1). That campaign pin is not
+a change to the Codex App Server 0.153.4 product compatibility baseline.
+Deterministic probes and the checked selection artifact live under
+`src/live_transport.rs` and
+`docs/protocol/dolgorae-live-transport-selection-v1.json`. The hidden
+`__live-transport-mcp` entry is test-only and must not edit a shared Profile.
+`DOLGORAE_RUN_LIVE_TRANSPORT_PROBE=1` runs the isolated live probe against the
+local `codex` binary. The campaign creates its own Codex home and must not use
+`~/.codex` or `~/.dolgorae`. It is outside the complete repository gate.
+Production TASK-047 authenticates live `item/tool/call`; TASK-049/050 split
+admission from completion and must not keep the fake `CompletedTask` seam.
+Commit authenticated busy rejections for exact replay. Compare assignment
+intent with admitted member access before writer movement.
 
 Separate durable task acceptance, Turn acceptance, completion, and delivery.
 Replay an accepted receipt before fresh busy checks. Validate immutable policy,
@@ -108,7 +120,12 @@ No SQLite transaction or global mutation owner spans a model Turn, approval,
 or bounded wait. Route broker approvals to their spawn operation, not a Codex
 pending request. Use injected clocks and retain the original durable deadline.
 Transport timeout or disconnect is not cancellation; interrupt acknowledgement
-alone is not terminal proof. Never replay possibly accepted work.
+alone is not terminal proof. Never replay possibly accepted work. Assignment
+always returns its durable accepted receipt. For fresh `blocking: true` calls,
+wait only until terminal state or the earlier of acceptance plus 60 seconds and
+the durable deadline; exact retry returns the receipt without re-waiting. A new
+await/collect call obtains terminal state. Test these response shapes without
+implementing the production dispatch/wait path ahead of its owning Task.
 
 Check accepted-request identity before its output discriminator. Validate the
 requested output before publishing completion. An artifact ID must name real
@@ -116,6 +133,12 @@ immutable bytes with matching length and digest. Use write-ahead reconciliation
 between existing artifact storage and SQLite, not a cross-store atomicity claim.
 Expose only a permitted Primary result projection or bounded private reader,
 never child credentials or arbitrary child files. Preserve cursor redelivery.
+For text pages, offset must be a UTF-8 boundary and content the longest complete
+prefix within the requested byte limit. Reject an undersized next-character
+limit or invalid offset; never return an empty pre-EOF page or replacement
+characters. Preserve exact CRLF, hash the complete immutable readable artifact,
+and test Korean, emoji, EOF, malformed ranges, and lossless page concatenation.
+The contract fixtures are reference checks, not evidence of the TASK-051 reader.
 
 Restore pinned Run/thread/Profile/access, isolated work roots, writer state,
 deadlines, and receipts on restart. The existing external-engagement isolated-

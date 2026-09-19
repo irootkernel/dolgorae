@@ -9,6 +9,7 @@ development commits.
 
 ### Added
 
+- Select native Codex `item/tool/call` as the private live Primary transport on the TASK-025 isolated-home campaign pin (locally installed Codex CLI 0.155.1; the product compatibility baseline remains 0.153.4). Freeze assignment receipts and `blocking` waits, lossless UTF-8 `read_specialist_result` pages, and the internal live-Primary boundaries for submission versus completion, Worker/Broker routing, business-rejection replay, and layered authorization.
 - Add verified orphan inspection and cleanup for detached Dolgorae processes, including disposable E2E owners.
 - Add task-aware Specialist Review v3 for one-shot and reusable assignments,
   with exact accepted briefs, inline contexts, ordered completion criteria, and criterion-complete structured results.

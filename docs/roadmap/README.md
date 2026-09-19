@@ -1441,7 +1441,7 @@ the Task and Epic become `COMPLETE`.
 
 ## EPIC-008: Live Dolgorae Provider and Brokered Hierarchy
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [EPIC-008 execution dossier](../todo/EPIC-008-live-provider.md)
 
@@ -1484,7 +1484,13 @@ merely by this plan; use the existing applicable approval boundaries.
 
 ### TASK-025: Pinned Transport Probe and Live Provider Contract
 
-Status: `PLANNED`
+Status: `COMPLETE`
+
+Freeze the internal live-Primary contract in the specification and architecture:
+accepted execution identity, Worker/Broker routing, business-rejection replay,
+and layered authorization. Production wiring of those boundaries remains with
+TASK-047 through TASK-051. The campaign pin is the locally installed Codex CLI;
+the product compatibility baseline remains 0.153.4.
 
 Depends on `TASK-023`, `TASK-024`, `EPIC-014`, and `EPIC-015`. Start here.
 Compare private MCP and native run-bound tool candidates on the checked Codex

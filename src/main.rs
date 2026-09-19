@@ -279,7 +279,7 @@ fn execute(cli: Cli) -> ExitCode {
         &cli.command,
         Command::Runtime {
             command: RuntimeCommand::Capabilities
-        }
+        } | Command::LiveTransportMcp(_)
     ) {
         let home = match dolgorae::paths::DolgoraeHome::system() {
             Ok(home) => home,
@@ -293,6 +293,22 @@ fn execute(cli: Cli) -> ExitCode {
         if let Err(error) = generation {
             return render_failure(cli.human, command_name, error);
         }
+    }
+    if let Command::LiveTransportMcp(args) = &cli.command {
+        return match dolgorae::live_transport_mcp::ProbeProcessBinding::parse(
+            &args.session_id,
+            &args.run_id,
+            args.generation,
+            args.dedicated_lane,
+        )
+        .and_then(dolgorae::live_transport_mcp::serve_stdio)
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("dolgorae MCP startup failed: {}", error.code);
+                ExitCode::from(error.exit_status())
+            }
+        };
     }
     if let Command::SpecialistReviewMcp(args) = &cli.command {
         return match dolgorae::mcp_review_server::serve_stdio(&args.workspace, &args.profile) {
@@ -652,6 +668,9 @@ fn execute(cli: Cli) -> ExitCode {
         Command::Worker(_) => unreachable!("hidden worker handled before semantic dispatch"),
         Command::SpecialistReviewMcp(_) => {
             unreachable!("hidden MCP server handled before semantic dispatch")
+        }
+        Command::LiveTransportMcp(_) => {
+            unreachable!("hidden live-transport MCP probe handled before semantic dispatch")
         }
         Command::Version(_) => unreachable!("version handled before semantic dispatch"),
         Command::ReviewTarget { .. } => {

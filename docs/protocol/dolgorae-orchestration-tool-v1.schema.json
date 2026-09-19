@@ -41,6 +41,12 @@
       "$ref": "#/$defs/collect_results_result"
     },
     {
+      "$ref": "#/$defs/read_result_request"
+    },
+    {
+      "$ref": "#/$defs/read_result_result"
+    },
+    {
       "$ref": "#/$defs/cancel_task_request"
     },
     {
@@ -671,6 +677,98 @@
         }
       }
     },
+    "read_result_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "offset",
+        "limit"
+      ],
+      "properties": {
+        "operation": {
+          "const": "read_specialist_result"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      }
+    },
+    "read_result_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "task_id",
+        "length",
+        "sha256",
+        "offset",
+        "content",
+        "truncated"
+      ],
+      "properties": {
+        "operation": {
+          "const": "read_specialist_result_result"
+        },
+        "task_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "content": {
+          "type": "string",
+          "x-maxUtf8Bytes": 65536
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "truncated": { "const": true } },
+            "required": ["truncated"]
+          },
+          "then": {
+            "properties": { "content": { "minLength": 1 } }
+          }
+        }
+      ],
+      "x-invariants": [
+        "content is an exact slice of one already published immutable authorized Primary-owned UTF-8 artifact; no trimming, normalization, replacement, or page-wise redaction",
+        "length and sha256 cover the complete Primary-readable artifact, not the returned page",
+        "offset is echoed exactly and must be at a UTF-8 character boundary; limit is a maximum byte count",
+        "content is the longest complete UTF-8 prefix of the remaining bytes that fits within limit",
+        "offset past EOF, offset inside a character, or a limit too small for the next character returns SPECIALIST_RESULT_UNREADABLE with retryable false",
+        "before EOF a successful page is nonempty; at offset equal to length return empty content and truncated false",
+        "next offset is offset plus the UTF-8 byte length of content and truncated is true exactly when that value is less than length",
+        "whole-artifact integrity and UTF-8 validity are checked before success; storage quotas still apply",
+        "the model never receives a child Controller credential, private socket, database path, or host file path"
+      ]
+    },
     "release_request": {
       "type": "object",
       "additionalProperties": false,
@@ -742,10 +840,13 @@
             "SPECIALIST_NOT_ACTIVE",
             "SPECIALIST_TASK_LIMIT",
             "SPECIALIST_WRITER_CONFLICT",
+            "RUN_STATE_CONFLICT",
+            "LIVE_POLICY_UNSUPPORTED",
             "TARGET_RUN_TERMINAL",
             "INTERRUPTED_UNKNOWN",
             "SPECIALIST_TASK_NOT_FOUND",
-            "SPECIALIST_TASK_NOT_CANCELLABLE"
+            "SPECIALIST_TASK_NOT_CANCELLABLE",
+            "SPECIALIST_RESULT_UNREADABLE"
           ]
         },
         "retryable": {
@@ -806,7 +907,7 @@
       }
     }
   },
-  "x-privateTransport": "One run-bound MCP or native transport selected by TASK-025 after pinned proof; not part of dolgorae.public.v1. Existing v1 shapes are preserved; any necessary live successor is separately checked.",
+  "x-privateTransport": "Native run-bound item/tool/call selected by the TASK-025 isolated-home campaign on locally installed Codex CLI 0.155.1; that campaign pin is not a change to the Codex App Server 0.153.4 product compatibility baseline. Thread, turn, and call identity are protocol fields, not model arguments. Not part of dolgorae.public.v1.",
   "x-transportBoundFields": [
     "orchestrated_session_id",
     "source_primary_run_id",
@@ -815,5 +916,57 @@
     "controller_principal",
     "root_priority",
     "idempotency_key"
-  ]
+  ],
+  "x-waitSemantics": {
+    "blocking": "false returns the durable acceptance receipt without a completion wait; true delays initial receipt delivery until a task terminal state or the earlier of accepted_at plus 60 seconds and the durable task deadline",
+    "blocking_budget_seconds": 60,
+    "blocking_budget_origin": "durable task acceptance; retries and restarts never refresh it",
+    "blocking_response": "both modes always return the immutable state accepted receipt; later terminal state is observed with a new await or collect call",
+    "blocking_timeout": "returns that accepted receipt; never cancels work or substitutes a terminal state or post-acceptance execution error",
+    "blocking_replay": "returns the original receipt without another dispatch or blocking wait",
+    "blocking_tool_cancellation": "stops waiting only; semantic task cancellation requires cancel_specialist_task",
+    "return_when": "any or all over the named operation or task ids",
+    "transport_wait_seconds": "bounded 1..60; expiry returns current observations and pending ids",
+    "operation_terminal_states": [
+      "ready",
+      "denied",
+      "failed",
+      "cancelled",
+      "recovery_required"
+    ],
+    "operation_non_terminal_states": [
+      "awaiting_approval",
+      "requested",
+      "provisioning"
+    ],
+    "task_terminal_states": [
+      "completed",
+      "failed",
+      "cancelled",
+      "interrupted_unknown",
+      "expired"
+    ],
+    "task_non_terminal_states": [
+      "accepted",
+      "queued",
+      "claimed",
+      "dispatching",
+      "running"
+    ],
+    "recovery_required": "operation-terminal for wait; not proof that no effect occurred",
+    "disconnect_or_cancel": "does not use wait terminal sets as proof of no effect",
+    "exact_retry": "same trusted call identity returns the original receipt",
+    "new_call": "a new tool-call identity may observe newer state"
+  },
+  "x-unsupportedPolicyErrors": {
+    "reuse_any_compatible": "LIVE_POLICY_UNSUPPORTED",
+    "collaboration_enabled_role": "LIVE_POLICY_UNSUPPORTED",
+    "on_mail_activation": "LIVE_POLICY_UNSUPPORTED",
+    "fresh_busy_assignment": "RUN_STATE_CONFLICT",
+    "authenticated_busy_rejection": "commit RUN_STATE_CONFLICT for that trusted call identity; exact retry returns it; a new call identity may assign when idle",
+    "exact_accepted_replay": "original acceptance receipt, not RUN_STATE_CONFLICT",
+    "admission_before_run_allocation": "POLICY_REJECTED",
+    "private_tool_envelope": "LIVE_POLICY_UNSUPPORTED"
+  },
+  "x-resultReadContract": "Primary consumes exact UTF-8 pages through read_specialist_result; invalid ranges, undersized next-character limits, unreadable or not-yet-published results return SPECIALIST_RESULT_UNREADABLE with retryable false and no metadata. New await/read calls may observe readiness; exact retry preserves the original response. collect_specialist_results remains the delivery-receipt cursor; public clients read the Primary-owned artifact through unchanged public ArtifactService contracts."
 }

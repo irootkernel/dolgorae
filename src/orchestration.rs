@@ -324,6 +324,10 @@ pub trait OrchestrationAdapter {
         plan: &BrokeredRunPlan,
         credential: &BrokerCredential,
     ) -> Result<(), AdapterFailure>;
+    /// Fake-adapter seam: the current helper returns a completed task.
+    /// Production TASK-049/050 must split admission, Turn submission, and
+    /// completion observation. The adapter receives the Broker `task_id`; it
+    /// must not invent a second semantic identity from prompt text.
     fn dispatch_task(
         &mut self,
         member: &BrokeredMemberSnapshot,
