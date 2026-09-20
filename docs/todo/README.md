@@ -25,12 +25,15 @@ roadmap identity, order, status, or dependencies.
 ### Actual Gul consumer acceptance
 
 - Owner: Gul integration maintainers, with Dolgorae provider maintainers
-- Prerequisite: Gul has a supported runnable client and Dolgorae has completed
-  `MILESTONE-BH1-P` provider acceptance.
+- Prerequisite: Gul has a runnable client pinned to the TASK-053 consumer contract,
+  and an exact Dolgorae v0.1.3 artifact is released after MILESTONE-BH1-P and
+  separate RC QA. Contract-ready permits mock/UI development, not actual integration.
 - Outcome: verify actual Gul startup/supervision, protected Controller carriers,
   Orchestrated Session creation, approval UX, Specialist result rendering,
-  artifact metadata/chunks and digest, event reconnect, and provider restart
-  against exact supported client/provider revisions.
+  public result discovery and artifact metadata/chunks/digest, complete original
+  prompt history through pages/restart/close, sequential human input without
+  queue/steering, whole-session close/recovery and event reconnect against exact
+  supported client/provider revisions.
 - Evidence: `real_gul_harness`, meaning the actual Gul client and its integration
   campaign, not a Gul-shaped test client or provider-only tests.
 - Milestone: only this separately adopted consumer campaign can establish
@@ -41,11 +44,44 @@ roadmap identity, order, status, or dependencies.
 - Revisit condition: Gul is ready for integration; adopt a bounded acceptance
   item then, with concrete revision/build inputs and normal completion gates.
 
+### Read-only Podway observation
+
+- Scope: post-v0.1.3, without an assigned release or active Task slot. Inspect
+  Podway's actual contract before assigning implementation IDs; do not invent
+  a source API from this requirements record.
+- Authority: Podway owns FSM definition and actual execution; Dolgorae publishes
+  safe bound observations; Gul renders them without direct Podway state access.
+- Data: full pinned graph/version/digest, execution identity distinct from the
+  Session, active node set, node states and stable execution identities/counts,
+  per-loop iterations including nested loops, revision and freshness.
+- Definition binding: display the complete definition used by that execution,
+  not a newly edited definition file. Preserve definition and execution identity
+  through snapshot/update recovery, parallel nodes and nested loops.
+- Counts: initial execution is the first occurrence. A genuinely new execution
+  attempt increments its node count; skipped nodes do not count as executed.
+  Loop iteration and node execution count are independent source facts, never
+  derived by incrementing on notification arrival.
+- Recovery: duplicates, reconnect and resume of the same execution do not
+  increment counts. Multiple executions remain distinct. Missing source evidence
+  is stale/unavailable, never fabricated zero counts or completion.
+- Prompt correlation may later link a workflow execution to its initiating user
+  request, but must not delay or become a dependency of v0.1.3 history.
+- Read-only boundary: no Gul UI/backend/API FSM editing, jump, skip, force-complete,
+  retry-node or reset-count action. Zoom/selection/details affect presentation only.
+  Changes or jumps are ordinary prompts judged by the executing LLM under Podway
+  rules. Only actual Podway state changes update the diagram, not an LLM promise.
+- Compatibility: a later optional observation surface must not block existing
+  chat, prompt history, approvals, result reads or session close. No speculative
+  Podway wire is frozen in TASK-053 and no implementation enters v0.1.3.
+- Adoption: coordinate later Dolgorae observation and Gul visualization Epics
+  after source-contract inspection. These do not become provider release blockers.
+
 ## Adopted Epic dossiers
 
 - [EPIC-008: Live Dolgorae Provider](EPIC-008-live-provider.md) is adopted for
-  implementation. The roadmap alone owns its current `PLANNED` status and the
-  eight-Task execution order. Documentation adoption does not start a runtime,
+  implementation. The roadmap alone owns current status and the amended
+  twelve-task order. TASK-025 completion is preserved; TASK-053 is next planned.
+  Documentation adoption does not start a runtime,
   commit changes, or authorize live credentials.
 
 The term adopted here does not imply that the roadmap state is `ACTIVE`.

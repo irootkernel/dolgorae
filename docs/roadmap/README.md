@@ -37,8 +37,10 @@ Primary control-plane integration, the durable Collaboration Plane, operator
 and audit interfaces, and final conformance and Personal Alpha acceptance.
 `TASK-025` remains the live run-bound transport probe and occurs only after the
 Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
-EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through eight
-Tasks, without waiting for Gul. `v0.1.3` remains owned by EPIC-008; actual Gul
+EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
+Tasks, including the Gul consumer contract, complete prompt history, read-only
+aggregate/result queries, and frozen-consumer regression. TASK-025 is complete;
+TASK-053 is the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul
 acceptance is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
@@ -59,7 +61,7 @@ Document roles and the required synchronization procedure are defined by the
 | `MILESTONE-SR1` | `EPIC-003` | Codex CLI can request one independent read-only working-tree review through `dolgorae specialist review`. The `dolgorae_review` MCP tool is additionally available only when its per-request identity carrier passes `TASK-011` and `TASK-012`. |
 | `MILESTONE-IR1` | `EPIC-004` | Aquarium independent-review uses Dolgorae, rather than an Orca-created Codex terminal, for immutable workspace, staged, dirty, HEAD, commit, and range review with a fresh Codex Reviewer. |
 | `MILESTONE-ES1` | `EPIC-006` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
-| `MILESTONE-BH1-P` | `EPIC-008` | Dolgorae operates a live Primary and durable Brokered Hierarchy, with its public provider interface and pinned Codex execution independently verified without Gul. |
+| `MILESTONE-BH1-P` | `EPIC-008` | Dolgorae operates a live Primary and durable Brokered Hierarchy with the 27-method Gul consumer profile, complete prompt history and whole-session closure, independently verified without actual Gul. |
 | `MILESTONE-BH1` | [Deferred Gul acceptance](../todo/README.md#actual-gul-consumer-acceptance) | Actual Gul integration is verified against the provider; provider QA alone does not unlock this milestone. |
 | `MILESTONE-BC1` | `EPIC-009` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
 | `MILESTONE-PA1` | `EPIC-011` | The complete Personal Alpha acceptance campaign passes. |
@@ -77,13 +79,14 @@ stated in its owning Epic.
 | `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
-| `v0.1.3` | Milestone Preview | Revised `EPIC-008` complete, including the preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` changes; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
+| `v0.1.3` | Milestone Preview | All twelve revised `EPIC-008` Tasks complete, including `dolgorae.gul-consumer/v1`; preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` included; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
 | `v0.1.4` | Milestone Preview | `EPIC-009` complete on the verified provider boundary | v0.1.3 provider capabilities plus `MILESTONE-BC1`; no automatic Gul acceptance claim |
 | `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
-readiness, the complete target specification, or customer support. A completion
-boundary makes a version eligible for release; it does not itself create a
+readiness, the complete target specification, or customer support. Read-only
+Podway observation is a separate post-v0.1.3 candidate, not automatically part
+of v0.1.4 or v0.2.0. A completion boundary makes a version eligible for release; it does not itself create a
 release, change the changelog, authorize a tag or publication, or prove an
 installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
@@ -1237,7 +1240,7 @@ ControlPlaneRuntime without treating memory as durable authority.
 Task acceptance: Gul can launch `dolgorae serve`, negotiate public v1, create and
 operate ordinary low-level Runs through the minimum frozen Run path, and survive
 a controlled gateway restart. The minimum gateway alone claims neither BH1-P nor actual Gul acceptance.
-BH1-P additionally requires TASK-024 and all eight revised EPIC-008 Tasks;
+BH1-P additionally requires TASK-024 and the revised EPIC-008 consumer-profile Tasks;
 actual-Gul BH1 retains its separate consumer gate.
 
 ### TASK-024: Durable Orchestration Session and Brokered Hierarchy Core
@@ -1453,22 +1456,29 @@ outside this Epic and does not become a blocked placeholder Task.
 Authorities: [provider slice](../specs/README.md#v013-live-provider-slice),
 [provider acceptance](../specs/README.md#provider-and-gul-acceptance-boundaries),
 [live integration architecture](../architecture/README.md#live-provider-integration-boundary),
-and [ADR-038](../architecture-decision-records/README.md#adr-038-deliver-the-live-provider-independently-of-gul).
+[Gul consumer contract](../specs/gul-consumer-v1.md),
+[ADR-038](../architecture-decision-records/README.md#adr-038-deliver-the-live-provider-independently-of-gul),
+and [ADR-039](../architecture-decision-records/README.md#adr-039-freeze-the-gul-consumer-contract-before-v013).
 
 Scope: both approval modes; trusted tool identity; ready-member task acceptance,
 actual dispatch, bounded wait, deadline/cancellation; admitted access and writer
 safety; readable checked results/artifacts; redelivery; release/abort; and
-restart recovery. Preserve existing external v1/v2/v3 review behavior.
+restart recovery; complete Controller timeline and original prompt history;
+sequential human input without queue/steering; public aggregate/result reads;
+whole-session closure; and frozen-consumer compatibility. Preserve existing
+external v1/v2/v3 review behavior.
 
 Non-goals: Gul code or UI, busy-target queues, lateral collaboration, mailbox
 scheduling, activation/passivation, new generic task/artifact frameworks,
-multiple supported internal transports, the TASK-029 operator surface, and
-release/publication/installation operations. Unsupported live policies fail
+multiple supported internal transports, Podway observation/control, the nine
+remaining TASK-029 methods, and release/publication/installation operations. Unsupported live policies fail
 closed under the provider slice rather than silently losing future semantics.
 
-Execution order is exactly TASK-025, TASK-047, TASK-048, TASK-049, TASK-050,
-TASK-051, TASK-052, TASK-026. These are eight integration Tasks, not sixteen
-previously proposed work packages compressed into eight commits. Each Task
+Execution order is exactly TASK-025, TASK-053, TASK-047, TASK-048, TASK-049,
+TASK-050, TASK-051, TASK-054, TASK-055, TASK-052, TASK-056, TASK-026. Four new
+Tasks cover the approved consumer scope; completed TASK-023/024/025 remain
+complete. TASK-053 is the contract-ready handoff for Gul mock/UI development;
+actual integration waits for the separately released v0.1.3 artifact. Each Task
 contains its implementation, targeted tests, directly affected contracts/docs,
 and independent review before one initial task-scoped completion commit.
 The general completion gate still applies. Fix task-local crash/security
@@ -1477,8 +1487,10 @@ behavior. Incomplete paths remain explicitly unavailable, never placeholder
 success. A later discovered defect gets explicit corrective ownership without
 rewriting completed history to preserve a count. Planning adoption and stable
 release metadata are separate operations, not extra implementation Tasks.
-Until TASK-025 is `COMPLETE`, work is limited to its probe, fixtures, and
-contract closure; later production implementation must not start in parallel.
+TASK-025 is `COMPLETE`; its private transport selection and implementation
+handoff remain accepted. TASK-053 must publish the checked consumer contract
+before TASK-047 begins. This planning amendment neither implements the new
+wire nor activates another Task.
 No staging, commit, live credentials, publication, or installation is authorized
 merely by this plan; use the existing applicable approval boundaries.
 
@@ -1528,13 +1540,58 @@ prevents completion, even when deterministic probes pass.
 
 Task acceptance: one proved transport and a complete bounded contract for the
 remaining Tasks, including executable probe/fixture code and no unresolved
-blocking findings. Next: TASK-047.
+blocking findings. Next: TASK-053 under the approved consumer amendment.
+
+### TASK-053: Freeze the Gul v0.1.3 Consumer Contract
+
+Status: `PLANNED`
+
+Depends on completed `TASK-025`. Publish the checked wire and fixtures for
+[the consumer specification](../specs/gul-consumer-v1.md). Add only
+GetOrchestratedSession and ListOrchestratedSessionResults and their typed
+messages to public v1. Preserve all existing field numbers and low-level
+meanings. Freeze the required 27-method profile over the extended 36-method
+descriptor. Leave unimplemented methods unavailable in runtime capabilities.
+
+Close exact message/enum numbers, cursor and byte limits, authorization,
+aggregate revision/count meanings, typed errors, result artifact owner and
+whole-session CloseRun semantics. Preserve TASK-025 private receipts/waits/reader
+and its selected transport. Correct advertised credential-schema SHA-256 values
+and verify them against the actual distributed file bytes. Publish an immutable
+source revision with schema/descriptor/policy/fixture digests, generated clients
+and a reproducible lock. A target document or a floating worktree is not a lock.
+
+Verification: pre-extension baseline Buf breaking check, old low-level client
+compatibility, complete 27-method positive/negative fixtures, unsupported-method
+classification, schema-byte digest equality, bounds/authorization/redaction,
+and independent read-only review. No live runtime or Gul is required for this
+contract publication. Commit/publication permission remains separate.
+
+The primary freeze risk is aggregate-aware CloseRun. Bind the consumer contract's
+bounded-call outcome table exactly: SESSION_CLOSE_IN_PROGRESS versus confirmed
+RunMutationResponse, durable operation_id across response/detail/query/restart,
+transport ambiguity, method-specific forbidden retry and root reconciliation.
+Use the existing operation_id fields; do not turn pending closure into gRPC OK.
+Add fixtures for intent-before-response loss, concurrent closes, mismatched
+interrupt choices, unknown child effects and already-settled sessions.
+
+Publish a checked field-sourceability matrix for both new queries. Each field,
+count, lifecycle/recovery value and artifact reference names its existing or
+planned durable owner, state predicate, revision boundary, authorization rule,
+fixture and implementing Task. Private producer stores are allowed sources;
+private consumer access, model-text interpretation and read-side repair are not.
+Unowned required fields block freeze. Do not require downstream runtime Tasks
+complete merely to prove a planned durable design.
+
+Task acceptance: Gul can pin exact checked artifacts and develop pre-release
+mocks/UI without unresolved provider shapes, close mappings or field sources.
+No new runtime implementation is claimed. Next: TASK-047.
 
 ### TASK-047: Trusted Live Primary Tool Bridge
 
 Status: `PLANNED`
 
-Depends on `TASK-025`. Implement the selected bridge through the production
+Depends on `TASK-053` and the completed TASK-025 transport. Implement the selected bridge through the production
 Primary Orchestration Service. Bind session, source Run/Turn/call, current
 authority, inherited priority, and idempotency outside model arguments. Use
 existing durable call/reuse receipts. Separate generation fencing from semantic
@@ -1647,8 +1704,11 @@ result projection without exposing child credentials or arbitrary child files.
 Completion must reference real bytes and verified length/SHA-256. Coordinate
 artifact and SQLite publication with write-ahead recovery, not imaginary
 cross-store atomicity. Preserve collect cursors and exact-call/reuse receipts.
-Lost delivery returns the same result, not a new target Turn. No new generic
-artifact service or public Protobuf change.
+Lost delivery returns the same result, not a new target Turn. Persist the
+recoverable association to permitted Primary-owned artifacts for TASK-055's
+public discovery query. Do not fabricate a Primary final response to carry
+Specialist results. No new generic artifact service or change to TASK-053's
+frozen public descriptor.
 
 Verification: actual Primary content consumption; above-inline-bound Specialist
 results; metadata/chunk reads, length/digest, authorization, redaction, range,
@@ -1657,13 +1717,64 @@ and discriminator downgrade; artifact/receipt crash windows; page replay and
 later-page delivery without repeat execution.
 
 Task acceptance: Primary and its authorized client can consume actual Specialist
-results through the intended private/public boundaries. Next: TASK-052.
+results through the intended private/public boundaries. Next: TASK-054.
+
+### TASK-054: Complete Controller Timeline and Durable Prompt History
+
+Status: `PLANNED`
+
+Depends on `TASK-051`. Move complete ListRunTimelineItems implementation from
+TASK-029 into v0.1.3. Reuse the ledger/timeline/artifact owners. Support every
+accepted safe item kind, Controller checks, stable Run/Turn/item identity,
+original UTF-8 text and line endings, exclusive cursor and bounded captured-head
+pagination. Persist accepted user input before submit acknowledgement. Long
+input uses the existing Controller-only artifact path; safe image metadata does
+not retain source paths or image bytes.
+
+Reject fresh ordinary Primary input during an active Turn before acceptance or
+effects. Exact accepted-request replay precedes fresh-busy admission. No queue,
+steering, auto-send or auto-interrupt; current Interaction answers remain usable.
+An explicit interrupt needs terminal/recovery proof before another submit.
+History is retained after failure/interruption/close and is not replay authority.
+
+Verification: complete timeline kinds, multi-page/concurrent append, Korean and
+emoji/CRLF, above-inline input, response-loss/restart at acceptance boundaries,
+same-key replay versus same-text new request, concurrent browsers, busy rejection
+without new history, closed-session recovery and secret/reasoning exclusion.
+Advertise controller_timeline only after the complete contract passes.
+
+Task acceptance: a public client restores ordered original prompts and safe
+conversation history after restart and close. Next: TASK-055.
+
+### TASK-055: Public Orchestrated Session and Result Observations
+
+Status: `PLANNED`
+
+Depends on `TASK-054`. Implement TASK-053's two read-only aggregate queries through
+the real public gateway and shared semantic/Broker layer. Authenticate the root
+Controller; return consistent lifecycle, independent aggregate revision, policy
+identity, defined counts, close/recovery disposition. No read-side repair,
+Worker startup or result acknowledgement. Low-level roots do not become sessions.
+
+List stable publication records from TASK-051 with bounded session/head-bound
+paging and explicit Primary-owned ArtifactRef/RunRef values. Retain published
+results after private collection and session close. Clients discover references
+through this query, not model prose or private fixture hooks. Query refresh must
+cover aggregate-only changes without relying on a Primary event for each one.
+
+Verification: foreign/wrong-Controller/non-session denial, zero versus unavailable
+counts, coherent revision snapshots, malformed/foreign paging, concurrent
+publication/restart, public discovery then metadata/chunks/digest, no child
+credential leak, no mutation-on-read, original Run/external facade compatibility.
+
+Task acceptance: public clients can observe session state and discover permitted
+results without reconstructing aggregate authority. Next: TASK-052.
 
 ### TASK-052: Live Hierarchy Retirement and Restart Recovery
 
 Status: `PLANNED`
 
-Depends on `TASK-051`. Connect graceful release, session completion/abort, and
+Depends on `TASK-055`. Connect graceful release, session completion/abort, and
 cross-component restart to existing lifecycle and recovery owners. Stop new
 admission while retiring; retain accepted/unknown work and undelivered results
 until their authoritative disposition. Reconstruct bridge bindings, pinned
@@ -1673,6 +1784,18 @@ process identity and orphan rules. A client disconnect does not stop a healthy
 shared Profile Server. Do not add unsolicited Primary Turns or auto-resume
 paused Runs.
 
+For an authoritatively registered Orchestrated root, CloseRun terminates the whole
+owned aggregate under the consumer contract. Reject interrupt=false while owned
+work/spawn/approval is active; interrupt=true is explicit confirmed intent.
+Persist close intent before effects, serialize against new admission and
+in-flight spawn/dispatch/publication, and retire children only through the Broker.
+Unknown effects prevent successful closed state. Preserve history/results/files,
+unrelated sessions and healthy shared Profile Servers. Root Recover/Reconcile
+must account for retained aggregate close intent when needed, without auto-resume
+or a new Primary Turn. Bounded callers reconcile through the read-only aggregate
+query and fresh Run/Writer/Interaction reads; no blind tokenless retry. Primary
+Pause/Interrupt remain Primary-scoped, not aggregate pause or Podway control.
+
 Verification: controlled and crash restart during approval, dispatch, execution,
 result publication/delivery, and retirement; original Run/thread identities;
 no duplicate/orphan child; writer and credential-carrier lifetime; unknown
@@ -1680,13 +1803,40 @@ preservation; isolated-root recovery failure; clean verified test teardown.
 These supplement, rather than defer, prior Task-local recovery checks.
 
 Task acceptance: the connected live hierarchy safely retires or reconstructs
-its existing durable work without semantic replay. Next: TASK-026.
+its existing durable work without semantic replay, including whole-session
+close from active, waiting, degraded and restart-interrupted states.
+Next: TASK-056.
+
+### TASK-056: Frozen Consumer and Cross-Version Regression
+
+Status: `PLANNED`
+
+Depends on `TASK-052`. Run the exact TASK-053 generated consumer and fixtures
+without regeneration against the candidate. Keep a pre-extension low-level
+consumer too. Integrate explicit immutable-baseline Buf breaking checks,
+advertised schema-byte digest equality and behavioral scenarios into the normal
+deterministic gate. Matching current source and descriptor is not sufficient.
+
+Cover all required methods, sequential submit/history, session/result paging,
+whole-session close/recovery, event variants/stamps/cursors, missing required
+versus added optional capabilities, unknown decisive enums/errors and protected
+boundaries. Define explicit verified descriptor compatibility for later additive
+versions without disabling artifact identity checks or changing old meanings.
+Future EPIC-009 and TASK-028/029/031 retain and rerun this baseline unchanged.
+
+Separate preview provider eligibility, Personal Alpha qualification, and actual
+Gul acceptance. Future-owner runtime tests must not accidentally block v0.1.3.
+Verification includes non-regenerated old-client execution, fault scenarios,
+static contract checks and independent review; no real Gul dependency.
+
+Task acceptance: the frozen public consumer works and future changes have an
+executable backward-compatibility boundary. Next: TASK-026.
 
 ### TASK-026: Provider Conformance and v0.1.3 Handoff
 
 Status: `PLANNED`
 
-Depends on `TASK-052` and therefore every preceding EPIC-008 Task. Implement the
+Depends on `TASK-056` and therefore every preceding EPIC-008 Task. Implement the
 planned `private_boundary` driver using generated public-v1 clients against an
 actual isolated `dolgorae serve` process and production semantic/Broker paths.
 Extend existing native gateway fixtures; do not build a Gul clone or new SDK.
@@ -1695,10 +1845,12 @@ live Codex must demonstrate actual Primary calls, both approval policies,
 Specialist execution, readable result consumption, and supported recovery.
 Missing live prerequisites block this Task; missing Gul does not.
 
-Verification: protocol-zero negotiation and exact 24-method inventory; Session
-bootstrap; approvals; event cursor replay; ready/busy task behavior; existing
+Verification: protocol-zero negotiation and exact 27-method consumer profile;
+complete prompt-history timeline through page/restart/close; sequential human
+admission; public session/result observations; Session bootstrap; approvals; event cursor replay; ready/busy task behavior; existing
 access/writer safety; a Specialist result above the inline bound consumed by
-Primary and retrieved by the external client using bounded artifact reads;
+Primary and discovered by the public result-list query before external-client
+bounded artifact reads, without private ID injection;
 length/SHA-256; typed failure/redaction matrix; exact retries; restart/redelivery;
 release/abort; complete deterministic repository gate, required live evidence,
 source-skill/Markdown checks, and independent read-only review with no unresolved
@@ -1712,9 +1864,10 @@ to canonical owners, remove the dossier/TODO entry, and replace `Detailed SOT`
 with `Canonical Outcomes` links. No stable release, tag, publication, install,
 or real Gul integration is performed by this Task.
 
-Epic acceptance: all eight Tasks and their completion gates pass; the actual
+Epic acceptance: all twelve Tasks and their completion gates pass; the actual
 provider and pinned Codex operate a durable live hierarchy; existing features
-remain compatible; public Protobuf stays byte-identical; no unsupported
+remain compatible; public Protobuf matches the TASK-053 frozen additive contract;
+no unsupported
 capability is advertised; and `MILESTONE-BH1-P` is complete. v0.1.3 becomes
 eligible for separate release-candidate QA and authorized publication as a
 Milestone Preview, not Personal Alpha. Actual-Gul `MILESTONE-BH1` remains
@@ -1759,7 +1912,10 @@ transactional result redelivery without replay; source restart and deferred
 collection; cross-session, external-engagement, cycle, depth, writer-held
 blocking wait, terminal target, queue overflow, and implicit-hire rejection; no
 credential, private socket, database path, raw protocol frame, or hidden
-reasoning leakage; and byte-identical public Protobuf source and descriptor.
+reasoning leakage; and byte-identical public Protobuf source and descriptor
+against the TASK-053 baseline. Rerun TASK-056 with unchanged generated clients;
+new collaboration policies must not add a human-input queue, rewrite existing
+policy snapshots/history, or change whole-session close semantics.
 
 Epic acceptance: completion unlocks `MILESTONE-BC1`. Failures cannot duplicate
 or orphan a broker-owned Specialist, create two Dolgorae writer proxies, signal
@@ -1799,18 +1955,21 @@ minimal-versus-operational fields, reasoning suppression/non-retention, path
 truncation, Git/non-Git algorithms, and every command `data` variant. Test
 1-MiB chunks, 8/32/256-MiB quotas, digest/range failures, conditional thread/turn
 identity, observer/controller interaction and artifact denial matrices, profile
-redaction/authorization, and pre-ready failures that create no Run.
+redaction/authorization, and pre-ready failures that create no Run. Rerun
+TASK-056 unchanged; activating declared event variants must preserve existing
+history, projection freshness and consumer behavior.
 
 ### TASK-029: Complete Gul gRPC Surface and Extended Operational Conformance
 
 Status: `PLANNED`
 
-Depends on `TASK-023`. Extend the already operational foreground
-`dolgorae serve` gateway from the 24-method BH1 set to all 34 methods in the
-frozen `dolgorae.public.v1` descriptor. Add the ten deferred RPCs covering
-profile diagnostics, Controller timeline, default-effort, fork,
-verification, deletion, write continuation, writer handoff, and their complete
-safe projections. Complete bounded independent Run streams, exhaustive typed
+Depends on `TASK-026` and TASK-056's frozen-consumer baseline. Extend the
+27-method consumer gateway to all 36 methods in TASK-053's extended public-v1
+descriptor. Add the nine remaining original RPCs covering profile diagnostics,
+default-effort, fork, verification, deletion, write continuation and writer
+handoff with complete safe projections. Timeline implementation belongs to
+TASK-054 and aggregate queries to TASK-055; this Task extends their conformance
+rather than reimplementing or postponing them. Complete bounded independent Run streams, exhaustive typed
 `google.rpc.Status` details, advanced cancellation behavior, and all remaining
 operator-safe conformance without adding Operator RPCs, TCP, client-streaming,
 bidirectional streaming, worker sockets, or App Server transports.
@@ -1828,7 +1987,9 @@ channel; continuation lineage; timeline redaction and image metadata; artifact
 regression coverage; advanced writer handoff; deletion and verification;
 and the exhaustive typed error map. Re-run the TASK-023 socket, restart,
 carrier TOCTOU, allocation-loss, Interaction-loss, and secret-canary tests as
-regressions. All timing uses injectable clocks and no test binds TCP.
+regressions. Run the TASK-056 consumer unchanged, including operation when new
+optional methods are advertised. All timing uses injectable clocks and no test
+binds TCP.
 
 ### TASK-030: Verify, Export, and Confirmed Delete
 
@@ -1868,7 +2029,9 @@ malformed/foreign/nonexistent managed markers, non-exec MCP marker absence,
 write-heavy Native Delegation language, Independent Specialist result routing
 without Controller disclosure,
 detached-worker signal/stdout behavior, five-second graceful/forced cleanup, and
-escaped-process limitation reporting.
+escaped-process limitation reporting. Rerun TASK-056 with unchanged clients;
+new instruction composition must not rewrite stored user input, introduce
+steering, expose child authority or change aggregate closure.
 
 Epic acceptance: every public command and audit workflow in
 `docs/specs/README.md` is
@@ -1953,7 +2116,8 @@ blocker.
 The live campaign also runs one broker-owned Dedicated managed child, returns a
 bounded result to a parent-shaped harness, and proves that a conflicting
 Dolgorae writer is rejected without exposing the child Controller credential.
-It additionally drives a Gul Go harness over one local gRPC channel, observes at
+It additionally drives a generated public-v1 Go conformance harness, not actual
+Gul and not evidence for MILESTONE-BH1, over one local gRPC channel, observes at
 least two independent Run streams, restarts the supervised gateway while a Run
 survives, resumes each cursor, verifies Controller adoption without mutation,
 and reads large final-response and approval artifacts.

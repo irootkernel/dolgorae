@@ -2383,7 +2383,9 @@ evidence; it cannot authorize an unsafe signal.
 
 ## ADR-038: Deliver the Live Provider Independently of Gul
 
-Status: Accepted
+Status: Accepted; ADR-039 amends the original eight-task/24-method/no-public-addition
+scope. Provider independence, live evidence, completed TASK-025 contracts and
+safety boundaries remain accepted. The original scope below is historical.
 
 ### Context
 
@@ -2465,3 +2467,98 @@ existing later owners. Planned evidence references never count as executed QA.
 - Restore the sixteen-task scope or pull in EPIC-009 scheduling: adds work not
   needed by the accepted provider slice.
 - Remove safety checks to force eight commits: task count is not a release gate.
+
+## ADR-039: Freeze the Gul Consumer Contract Before v0.1.3
+
+Status: Accepted, 2026-09-20
+
+### Context
+
+The first Gul integration requires original user prompt history with durable
+provider support in Dolgorae v0.1.3. The product uses draft-only input while a
+Primary Turn is active, explicit send after eligible terminal state, and
+whole-session close covering owned Specialists through the Broker. Podway
+visualization follows after v0.1.3 and is strictly read-only in Gul.
+
+The original 24-method gateway excludes timeline. Raw Run projections also
+cannot express exact aggregate closing state or a bounded discoverable list of
+permitted Specialist results. Parsing model prose or exposing private stores
+would make Gul depend on implementation details.
+
+### Decision
+
+Adopt [dolgorae.gul-consumer/v1](../specs/gul-consumer-v1.md). Promote complete
+Controller timeline to v0.1.3 and add only GetOrchestratedSession and
+ListOrchestratedSessionResults as authorized read-only public-v1 queries.
+TASK-053 publishes 27 required methods over the extended 36-method descriptor
+with reproducible clients, fixtures, schema/policy digests and an immutable lock.
+The nine remaining original methods stay with TASK-029. Until publication,
+existing checked artifacts remain the historical baseline, not the new contract.
+
+Existing StartRun and root CloseRun remain the entry and termination operations.
+The latter is aggregate-aware only for a registered Orchestrated root; the Broker
+owns child control and must not report successful closure while effects remain
+unknown. Ordinary low-level/external Run behavior is preserved. Pause and
+Interrupt are Primary-scoped, not aggregate pause. No new mutation endpoint is
+added. Reads expose state and Primary-owned result references without repairing
+state, starting processes, or acknowledging private delivery.
+
+Accepted human input is durable history, separate from replay material. Fresh
+input cannot enter an active Primary Turn. Exact receipt replay and answers to
+current Interactions keep their existing semantics. Gul may preserve a draft,
+but cannot enqueue it, send it automatically, steer or interrupt implicitly.
+
+Add TASK-053 (checked contract), TASK-054 (complete timeline and input admission),
+TASK-055 (public aggregate queries), and TASK-056 (frozen-consumer regression)
+to EPIC-008. TASK-052 implements aggregate-wide closure and recovery; TASK-026
+verifies the assembled provider. The roadmap owns the twelve-task order.
+Completed TASK-025 at 57e6be8, its transport selection, campaign/product baseline
+distinction and private boundaries are preserved. New plan adoption is not new
+runtime implementation or a reason to reopen that completed task.
+
+Gul pins the contract after TASK-053, implements its own services/UI with an
+explicit stateful fake, then integrates with an exact released v0.1.3 artifact.
+Actual Gul does not block provider release. Later providers run unchanged frozen
+consumer clients and a pre-extension low-level client. Wire compatibility alone
+is not sufficient; history, closure, discovery and error behavior are tested.
+
+Track Podway observation separately without an assigned release. Podway owns
+pinned graphs and execution records; Dolgorae publishes safe observations; Gul
+renders active node sets, loop iterations and node-execution counts. No Gul API
+or UI edits/jumps/skips/forces/retries nodes or resets counts. Changes are normal
+user prompts judged by the executing LLM, and only actual Podway state updates
+the diagram. Future optional observations cannot block existing functionality.
+
+### Consequences
+
+The scope deliberately grows from eight provider-preview Tasks to twelve
+consumer-ready provider Tasks, from 34 to 36 declared RPCs, and from 24 to 27
+required RPCs. Added implementation and release-verification work is accepted
+so Gul does not reconstruct history, aggregate authority or closure itself.
+The milestones still separate contract publication, provider release and actual
+Gul acceptance; no claim of an unchanged release effort is made.
+
+The consumer contract owns provider semantics and safety, not detailed Gul UI.
+Gul owns browser DTOs, navigation and presentation. Deferred Podway details live
+in the TODO owner. TASK-053's primary design risk is aggregate CloseRun: freeze
+its nonterminal typed outcome, durable operation correlation, completed-success
+condition and no-tokenless-retry rules before publishing the lock. Preserve the
+existing RunMutationResponse shape and use the existing operation_id carriers.
+Every new query field requires a checked durable-source/derivation matrix.
+Provider-owned private stores are valid sources; private client access, model
+prose and read-side repair are not.
+
+The credential-schema digest mismatch and release-profile inconsistencies get
+explicit TASK-053/056 ownership. Runtime capabilities advertise only implemented
+methods. TASK-053 must close checked message shapes before Gul implementation;
+this document alone is not that wire publication. No release, install, live
+credential use, staging, commit or push is implied by the planning amendment.
+
+### Rejected alternatives
+
+- Defer prompt history or keep it only in browser memory.
+- Advertise a user-input-only subset as the complete Timeline RPC.
+- Require Gul to read private Broker state or parse model replies to find results or closure.
+- Give Gul child credentials or a direct Podway control path.
+- Require real Gul before releasing its independently verifiable provider.
+- Reopen completed Tasks or rewrite earlier evidence to conceal new scope.

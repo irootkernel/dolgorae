@@ -81,16 +81,21 @@ outside the complete repository gate.
 
 ## Live provider implementation
 
-EPIC-008 follows eight integration Tasks: TASK-025, TASK-047 through TASK-052,
-then TASK-026. Follow the roadmap's Detailed SOT link for the adopted execution
-checklists. Specifications own the v0.1.3 ready-member-only provider slice;
+EPIC-008 follows the amended twelve-task roadmap. TASK-025 is complete;
+TASK-053 publishes the checked consumer contract before TASK-047. TASK-054
+implements complete history, TASK-055 read-only aggregate/result queries,
+TASK-052 whole-session closure, and TASK-056 unchanged-consumer regression before
+TASK-026. Follow the Detailed SOT checklists and the
+[Gul consumer contract](../specs/gul-consumer-v1.md). Specifications own the
+v0.1.3 ready-member-only provider slice;
 actual Gul acceptance is separate. Tests, directly affected docs, and independent
 review belong in each Task's initial completion commit. Never defer a newly
 introduced effect's crash safety or return placeholder success for an unwired
 operation. Required commit and live-runtime approvals remain separate.
-TASK-025 must be `COMPLETE` with a proved transport and frozen contract before
-later production work starts. Its isolated probes are not permission to build
-bridge, provisioning, or dispatch paths in parallel. General collaboration and
+Preserve TASK-025's completed private contract and transport selection. Its
+isolated probes do not implement production bridge/provisioning/dispatch.
+The public 27-method consumer lock is separate TASK-053 work; do not claim it
+exists merely because this plan has been adopted. General collaboration and
 busy/mail-count reuse descriptions are EPIC-009 targets, not instructions to
 create placeholder services in EPIC-008.
 
@@ -133,6 +138,9 @@ immutable bytes with matching length and digest. Use write-ahead reconciliation
 between existing artifact storage and SQLite, not a cross-store atomicity claim.
 Expose only a permitted Primary result projection or bounded private reader,
 never child credentials or arbitrary child files. Preserve cursor redelivery.
+TASK-055 exposes published references through the root-authorized result query.
+A conformance client must discover them there before artifact reads; do not
+inject IDs from private fixtures or fabricate Primary final-response events.
 For text pages, offset must be a UTF-8 boundary and content the longest complete
 prefix within the requested byte limit. Reject an undersized next-character
 limit or invalid offset; never return an empty pre-EOF page or replacement
@@ -145,6 +153,25 @@ deadlines, and receipts on restart. The existing external-engagement isolated-
 write branch does not automatically cover brokered members. Reuse TASK-046 for
 any new bridge process and test teardown; healthy shared servers survive client
 exit. Do not add unsolicited Primary Turns or auto-resume paused Runs.
+
+History is distinct from mutation replay. Store exact accepted Primary text
+before acknowledgement and implement the full Controller timeline, including
+long input artifacts. Test same-key retry versus same-text new request, pages,
+concurrent append, restart, interruption and close. New ordinary human input is
+rejected while a Turn is active; retain drafts without queue/steering/auto-send
+and keep current Interaction answers available.
+
+Whole-session close uses the root Controller and Broker-owned child control.
+Persist intent before effects; reject non-interrupting close while owned work
+is active. Account for in-flight spawn/dispatch and uncertain results before
+reporting closed. Use aggregate snapshots for bounded-call reconciliation, not
+Gul child mutations or blind retries. Keep history/files/unrelated sessions and
+healthy shared Profile Servers intact; Primary pause is not aggregate pause.
+
+Publish exact contract and credential-schema hashes. TASK-056 runs the old
+consumer unchanged rather than regenerating it to match each new candidate.
+Keep contract-ready, runtime-ready, released-provider and actual-Gul evidence
+separate. Future Podway observation remains read-only and outside this release.
 
 Extend the existing native gateway fixtures with generated public-v1 clients
 against real dolgorae serve and production semantics. Label fake Codex scenarios;

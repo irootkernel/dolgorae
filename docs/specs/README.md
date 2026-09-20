@@ -16,6 +16,14 @@ The cumulative `v0.1.x` milestone previews implement only the product boundary
 assigned to each version by the roadmap. They do not claim this complete target
 specification, Personal Alpha readiness, or customer support.
 
+The approved [Gul consumer contract v1](gul-consumer-v1.md) defines the v0.1.3
+consumer profile: complete prompt history, sequential human submission without
+queue/steering, two read-only aggregate/result queries, whole-session closure,
+and frozen-client compatibility. It supersedes the former 24-method-only release
+scope. TASK-053 publishes the checked wire lock; this Required State amendment
+does not claim new methods or generated artifacts already exist. Completed
+TASK-025 private contracts and transport selection are unchanged.
+
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.
 Constraints in checked JSON Schemas and rejection by an executable semantic
@@ -185,8 +193,9 @@ An `UNSPECIFIED` value or hidden interactive default is invalid.
 
 #### Compilation Over the Unchanged Public Run Contract
 
-The two product facades compile to the existing public v1 Run operations. The
-checked public Protobuf remains unchanged, but aggregate creation is explicit
+The two product facades compile to the existing public v1 Run operations.
+Their entry mapping preserves existing Run signatures. TASK-053 separately adds
+the two read-only queries specified by the Gul consumer contract. Aggregate creation is explicit
 inside the semantic service and durable orchestration store. Client name,
 process name, and undocumented defaults MUST NOT select a use case.
 
@@ -1814,6 +1823,18 @@ Turn. UTF-8 text at most 1 MiB is inline; larger accepted text up to the 8-MiB
 public-request bound is streamed to a `user_input` Controller-only artifact.
 Image inputs retain only caller order, detail, media type, raw byte length, and
 SHA-256. Their source path and bytes are not retained for timeline display.
+
+Complete public timeline support is mandatory in v0.1.3 under TASK-054. Gul's
+user-only Prompt History derives from accepted Primary input items, not tool
+messages, draft text or reconstructed model prose. Preserve stable accepted
+identity, original text and order through pagination, reconnect, restart,
+interrupted/failed Turns and session close. Same-key retry does not duplicate
+history; same-text new submissions remain distinct. History is not mutation
+replay authority. Fresh ordinary input during an active Primary Turn is rejected
+before acceptance/effects; exact receipt replay and current Interaction answers
+retain their separate paths. No queue, steering, auto-send or automatic
+interruption is added. See the [consumer contract](gul-consumer-v1.md#5-durable-prompt-history-and-complete-timeline).
+
 Interaction timeline items contain typed `interaction_kind`, typed
 `interaction_status`, bounded `interaction_safe_title`, and identity only;
 the full payload remains available solely through the separately authorized
@@ -3378,9 +3399,10 @@ Primary result consumption MUST expose actual bounded content, not only an
 unreadable artifact identity. Verify accepted-request identity before choosing
 an output validator, validate the requested format before result publication,
 and bind completed state to real immutable artifact bytes, length, and SHA-256.
-Use existing artifact storage and bounded read services. Add only the minimum
-checked private projection/read path needed by the Primary, with no public-v1
-Protobuf change. Authorization is aggregate-scoped; the Primary and external
+Use existing artifact storage and bounded read services. Preserve the completed
+private reader contract. TASK-053 separately freezes two additive public queries;
+TASK-055 implements bounded public result discovery with Primary-owned artifact
+references, without private-state access or model-text parsing. Authorization is aggregate-scoped; the Primary and external
 client MUST NOT receive a child Controller capability. Public retrieval may
 use a Primary-owned result projection backed by existing artifact services;
 it MUST NOT relax authorization on arbitrary child artifacts. TASK-025 freezes
@@ -4031,15 +4053,22 @@ unbounded peer chat, and cross-Run model authority remain future work. Bounded
 broker-mediated Specialist Collaboration is part of Brokered Hierarchy v1.
 
 The existing public v1 gRPC Run operations remain the low-level Gul wire
-contract. A direct-interactive root `StartRun` carrying checked launch metadata
+contract. For a durably registered Orchestrated root, the
+[whole-session close contract](gul-consumer-v1.md#7-whole-session-close)
+requires Broker-owned termination of all owned work before successful closed
+state. Ordinary low-level and external Run meanings are unchanged. Primary
+pause/interrupt must not be presented as aggregate pause. A direct-interactive
+root `StartRun` carrying checked launch metadata
 in its protected Controller carrier is aggregate-aware inside the semantic
 service and creates the Orchestration Session without a new RPC. The
 Machine CLI additionally carries the private External Specialist Facade through
 `engagement call --request-fd`; trusted MCP adapters use the same checked
 payloads. Primary orchestration and Specialist collaboration use separate
 run-bound private tools. None of these private facades changes the checked public
-Protobuf source or descriptor. A future additive read-only aggregate query may
-improve presentation, but it is not required for state ownership or recovery.
+Protobuf source or descriptor. TASK-053 separately adds the read-only
+GetOrchestratedSession and ListOrchestratedSessionResults consumer queries.
+Their required projections expose actual aggregate/close state and permitted
+result references, without granting child-control or mutation-on-read authority.
 
 Gul v1 obtains a safe operational view from the existing Primary Run stream,
 Controller Interactions, `ListRuns`, and public parent projections. It MAY show
@@ -4567,28 +4596,32 @@ The public gRPC v1 surface is:
 - `WriterService`: unary `GetWorkspaceWriterStatus`, `AcquireWriter`,
   `ReleaseWriter`, `PrepareWriterHandoff`, `CommitWriterHandoff`, and
   `CancelWriterHandoff`;
-- `ControllerService`: unary `VerifyController`; and
+- `ControllerService`: unary `VerifyController`;
 - `ArtifactService`: unary metadata-only `GetArtifact` and bounded
-  `ReadArtifactChunk`.
+  `ReadArtifactChunk`; and
+- `OrchestrationService`: the TASK-053 additive unary reads
+  `GetOrchestratedSession` and `ListOrchestratedSessionResults` from the
+  [consumer contract](gul-consumer-v1.md#6-authoritative-session-and-result-observations).
 
-The descriptor is frozen, but runtime method availability is capability-
-advertised. `GetCapabilities.supported_methods` MUST contain only methods whose
-full semantic and safety contract is implemented. `MILESTONE-BH1-P` and the
-later actual-Gul `MILESTONE-BH1` use the same checked minimum Run gateway set
-recorded in
-`dolgorae-capabilities-v1.schema.json` and
-`dolgorae-grpc-conformance-v1.json`: capability/workspace/profile bootstrap,
-Primary Run start/get/list/submit and basic lifecycle recovery, Run event
-streaming, Controller interaction handling, basic writer status/acquire/release,
-Controller verification, and artifact metadata/bounded chunk retrieval.
-Timeline, profile diagnostics, advanced Run operations, writer handoff, delete,
-verification, and write continuation remain unavailable and unadvertised until
-`TASK-029`. A client
-MUST fail closed rather than call an unadvertised method. `MILESTONE-PA1`
-requires the complete descriptor method set.
+Runtime method availability is capability-advertised. `GetCapabilities.supported_methods`
+MUST contain only methods whose full semantic and safety contract is implemented.
+Historical TASK-023 evidence covers its original 24-method gateway. The approved
+v0.1.3 profile requires those 24, complete Controller timeline and the two
+read-only aggregate queries, totaling 27. TASK-053 publishes the checked
+profile over the extended 36-method descriptor; TASK-054/055 implement the reads.
+Existing checked artifacts remain the earlier baseline until that publication;
+no target-only method may be advertised by the runtime.
 
-The checked public v1 Protobuf and descriptor remain unchanged by the two-use-
-case and internal-broker revision. Gul uses the existing Run surface and a protected Controller carrier containing
+Profile diagnostics, default-effort, fork, verification, delete, write
+continuation, and the three writer-handoff methods remain unavailable until
+TASK-029. MILESTONE-PA1 requires the complete extended descriptor. Clients check
+a required subset rather than rejecting newly advertised optional methods.
+They MUST NOT call an unadvertised method, even when an error suggests that
+operation as a future remedy.
+
+The two-use-case bootstrap preserves existing public Run signatures. TASK-053
+is the approved additive consumer-wire publication; subsequent v0.1.3 work
+preserves that lock. Gul uses the existing Run surface and a protected Controller carrier containing
 explicit Orchestration Launch Intent to create and control the
 `direct_interactive` Primary Run. The semantic service resolves the named
 Specialist Policy and creates the matching Orchestration Session and Aggregate
@@ -4605,8 +4638,9 @@ private External Specialist Facade, which compiles each hire and task into the
 same semantic Run core. A raw public `managed_agent` StartRun does not infer
 engagement membership. Dolgorae persists the accepted Specialist boundary but
 MUST NOT persist or execute an additional external task graph. Future aggregate-
-query RPCs, if needed, are additive v1 extensions and do not alter this
-release's checked wire shape.
+query RPCs follow additive v1 evolution. The two consumer queries are now
+required target scope for v0.1.3; their checked publication belongs to TASK-053
+and implementation to TASK-055.
 
 Workspace initialization, profile mutation/lifecycle, Operator-authorized
 reset/repair/migration, and server-side filesystem export MUST remain Machine
@@ -5017,10 +5051,13 @@ replaces the private parent/path and starts a fresh gateway attempt. It MUST NOT
 blindly restart with the same unsafe pathname and MUST NOT unlink a provider
 socket.
 
-Public-v1 freeze is gated by this normative runtime inventory. The checked
-conformance registry may mirror these rows but may not add, remove, rename, or
-reassign one. A release is valid only when each listed black-box test exists
-and passes for the release candidate.
+This normative runtime inventory covers the complete target. Release requirements
+are profile-specific: v0.1.3 requires applicable TASK-023 cases, TASK-026 provider
+acceptance and the consumer-contract cases. TASK-032 full-surface non-UTF8
+acceptance remains a later Personal Alpha requirement. TASK-053/056 synchronize
+these boundaries in the checked registry; future-owner tests must not silently
+block the preview. Each applicable black-box test must exist and pass against
+the exact release candidate; planned paths are not passing evidence.
 
 | Runtime case ID | Owner | Required test | Test path |
 |---|---|---|---|
@@ -5049,11 +5086,14 @@ result. Both approval modes require live-path evidence. No fake-only campaign
 can establish live provider acceptance.
 
 The provider campaign MUST verify protocol-zero negotiation, the existing
-24-method gateway availability contract, explicit Session bootstrap, Controller
+27-method Gul consumer profile, complete prompt-history timeline, sequential
+human submission, authoritative public session/result observations, explicit
+Session bootstrap, Controller
 approval, event cursor replay, task/results, release/abort, and restart through
 public interfaces. It MUST include a Specialist result above the inline bound,
 actual Primary consumption, and external-client metadata/chunk reads of the
-permitted result projection. Verify total bytes and SHA-256, authorization,
+permitted result projection discovered through ListOrchestratedSessionResults,
+never an ID injected from private fixture state. Verify total bytes and SHA-256, authorization,
 missing/expired/malformed/oversized/range/integrity failures, and secret canaries.
 The client remains a small test and handoff fixture, not a Gul clone, UI, SDK,
 new service, or alternate source of aggregate authority.

@@ -705,6 +705,57 @@ worker owns the run. Start-time bootstrap is the only period in which the
 front-end may create the run directory and initial records before worker
 ownership transfers.
 
+### Gul Consumer Contract
+
+The [Gul consumer specification](../specs/gul-consumer-v1.md) defines the approved
+v0.1.3 surface. TASK-053 publishes its checked wire; planning does not change
+runtime capabilities. Completed TASK-025 transport, private receipts, execution
+identity, rejection replay, blocking waits and result paging are unchanged.
+
+The shared semantic/Broker layer owns the two Controller-authorized read-only
+aggregate queries. GetOrchestratedSession captures consistent aggregate state,
+policy identity, counts, close disposition and an independent revision.
+ListOrchestratedSessionResults pages immutable publication records with explicit
+Primary-owned ArtifactRef/RunRef values. Reads do not start processes, repair
+state or acknowledge private result delivery. Aggregate revisions are not Run
+ProjectionStamp counters. Clients coalesce bounded snapshot refreshes, including
+aggregate-only changes that need not emit a Primary Run event.
+
+The existing ledger/timeline owners persist accepted human text before submit
+acknowledgement and expose the complete Controller-safe chronology. Gul filters
+user input for Prompt History; it does not become a second history authority.
+Ordinary new prompts cannot enter an active Primary Turn; exact receipt replay
+and current Interaction responses retain their distinct paths. No human-input
+queue, steering or automatic interruption is introduced.
+
+Whole-session root CloseRun records durable close intent, stops new admission
+and retires owned children through the Broker. Admission races with spawn/task
+publication use the existing serialization order; waits hold no SQLite/global
+mutation owner. Unknown effects prevent successful closed state. Root recovery
+accounts for retained aggregate intent without new semantic work or auto-resume.
+History, results, workspace changes and unrelated runtimes remain intact.
+Primary Pause/Interrupt does not imply aggregate pause.
+
+The consumer contract's bounded-close outcome table is the semantic authority.
+The gateway keeps RunMutationResponse unchanged: gRPC OK requires settled whole-
+session closure. Accepted but progressing intent uses SESSION_CLOSE_IN_PROGRESS
+with the durable operation ID in existing error details; completed response
+context and aggregate close projection correlate that same ID. Transport loss
+can omit the ID and is reconciled by the known root, never blind tokenless retry.
+Reads only observe; the existing root recovery owner advances retained work.
+
+TASK-053's checked provenance matrix maps each query field to durable owner,
+derivation, revision boundary and implementing Task. Semantic owners may read
+private provider stores, but no client depends on those structures. Source
+corruption cannot become a zero count and no read performs repair. Gul's browser
+DTOs, tokens, history navigation and presentation remain Gul-owned contracts.
+
+Gul develops with an explicitly selected contract-derived mock before release;
+production injection never falls back to that mock or the Machine CLI. Actual
+integration uses the separately released provider. Frozen and pre-extension
+clients remain regression fixtures for later implementation. Future Podway
+observations are an optional read-only surface with no direct FSM mutation path.
+
 ### Public gRPC Gateway
 
 `dolgorae serve --socket <absolute-path>` is a supervised foreground
@@ -719,23 +770,21 @@ Gul or another trusted
 same-user client starts and supervises it; Dolgorae never installs a launchd
 unit. It binds only the supplied Unix socket, checks every accepted
 connection with the platform peer-credential API, and offers unary operations
-plus Run-scoped event streams. The process serves multiple workspaces, but every
-request after the initial `InspectWorkspace` bootstrap supplies an absolute
-workspace path and expected workspace ID; bootstrap inspection accepts the
-absolute path alone and returns the calculated identity. There is no durable or
+plus Run-scoped event streams. The process serves multiple workspaces.
+Workspace-scoped calls after InspectWorkspace supply a canonical path and expected
+ID; bootstrap accepts the path alone. Capability and global Profile reads are
+not workspace-scoped. There is no durable or
 authoritative global in-memory Run registry. Dirty sets, activation leases, and
 scheduler caches are reconstructable from SQLite.
 
-Gateway delivery is staged without changing the frozen Protobuf descriptor.
-`TASK-023` implements the 24-method path shared by `MILESTONE-BH1-P` and
-`MILESTONE-BH1`,
-including metadata-only artifact lookup and bounded artifact reads, and
-advertises only that method set through capabilities. `TASK-029` completes
-the remaining timeline, diagnostics, advanced Run, writer-handoff, delete,
-verification, and write-continuation methods and
-then advertises the complete descriptor method inventory. An unadvertised
-method is unavailable even though generated stubs exist, and the adapter fails
-closed rather than routing it to an incomplete semantic handler.
+Historical TASK-023 provides 24 methods. TASK-053 freezes the additive public
+consumer wire: complete existing timeline plus two read-only aggregate queries,
+27 required methods over a 36-method descriptor. TASK-054 implements timeline,
+TASK-055 the aggregate queries; TASK-029 enables the remaining nine original
+methods. Preserve historical evidence separately from the current release
+profile. Runtime advertisement includes only complete implementations, never a
+planned method or generated stub. Missing optional later functionality must not
+block the required profile; incomplete handlers remain unavailable.
 
 The gateway holds the installation-scoped Dolgorae-home
 `rpc/gateway.lock` for its lifetime and publishes `gateway.json` with
