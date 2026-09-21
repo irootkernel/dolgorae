@@ -82,7 +82,8 @@ outside the complete repository gate.
 ## Live provider implementation
 
 EPIC-008 follows the amended twelve-task roadmap. TASK-025 is complete;
-TASK-053 publishes the checked consumer contract before TASK-047. TASK-054
+TASK-053 publishes the checked consumer contract before TASK-047 through
+`docs/protocol/dolgorae-gul-consumer-v1.lock.json`. TASK-054
 implements complete history, TASK-055 read-only aggregate/result queries,
 TASK-052 whole-session closure, and TASK-056 unchanged-consumer regression before
 TASK-026. Follow the Detailed SOT checklists and the
@@ -94,8 +95,8 @@ introduced effect's crash safety or return placeholder success for an unwired
 operation. Required commit and live-runtime approvals remain separate.
 Preserve TASK-025's completed private contract and transport selection. Its
 isolated probes do not implement production bridge/provisioning/dispatch.
-The public 27-method consumer lock is separate TASK-053 work; do not claim it
-exists merely because this plan has been adopted. General collaboration and
+The public 27-method consumer lock is a checked TASK-053 artifact; do not treat
+its descriptor presence or generated stubs as runtime availability. General collaboration and
 busy/mail-count reuse descriptions are EPIC-009 targets, not instructions to
 create placeholder services in EPIC-008.
 

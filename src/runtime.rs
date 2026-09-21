@@ -268,7 +268,7 @@ pub fn capabilities() -> RuntimeCapabilities {
         "controller_credential": {
             "schema_id": "https://dolgorae.local/schema/controller-credential/v1",
             "schema_version": 1,
-            "schema_sha256": "01b3d8b24b8cb7ecb2664ff10625e1d313890fd67259ae672b3842622ea5076c",
+            "schema_sha256": "6e888023fa6f12964afbd2867832944307dc626cad3fe6c6bc517768ab98b84f",
             "accepted_kinds": ["human_cli", "interactive_client", "workflow_orchestrator", "automation", "other"],
             "capability_byte_length": 32,
             "capability_encoding": "base64url_no_padding",
@@ -356,6 +356,7 @@ pub fn capabilities() -> RuntimeCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn task_023_advertises_the_implemented_public_surface() {
@@ -380,5 +381,23 @@ mod tests {
             capabilities["supported_transports"],
             json!(["machine_cli", "local_grpc"])
         );
+        assert_eq!(capabilities["grpc_methods"].as_array().unwrap().len(), 24);
+        assert!(
+            !capabilities["grpc_methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|method| method
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("OrchestrationService.")))
+        );
+    }
+
+    #[test]
+    fn advertised_controller_credential_digest_matches_distributed_bytes() {
+        let bytes =
+            include_bytes!("../docs/protocol/dolgorae-controller-credential-v1.schema.json");
+        let expected = format!("{:x}", Sha256::digest(bytes));
+        assert_eq!(capabilities().controller_credential.schema_sha256, expected);
     }
 }

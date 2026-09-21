@@ -1544,7 +1544,7 @@ blocking findings. Next: TASK-053 under the approved consumer amendment.
 
 ### TASK-053: Freeze the Gul v0.1.3 Consumer Contract
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on completed `TASK-025`. Publish the checked wire and fixtures for
 [the consumer specification](../specs/gul-consumer-v1.md). Add only

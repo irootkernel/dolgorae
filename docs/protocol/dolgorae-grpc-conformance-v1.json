@@ -6,6 +6,45 @@
     "machine_cli",
     "local_grpc"
   ],
+  "consumer_profiles": {
+    "dolgorae.gul-consumer/v1": {
+      "owner": "TASK-053",
+      "descriptor_method_count": 36,
+      "required_method_count": 27,
+      "contract": "dolgorae-gul-consumer-v1.json",
+      "fixtures": "dolgorae-gul-consumer-v1.fixtures.json",
+      "availability_rule": "required subset; descriptor presence alone is not availability",
+      "required_methods": [
+        "ArtifactService.GetArtifact",
+        "ArtifactService.ReadArtifactChunk",
+        "ControllerService.VerifyController",
+        "InteractionService.GetControllerInteraction",
+        "InteractionService.ListPendingInteractions",
+        "InteractionService.ResolveInteraction",
+        "ObservationService.ListRunTimelineItems",
+        "ObservationService.WatchRunEvents",
+        "OrchestrationService.GetOrchestratedSession",
+        "OrchestrationService.ListOrchestratedSessionResults",
+        "RunService.CloseRun",
+        "RunService.GetRun",
+        "RunService.InterruptTurn",
+        "RunService.ListRuns",
+        "RunService.PauseRun",
+        "RunService.ReconcileRun",
+        "RunService.RecoverRun",
+        "RunService.ResumeRun",
+        "RunService.StartRun",
+        "RunService.SubmitTurn",
+        "RuntimeService.GetCapabilities",
+        "RuntimeService.GetProfile",
+        "RuntimeService.InspectWorkspace",
+        "RuntimeService.ListProfiles",
+        "WriterService.AcquireWriter",
+        "WriterService.GetWorkspaceWriterStatus",
+        "WriterService.ReleaseWriter"
+      ]
+    }
+  },
   "contract_cases": [
     {
       "id": "workspace_bootstrap",
@@ -244,6 +283,21 @@
         "all_input_enums_reject_unknown",
         "all_output_enums_refresh_fail_closed"
       ]
+    },
+    {
+      "id": "gul_consumer_contract_lock",
+      "fixtures": [
+        "session_active",
+        "results_page_one",
+        "close_outcome_matrix"
+      ],
+      "assertions": [
+        "extended_descriptor_has_36_methods",
+        "required_profile_has_27_methods",
+        "unimplemented_methods_remain_unadvertised",
+        "field_sources_are_complete",
+        "whole_session_close_correlation_is_exhaustive"
+      ]
     }
   ],
   "runtime_pending": [
@@ -481,7 +535,7 @@
         "controllerCarrier": {
           "schemaId": "https://dolgorae.local/schema/controller-credential/v1",
           "schemaVersion": 1,
-          "schemaSha256": "01b3d8b24b8cb7ecb2664ff10625e1d313890fd67259ae672b3842622ea5076c",
+          "schemaSha256": "6e888023fa6f12964afbd2867832944307dc626cad3fe6c6bc517768ab98b84f",
           "carrierRootLocator": "home/.dolgorae/controller-carriers",
           "carrierRootPolicy": "CONTROLLER_CARRIER_ROOT_POLICY_DOLGORAE_OWNED_HOME",
           "acceptedControllerKinds": [
@@ -1682,7 +1736,7 @@
     "MILESTONE-BH1-P": {
       "owner": "TASK-026",
       "required_runtime_case": "private_boundary",
-      "gateway_inventory": "delivery_stages.MILESTONE-BH1",
+      "gateway_inventory": "consumer_profiles.dolgorae.gul-consumer/v1",
       "required_evidence": "provider_grpc_e2e_and_pinned_live_codex",
       "requires_real_gul": false,
       "release_eligibility": "v0.1.3 after all revised EPIC-008 completion gates; publication remains separate"
@@ -1750,6 +1804,39 @@
       },
       "description": "Historical BH1 inventory key for the twenty-four-method frozen public-v1 path shared by provider BH1-P and later actual-Gul BH1 acceptance, including artifact metadata and bounded chunk retrieval. Inventory membership does not claim either acceptance campaign has passed."
     },
+    "MILESTONE-BH1-P": {
+      "owner": "EPIC-008",
+      "required_methods": [
+        "ArtifactService.GetArtifact",
+        "ArtifactService.ReadArtifactChunk",
+        "ControllerService.VerifyController",
+        "InteractionService.GetControllerInteraction",
+        "InteractionService.ListPendingInteractions",
+        "InteractionService.ResolveInteraction",
+        "ObservationService.ListRunTimelineItems",
+        "ObservationService.WatchRunEvents",
+        "OrchestrationService.GetOrchestratedSession",
+        "OrchestrationService.ListOrchestratedSessionResults",
+        "RunService.CloseRun",
+        "RunService.GetRun",
+        "RunService.InterruptTurn",
+        "RunService.ListRuns",
+        "RunService.PauseRun",
+        "RunService.ReconcileRun",
+        "RunService.RecoverRun",
+        "RunService.ResumeRun",
+        "RunService.StartRun",
+        "RunService.SubmitTurn",
+        "RuntimeService.GetCapabilities",
+        "RuntimeService.GetProfile",
+        "RuntimeService.InspectWorkspace",
+        "RuntimeService.ListProfiles",
+        "WriterService.AcquireWriter",
+        "WriterService.GetWorkspaceWriterStatus",
+        "WriterService.ReleaseWriter"
+      ],
+      "description": "Provider release profile frozen by TASK-053; runtime availability is achieved only after the owning EPIC-008 implementation and acceptance tasks."
+    },
     "MILESTONE-PA1": {
       "owner": "TASK-029",
       "required_methods": [
@@ -1761,6 +1848,8 @@
         "InteractionService.ResolveInteraction",
         "ObservationService.ListRunTimelineItems",
         "ObservationService.WatchRunEvents",
+        "OrchestrationService.GetOrchestratedSession",
+        "OrchestrationService.ListOrchestratedSessionResults",
         "RunService.CloseRun",
         "RunService.CreateWriteContinuation",
         "RunService.DeleteRun",

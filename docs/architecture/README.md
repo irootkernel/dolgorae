@@ -708,8 +708,10 @@ ownership transfers.
 ### Gul Consumer Contract
 
 The [Gul consumer specification](../specs/gul-consumer-v1.md) defines the approved
-v0.1.3 surface. TASK-053 publishes its checked wire; planning does not change
-runtime capabilities. Completed TASK-025 transport, private receipts, execution
+v0.1.3 surface. TASK-053 publishes its checked wire through the immutable
+consumer lock, generated clients, fixtures, and pre-extension descriptor under
+`docs/protocol/`; this publication does not change runtime capabilities.
+Completed TASK-025 transport, private receipts, execution
 identity, rejection replay, blocking waits and result paging are unchanged.
 
 The shared semantic/Broker layer owns the two Controller-authorized read-only
@@ -744,7 +746,7 @@ context and aggregate close projection correlate that same ID. Transport loss
 can omit the ID and is reconciled by the known root, never blind tokenless retry.
 Reads only observe; the existing root recovery owner advances retained work.
 
-TASK-053's checked provenance matrix maps each query field to durable owner,
+The TASK-053 checked provenance matrix maps each query field to durable owner,
 derivation, revision boundary and implementing Task. Semantic owners may read
 private provider stores, but no client depends on those structures. Source
 corruption cannot become a zero count and no read performs repair. Gul's browser

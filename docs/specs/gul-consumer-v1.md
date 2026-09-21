@@ -2,9 +2,10 @@
 
 Contract ID: `dolgorae.gul-consumer/v1`
 
-Status: Approved Required State, adopted 2026-09-20. This document defines the
-Dolgorae v0.1.3 consumer requirements. It is not evidence of implemented methods,
-a published wire lock, a release candidate passing QA, or actual Gul integration.
+Status: Approved Required State, adopted 2026-09-20; checked wire published by
+TASK-053. This document defines the Dolgorae v0.1.3 consumer requirements. The
+wire publication is not evidence of implemented methods, a release candidate
+passing QA, or actual Gul integration.
 
 Authority: this specification owns provider wire semantics, authorization,
 lifecycle, safety, and compatibility alongside [the product specification](README.md).
@@ -13,7 +14,8 @@ Client obligations here are limited to interoperability and safety. [ADR-039](..
 records the decision. The [roadmap](../roadmap/README.md) alone owns Task identity,
 order, and status. Checked wire artifacts remain under `docs/protocol/`.
 TASK-053 publishes the exact Protobuf messages, error mappings, generated
-clients, fixtures, and immutable contract lock before Gul pins them.
+clients, fixtures, and immutable contract lock under `docs/protocol/` before Gul
+pins them.
 
 ## 1. Delivery boundaries
 

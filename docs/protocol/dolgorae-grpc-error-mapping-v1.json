@@ -43,6 +43,27 @@
         "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED"
       }
     },
+    "RunService.CloseRun": {
+      "SESSION_CLOSE_IN_PROGRESS": {
+        "status": "FAILED_PRECONDITION",
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED",
+        "required_fields": ["run_id", "operation_id"]
+      },
+      "OUTCOME_UNKNOWN": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RECONCILE_RUN",
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_OUTCOME_UNKNOWN",
+        "operation_id": "required_when_authorized_and_known"
+      },
+      "RECOVERY_REQUIRED": {
+        "required_action": "REQUIRED_CLIENT_ACTION_RECOVER_RUN",
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_RECONCILE_REQUIRED",
+        "operation_id": "required_when_authorized_and_known"
+      }
+    },
     "RunService.SubmitTurn": {
       "DEDICATED_SERVER_START_FAILED": {
         "required_action": "REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY",

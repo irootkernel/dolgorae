@@ -1,0 +1,174 @@
+{
+  "contract_id": "dolgorae.gul-consumer/v1",
+  "schema_version": 1,
+  "projection_version": 1,
+  "baseline_commit": "a963f3601b1e7036432501b6d8946c8c62c1466d",
+  "descriptor_method_count": 36,
+  "required_method_count": 27,
+  "required_methods": [
+    "ArtifactService.GetArtifact",
+    "ArtifactService.ReadArtifactChunk",
+    "ControllerService.VerifyController",
+    "InteractionService.GetControllerInteraction",
+    "InteractionService.ListPendingInteractions",
+    "InteractionService.ResolveInteraction",
+    "ObservationService.ListRunTimelineItems",
+    "ObservationService.WatchRunEvents",
+    "OrchestrationService.GetOrchestratedSession",
+    "OrchestrationService.ListOrchestratedSessionResults",
+    "RunService.CloseRun",
+    "RunService.GetRun",
+    "RunService.InterruptTurn",
+    "RunService.ListRuns",
+    "RunService.PauseRun",
+    "RunService.ReconcileRun",
+    "RunService.RecoverRun",
+    "RunService.ResumeRun",
+    "RunService.StartRun",
+    "RunService.SubmitTurn",
+    "RuntimeService.GetCapabilities",
+    "RuntimeService.GetProfile",
+    "RuntimeService.InspectWorkspace",
+    "RuntimeService.ListProfiles",
+    "WriterService.AcquireWriter",
+    "WriterService.GetWorkspaceWriterStatus",
+    "WriterService.ReleaseWriter"
+  ],
+  "unavailable_until_later_tasks": [
+    "RunService.CreateWriteContinuation",
+    "RunService.DeleteRun",
+    "RunService.ForkRun",
+    "RunService.SetDefaultEffort",
+    "RunService.VerifyRun",
+    "RuntimeService.ListProfileDiagnostics",
+    "WriterService.CancelWriterHandoff",
+    "WriterService.CommitWriterHandoff",
+    "WriterService.PrepareWriterHandoff"
+  ],
+  "paging": {
+    "default_limit": 100,
+    "maximum_limit": 500,
+    "cursor": "opaque_versioned_session_projection_head_and_last_item_bound",
+    "cursor_grants_authority": false,
+    "maximum_metadata_response_bytes": 1048576
+  },
+  "authorization": {
+    "methods": "root_controller_required",
+    "wrong_controller_disclosure": "forbidden",
+    "child_controller_exposure": "forbidden",
+    "read_side_effects": "forbidden"
+  },
+  "session_semantics": {
+    "lifecycle": {
+      "CREATING": "durable session exists and initial Primary publication is incomplete",
+      "ACTIVE": "root is registered and no degraded, recovery, or close condition applies",
+      "DEGRADED": "a known member or task failure reduces capability while the aggregate remains operable",
+      "RECOVERING": "durable aggregate recovery is required or in progress and no close state takes precedence",
+      "COMPLETING": "non-interrupting close intent is committed and settlement is incomplete",
+      "ABORTING": "interrupting close intent is committed and settlement is incomplete",
+      "COMPLETED": "non-interrupting close completion conditions are authoritatively satisfied",
+      "ABORTED": "interrupting close completion conditions are authoritatively satisfied"
+    },
+    "close_progress": {
+      "NONE": "no durable public close intent exists",
+      "SETTLING": "intent is committed and all effects are known but settlement is incomplete",
+      "COMPLETED": "complete intent settled and the aggregate is closed",
+      "ABORTED": "abort intent settled and the aggregate is closed",
+      "RECOVERY_REQUIRED": "verified recovery or reconciliation is required before settlement can continue",
+      "OUTCOME_UNKNOWN": "at least one owned effect lacks authoritative outcome evidence"
+    },
+    "availability": {
+      "AVAILABLE": "the complete projection is sourced from one valid bounded observation",
+      "UNAVAILABLE": "the requested root is not an exposed orchestrated session",
+      "RECOVERY_REQUIRED": "a retained aggregate exists but cannot produce a trustworthy complete projection"
+    },
+    "result_format": {
+      "UTF8_TEXT": "the immutable artifact contains exact valid UTF-8 result bytes"
+    }
+  },
+  "close_run": {
+    "application_idempotency_key": false,
+    "transparent_retry": "forbidden",
+    "compatible_repeat": "return_existing_operation_outcome",
+    "mismatched_interrupt_choice": "typed_conflict",
+    "transport_loss_follow_up": "OrchestrationService.GetOrchestratedSession",
+    "outcomes": [
+      {
+        "id": "rejected_before_intent",
+        "grpc": "existing_typed_error",
+        "new_operation_id": false
+      },
+      {
+        "id": "settlement_in_progress",
+        "grpc": "FAILED_PRECONDITION",
+        "error_code": "SESSION_CLOSE_IN_PROGRESS",
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED",
+        "requires_run_id": true,
+        "requires_operation_id": true
+      },
+      {
+        "id": "recovery_required",
+        "grpc": "existing_typed_error",
+        "error_codes": ["OUTCOME_UNKNOWN", "RECOVERY_REQUIRED"],
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "operation_id": "required_when_authorized_and_known"
+      },
+      {
+        "id": "completed",
+        "grpc": "OK",
+        "response": "RunMutationResponse",
+        "operation_id": "ResponseContext.operation_id_when_retained"
+      },
+      {
+        "id": "transport_loss",
+        "grpc": "transport_error",
+        "acceptance": "unknown",
+        "follow_up": "OrchestrationService.GetOrchestratedSession"
+      }
+    ]
+  },
+  "field_sources": [
+    {"field": "session.context", "source": "gateway response metadata", "state": "protocol and server identity only; queried close operation is not placed here", "revision": "response", "authorization": "returned after root Controller authorization", "fixture": "session_active", "owner": "existing gateway"},
+    {"field": "session.session_id", "source": "orchestrated_session.session_id", "state": "registered root only", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "session_active", "owner": "existing/TASK-055"},
+    {"field": "session.primary_run", "source": "orchestrated_session.primary_run_id plus workspace record", "state": "registered root only", "revision": "orchestration aggregate", "authorization": "root Controller; canonical path only", "fixture": "session_active", "owner": "existing/TASK-055"},
+    {"field": "session.aggregate_revision", "source": "orchestration aggregate revision", "state": "one bounded snapshot", "revision": "self", "authorization": "root Controller", "fixture": "session_active", "owner": "TASK-055"},
+    {"field": "session.lifecycle", "source": "session state plus durable close record", "state": "exhaustive checked mapping", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "session_lifecycle_matrix", "owner": "TASK-052/TASK-055"},
+    {"field": "session.composition", "source": "registered member records", "state": "standalone when only retained Primary; brokered otherwise", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "session_active", "owner": "existing/TASK-055"},
+    {"field": "session.approval_policy", "source": "immutable session policy snapshot", "state": "accepted bootstrap value", "revision": "session creation", "authorization": "root Controller", "fixture": "session_active", "owner": "existing/TASK-055"},
+    {"field": "session.specialist_policy_name", "source": "immutable session policy snapshot", "state": "accepted bootstrap value", "revision": "session creation", "authorization": "name only", "fixture": "session_active", "owner": "existing/TASK-055"},
+    {"field": "session.specialist_policy_revision", "source": "immutable session policy snapshot revision", "state": "accepted bootstrap value", "revision": "policy domain", "authorization": "root Controller", "fixture": "session_active", "owner": "TASK-048/TASK-055"},
+    {"field": "session.specialist_policy_sha256", "source": "immutable session policy snapshot digest", "state": "accepted bytes", "revision": "policy domain", "authorization": "digest only; no role instructions", "fixture": "session_active", "owner": "existing/TASK-055"},
+    {"field": "session.nonretired_member_count", "source": "member records", "state": "all Primary and Specialist members not retired", "revision": "orchestration aggregate", "authorization": "count only", "fixture": "session_count_matrix", "owner": "TASK-055"},
+    {"field": "session.nonterminal_spawn_count", "source": "spawn operations", "state": "requested, awaiting_approval, approved, provisioning or publication_pending", "revision": "orchestration aggregate", "authorization": "count only", "fixture": "session_count_matrix", "owner": "TASK-048/TASK-055"},
+    {"field": "session.pending_approval_count", "source": "spawn operations", "state": "awaiting_approval only; overlaps nonterminal spawns", "revision": "orchestration aggregate", "authorization": "count only", "fixture": "session_count_matrix", "owner": "TASK-048/TASK-055"},
+    {"field": "session.accepted_unfinished_task_count", "source": "accepted specialist tasks", "state": "accepted or dispatching or running or result_publication_pending", "revision": "orchestration aggregate", "authorization": "count only", "fixture": "session_count_matrix", "owner": "TASK-049/TASK-051/TASK-055"},
+    {"field": "session.unknown_outcome_task_count", "source": "accepted specialist tasks", "state": "outcome_unknown only; overlaps accepted unfinished", "revision": "orchestration aggregate", "authorization": "count only", "fixture": "session_count_matrix", "owner": "TASK-049/TASK-050/TASK-055"},
+    {"field": "session.published_result_count", "source": "immutable result publications", "state": "artifact and association committed", "revision": "orchestration aggregate", "authorization": "count only", "fixture": "session_count_matrix", "owner": "TASK-051/TASK-055"},
+    {"field": "session.close_intent", "source": "durable root close record", "state": "none, complete, or abort fixed at admission", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "close_outcome_matrix", "owner": "TASK-052/TASK-055"},
+    {"field": "session.close_progress", "source": "durable root close record plus accounted effects", "state": "checked exhaustive mapping", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "close_outcome_matrix", "owner": "TASK-052/TASK-055"},
+    {"field": "session.close_operation_id", "source": "durable root close record", "state": "present only after intent commit", "revision": "close operation", "authorization": "root Controller; opaque", "fixture": "close_outcome_matrix", "owner": "TASK-052/TASK-055"},
+    {"field": "session.recovery_classification", "source": "close record and verified aggregate recovery evidence", "state": "typed mapping; never diagnostic parsing", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "close_outcome_matrix", "owner": "TASK-052/TASK-055"},
+    {"field": "session.required_action", "source": "same semantic decision as recovery classification", "state": "typed mapping", "revision": "orchestration aggregate", "authorization": "root Controller", "fixture": "close_outcome_matrix", "owner": "TASK-052/TASK-055"},
+    {"field": "session.captured_at", "source": "gateway observation clock", "state": "capture metadata only", "revision": "not a lifecycle event", "authorization": "root Controller", "fixture": "session_active", "owner": "TASK-055"},
+    {"field": "session.source_revision", "source": "orchestration store revision", "state": "same bounded snapshot as fields and counts", "revision": "self", "authorization": "root Controller", "fixture": "session_active", "owner": "TASK-055"},
+    {"field": "session.availability", "source": "source record presence and integrity", "state": "available, unavailable, or recovery_required; unknown is not zero", "revision": "orchestration aggregate", "authorization": "deny before existence disclosure", "fixture": "session_unavailable", "owner": "TASK-055"},
+    {"field": "results.context", "source": "gateway response metadata", "state": "protocol and server identity only", "revision": "response", "authorization": "returned after root Controller authorization", "fixture": "results_page_one", "owner": "existing gateway"},
+    {"field": "results.captured_publication_head", "source": "durable publication sequence head", "state": "fixed for traversal", "revision": "publication domain", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.source_revision", "source": "orchestration store revision", "state": "bounded page observation", "revision": "self", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-055"},
+    {"field": "results.captured_at", "source": "gateway observation clock", "state": "capture metadata only", "revision": "not a publication event", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-055"},
+    {"field": "results.items.result_id", "source": "immutable result publication association", "state": "published only", "revision": "publication order", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.task_id", "source": "accepted task linked by publication association", "state": "published only", "revision": "publication order", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.specialist_run", "source": "accepted task target member", "state": "safe RunRef only", "revision": "publication order", "authorization": "no child Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.specialist_role", "source": "accepted immutable member role name", "state": "safe name only", "revision": "member snapshot", "authorization": "no role instructions", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.publication_order", "source": "durable publication sequence", "state": "strictly increasing per session", "revision": "publication domain", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.published_at", "source": "committed publication association", "state": "write commit time", "revision": "publication order", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.format", "source": "committed result metadata", "state": "UTF8_TEXT in v1", "revision": "publication order", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.byte_length", "source": "committed Primary-owned artifact metadata", "state": "exact immutable bytes", "revision": "artifact identity", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.sha256", "source": "committed Primary-owned artifact metadata", "state": "exact immutable bytes", "revision": "artifact identity", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.artifact", "source": "committed Primary-owned artifact metadata", "state": "association committed after bytes", "revision": "artifact identity", "authorization": "permitted ArtifactRef only", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.items.artifact_owner", "source": "publication association Primary Run", "state": "must equal root Primary Run", "revision": "publication order", "authorization": "root Controller", "fixture": "results_page_one", "owner": "TASK-051/TASK-055"},
+    {"field": "results.next_page_cursor", "source": "session, projection version, captured head and last order", "state": "opaque authenticated encoding", "revision": "publication head", "authorization": "cursor grants none; revalidate Controller", "fixture": "results_page_one", "owner": "TASK-055"}
+  ]
+}

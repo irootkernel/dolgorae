@@ -4609,8 +4609,9 @@ Historical TASK-023 evidence covers its original 24-method gateway. The approved
 v0.1.3 profile requires those 24, complete Controller timeline and the two
 read-only aggregate queries, totaling 27. TASK-053 publishes the checked
 profile over the extended 36-method descriptor; TASK-054/055 implement the reads.
-Existing checked artifacts remain the earlier baseline until that publication;
-no target-only method may be advertised by the runtime.
+The immutable TASK-053 lock retains the pre-extension descriptor and generated
+low-level client alongside the new generated consumer. No target-only method may
+be advertised by the runtime.
 
 Profile diagnostics, default-effort, fork, verification, delete, write
 continuation, and the three writer-handoff methods remain unavailable until

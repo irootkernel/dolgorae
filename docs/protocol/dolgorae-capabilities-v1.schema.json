@@ -66,7 +66,7 @@
       "const": 1
     },
     "rpc_descriptor_sha256": {
-      "const": "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252"
+      "const": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5"
     },
     "grpc_methods": {
       "type": "array",
@@ -82,6 +82,8 @@
           "InteractionService.ResolveInteraction",
           "ObservationService.ListRunTimelineItems",
           "ObservationService.WatchRunEvents",
+          "OrchestrationService.GetOrchestratedSession",
+          "OrchestrationService.ListOrchestratedSessionResults",
           "RunService.CloseRun",
           "RunService.CreateWriteContinuation",
           "RunService.DeleteRun",
@@ -137,6 +139,35 @@
           "WriterService.GetWorkspaceWriterStatus",
           "WriterService.ReleaseWriter"
         ],
+        "MILESTONE-BH1-P": [
+          "ArtifactService.GetArtifact",
+          "ArtifactService.ReadArtifactChunk",
+          "ControllerService.VerifyController",
+          "InteractionService.GetControllerInteraction",
+          "InteractionService.ListPendingInteractions",
+          "InteractionService.ResolveInteraction",
+          "ObservationService.ListRunTimelineItems",
+          "ObservationService.WatchRunEvents",
+          "OrchestrationService.GetOrchestratedSession",
+          "OrchestrationService.ListOrchestratedSessionResults",
+          "RunService.CloseRun",
+          "RunService.GetRun",
+          "RunService.InterruptTurn",
+          "RunService.ListRuns",
+          "RunService.PauseRun",
+          "RunService.ReconcileRun",
+          "RunService.RecoverRun",
+          "RunService.ResumeRun",
+          "RunService.StartRun",
+          "RunService.SubmitTurn",
+          "RuntimeService.GetCapabilities",
+          "RuntimeService.GetProfile",
+          "RuntimeService.InspectWorkspace",
+          "RuntimeService.ListProfiles",
+          "WriterService.AcquireWriter",
+          "WriterService.GetWorkspaceWriterStatus",
+          "WriterService.ReleaseWriter"
+        ],
         "MILESTONE-PA1": [
           "ArtifactService.GetArtifact",
           "ArtifactService.ReadArtifactChunk",
@@ -146,6 +177,8 @@
           "InteractionService.ResolveInteraction",
           "ObservationService.ListRunTimelineItems",
           "ObservationService.WatchRunEvents",
+          "OrchestrationService.GetOrchestratedSession",
+          "OrchestrationService.ListOrchestratedSessionResults",
           "RunService.CloseRun",
           "RunService.CreateWriteContinuation",
           "RunService.DeleteRun",
@@ -207,7 +240,7 @@
           "const": 1
         },
         "schema_sha256": {
-          "const": "01b3d8b24b8cb7ecb2664ff10625e1d313890fd67259ae672b3842622ea5076c"
+          "const": "6e888023fa6f12964afbd2867832944307dc626cad3fe6c6bc517768ab98b84f"
         },
         "accepted_kinds": {
           "type": "array",

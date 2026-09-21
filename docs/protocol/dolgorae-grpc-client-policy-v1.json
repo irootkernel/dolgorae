@@ -15,6 +15,29 @@
     "protected_body_persistence": "forbidden",
     "protected_body_automatic_replay": "forbidden"
   },
+  "orchestration_read_policy": {
+    "methods": [
+      "OrchestrationService.GetOrchestratedSession",
+      "OrchestrationService.ListOrchestratedSessionResults"
+    ],
+    "authorization": "revalidate the root Controller on every query and page",
+    "refresh": "on relevant notifications, reconnect, open and a coalesced rate-bounded schedule while active",
+    "side_effects": "forbidden",
+    "result_page_default_limit": 100,
+    "result_page_maximum_limit": 500,
+    "result_page_maximum_metadata_bytes": 1048576
+  },
+  "orchestrated_close_policy": {
+    "transparent_retry": "forbidden",
+    "blind_tokenless_retry": "forbidden after durable acceptance or ambiguous transport outcome",
+    "in_progress_error": "SESSION_CLOSE_IN_PROGRESS",
+    "observation_method": "OrchestrationService.GetOrchestratedSession",
+    "operation_id_sources": [
+      "DolgoraeErrorDetail.operation_id",
+      "RunMutationResponse.context.operation_id",
+      "OrchestratedSessionProjection.close_operation_id"
+    ]
+  },
   "stream_end_policy": {
     "RUN_TERMINAL": "fetch final required snapshots and do not reconnect indefinitely",
     "SERVER_SHUTDOWN": "refresh gateway state and reconnect from the last committed cursor",

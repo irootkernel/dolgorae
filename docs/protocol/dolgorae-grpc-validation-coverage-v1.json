@@ -4,6 +4,7 @@
   "required_sections": [
     "acceptance_matrix",
     "controller_credential_digest",
+    "consumer_profile_lock",
     "descriptor_digest_provenance",
     "descriptor_method_shape",
     "freeze_branch",
@@ -15,5 +16,6 @@
   ],
   "required_acceptance_rows": 30,
   "required_bh1_methods": 24,
-  "required_pa1_methods": 34
+  "required_gul_consumer_methods": 27,
+  "required_pa1_methods": 36
 }

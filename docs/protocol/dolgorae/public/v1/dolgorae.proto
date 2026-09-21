@@ -61,6 +61,11 @@ service ArtifactService {
   rpc ReadArtifactChunk(ReadArtifactChunkRequest) returns (ReadArtifactChunkResponse);
 }
 
+service OrchestrationService {
+  rpc GetOrchestratedSession(GetOrchestratedSessionRequest) returns (GetOrchestratedSessionResponse);
+  rpc ListOrchestratedSessionResults(ListOrchestratedSessionResultsRequest) returns (ListOrchestratedSessionResultsResponse);
+}
+
 message RequestContext {
   uint32 protocol_version = 1;
   string client_request_id = 2;
@@ -1483,6 +1488,128 @@ message ReadArtifactChunkResponse {
   bool eof = 6;
   uint64 total_byte_length = 7;
   string sha256 = 8;
+}
+
+enum OrchestratedSessionLifecycle {
+  ORCHESTRATED_SESSION_LIFECYCLE_UNSPECIFIED = 0;
+  ORCHESTRATED_SESSION_LIFECYCLE_CREATING = 1;
+  ORCHESTRATED_SESSION_LIFECYCLE_ACTIVE = 2;
+  ORCHESTRATED_SESSION_LIFECYCLE_DEGRADED = 3;
+  ORCHESTRATED_SESSION_LIFECYCLE_RECOVERING = 4;
+  ORCHESTRATED_SESSION_LIFECYCLE_COMPLETING = 5;
+  ORCHESTRATED_SESSION_LIFECYCLE_ABORTING = 6;
+  ORCHESTRATED_SESSION_LIFECYCLE_COMPLETED = 7;
+  ORCHESTRATED_SESSION_LIFECYCLE_ABORTED = 8;
+}
+
+enum OrchestratedSessionComposition {
+  ORCHESTRATED_SESSION_COMPOSITION_UNSPECIFIED = 0;
+  ORCHESTRATED_SESSION_COMPOSITION_STANDALONE_PRIMARY = 1;
+  ORCHESTRATED_SESSION_COMPOSITION_BROKERED_HIERARCHY = 2;
+}
+
+enum OrchestratedSessionApprovalPolicy {
+  ORCHESTRATED_SESSION_APPROVAL_POLICY_UNSPECIFIED = 0;
+  ORCHESTRATED_SESSION_APPROVAL_POLICY_USER_APPROVAL_REQUIRED = 1;
+  ORCHESTRATED_SESSION_APPROVAL_POLICY_FULLY_DELEGATED = 2;
+}
+
+enum OrchestratedSessionAvailability {
+  ORCHESTRATED_SESSION_AVAILABILITY_UNSPECIFIED = 0;
+  ORCHESTRATED_SESSION_AVAILABILITY_AVAILABLE = 1;
+  ORCHESTRATED_SESSION_AVAILABILITY_UNAVAILABLE = 2;
+  ORCHESTRATED_SESSION_AVAILABILITY_RECOVERY_REQUIRED = 3;
+}
+
+enum SessionCloseIntent {
+  SESSION_CLOSE_INTENT_UNSPECIFIED = 0;
+  SESSION_CLOSE_INTENT_NONE = 1;
+  SESSION_CLOSE_INTENT_COMPLETE = 2;
+  SESSION_CLOSE_INTENT_ABORT = 3;
+}
+
+enum SessionCloseProgress {
+  SESSION_CLOSE_PROGRESS_UNSPECIFIED = 0;
+  SESSION_CLOSE_PROGRESS_NONE = 1;
+  SESSION_CLOSE_PROGRESS_SETTLING = 2;
+  SESSION_CLOSE_PROGRESS_COMPLETED = 3;
+  SESSION_CLOSE_PROGRESS_ABORTED = 4;
+  SESSION_CLOSE_PROGRESS_RECOVERY_REQUIRED = 5;
+  SESSION_CLOSE_PROGRESS_OUTCOME_UNKNOWN = 6;
+}
+
+message OrchestratedSessionProjection {
+  string session_id = 1;
+  RunRef primary_run = 2;
+  uint64 aggregate_revision = 3;
+  OrchestratedSessionLifecycle lifecycle = 4;
+  OrchestratedSessionComposition composition = 5;
+  OrchestratedSessionApprovalPolicy approval_policy = 6;
+  string specialist_policy_name = 7;
+  uint64 specialist_policy_revision = 8;
+  string specialist_policy_sha256 = 9;
+  uint64 nonretired_member_count = 10;
+  uint64 nonterminal_spawn_count = 11;
+  uint64 pending_approval_count = 12;
+  uint64 accepted_unfinished_task_count = 13;
+  uint64 unknown_outcome_task_count = 14;
+  uint64 published_result_count = 15;
+  SessionCloseIntent close_intent = 16;
+  SessionCloseProgress close_progress = 17;
+  optional string close_operation_id = 18;
+  RecoveryClassification recovery_classification = 19;
+  RequiredClientAction required_action = 20;
+  google.protobuf.Timestamp captured_at = 21;
+  uint64 source_revision = 22;
+  OrchestratedSessionAvailability availability = 23;
+}
+
+message GetOrchestratedSessionRequest {
+  RequestContext context = 1;
+  RunRef root_run = 2;
+  ControllerCarrierRef controller = 3;
+}
+
+message GetOrchestratedSessionResponse {
+  ResponseContext context = 1;
+  OrchestratedSessionProjection session = 2;
+}
+
+enum OrchestratedResultFormat {
+  ORCHESTRATED_RESULT_FORMAT_UNSPECIFIED = 0;
+  ORCHESTRATED_RESULT_FORMAT_UTF8_TEXT = 1;
+}
+
+message OrchestratedSessionResult {
+  string result_id = 1;
+  string task_id = 2;
+  RunRef specialist_run = 3;
+  string specialist_role = 4;
+  uint64 publication_order = 5;
+  google.protobuf.Timestamp published_at = 6;
+  OrchestratedResultFormat format = 7;
+  uint64 byte_length = 8;
+  string sha256 = 9;
+  ArtifactRef artifact = 10;
+  RunRef artifact_owner = 11;
+}
+
+message ListOrchestratedSessionResultsRequest {
+  RequestContext context = 1;
+  RunRef root_run = 2;
+  ControllerCarrierRef controller = 3;
+  optional string page_cursor = 4;
+  uint32 limit = 5;
+  uint32 projection_version = 6;
+}
+
+message ListOrchestratedSessionResultsResponse {
+  ResponseContext context = 1;
+  uint64 captured_publication_head = 2;
+  uint64 source_revision = 3;
+  google.protobuf.Timestamp captured_at = 4;
+  repeated OrchestratedSessionResult items = 5;
+  optional string next_page_cursor = 6;
 }
 
 enum RetryClassification {

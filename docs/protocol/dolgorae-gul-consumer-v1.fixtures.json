@@ -1,0 +1,115 @@
+{
+  "contract_id": "dolgorae.gul-consumer-fixtures/v1",
+  "schema_version": 1,
+  "method_coverage": [
+    {"method": "ArtifactService.GetArtifact", "positive": "artifact_projection", "negative": "artifact_authorization_or_integrity"},
+    {"method": "ArtifactService.ReadArtifactChunk", "positive": "artifact_projection", "negative": "artifact_range_or_integrity"},
+    {"method": "ControllerService.VerifyController", "positive": "controller_verification_projection", "negative": "controller_mismatch"},
+    {"method": "InteractionService.GetControllerInteraction", "positive": "controller_interaction_projection", "negative": "interaction_authorization"},
+    {"method": "InteractionService.ListPendingInteractions", "positive": "interaction_summary_projection", "negative": "foreign_run"},
+    {"method": "InteractionService.ResolveInteraction", "positive": "controller_interaction_projection", "negative": "protected_interaction_lost_response"},
+    {"method": "ObservationService.ListRunTimelineItems", "positive": "timeline_interaction_projection", "negative": "timeline_cursor_or_authorization"},
+    {"method": "ObservationService.WatchRunEvents", "positive": "run_event_projection", "negative": "slow_consumer_or_cursor"},
+    {"method": "OrchestrationService.GetOrchestratedSession", "positive": "session_active", "negative": "low_level_run_is_not_session"},
+    {"method": "OrchestrationService.ListOrchestratedSessionResults", "positive": "results_page_one", "negative": "result_cursor_foreign_session"},
+    {"method": "RunService.CloseRun", "positive": "close_outcome_matrix", "negative": "bounded_wait_expired"},
+    {"method": "RunService.GetRun", "positive": "run_projection", "negative": "foreign_run"},
+    {"method": "RunService.InterruptTurn", "positive": "transition_error_projection", "negative": "stale_aggregate_action"},
+    {"method": "RunService.ListRuns", "positive": "run_projection", "negative": "workspace_identity_mismatch"},
+    {"method": "RunService.PauseRun", "positive": "transition_error_projection", "negative": "stale_aggregate_action"},
+    {"method": "RunService.ReconcileRun", "positive": "run_projection", "negative": "controller_mismatch"},
+    {"method": "RunService.RecoverRun", "positive": "run_projection", "negative": "controller_mismatch"},
+    {"method": "RunService.ResumeRun", "positive": "transition_error_projection", "negative": "dedicated_server_start_failed"},
+    {"method": "RunService.StartRun", "positive": "start_run_replay_projection", "negative": "start_run_idempotency_conflict"},
+    {"method": "RunService.SubmitTurn", "positive": "submit_turn_accepted", "negative": "busy_or_exact_replay"},
+    {"method": "RuntimeService.GetCapabilities", "positive": "credential_carrier_projection", "negative": "unsupported_required_profile"},
+    {"method": "RuntimeService.GetProfile", "positive": "profile_projection", "negative": "profile_unavailable"},
+    {"method": "RuntimeService.InspectWorkspace", "positive": "workspace_projection", "negative": "workspace_identity_mismatch"},
+    {"method": "RuntimeService.ListProfiles", "positive": "profile_projection", "negative": "profile_contract_corrupt"},
+    {"method": "WriterService.AcquireWriter", "positive": "writer_projection", "negative": "writer_conflict"},
+    {"method": "WriterService.GetWorkspaceWriterStatus", "positive": "writer_projection", "negative": "workspace_identity_mismatch"},
+    {"method": "WriterService.ReleaseWriter", "positive": "writer_projection", "negative": "stale_writer_generation"}
+  ],
+  "fixture_groups": {
+    "session_lifecycle_matrix": ["session_active", "intent_before_response_loss", "unknown_child_effect", "already_settled_session"],
+    "session_count_matrix": ["session_active", "session_source_corrupt_is_not_zero"],
+    "session_unavailable": ["low_level_run_is_not_session", "session_source_corrupt_is_not_zero"],
+    "close_outcome_matrix": ["intent_before_response_loss", "concurrent_compatible_close", "concurrent_mismatched_interrupt", "unknown_child_effect", "already_settled_session", "bounded_wait_expired"]
+  },
+  "positive": [
+    {
+      "id": "session_active",
+      "grpc_message": "dolgorae.public.v1.GetOrchestratedSessionResponse",
+      "grpc_json": {
+        "context": {"protocolVersion": 1, "serverInstanceId": "gateway-a"},
+        "session": {
+          "sessionId": "018f47b2-6f4a-7cc1-9a2b-123456789abc",
+          "primaryRun": {"workspace": {"absolutePath": "/workspace", "expectedWorkspaceId": "workspace-1"}, "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc"},
+          "aggregateRevision": "42",
+          "lifecycle": "ORCHESTRATED_SESSION_LIFECYCLE_ACTIVE",
+          "composition": "ORCHESTRATED_SESSION_COMPOSITION_BROKERED_HIERARCHY",
+          "approvalPolicy": "ORCHESTRATED_SESSION_APPROVAL_POLICY_USER_APPROVAL_REQUIRED",
+          "specialistPolicyName": "engineering",
+          "specialistPolicyRevision": "3",
+          "specialistPolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "nonretiredMemberCount": "2",
+          "nonterminalSpawnCount": "1",
+          "pendingApprovalCount": "1",
+          "acceptedUnfinishedTaskCount": "1",
+          "unknownOutcomeTaskCount": "0",
+          "publishedResultCount": "1",
+          "closeIntent": "SESSION_CLOSE_INTENT_NONE",
+          "closeProgress": "SESSION_CLOSE_PROGRESS_NONE",
+          "recoveryClassification": "RECOVERY_CLASSIFICATION_NONE",
+          "requiredAction": "REQUIRED_CLIENT_ACTION_NONE",
+          "capturedAt": "2026-09-21T00:00:00Z",
+          "sourceRevision": "42",
+          "availability": "ORCHESTRATED_SESSION_AVAILABILITY_AVAILABLE"
+        }
+      }
+    },
+    {
+      "id": "results_page_one",
+      "grpc_message": "dolgorae.public.v1.ListOrchestratedSessionResultsResponse",
+      "grpc_json": {
+        "context": {"protocolVersion": 1, "serverInstanceId": "gateway-a"},
+        "capturedPublicationHead": "7",
+        "sourceRevision": "43",
+        "capturedAt": "2026-09-21T00:00:01Z",
+        "items": [{
+          "resultId": "result-7",
+          "taskId": "task-7",
+          "specialistRun": {"workspace": {"absolutePath": "/workspace", "expectedWorkspaceId": "workspace-1"}, "runId": "specialist-1"},
+          "specialistRole": "implementation",
+          "publicationOrder": "7",
+          "publishedAt": "2026-09-21T00:00:00Z",
+          "format": "ORCHESTRATED_RESULT_FORMAT_UTF8_TEXT",
+          "byteLength": "4",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "artifact": {"artifactId": "artifact-7", "kind": "ARTIFACT_KIND_FINAL_RESPONSE", "visibility": "ARTIFACT_VISIBILITY_CONTROLLER_ONLY", "mediaType": "text/plain; charset=utf-8", "byteLength": "4", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+          "artifactOwner": {"workspace": {"absolutePath": "/workspace", "expectedWorkspaceId": "workspace-1"}, "runId": "018f47b2-6f4a-7cc1-9a2b-123456789abc"}
+        }],
+        "nextPageCursor": "opaque-head-7-after-7"
+      }
+    }
+  ],
+  "negative": [
+    {"id": "low_level_run_is_not_session", "method": "OrchestrationService.GetOrchestratedSession", "outcome": "typed_invalid_target"},
+    {"id": "foreign_controller_hides_existence", "method": "OrchestrationService.GetOrchestratedSession", "outcome": "typed_authorization_failure_without_private_detail"},
+    {"id": "session_source_corrupt_is_not_zero", "method": "OrchestrationService.GetOrchestratedSession", "outcome": "typed_integrity_or_recovery_error"},
+    {"id": "result_cursor_malformed", "method": "OrchestrationService.ListOrchestratedSessionResults", "outcome": "typed_invalid_cursor"},
+    {"id": "result_cursor_foreign_session", "method": "OrchestrationService.ListOrchestratedSessionResults", "outcome": "typed_invalid_cursor"},
+    {"id": "result_limit_above_500", "method": "OrchestrationService.ListOrchestratedSessionResults", "outcome": "typed_invalid_request"},
+    {"id": "result_artifact_not_primary_owned", "method": "OrchestrationService.ListOrchestratedSessionResults", "outcome": "typed_integrity_error"},
+    {"id": "unimplemented_required_method", "outcome": "not_advertised_and_unavailable"},
+    {"id": "unknown_decisive_enum", "outcome": "refresh_and_fail_closed"}
+  ],
+  "close_outcomes": [
+    {"id": "intent_before_response_loss", "operation_id": "close-1", "query_progress": "SESSION_CLOSE_PROGRESS_SETTLING", "client_action": "observe_without_resubmit"},
+    {"id": "concurrent_compatible_close", "operation_id": "close-1", "outcome": "same_operation"},
+    {"id": "concurrent_mismatched_interrupt", "operation_id": "close-1", "outcome": "typed_conflict_no_new_operation"},
+    {"id": "unknown_child_effect", "operation_id": "close-1", "outcome": "OUTCOME_UNKNOWN", "retry": "RETRY_CLASSIFICATION_FORBIDDEN"},
+    {"id": "already_settled_session", "outcome": "authoritative_closed_response_without_new_retirement_operation"},
+    {"id": "bounded_wait_expired", "operation_id": "close-1", "outcome": "SESSION_CLOSE_IN_PROGRESS", "retry": "RETRY_CLASSIFICATION_FORBIDDEN"}
+  ]
+}

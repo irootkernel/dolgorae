@@ -1520,7 +1520,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(methods, 34);
+        assert_eq!(methods, 36);
     }
 
     #[test]

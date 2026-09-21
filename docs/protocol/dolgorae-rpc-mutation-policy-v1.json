@@ -98,7 +98,9 @@
       "idempotency": "tokenless",
       "identity": ["run", "controller_identity_generation", "interrupt", "expected_state_revision"],
       "same_key_replay": "not_applicable",
-      "lost_response": "get_run_and_reconcile_if_required",
+      "lost_response": "for a registered Orchestrated root, get_orchestrated_session and do not resubmit; otherwise get_run_and_reconcile_if_required",
+      "accepted_session_intent_retry": "forbidden",
+      "operation_correlation": "durable close operation_id across typed detail, completed response context and session query",
       "automatic_retry": "forbidden"
     },
     {
