@@ -469,10 +469,11 @@ capability or a private Worker address.
 
 Each broker-held capability has one owner-only mode-0600 carrier below the
 workspace state root at `orchestration/broker-credentials/<run-id>.json`. The
-carrier is outside SQLite, checked against its stored public Controller binding
-before every Specialist side effect, and deleted only after authoritative
-member release. SQLite, events, model input, and public projections contain the
-public binding and capability digest, never the raw capability.
+carrier uses the ordinary checked Controller credential shape, remains outside
+SQLite, is checked against its stored public Controller binding before every
+Specialist side effect, and is deleted only after authoritative member release.
+SQLite, events, model input, and public projections contain the public binding
+and capability digest, never the raw capability.
 
 ### Primary Orchestration Service
 
@@ -531,6 +532,15 @@ membership row. The Primary Run tool-call/result ledger then persists the
 complete response with its source Turn and tool-call identity. The receipt,
 rather than current queue state, restores the exact selection when a response
 is lost before the ledger append.
+
+Production provisioning enters through the shared semantic composition layer,
+which re-resolves the immutable global Profile binding, validates the exact
+Agent Configuration, and starts the preallocated managed-agent Run with its
+broker Controller. The Worker binds the initial thread to the spawn operation
+before the member becomes ready. On an ambiguous cross-store publication, the
+Broker observes the reserved Run: a ready Run settles without replay, a known
+absence may safely republish, and partial or unreadable state remains
+`recovery_required`.
 
 Task assignment never auto-hires a missing role. A bounded tool wait may expire
 without cancelling the durable operation or task. Cancellation is fail-closed
@@ -875,7 +885,9 @@ before admission of a new operation, including Writer acquire/release.
 
 The `gateway` module owns transport admission and bounded async delivery;
 `gateway_socket` owns the singleton record, peer identity, and socket lifetime.
-`gateway_service` translates checked requests into shared semantic operations.
+`gateway_service` translates checked requests into shared semantic operations,
+including broker-originated approval observation and resolution; it does not
+open the Broker store or invoke the private Primary bridge directly.
 `machine` owns the current registered error-code vocabulary; `gateway` owns its
 gRPC status, retry, and recovery mapping.
 The `controller` module owns the descriptor-relative confined carrier walk;

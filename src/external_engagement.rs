@@ -1494,7 +1494,7 @@ fn specialist_start_arguments(
     args
 }
 
-fn initial_specialist_sandbox(requested_access: &str) -> &'static str {
+pub(crate) fn initial_specialist_sandbox(requested_access: &str) -> &'static str {
     if requested_access == "isolated_write" {
         "workspace-write"
     } else {
@@ -1502,7 +1502,7 @@ fn initial_specialist_sandbox(requested_access: &str) -> &'static str {
     }
 }
 
-fn prepare_launch_root(
+pub(crate) fn prepare_launch_root(
     canonical: &Path,
     mode: WorkspaceMode,
     state_root: &Path,
@@ -1569,7 +1569,7 @@ fn create_private_directory(path: &Path) -> Result<(), MachineError> {
     verify_secure_directory(path, DarwinSystem.current_uid())
 }
 
-fn cleanup_isolated_root(
+pub(crate) fn cleanup_isolated_root(
     canonical: &Path,
     state_root: &Path,
     engagement_id: Uuid,

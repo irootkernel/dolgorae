@@ -624,6 +624,38 @@ pub(crate) fn validate_installed_policy(
     Ok(())
 }
 
+/// Validate the deliberately narrow live-provider subset without changing the
+/// broader persisted Specialist Policy contract. Future collaboration and
+/// activation values remain valid snapshots, but they cannot allocate a live
+/// Orchestrated Session in v0.1.3.
+pub(crate) fn validate_live_provider_policy(
+    policy: &InstalledSpecialistPolicy,
+) -> Result<(), MachineError> {
+    validate_installed_policy(policy)?;
+    let unsupported = policy.roles.iter().find(|role| {
+        role.reuse_policy == "reuse_any_compatible"
+            || role.collaboration_source
+            || role.collaboration_target
+            || role.activation_policy == "on_mail"
+    });
+    if let Some(role) = unsupported {
+        return Err(MachineError::new(
+            "POLICY_REJECTED",
+            "the Specialist Policy uses controls outside the live provider slice",
+            false,
+            serde_json::json!({
+                "policy_name": policy.policy_name,
+                "role_ref": role.role_ref,
+                "reuse_policy": role.reuse_policy,
+                "activation_policy": role.activation_policy,
+                "collaboration_source": role.collaboration_source,
+                "collaboration_target": role.collaboration_target,
+            }),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_installed_role_controls(role: &InstalledSpecialistRole) -> Result<(), MachineError> {
     if !(1..=16).contains(&role.max_active_instances)
         || !matches!(
@@ -1141,6 +1173,36 @@ mod tests {
             validate_installed_policy(&policy).unwrap_err().code,
             "CONFIG_INVALID"
         );
+    }
+
+    #[test]
+    fn live_provider_policy_rejects_future_controls_without_invalidating_snapshots() {
+        let base = installed(
+            RoleSourceReference {
+                scope: RoleSourceScope::Project,
+                name: "reviewer".to_owned(),
+            },
+            role("reviewer", "Inspect the bounded target."),
+        );
+        assert_eq!(validate_live_provider_policy(&base), Ok(()));
+
+        for mutate in [
+            |policy: &mut InstalledSpecialistPolicy| {
+                policy.roles[0].reuse_policy = "reuse_any_compatible".to_owned();
+            },
+            |policy: &mut InstalledSpecialistPolicy| {
+                policy.roles[0].activation_policy = "on_mail".to_owned();
+                policy.roles[0].collaboration_target = true;
+            },
+        ] {
+            let mut policy = base.clone();
+            mutate(&mut policy);
+            assert_eq!(validate_installed_policy(&policy), Ok(()));
+            assert_eq!(
+                validate_live_provider_policy(&policy).unwrap_err().code,
+                "POLICY_REJECTED"
+            );
+        }
     }
 
     #[test]

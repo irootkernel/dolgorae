@@ -1619,7 +1619,7 @@ unavailable. Next: TASK-048.
 
 ### TASK-048: Brokered Run Provisioning and Approval Binding
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-047`. Connect the existing spawn operation and preallocated
 child identity to real semantic Run/Worker/thread creation and the fixed Role,
@@ -1638,6 +1638,14 @@ registry/snapshot invariance, cardinality and allowlist denial, duplicate spawn,
 credential canaries, cross-store publication failure and known/unknown recovery.
 Use real adapters with isolated fake Codex for deterministic cases and the
 required separately authorized live behavior checks.
+
+Completion evidence includes the production semantic adapter from the durable
+spawn operation to the preallocated managed-agent Run, Worker, and eager thread;
+shared Controller Interaction resolution with exact replay; and deterministic
+known-ready, known-absent, and unknown publication recovery. The complete local
+gate passed, including the isolated fake-Codex E2E suite. The six-role Mulgae
+review completed with full coverage and no Low-or-higher findings. Separately
+authorized live behavior checks were not run as part of this task completion.
 
 Task acceptance: policy-admitted actual Specialists can be created once through
 either approval mode without changing existing aggregate ownership. Next:

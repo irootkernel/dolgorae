@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Connect policy-admitted Specialist requests to preallocated managed-agent
+  Runs, Workers, and eager threads, with durable Controller approval routing,
+  exact replay, deterministic idle reuse, and known/unknown publication recovery.
 - Add the Run-scoped `dolgorae_orchestration` Primary tool bridge with trusted
   Run/Turn/call binding, durable replay, generation fencing, and pinned Codex 0.153.4 live acceptance.
 - Freeze the checked `dolgorae.gul-consumer/v1` wire contract with two

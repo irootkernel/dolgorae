@@ -2294,6 +2294,8 @@ pub struct WorkerSessionBootstrap {
     pub safety_policy: SessionSafetyPolicy,
     pub artifact_root: PathBuf,
     pub attach: SessionAttach,
+    #[serde(default)]
+    pub eager_thread_operation_id: Option<Uuid>,
     pub transport_timeout_seconds: u64,
     #[serde(default)]
     pub dedicated_server: Option<DedicatedServerBootstrap>,
@@ -2363,6 +2365,9 @@ impl WorkerSessionBootstrap {
             || !self.artifact_root.is_absolute()
             || self.transport_timeout_seconds == 0
             || self.transport_timeout_seconds > 86_400
+            || self
+                .eager_thread_operation_id
+                .is_some_and(|operation_id| operation_id.get_version_num() != 7)
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
@@ -3628,6 +3633,11 @@ impl WorkerSession {
         coordinator
             .restore_interaction_resolutions(interaction_decisions)
             .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+        if let Some(operation_id) = session.eager_thread_operation_id {
+            coordinator
+                .initialize_thread(operation_id)
+                .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+        }
         let progress = Arc::new(SessionProgress::new(facts.clone()));
         progress.publish(
             coordinator_control_state(&coordinator, false),
@@ -8028,6 +8038,7 @@ mod tests {
             safety_policy: SessionSafetyPolicy::ReviewerReadOnly,
             artifact_root: PathBuf::from("/tmp/artifacts"),
             attach: SessionAttach::Start,
+            eager_thread_operation_id: None,
             transport_timeout_seconds: 60,
             dedicated_server: None,
         }

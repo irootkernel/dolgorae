@@ -19,7 +19,7 @@ use crate::event::EventProjection;
 use crate::global_runtime::{
     GlobalMembershipStore, GlobalProfileBinding, MembershipDisposition, ResolvedGlobalProfile,
 };
-use crate::interaction::MAX_RESPONSE_BYTES;
+use crate::interaction::{MAX_RESPONSE_BYTES, response_too_large};
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{
     LedgerClock, SystemLedgerClock, audit_integrity_error as audit_integrity, event_cursor_invalid,
@@ -1071,7 +1071,7 @@ impl CoreSemanticService {
     pub fn start_run(&self, input: StartRunInput) -> Result<RunStartReceipt, MachineError> {
         let view =
             WorkspaceService::system()?.discover_for_run_start(input.workspace.as_deref())?;
-        start_run_typed(input, view, None, None, None, None)
+        start_run_typed(input, view, None, None, None, None, None)
     }
 }
 
@@ -1111,7 +1111,7 @@ impl SemanticService for CoreSemanticService {
 /// Start a Run: pin the Runtime Profile, publish the run record, bootstrap the
 /// durable ledger, and hand the hidden worker the app-server session it will own.
 fn run_start(args: &[OsString]) -> Result<Value, MachineError> {
-    run_start_with_context(args, None, None, None, None)
+    run_start_with_context(args, None, None, None, None, None)
 }
 
 fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineError> {
@@ -1330,6 +1330,7 @@ fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineErro
         }),
         None,
         None,
+        None,
     )
 }
 
@@ -1492,6 +1493,7 @@ fn run_fork(args: &[OsString]) -> Result<Value, MachineError> {
         Some(&ForkStartContext {
             provenance: &provenance,
         }),
+        None,
         None,
     )
 }
@@ -1756,7 +1758,7 @@ pub(crate) fn start_reviewer_run(
     args: &[OsString],
     context: ReviewerStartContext<'_>,
 ) -> Result<Value, MachineError> {
-    run_start_with_context(args, Some(&context), None, None, None)
+    run_start_with_context(args, Some(&context), None, None, None, None)
 }
 
 pub(crate) struct ExternalSpecialistStartContext<'a> {
@@ -1772,7 +1774,337 @@ pub(crate) fn start_external_specialist_run(
     args: &[OsString],
     context: ExternalSpecialistStartContext<'_>,
 ) -> Result<Value, MachineError> {
-    run_start_with_context(args, None, None, None, Some(&context))
+    run_start_with_context(args, None, None, None, Some(&context), None)
+}
+
+pub(crate) struct BrokeredSpecialistStartContext<'a> {
+    pub reserved_run_id: Uuid,
+    pub aggregate_binding: &'a AggregateBinding,
+    pub agent_configuration: &'a AgentConfigurationSnapshot,
+    pub launch_cwd: Option<&'a Path>,
+    pub sandbox: &'a str,
+    pub global_profile_binding: &'a GlobalProfileBinding,
+}
+
+pub(crate) fn start_brokered_specialist_run(
+    args: &[OsString],
+    context: BrokeredSpecialistStartContext<'_>,
+) -> Result<Value, MachineError> {
+    run_start_with_context(args, None, None, None, None, Some(&context))
+}
+
+pub(crate) use crate::orchestration::BrokerApprovalInteractionSnapshot;
+
+pub(crate) fn broker_approval_interactions(
+    state_root: &Path,
+    session_id: Uuid,
+) -> Result<Vec<BrokerApprovalInteractionSnapshot>, MachineError> {
+    crate::orchestration::OrchestrationStore::open(state_root)?.approval_interactions(session_id)
+}
+
+pub(crate) fn broker_approval_interaction(
+    state_root: &Path,
+    session_id: Uuid,
+    approval_request_id: Uuid,
+) -> Result<Option<BrokerApprovalInteractionSnapshot>, MachineError> {
+    crate::orchestration::OrchestrationStore::open(state_root)?
+        .approval_interaction(session_id, approval_request_id)
+}
+
+pub(crate) fn resolve_broker_approval(
+    state_root: &Path,
+    session_id: Uuid,
+    approval_request_id: Uuid,
+    approved: bool,
+    idempotency_key: &str,
+) -> Result<crate::orchestration::BrokerApprovalResolution, MachineError> {
+    let mut store = crate::orchestration::OrchestrationStore::open(state_root)?;
+    let mut adapter = ProductionOrchestrationEffects::new(state_root);
+    store.resolve_specialist_approval(
+        session_id,
+        approval_request_id,
+        approved,
+        idempotency_key,
+        &mut adapter,
+    )
+}
+
+pub(crate) fn validate_broker_approval_response_size(
+    run_id: Uuid,
+    interaction_id: &str,
+    observed_bytes: usize,
+) -> Result<(), MachineError> {
+    if observed_bytes > MAX_RESPONSE_BYTES {
+        return Err(response_too_large(
+            run_id,
+            interaction_id,
+            observed_bytes,
+            "interaction response exceeds 1 MiB",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) struct ProductionOrchestrationEffects<'a> {
+    state_root: &'a Path,
+}
+
+impl<'a> ProductionOrchestrationEffects<'a> {
+    pub(crate) fn new(state_root: &'a Path) -> Self {
+        Self { state_root }
+    }
+
+    fn publish_brokered_run(
+        &mut self,
+        plan: &crate::orchestration::BrokeredRunPlan,
+        credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        use crate::orchestration::AdapterFailure;
+
+        let root = RunStore::new(SystemWorkspacePlatform, self.state_root)
+            .load_manifest(plan.session_id)
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let workspace = root
+            .canonical_workspace
+            .to_path_buf()
+            .map_err(|_| AdapterFailure::Rejected("WORKSPACE_PATH_INVALID".to_owned()))?;
+        let configuration = &plan.role.agent_configuration;
+        let prepared = prepare_external_specialist(
+            Some(&workspace),
+            &plan.role.role_ref,
+            ExternalAgentConfigurationInput {
+                schema_version: configuration.schema_version,
+                runtime_profile: configuration.runtime_profile.clone(),
+                global_profile_binding_sha256: Some(
+                    configuration.runtime_profile_snapshot_sha256.clone(),
+                ),
+                model: Some(configuration.model.clone()),
+                default_effort: configuration.default_effort.clone(),
+                purpose: configuration.purpose.kind.as_str().to_owned(),
+                purpose_label: configuration.purpose.external_label.clone(),
+                required_capabilities: configuration.required_capabilities.clone(),
+                instructions: configuration.normalized_instructions.clone(),
+                execution_lane: configuration.execution_lane.as_str().to_owned(),
+                required_assurance: configuration.required_assurance.as_str().to_owned(),
+                native_subagent_policy: configuration.native_subagent_policy.clone(),
+            },
+        )
+        .map_err(|error| classify_brokered_start_failure(self.state_root, plan.run_id, error))?;
+        if prepared.agent_configuration != *configuration {
+            return Err(AdapterFailure::Rejected(
+                "SPECIALIST_POLICY_DENIED".to_owned(),
+            ));
+        }
+        let launch_cwd = crate::external_engagement::prepare_launch_root(
+            &workspace,
+            prepared.view.mode,
+            self.state_root,
+            plan.session_id,
+            plan.run_id,
+            &plan.requested_access,
+        )
+        .map_err(|error| classify_brokered_start_failure(self.state_root, plan.run_id, error))?;
+        let carrier = credential.controller_carrier().map_err(|error| {
+            classify_brokered_start_failure(self.state_root, plan.run_id, error)
+        })?;
+        let args = brokered_start_arguments(&workspace, carrier.raw_fd(), plan);
+        let outcome = start_brokered_specialist_run(
+            &args,
+            BrokeredSpecialistStartContext {
+                reserved_run_id: plan.run_id,
+                aggregate_binding: &plan.aggregate_binding,
+                agent_configuration: configuration,
+                launch_cwd: launch_cwd.as_deref(),
+                sandbox: crate::external_engagement::initial_specialist_sandbox(
+                    &plan.requested_access,
+                ),
+                global_profile_binding: &prepared.global_profile_binding,
+            },
+        );
+        match outcome {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let failure = classify_brokered_start_failure(self.state_root, plan.run_id, error);
+                if matches!(failure, AdapterFailure::Rejected(_))
+                    && plan.requested_access == "isolated_write"
+                {
+                    let _ = crate::external_engagement::cleanup_isolated_root(
+                        &workspace,
+                        self.state_root,
+                        plan.session_id,
+                        plan.run_id,
+                    );
+                }
+                Err(failure)
+            }
+        }
+    }
+}
+
+fn unavailable_orchestration_effect() -> Result<(), crate::orchestration::AdapterFailure> {
+    Err(crate::orchestration::AdapterFailure::Rejected(
+        "ORCHESTRATION_OPERATION_UNAVAILABLE".to_owned(),
+    ))
+}
+
+impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffects<'_> {
+    fn publish_approval_request(
+        &mut self,
+        session_id: Uuid,
+        _operation_id: Uuid,
+        _approval_request_id: Uuid,
+        _request: &crate::orchestration::RequestSpecialist,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        RunStore::new(SystemWorkspacePlatform, self.state_root)
+            .load_manifest(session_id)
+            .map(|_| ())
+            .map_err(|error| crate::orchestration::AdapterFailure::Rejected(error.code))
+    }
+
+    fn publish_specialist(
+        &mut self,
+        plan: &crate::orchestration::BrokeredRunPlan,
+        credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        self.publish_brokered_run(plan, credential)
+    }
+
+    fn create_thread(
+        &mut self,
+        plan: &crate::orchestration::BrokeredRunPlan,
+        _credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, plan.run_id, 0)
+            .map_err(|_| crate::orchestration::AdapterFailure::Unknown)?;
+        if snapshot.projection.thread_id.is_some() {
+            Ok(())
+        } else {
+            Err(crate::orchestration::AdapterFailure::Unknown)
+        }
+    }
+
+    fn observe_specialist(
+        &mut self,
+        plan: &crate::orchestration::BrokeredRunPlan,
+        _credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<
+        crate::orchestration::SpecialistPublicationObservation,
+        crate::orchestration::AdapterFailure,
+    > {
+        let root = self.state_root.join("runs").join(plan.run_id.to_string());
+        if !root.exists() {
+            return Ok(crate::orchestration::SpecialistPublicationObservation::Absent);
+        }
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, plan.run_id, 0)
+            .map_err(|_| crate::orchestration::AdapterFailure::Unknown)?;
+        if snapshot.projection.thread_id.is_some() {
+            Ok(crate::orchestration::SpecialistPublicationObservation::Ready)
+        } else {
+            Err(crate::orchestration::AdapterFailure::Unknown)
+        }
+    }
+
+    fn dispatch_task(
+        &mut self,
+        _member: &crate::orchestration::BrokeredMemberSnapshot,
+        _request: &crate::orchestration::AssignSpecialistTask,
+        _credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<crate::orchestration::CompletedTask, crate::orchestration::AdapterFailure> {
+        Err(crate::orchestration::AdapterFailure::Rejected(
+            "ORCHESTRATION_OPERATION_UNAVAILABLE".to_owned(),
+        ))
+    }
+
+    fn cancel_task(
+        &mut self,
+        _task: &crate::orchestration::SpecialistTaskSnapshot,
+        _credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        unavailable_orchestration_effect()
+    }
+
+    fn release_specialist(
+        &mut self,
+        _member: &crate::orchestration::BrokeredMemberSnapshot,
+        _credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        unavailable_orchestration_effect()
+    }
+
+    fn release_writer(
+        &mut self,
+        _run_id: Uuid,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        unavailable_orchestration_effect()
+    }
+
+    fn verify_writer_none(&mut self) -> Result<(), crate::orchestration::AdapterFailure> {
+        unavailable_orchestration_effect()
+    }
+
+    fn acquire_writer(
+        &mut self,
+        _run_id: Uuid,
+    ) -> Result<(), crate::orchestration::AdapterFailure> {
+        unavailable_orchestration_effect()
+    }
+}
+
+fn brokered_start_arguments(
+    workspace: &Path,
+    controller_fd: i32,
+    plan: &crate::orchestration::BrokeredRunPlan,
+) -> Vec<OsString> {
+    let configuration = &plan.role.agent_configuration;
+    let mut args = vec![
+        "--workspace".into(),
+        workspace.as_os_str().to_owned(),
+        "--profile".into(),
+        configuration.runtime_profile.clone().into(),
+        "--control-mode".into(),
+        "managed-agent".into(),
+        "--execution-lane".into(),
+        configuration.execution_lane.as_str().into(),
+        "--required-assurance".into(),
+        configuration.required_assurance.as_str().into(),
+        "--purpose".into(),
+        configuration.purpose.kind.as_str().into(),
+        "--parent-namespace".into(),
+        "dolgorae.orchestrated-session.v1".into(),
+        "--parent-kind".into(),
+        "specialist".into(),
+        "--parent-id".into(),
+        plan.session_id.to_string().into(),
+        "--model".into(),
+        configuration.model.clone().into(),
+        "--effort".into(),
+        configuration.default_effort.clone().into(),
+        "--instructions".into(),
+        configuration.normalized_instructions.clone().into(),
+        "--controller-fd".into(),
+        controller_fd.to_string().into(),
+        "--idempotency-key".into(),
+        format!("brokered-spawn:{}", plan.aggregate_binding.operation_id).into(),
+    ];
+    if let Some(label) = &configuration.purpose.external_label {
+        args.extend(["--purpose-label".into(), label.clone().into()]);
+    }
+    for capability in &configuration.required_capabilities {
+        args.extend(["--require-capability".into(), capability.clone().into()]);
+    }
+    args
+}
+
+fn classify_brokered_start_failure(
+    state_root: &Path,
+    run_id: Uuid,
+    error: MachineError,
+) -> crate::orchestration::AdapterFailure {
+    if state_root.join("runs").join(run_id.to_string()).exists() {
+        crate::orchestration::AdapterFailure::Unknown
+    } else {
+        crate::orchestration::AdapterFailure::Rejected(error.code)
+    }
 }
 
 fn validate_external_specialist_manifest(
@@ -1799,6 +2131,35 @@ fn validate_external_specialist_manifest(
         return Err(MachineError::invalid_argument(
             "agent_configuration",
             "external Specialist Run does not match its immutable configuration",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_brokered_specialist_manifest(
+    manifest: &RunManifest,
+    configuration: &AgentConfigurationSnapshot,
+) -> Result<(), MachineError> {
+    let binding = manifest.aggregate_binding.as_ref().ok_or_else(|| {
+        MachineError::invalid_argument(
+            "aggregate_binding",
+            "a brokered Specialist requires an aggregate binding",
+        )
+    })?;
+    if manifest.control_mode != ControlMode::ManagedAgent
+        || binding.aggregate_kind != AggregateKind::OrchestratedSession
+        || binding.member_kind != crate::run::AggregateMemberKind::Specialist
+        || manifest.profile.profile_name != configuration.runtime_profile
+        || manifest.model != configuration.model
+        || manifest.default_reasoning_effort != configuration.default_effort
+        || manifest.execution_lane != configuration.execution_lane
+        || manifest.requested_assurance != configuration.required_assurance
+        || manifest.purpose != configuration.purpose
+        || manifest.agent_configuration != *configuration
+    {
+        return Err(MachineError::invalid_argument(
+            "agent_configuration",
+            "brokered Specialist Run does not match its immutable configuration",
         ));
     }
     Ok(())
@@ -1849,6 +2210,7 @@ fn run_start_with_context(
     continuation: Option<&ContinuationStartContext<'_>>,
     fork: Option<&ForkStartContext<'_>>,
     external: Option<&ExternalSpecialistStartContext<'_>>,
+    brokered: Option<&BrokeredSpecialistStartContext<'_>>,
 ) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(args, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
@@ -1875,7 +2237,15 @@ fn run_start_with_context(
         carrier: carrier_from_options(args, "--controller-file", "--controller-fd")?,
         required_capabilities: required_capabilities(args),
     };
-    let receipt = start_run_typed(input, view, reviewer, continuation, fork, external)?;
+    let receipt = start_run_typed(
+        input,
+        view,
+        reviewer,
+        continuation,
+        fork,
+        external,
+        brokered,
+    )?;
     let state_root = workspace_state_root_from_snapshot(&receipt.snapshot)?;
     let verdict = projection_identity_verdict(&state_root, receipt.snapshot.manifest.run_id);
     let terminal = durable_last_terminal(
@@ -1899,6 +2269,7 @@ fn start_run_typed(
     continuation: Option<&ContinuationStartContext<'_>>,
     fork: Option<&ForkStartContext<'_>>,
     external: Option<&ExternalSpecialistStartContext<'_>>,
+    brokered: Option<&BrokeredSpecialistStartContext<'_>>,
 ) -> Result<RunStartReceipt, MachineError> {
     let StartRunInput {
         workspace: _,
@@ -1929,6 +2300,8 @@ fn start_run_typed(
     let global_profile_binding = if let Some(context) = reviewer {
         context.global_profile_binding.clone()
     } else if let Some(context) = external {
+        context.global_profile_binding.clone()
+    } else if let Some(context) = brokered {
         context.global_profile_binding.clone()
     } else {
         ResolvedGlobalProfile::resolve(&home, &profile_name)?.prepare(&home)?
@@ -1973,6 +2346,7 @@ fn start_run_typed(
     let orchestration_policy = if let Some(launch) = presented_controller.orchestration_launch {
         if reviewer.is_some()
             || external.is_some()
+            || brokered.is_some()
             || continuation.is_some()
             || fork.is_some()
             || control_mode != ControlMode::DirectInteractive
@@ -2016,6 +2390,7 @@ fn start_run_typed(
                 &launch.specialist_policy_name,
             ));
         }
+        crate::specialist_policy::validate_live_provider_policy(&policy)?;
         Some(policy)
     } else {
         None
@@ -2094,6 +2469,17 @@ fn start_run_typed(
             .as_bytes(),
         );
     }
+    if let Some(context) = brokered {
+        normalized_identity_sha256 = sha256_hex(
+            format!(
+                "brokered-specialist-v1\0{normalized_identity_sha256}\0{}\0{}",
+                serde_json::to_string(context.aggregate_binding)
+                    .map_err(|error| internal(error.to_string()))?,
+                agent_configuration_digest(context.agent_configuration).map_err(internal)?
+            )
+            .as_bytes(),
+        );
+    }
     if let Some(context) = continuation {
         normalized_identity_sha256 = sha256_hex(
             format!(
@@ -2133,7 +2519,12 @@ fn start_run_typed(
             idempotency_key: idempotency_key.clone(),
             normalized_identity_sha256: normalized_identity_sha256.clone(),
             run_id: reviewer.map_or_else(
-                || external.map_or_else(Uuid::now_v7, |context| context.reserved_run_id),
+                || {
+                    external.map_or_else(
+                        || brokered.map_or_else(Uuid::now_v7, |context| context.reserved_run_id),
+                        |context| context.reserved_run_id,
+                    )
+                },
                 |context| context.reserved_run_id,
             ),
         })?,
@@ -2155,6 +2546,15 @@ fn start_run_typed(
         ));
     }
     if let Some(context) = external
+        && reservation.run_id != context.reserved_run_id
+    {
+        return Err(crate::run::idempotency_conflict(
+            reservation.run_id,
+            &reservation.normalized_identity_sha256,
+            &normalized_identity_sha256,
+        ));
+    }
+    if let Some(context) = brokered
         && reservation.run_id != context.reserved_run_id
     {
         return Err(crate::run::idempotency_conflict(
@@ -2206,6 +2606,9 @@ fn start_run_typed(
                 orchestration.finish_primary_publication(run_id, Ok(()))?;
             }
         }
+        if brokered.is_some() {
+            ensure_run_worker(&view, &state_root, run_id)?;
+        }
         return Ok(RunStartReceipt {
             snapshot: RunSources::load(
                 &state_root,
@@ -2248,6 +2651,11 @@ fn start_run_typed(
             manifest.agent_configuration = context.agent_configuration.clone();
             manifest.aggregate_binding = Some(context.aggregate_binding.clone());
             validate_external_specialist_manifest(&manifest, context.agent_configuration)?;
+        }
+        if let Some(context) = brokered {
+            manifest.agent_configuration = context.agent_configuration.clone();
+            manifest.aggregate_binding = Some(context.aggregate_binding.clone());
+            validate_brokered_specialist_manifest(&manifest, context.agent_configuration)?;
         }
         if let (Some(policy), Some(orchestration)) =
             (orchestration_policy.as_ref(), orchestration.as_mut())
@@ -2324,10 +2732,10 @@ fn start_run_typed(
             run_id,
             crate::global_runtime::GlobalMembershipFacts {
                 controller_id: Some(manifest.controller.identity.controller_id),
-                worker_generation: reviewer.is_some().then_some(1),
+                worker_generation: (reviewer.is_some() || brokered.is_some()).then_some(1),
                 thread_id: manifest.thread_id.clone(),
                 connection_id: None,
-                lifecycle: if reviewer.is_none() {
+                lifecycle: if reviewer.is_none() && brokered.is_none() {
                     "threadless_ready"
                 } else {
                     "worker_starting"
@@ -2349,7 +2757,7 @@ fn start_run_typed(
         // Internal reviewer allocation retains its already-selected isolated cwd
         // and starts immediately because that path is not part of the public Run
         // manifest.
-        if reviewer.is_none() {
+        if reviewer.is_none() && brokered.is_none() {
             return run_object(&state_root, run_id, 0, "Absent");
         }
 
@@ -2366,6 +2774,7 @@ fn start_run_typed(
             cwd: match reviewer
                 .and_then(|context| context.review_cwd)
                 .or_else(|| external.and_then(|context| context.launch_cwd))
+                .or_else(|| brokered.and_then(|context| context.launch_cwd))
             {
                 Some(path) => path.to_path_buf(),
                 None => view
@@ -2375,7 +2784,9 @@ fn start_run_typed(
             },
             developer_instructions: instructions_text,
             sandbox: external
-                .map_or("read-only", |context| context.sandbox)
+                .map(|context| context.sandbox)
+                .or_else(|| brokered.map(|context| context.sandbox))
+                .unwrap_or("read-only")
                 .to_owned(),
             approval_policy: "never".to_owned(),
             safety_policy: reviewer.map_or(crate::turn::SessionSafetyPolicy::Standard, |context| {
@@ -2383,6 +2794,8 @@ fn start_run_typed(
             }),
             artifact_root: directory.root.join("artifacts"),
             attach: SessionAttach::Start,
+            eager_thread_operation_id: brokered
+                .map(|context| context.aggregate_binding.operation_id),
             transport_timeout_seconds: 900,
             dedicated_server: None,
         };
@@ -6264,6 +6677,11 @@ fn ensure_run_worker_locked(
                     thread_id,
                 }),
         },
+        eager_thread_operation_id: manifest.aggregate_binding.as_ref().and_then(|binding| {
+            (binding.aggregate_kind == AggregateKind::OrchestratedSession
+                && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
+                .then_some(binding.operation_id)
+        }),
         transport_timeout_seconds: 900,
         dedicated_server,
     };

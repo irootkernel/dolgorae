@@ -148,6 +148,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
+                "controller",
                 "darwin",
                 "domain",
                 "engagement",
@@ -159,7 +160,10 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
-        ("primary_bridge", &["machine", "orchestration"][..]),
+        (
+            "primary_bridge",
+            &["machine", "orchestration", "semantic"][..],
+        ),
         ("primary_tool", &["machine"][..]),
         ("live_transport", &["jcs", "machine", "primary_tool"][..]),
         ("live_transport_mcp", &["live_transport", "machine"][..]),
@@ -249,6 +253,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "engagement",
                 "event",
+                "external_engagement",
                 "global_profile",
                 "global_runtime",
                 "interaction",

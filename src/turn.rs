@@ -2263,6 +2263,36 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         Ok(thread_id)
     }
 
+    /// Create and durably bind a thread before the first task Turn. Brokered
+    /// Specialist provisioning uses the spawn operation as the binding
+    /// identity so a ready member never exposes a threadless publication gap.
+    pub(crate) fn initialize_thread(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
+        if self.thread_id.is_some() {
+            return Ok(());
+        }
+        if self.state != CoordinatorState::Threadless {
+            return Err(TurnError::TurnBusy);
+        }
+        let thread_id = match self.ensure_thread(operation_id) {
+            Ok(thread_id) => thread_id,
+            Err(error) => return Err(self.lost_after_write(operation_id, error)),
+        };
+        self.thread_generation = self
+            .thread_generation
+            .checked_add(1)
+            .ok_or(TurnError::OutcomeUnknown)?;
+        let effective_policy = self.next_unverified_policy(self.writer_generation)?;
+        self.policy_epoch = effective_policy.policy_epoch.0;
+        self.journal.append_and_sync(JournalEntry::ThreadBound {
+            operation_id,
+            thread_id,
+            thread_generation: self.thread_generation,
+            effective_policy,
+        })?;
+        self.state = CoordinatorState::Idle;
+        Ok(())
+    }
+
     fn mark_unknown(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
         self.journal
             .append_and_sync(JournalEntry::OutcomeUnknown { operation_id })?;

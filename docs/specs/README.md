@@ -3313,11 +3313,12 @@ The TASK-047 bridge advertises exactly one `dolgorae_orchestration` dynamic tool
 when a starting Run manifest identifies the current Run as the Primary of an
 Orchestrated Session. It enables the experimental App Server API only for that
 Run, derives session/Run/Thread/Turn/call authority before dispatch, and keeps
-the response destination in the owning Worker generation. Until their owning
-Tasks connect production effects, request, assign, cancel, and release
-operations return the frozen `ORCHESTRATION_NOT_AVAILABLE` result before any
-semantic mutation; the already-wired read operations reach the existing
-Primary Orchestration Service.
+the response destination in the owning Worker generation. TASK-048 connects
+`request_specialist` to production provisioning and the shared Controller
+Interaction path. Assign, cancel, and release remain unavailable until their
+owning Tasks connect those production effects; they return the frozen
+`ORCHESTRATION_NOT_AVAILABLE` result before any semantic mutation. The wired
+request and read operations reach the existing Primary Orchestration Service.
 
 The separately authorized focused acceptance target is
 `DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE=1 make test-live-primary-bridge`. It requires

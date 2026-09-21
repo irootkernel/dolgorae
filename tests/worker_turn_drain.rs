@@ -438,6 +438,13 @@ struct Run {
 
 impl Run {
     fn start(behaviour: Behaviour) -> Self {
+        Self::start_with_eager_thread(behaviour, None)
+    }
+
+    fn start_with_eager_thread(
+        behaviour: Behaviour,
+        eager_thread_operation_id: Option<Uuid>,
+    ) -> Self {
         // A short root: the app-server socket lives inside it, and a Unix
         // socket path is bounded well below what a temporary directory name
         // on this platform would spend.
@@ -499,6 +506,7 @@ impl Run {
                     safety_policy: dolgorae::turn::SessionSafetyPolicy::Standard,
                     artifact_root: root.join("artifacts"),
                     attach: SessionAttach::Start,
+                    eager_thread_operation_id,
                     transport_timeout_seconds: 60,
                     dedicated_server: None,
                 },
@@ -908,6 +916,30 @@ fn terminal(response: &ControlResponseV1) -> (String, String) {
 // ---------------------------------------------------------------------------
 // Cases
 // ---------------------------------------------------------------------------
+
+#[test]
+fn eager_thread_is_bound_before_a_brokered_worker_becomes_ready() {
+    let operation_id = Uuid::now_v7();
+    let run = Run::start_with_eager_thread(Behaviour::default(), Some(operation_id));
+
+    assert_eq!(run.server.calls("thread/start").len(), 1);
+    assert!(run.server.calls("turn/start").is_empty());
+    let ledger = run.ledger.lock().unwrap();
+    let thread_records = ledger
+        .durable_records()
+        .unwrap()
+        .iter()
+        .filter(|record| record.kind() == AuditKind::ThreadBound)
+        .collect::<Vec<_>>();
+    assert_eq!(thread_records.len(), 1);
+    let LosslessJson::Object(payload) = thread_records[0].payload() else {
+        panic!("thread binding payload is not an object");
+    };
+    assert!(payload.iter().any(|(key, value)| {
+        key == "operation_id"
+            && matches!(value, LosslessJson::String(actual) if actual == &operation_id.to_string())
+    }));
+}
 
 #[test]
 fn checked_submit_rejects_stale_revision_before_any_turn_effect() {

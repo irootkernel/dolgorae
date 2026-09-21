@@ -8,12 +8,15 @@ use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::protocol::public_v1 as pb;
 use crate::semantic::{
-    CoreSemanticService, RunMutationInput, RunMutationOperation, RunMutationReceipt, StartRunInput,
+    BrokerApprovalInteractionSnapshot, CoreSemanticService, RunMutationInput, RunMutationOperation,
+    RunMutationReceipt, StartRunInput, broker_approval_interaction, broker_approval_interactions,
+    resolve_broker_approval, validate_broker_approval_response_size,
 };
 use crate::snapshot::RunSnapshot;
 use crate::workspace::{WorkspaceService, WorkspaceView};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub struct CoreGatewayBackend {
     pub(crate) home: DolgoraeHome,
@@ -245,6 +248,142 @@ fn controller_mismatch(run_id: Uuid) -> MachineError {
         serde_json::json!({"run_id":run_id,"operation":"rpc.controller.authorize"}),
     )
 }
+
+fn timestamp_ms(value: i64) -> Result<prost_types::Timestamp, MachineError> {
+    if value < 0 {
+        return Err(MachineError::new(
+            "INTERNAL_ERROR",
+            "broker interaction timestamp is invalid",
+            false,
+            serde_json::json!({"invariant":"nonnegative timestamp"}),
+        ));
+    }
+    Ok(prost_types::Timestamp {
+        seconds: value / 1_000,
+        nanos: ((value % 1_000) * 1_000_000) as i32,
+    })
+}
+
+fn broker_approval_pending(interaction: &BrokerApprovalInteractionSnapshot) -> bool {
+    interaction.decision.is_none() && interaction.operation_state == "awaiting_approval"
+}
+
+fn broker_approval_summary(
+    interaction: &BrokerApprovalInteractionSnapshot,
+    snapshot: &RunSnapshot,
+) -> Result<pb::InteractionSummary, MachineError> {
+    let pending = broker_approval_pending(interaction);
+    Ok(pb::InteractionSummary {
+        interaction_id: interaction.approval_request_id.to_string(),
+        run_id: interaction.session_id.to_string(),
+        kind: pb::InteractionKind::UserInput as i32,
+        status: if pending {
+            pb::InteractionStatus::Pending
+        } else {
+            pb::InteractionStatus::Resolved
+        } as i32,
+        safe_title: if pending {
+            "User input requested"
+        } else {
+            "Interaction resolved"
+        }
+        .to_owned(),
+        controller_kind: project::controller_kind(snapshot.controller.kind) as i32,
+        requires_user_escalation: pending,
+        contains_protected_input: false,
+        created_at: Some(timestamp_ms(interaction.created_at_ms)?),
+        expires_at: None,
+        resolved_at: (!pending)
+            .then(|| {
+                timestamp_ms(interaction.resolved_at_ms.ok_or_else(|| {
+                    MachineError::new(
+                        "INTERNAL_ERROR",
+                        "resolved broker interaction has no resolution timestamp",
+                        false,
+                        serde_json::json!({"invariant":"resolved_at_ms"}),
+                    )
+                })?)
+            })
+            .transpose()?,
+        state_revision: interaction.state_revision,
+    })
+}
+
+fn broker_approval_projection(
+    interaction: &BrokerApprovalInteractionSnapshot,
+    snapshot: &RunSnapshot,
+    context: pb::ResponseContext,
+) -> Result<pb::GetControllerInteractionResponse, MachineError> {
+    use pb::controller_interaction::Payload;
+    Ok(pb::GetControllerInteractionResponse {
+        context: Some(context),
+        interaction: Some(pb::ControllerInteraction {
+            summary: Some(broker_approval_summary(interaction, snapshot)?),
+            response_schema_id: "dolgorae.interaction.user-input/v1".to_owned(),
+            stamp: Some(project::stamp(&snapshot.stamp)),
+            payload: Some(Payload::UserInput(pb::UserInputInteraction {
+                is_blocking: true,
+                questions: vec![pb::InteractionQuestion {
+                    id: "specialist_approval".to_owned(),
+                    header: "Specialist".to_owned(),
+                    question: format!(
+                        "Approve a {} Specialist for this request?",
+                        interaction.request.role_ref
+                    ),
+                    allows_other: false,
+                    is_secret: false,
+                    options: Some(pb::InteractionOptions {
+                        items: vec![
+                            pb::InteractionOption {
+                                label: "approve".to_owned(),
+                                description: "Create the policy-admitted Specialist.".to_owned(),
+                            },
+                            pb::InteractionOption {
+                                label: "reject".to_owned(),
+                                description: "Reject this Specialist request.".to_owned(),
+                            },
+                        ],
+                    }),
+                }],
+            })),
+            decisions: Vec::new(),
+        }),
+    })
+}
+
+fn broker_approval_decision(bytes: &[u8]) -> Result<bool, MachineError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+        MachineError::new(
+            "INTERACTION_RESPONSE_INVALID",
+            "interaction response does not match its checked schema",
+            false,
+            serde_json::json!({}),
+        )
+    })?;
+    let answer = value
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .and_then(|object| object.get("answers"))
+        .and_then(serde_json::Value::as_object)
+        .filter(|answers| answers.len() == 1)
+        .and_then(|answers| answers.get("specialist_approval"))
+        .and_then(serde_json::Value::as_object)
+        .filter(|answer| answer.len() == 1)
+        .and_then(|answer| answer.get("answers"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|answers| answers.len() == 1)
+        .and_then(|answers| answers[0].as_str());
+    match answer {
+        Some("approve") => Ok(true),
+        Some("reject") => Ok(false),
+        _ => Err(MachineError::new(
+            "INTERACTION_RESPONSE_INVALID",
+            "interaction response does not match its checked schema",
+            false,
+            serde_json::json!({}),
+        )),
+    }
+}
 fn input_enum<T: TryFrom<i32>>(field: &str, value: i32, maximum: u32) -> Result<T, MachineError> {
     T::try_from(value).map_err(|_| MachineError::new("UNSUPPORTED_SCHEMA_VERSION", "input enum is not supported by this public protocol", false,
         serde_json::json!({"schema":format!("dolgorae.public.v1.{field}"),"requested":u32::from_ne_bytes(value.to_ne_bytes()),"supported":(0..=maximum).collect::<Vec<_>>()})))
@@ -283,7 +422,16 @@ impl GatewayBackend for CoreGatewayBackend {
         request: pb::ListPendingInteractionsRequest,
     ) -> Result<pb::ListPendingInteractionsResponse, MachineError> {
         let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
-        crate::gateway_observation::list_pending(&root, &snapshot, self.context())
+        let mut response =
+            crate::gateway_observation::list_pending(&root, &snapshot, self.context())?;
+        for interaction in broker_approval_interactions(&root, snapshot.manifest.run_id)? {
+            if broker_approval_pending(&interaction) {
+                response
+                    .items
+                    .push(broker_approval_summary(&interaction, &snapshot)?);
+            }
+        }
+        Ok(response)
     }
     fn get_controller_interaction(
         &self,
@@ -297,6 +445,13 @@ impl GatewayBackend for CoreGatewayBackend {
             )
         })?;
         let carrier = self.run_controller(&snapshot, controller)?;
+        if let Ok(interaction_id) = Uuid::parse_str(&request.interaction_id)
+            && let Some(interaction) =
+                broker_approval_interaction(&root, snapshot.manifest.run_id, interaction_id)?
+        {
+            snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
+            return broker_approval_projection(&interaction, &snapshot, self.context());
+        }
         crate::gateway_observation::get_interaction(
             &root,
             &snapshot,
@@ -309,6 +464,48 @@ impl GatewayBackend for CoreGatewayBackend {
         &self,
         mut request: pb::ResolveInteractionRequest,
     ) -> Result<pb::ResolveInteractionResponse, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        if let Ok(interaction_id) = Uuid::parse_str(&request.interaction_id)
+            && broker_approval_interaction(&root, snapshot.manifest.run_id, interaction_id)?
+                .is_some()
+        {
+            let controller = request.controller.as_ref().ok_or_else(|| {
+                MachineError::interaction_full_payload_requires_controller(
+                    snapshot.manifest.run_id,
+                    "run.respond",
+                )
+            })?;
+            let carrier = self.run_controller(&snapshot, controller)?;
+            snapshot.authorize_current_controller(&root, &carrier, "run.respond")?;
+            if request.idempotency_key.is_empty() || request.idempotency_key.len() > 256 {
+                return Err(MachineError::invalid_argument(
+                    "idempotency_key",
+                    "idempotency key must contain 1 to 256 UTF-8 bytes",
+                ));
+            }
+            let bytes = Zeroizing::new(std::mem::take(&mut request.response_json));
+            validate_broker_approval_response_size(
+                snapshot.manifest.run_id,
+                &request.interaction_id,
+                bytes.len(),
+            )?;
+            let approved = broker_approval_decision(&bytes)?;
+            let resolution = resolve_broker_approval(
+                &root,
+                snapshot.manifest.run_id,
+                interaction_id,
+                approved,
+                &request.idempotency_key,
+            )?;
+            let mut context = self.context();
+            context.operation_id = Some(resolution.resolution_receipt_id.to_string());
+            return Ok(pb::ResolveInteractionResponse {
+                context: Some(context),
+                interaction_id: request.interaction_id,
+                status: pb::InteractionStatus::Resolved as i32,
+                resolution_receipt: resolution.resolution_receipt_id.to_string(),
+            });
+        }
         let operation = crate::gateway_observation::resolve_operation(&mut request)?;
         let receipt = self.mutate(
             required(request.run.as_ref(), "run")?,
@@ -765,5 +962,37 @@ impl GatewayBackend for CoreGatewayBackend {
                 &crate::ledger::SystemLedgerClock::default().timestamp(),
             )?),
         })
+    }
+}
+
+#[cfg(test)]
+mod broker_approval_tests {
+    use super::*;
+
+    #[test]
+    fn broker_approval_response_accepts_only_the_closed_answer_shape() {
+        assert_eq!(
+            broker_approval_decision(
+                br#"{"answers":{"specialist_approval":{"answers":["approve"]}}}"#,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            broker_approval_decision(
+                br#"{"answers":{"specialist_approval":{"answers":["reject"]}}}"#,
+            ),
+            Ok(false)
+        );
+        for invalid in [
+            br#"{}"#.as_slice(),
+            br#"{"decision":"approve"}"#.as_slice(),
+            br#"{"answers":{"specialist_approval":{"answers":["approve","reject"]}}}"#.as_slice(),
+            br#"{"answers":{"specialist_approval":{"answers":["other"]}}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                broker_approval_decision(invalid).unwrap_err().code,
+                "INTERACTION_RESPONSE_INVALID"
+            );
+        }
     }
 }

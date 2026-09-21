@@ -1,5 +1,6 @@
 //! Durable transport-independent Orchestrated Session authority.
 
+use crate::controller::CredentialCarrier;
 use crate::domain::{ControllerIdentity, ControllerKind};
 use crate::engagement::EngagementStore;
 use crate::jcs::{canonicalize, parse, sha256_hex};
@@ -109,6 +110,27 @@ pub struct SpecialistOperationSnapshot {
     pub approval_request_id: Option<Uuid>,
     pub reused: bool,
     pub safe_error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrokerApprovalInteractionSnapshot {
+    pub session_id: Uuid,
+    pub operation_id: Uuid,
+    pub approval_request_id: Uuid,
+    pub request: RequestSpecialist,
+    pub operation_state: String,
+    pub decision: Option<String>,
+    pub resolution_receipt_id: Option<Uuid>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+    pub state_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrokerApprovalResolution {
+    pub operation: SpecialistOperationSnapshot,
+    pub resolution_receipt_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -222,11 +244,14 @@ impl BrokerCredential {
         let encoded = Zeroizing::new(
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(*credential.capability),
         );
-        let wire = BrokerCredentialWireRef {
+        let wire = BrokerControllerWireRef {
             schema_version: 1,
-            run_id,
-            binding: &credential.binding,
+            controller_id: credential.binding.identity.controller_id,
+            kind: credential.binding.identity.kind,
+            instance_id: &credential.binding.identity.instance_id,
+            subject_id: credential.binding.identity.subject_id.as_deref(),
             capability: &encoded,
+            orchestration_launch: None,
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&wire).map_err(internal)?);
         atomic_create(&SystemWorkspacePlatform, &credential.path, &bytes, 0o600)
@@ -259,27 +284,58 @@ impl BrokerCredential {
         }
         let wire: BrokerCredentialWire = serde_json::from_slice(&bytes)
             .map_err(|_| integrity("broker credential carrier is invalid"))?;
-        if wire.schema_version != 1
-            || wire.run_id != run_id
-            || wire.binding.identity.kind != ControllerKind::Automation
-            || wire.binding.identity.generation != 1
+        let (binding, encoded) = match wire {
+            BrokerCredentialWire::Controller(wire) => {
+                if wire.schema_version != 1 || wire.orchestration_launch.is_some() {
+                    return Err(integrity("broker credential carrier identity is invalid"));
+                }
+                (
+                    ControllerBinding {
+                        identity: ControllerIdentity {
+                            controller_id: wire.controller_id,
+                            kind: wire.kind,
+                            instance_id: wire.instance_id,
+                            subject_id: wire.subject_id,
+                            generation: 1,
+                        },
+                        capability_sha256: String::new(),
+                    },
+                    wire.capability,
+                )
+            }
+            BrokerCredentialWire::Legacy(wire) => {
+                if wire.schema_version != 1 || wire.run_id != run_id {
+                    return Err(integrity("broker credential carrier identity is invalid"));
+                }
+                (wire.binding, wire.capability)
+            }
+        };
+        if binding.identity.controller_id.get_version_num() != 7
+            || binding.identity.kind != ControllerKind::Automation
+            || binding.identity.generation != 1
+            || binding.identity.instance_id.is_empty()
+            || binding.identity.instance_id.len() > 128
         {
             return Err(integrity("broker credential carrier identity is invalid"));
         }
         let mut capability = Zeroizing::new([0_u8; 32]);
         let count = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode_slice(&wire.capability, &mut *capability)
+            .decode_slice(&encoded, &mut *capability)
             .map_err(|_| integrity("broker credential capability is invalid"))?;
+        let digest = controller_capability_digest(&capability);
         if count != 32
-            || base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(*capability)
-                != wire.capability
-            || controller_capability_digest(&capability) != wire.binding.capability_sha256
+            || base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(*capability) != encoded
+            || (!binding.capability_sha256.is_empty() && digest != binding.capability_sha256)
         {
             return Err(integrity("broker credential capability binding is invalid"));
         }
+        let binding = ControllerBinding {
+            capability_sha256: digest,
+            ..binding
+        };
         Ok(Self {
             capability,
-            binding: wire.binding,
+            binding,
             path: root.join(filename),
         })
     }
@@ -298,19 +354,46 @@ impl BrokerCredential {
     pub fn capability(&self) -> &[u8; 32] {
         &self.capability
     }
+
+    pub(crate) fn controller_carrier(&self) -> Result<CredentialCarrier, MachineError> {
+        CredentialCarrier::open_path(&self.path).map(|carrier| carrier.with_expected_generation(1))
+    }
 }
 
 #[derive(Serialize)]
-struct BrokerCredentialWireRef<'a> {
+struct BrokerControllerWireRef<'a> {
     schema_version: u32,
-    run_id: Uuid,
-    binding: &'a ControllerBinding,
+    controller_id: Uuid,
+    kind: ControllerKind,
+    instance_id: &'a str,
+    subject_id: Option<&'a str>,
     capability: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orchestration_launch: Option<&'a crate::controller::OrchestrationLaunch>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BrokerCredentialWire {
+    Controller(BrokerControllerWire),
+    Legacy(LegacyBrokerCredentialWire),
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BrokerCredentialWire {
+struct BrokerControllerWire {
+    schema_version: u32,
+    controller_id: Uuid,
+    kind: ControllerKind,
+    instance_id: String,
+    subject_id: Option<String>,
+    capability: String,
+    orchestration_launch: Option<crate::controller::OrchestrationLaunch>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyBrokerCredentialWire {
     schema_version: u32,
     run_id: Uuid,
     binding: ControllerBinding,
@@ -340,6 +423,12 @@ pub enum AdapterFailure {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpecialistPublicationObservation {
+    Ready,
+    Absent,
+}
+
 pub trait OrchestrationAdapter {
     /// Idempotently creates the typed Primary `user_input` interaction keyed by
     /// `approval_request_id`. An unknown response must be safe to retry with
@@ -361,6 +450,14 @@ pub trait OrchestrationAdapter {
         plan: &BrokeredRunPlan,
         credential: &BrokerCredential,
     ) -> Result<(), AdapterFailure>;
+    /// Observe a prior ambiguous publication without repeating an external
+    /// effect. `Absent` is safe to retry; an unknown partial boundary remains
+    /// fenced.
+    fn observe_specialist(
+        &mut self,
+        plan: &BrokeredRunPlan,
+        credential: &BrokerCredential,
+    ) -> Result<SpecialistPublicationObservation, AdapterFailure>;
     /// Fake-adapter seam: the current helper returns a completed task.
     /// Production TASK-049/050 must split admission, Turn submission, and
     /// completion observation. The adapter receives the Broker `task_id`; it
@@ -504,6 +601,9 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
             })?;
             if live_bridge && !request.live_bridge_available() {
                 return Err(operation_unavailable(request.operation()));
+            }
+            if live_bridge && matches!(request, ToolRequest::RequestSpecialist { .. }) {
+                self.store.ensure_live_provider_policy(context.session_id)?;
             }
             self.execute(context, request)
         })();
@@ -702,7 +802,8 @@ impl ToolRequest {
     fn live_bridge_available(&self) -> bool {
         matches!(
             self,
-            Self::AwaitSpecialistOperations { .. }
+            Self::RequestSpecialist { .. }
+                | Self::AwaitSpecialistOperations { .. }
                 | Self::ListSpecialists
                 | Self::AwaitSpecialistTasks { .. }
                 | Self::CollectSpecialistResults { .. }
@@ -738,6 +839,27 @@ impl OrchestrationStore {
             faults,
             credential_root: state_root.join("orchestration/broker-credentials"),
             uid: crate::darwin::DarwinSystem.current_uid(),
+        })
+    }
+
+    fn ensure_live_provider_policy(&self, session_id: Uuid) -> Result<(), MachineError> {
+        let policy_json: String = self
+            .connection
+            .query_row(
+                "SELECT policy_json FROM orchestrated_sessions WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|_| session_not_found(session_id))?;
+        let policy: InstalledSpecialistPolicy = serde_json::from_str(&policy_json)
+            .map_err(|_| integrity("session policy snapshot is invalid"))?;
+        crate::specialist_policy::validate_live_provider_policy(&policy).map_err(|_| {
+            MachineError::new(
+                "LIVE_POLICY_UNSUPPORTED",
+                "the immutable Specialist Policy is outside the live provider slice",
+                false,
+                serde_json::json!({"session_id":session_id,"policy_name":policy.policy_name}),
+            )
         })
     }
 
@@ -1082,6 +1204,23 @@ impl OrchestrationStore {
                     adapter,
                 );
             }
+            if matches!(
+                existing.state.as_str(),
+                "provisioning" | "recovery_required"
+            ) {
+                let run_id = existing
+                    .specialist_run_id
+                    .ok_or_else(|| integrity("reserved Specialist identity is missing"))?;
+                let credential = BrokerCredential::load(&self.credential_root, self.uid, run_id)?;
+                return self.recover_reserved_specialist(
+                    context,
+                    &role,
+                    existing.operation_id,
+                    run_id,
+                    &credential,
+                    adapter,
+                );
+            }
             if existing.state == "awaiting_approval" {
                 let approval_request_id = existing
                     .approval_request_id
@@ -1240,6 +1379,26 @@ impl OrchestrationStore {
                 adapter,
             );
         }
+        if approved
+            && matches!(
+                operation.state.as_str(),
+                "provisioning" | "recovery_required"
+            )
+        {
+            let run_id = operation
+                .specialist_run_id
+                .ok_or_else(|| integrity("reserved Specialist identity is missing"))?;
+            let credential = BrokerCredential::load(&self.credential_root, self.uid, run_id)?;
+            let role = session.specialist_policy.role(&operation.role_ref)?.clone();
+            return self.recover_reserved_specialist(
+                context,
+                &role,
+                operation_id,
+                run_id,
+                &credential,
+                adapter,
+            );
+        }
         if operation.state != "awaiting_approval" {
             return Ok(operation);
         }
@@ -1284,6 +1443,171 @@ impl OrchestrationStore {
             &request_sha256,
             adapter,
         )
+    }
+
+    pub fn approval_interactions(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<BrokerApprovalInteractionSnapshot>, MachineError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT s.operation_id,s.approval_request_id,s.request_json,s.state,
+                        r.decision,r.resolution_receipt_id,s.created_at_ms,s.updated_at_ms,
+                        r.resolved_at_ms,o.revision
+                 FROM brokered_spawn_operations s
+                 JOIN orchestrated_sessions o ON o.session_id=s.session_id
+                 LEFT JOIN brokered_approval_resolutions r
+                   ON r.approval_request_id=s.approval_request_id
+                 WHERE s.session_id=?1 AND s.approval_request_id IS NOT NULL
+                 ORDER BY s.created_at_ms,s.operation_id",
+            )
+            .map_err(internal)?;
+        let rows = statement
+            .query_map([session_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, u64>(9)?,
+                ))
+            })
+            .map_err(internal)?;
+        rows.map(|row| {
+            let row = row.map_err(internal)?;
+            Ok(BrokerApprovalInteractionSnapshot {
+                session_id,
+                operation_id: parse_uuid(&row.0)?,
+                approval_request_id: parse_uuid(&row.1)?,
+                request: serde_json::from_str(&row.2)
+                    .map_err(|_| integrity("approval request payload is invalid"))?,
+                operation_state: row.3,
+                decision: row.4,
+                resolution_receipt_id: row.5.as_deref().map(parse_uuid).transpose()?,
+                created_at_ms: row.6,
+                updated_at_ms: row.7,
+                resolved_at_ms: row.8,
+                state_revision: row.9,
+            })
+        })
+        .collect()
+    }
+
+    pub fn approval_interaction(
+        &self,
+        session_id: Uuid,
+        approval_request_id: Uuid,
+    ) -> Result<Option<BrokerApprovalInteractionSnapshot>, MachineError> {
+        Ok(self
+            .approval_interactions(session_id)?
+            .into_iter()
+            .find(|interaction| interaction.approval_request_id == approval_request_id))
+    }
+
+    pub fn resolve_specialist_approval<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        approval_request_id: Uuid,
+        approved: bool,
+        idempotency_key: &str,
+        adapter: &mut A,
+    ) -> Result<BrokerApprovalResolution, MachineError> {
+        checked(idempotency_key, 256, "idempotency_key")?;
+        let interaction = self
+            .approval_interaction(session_id, approval_request_id)?
+            .ok_or_else(|| {
+                MachineError::interaction_not_found(
+                    session_id,
+                    approval_request_id,
+                    "interaction is not present in this Run",
+                )
+            })?;
+        let decision = if approved { "approve" } else { "reject" };
+        let prior = self
+            .connection
+            .query_row(
+                "SELECT decision,idempotency_key,resolution_receipt_id
+                 FROM brokered_approval_resolutions WHERE approval_request_id=?1",
+                [approval_request_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(internal)?;
+        let receipt = if let Some((stored_decision, stored_key, receipt)) = prior {
+            if stored_decision != decision || stored_key != idempotency_key {
+                return Err(interaction_already_resolved(
+                    session_id,
+                    approval_request_id,
+                ));
+            }
+            parse_uuid(&receipt)?
+        } else {
+            let receipt = new_uuid_v7();
+            self.connection
+                .execute(
+                    "INSERT INTO brokered_approval_resolutions(
+                       approval_request_id,operation_id,decision,idempotency_key,
+                       resolution_receipt_id,resolved_at_ms
+                     ) VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![
+                        approval_request_id.to_string(),
+                        interaction.operation_id.to_string(),
+                        decision,
+                        idempotency_key,
+                        receipt.to_string(),
+                        now_ms()?
+                    ],
+                )
+                .map_err(internal)?;
+            receipt
+        };
+        let context = self.spawn_context(interaction.operation_id)?;
+        let operation =
+            self.decide_specialist(&context, interaction.operation_id, approved, adapter)?;
+        Ok(BrokerApprovalResolution {
+            operation,
+            resolution_receipt_id: receipt,
+        })
+    }
+
+    fn spawn_context(&self, operation_id: Uuid) -> Result<PrimaryCallContext, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT session_id,idempotency_key,source_turn_id,source_tool_call_id
+                 FROM brokered_spawn_operations WHERE operation_id=?1",
+                [operation_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(internal)
+            .and_then(|row| {
+                let session_id = parse_uuid(&row.0)?;
+                Ok(PrimaryCallContext {
+                    session_id,
+                    source_run_id: session_id,
+                    source_turn_id: row.2,
+                    source_tool_call_id: row.3,
+                    idempotency_key: row.1,
+                })
+            })
     }
 
     pub fn specialist_operations(
@@ -1621,6 +1945,148 @@ impl OrchestrationStore {
             let _ = credential.remove();
         }
         self.spawn(operation_id)
+    }
+
+    fn recover_reserved_specialist<A: OrchestrationAdapter>(
+        &mut self,
+        context: &PrimaryCallContext,
+        role: &InstalledSpecialistRole,
+        operation_id: Uuid,
+        run_id: Uuid,
+        credential: &BrokerCredential,
+        adapter: &mut A,
+    ) -> Result<SpecialistOperationSnapshot, MachineError> {
+        let member = self.member(context.session_id, run_id)?;
+        validate_member_credential(&member, credential)?;
+        let plan = BrokeredRunPlan {
+            session_id: context.session_id,
+            run_id,
+            aggregate_binding: AggregateBinding {
+                aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+                aggregate_id: context.session_id,
+                member_kind: AggregateMemberKind::Specialist,
+                operation_id,
+                policy_sha256: None,
+                role_reference: Some(role.role_ref.clone()),
+                role_snapshot_sha256: Some(digest_value(role)?),
+                agent_configuration_sha256: Some(
+                    crate::run::agent_configuration_digest(&role.agent_configuration)
+                        .map_err(internal)?,
+                ),
+            },
+            role: role.clone(),
+            requested_access: member.requested_access,
+        };
+        match adapter.observe_specialist(&plan, credential) {
+            Ok(SpecialistPublicationObservation::Ready) => {
+                self.settle_recovered_publication(
+                    context.session_id,
+                    operation_id,
+                    run_id,
+                    "ready",
+                    "active",
+                    "resident",
+                    None,
+                )?;
+            }
+            Ok(SpecialistPublicationObservation::Absent) => {
+                let now = now_ms()?;
+                let transaction = self.transaction()?;
+                transaction
+                    .execute(
+                        "UPDATE brokered_spawn_operations SET state='requested',safe_error_code=NULL,
+                         updated_at_ms=?2 WHERE operation_id=?1
+                         AND state IN ('provisioning','recovery_required')",
+                        params![operation_id.to_string(), now],
+                    )
+                    .map_err(internal)?;
+                transaction
+                    .execute(
+                        "UPDATE brokered_members SET membership_state='provisioning',
+                         actor_residency='unstarted',updated_at_ms=?2 WHERE run_id=?1",
+                        params![run_id.to_string(), now],
+                    )
+                    .map_err(internal)?;
+                transaction.commit().map_err(internal)?;
+                return self.publish_reserved_specialist(
+                    context,
+                    role,
+                    operation_id,
+                    run_id,
+                    credential,
+                    adapter,
+                );
+            }
+            Err(AdapterFailure::Rejected(code)) => {
+                self.settle_recovered_publication(
+                    context.session_id,
+                    operation_id,
+                    run_id,
+                    "failed",
+                    "retired",
+                    "terminal",
+                    Some(code),
+                )?;
+                let credential = BrokerCredential::load(&self.credential_root, self.uid, run_id)?;
+                let _ = credential.remove();
+            }
+            Err(AdapterFailure::Unknown) => {
+                self.settle_recovered_publication(
+                    context.session_id,
+                    operation_id,
+                    run_id,
+                    "recovery_required",
+                    "degraded",
+                    "unavailable",
+                    Some("SPECIALIST_PUBLICATION_UNKNOWN".to_owned()),
+                )?;
+            }
+        }
+        self.spawn(operation_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn settle_recovered_publication(
+        &mut self,
+        session_id: Uuid,
+        operation_id: Uuid,
+        run_id: Uuid,
+        state: &str,
+        member_state: &str,
+        residency: &str,
+        error: Option<String>,
+    ) -> Result<(), MachineError> {
+        let now = now_ms()?;
+        let transaction = self.transaction()?;
+        transaction
+            .execute(
+                "UPDATE brokered_spawn_operations SET state=?2,safe_error_code=?3,updated_at_ms=?4
+                 WHERE operation_id=?1",
+                params![operation_id.to_string(), state, error, now],
+            )
+            .map_err(internal)?;
+        transaction
+            .execute(
+                "UPDATE brokered_members SET membership_state=?2,actor_residency=?3,updated_at_ms=?4
+                 WHERE run_id=?1",
+                params![run_id.to_string(), member_state, residency, now],
+            )
+            .map_err(internal)?;
+        transaction
+            .execute(
+                "UPDATE orchestrated_sessions SET revision=revision+1,updated_at_ms=?2
+                 WHERE session_id=?1",
+                params![session_id.to_string(), now],
+            )
+            .map_err(internal)?;
+        append_event(
+            &transaction,
+            session_id,
+            "specialist_publication_reconciled",
+            &sha256_hex(state.as_bytes()),
+            now,
+        )?;
+        transaction.commit().map_err(internal)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2783,6 +3249,15 @@ CREATE TABLE IF NOT EXISTS brokered_specialist_reuse_receipts(
   FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id),
   FOREIGN KEY(spawn_operation_id) REFERENCES brokered_spawn_operations(operation_id)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS brokered_approval_resolutions(
+  approval_request_id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL UNIQUE,
+  decision TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  resolution_receipt_id TEXT NOT NULL UNIQUE,
+  resolved_at_ms INTEGER NOT NULL,
+  FOREIGN KEY(operation_id) REFERENCES brokered_spawn_operations(operation_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS brokered_tasks(
   task_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -3205,6 +3680,15 @@ fn idempotency_conflict(key: &str) -> MachineError {
     )
 }
 
+fn interaction_already_resolved(run_id: Uuid, request_id: Uuid) -> MachineError {
+    MachineError::new(
+        "INTERACTION_ALREADY_RESOLVED",
+        "interaction is already resolved",
+        false,
+        serde_json::json!({"run_id":run_id,"request_id":request_id}),
+    )
+}
+
 fn operation_unavailable(operation: &str) -> MachineError {
     MachineError::new(
         "ORCHESTRATION_OPERATION_UNAVAILABLE",
@@ -3227,6 +3711,7 @@ fn is_replayable_business_error(error: &MachineError) -> bool {
                 | "SPECIALIST_TASK_NOT_FOUND"
                 | "SPECIALIST_WRITER_CONFLICT"
                 | "WRITER_BUSY"
+                | "LIVE_POLICY_UNSUPPORTED"
                 | "ORCHESTRATION_OPERATION_UNAVAILABLE"
         )
 }
@@ -3320,6 +3805,7 @@ mod tests {
         approval: Result<(), AdapterFailure>,
         publish: Result<(), AdapterFailure>,
         thread: Result<(), AdapterFailure>,
+        observation: Result<SpecialistPublicationObservation, AdapterFailure>,
         dispatch: Result<CompletedTask, AdapterFailure>,
         cancel: Result<(), AdapterFailure>,
         release: Result<(), AdapterFailure>,
@@ -3336,6 +3822,7 @@ mod tests {
                 approval: Ok(()),
                 publish: Ok(()),
                 thread: Ok(()),
+                observation: Err(AdapterFailure::Unknown),
                 dispatch: Ok(CompletedTask {
                     turn_id: "turn-specialist".to_owned(),
                     result: serde_json::json!({"answer":"verified"}),
@@ -3383,6 +3870,15 @@ mod tests {
         ) -> Result<(), AdapterFailure> {
             self.calls.push(format!("thread:{}", plan.run_id));
             self.thread.clone()
+        }
+
+        fn observe_specialist(
+            &mut self,
+            plan: &BrokeredRunPlan,
+            _credential: &BrokerCredential,
+        ) -> Result<SpecialistPublicationObservation, AdapterFailure> {
+            self.calls.push(format!("observe:{}", plan.run_id));
+            self.observation.clone()
         }
 
         fn dispatch_task(
@@ -3643,6 +4139,17 @@ mod tests {
             .join("orchestration/broker-credentials")
             .join(format!("{child}.json"));
         assert_eq!(std::fs::metadata(&carrier).unwrap().mode() & 0o777, 0o600);
+        let broker_credential = BrokerCredential::load(
+            &root.join("orchestration/broker-credentials"),
+            store.uid,
+            child,
+        )
+        .unwrap();
+        let controller_carrier = broker_credential.controller_carrier().unwrap();
+        assert_eq!(
+            crate::controller::binding_from_carrier(&controller_carrier, 1).unwrap(),
+            broker_credential.binding
+        );
         let adapter_calls = adapter.calls.len();
         assert_eq!(
             store
@@ -3932,6 +4439,76 @@ mod tests {
     }
 
     #[test]
+    fn broker_approval_resolution_is_durable_routed_and_exactly_replayed() {
+        let root = root();
+        let (mut store, session) = active_session(&root, "user_approval_required");
+        let mut adapter = FakeAdapter::default();
+        let operation = store
+            .request_specialist(
+                &context(session.session_id, "approval-route"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let approval_id = operation.approval_request_id.unwrap();
+        let interaction = store
+            .approval_interaction(session.session_id, approval_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.operation_id, operation.operation_id);
+        assert_eq!(interaction.request.role_ref, "reviewer");
+        assert!(interaction.decision.is_none());
+
+        let resolved = store
+            .resolve_specialist_approval(
+                session.session_id,
+                approval_id,
+                true,
+                "controller-resolution",
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(resolved.operation.state, "ready");
+        let calls = adapter.calls.len();
+        let replay = store
+            .resolve_specialist_approval(
+                session.session_id,
+                approval_id,
+                true,
+                "controller-resolution",
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(replay.resolution_receipt_id, resolved.resolution_receipt_id);
+        assert_eq!(replay.operation, resolved.operation);
+        assert_eq!(adapter.calls.len(), calls);
+        assert_eq!(
+            store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    approval_id,
+                    false,
+                    "controller-resolution-drift",
+                    &mut adapter,
+                )
+                .unwrap_err()
+                .code,
+            "INTERACTION_ALREADY_RESOLVED"
+        );
+        let interaction = store
+            .approval_interaction(session.session_id, approval_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.decision.as_deref(), Some("approve"));
+        assert!(interaction.resolved_at_ms.is_some());
+        assert_eq!(
+            interaction.resolution_receipt_id,
+            Some(resolved.resolution_receipt_id)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn committed_fault_boundaries_recover_without_duplicate_identity() {
         let root = root();
         let run_id = new_uuid_v7();
@@ -4197,7 +4774,11 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(operation.state, "recovery_required");
-            let calls = adapter.calls.len();
+            let publish_calls = adapter
+                .calls
+                .iter()
+                .filter(|entry| entry.starts_with("publish:") || entry.starts_with("thread:"))
+                .count();
             assert_eq!(
                 store
                     .request_specialist(&call, &request("read_only"), &mut adapter)
@@ -4205,7 +4786,91 @@ mod tests {
                     .state,
                 "recovery_required"
             );
-            assert_eq!(adapter.calls.len(), calls);
+            assert_eq!(
+                adapter
+                    .calls
+                    .iter()
+                    .filter(|entry| entry.starts_with("publish:") || entry.starts_with("thread:"))
+                    .count(),
+                publish_calls
+            );
+            assert!(
+                adapter
+                    .calls
+                    .last()
+                    .is_some_and(|entry| entry.starts_with("observe:"))
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn specialist_publication_recovery_observes_ready_or_republishes_known_absent() {
+        for (barrier, observation, expected_publish_calls, expected_thread_calls) in [
+            (
+                OrchestrationBarrier::AfterWorkerPublication,
+                SpecialistPublicationObservation::Ready,
+                1,
+                0,
+            ),
+            (
+                OrchestrationBarrier::BeforeWorkerPublication,
+                SpecialistPublicationObservation::Absent,
+                1,
+                1,
+            ),
+        ] {
+            let root = root();
+            let (store, session) = active_session(&root, "fully_delegated");
+            drop(store);
+            let fault = Arc::new(OneFault {
+                barrier,
+                fired: Mutex::new(false),
+            });
+            let mut store = OrchestrationStore::open_with_faults(&root, fault).unwrap();
+            let mut adapter = FakeAdapter::default();
+            let call = context(session.session_id, "recoverable-spawn");
+            assert!(
+                store
+                    .request_specialist(&call, &request("read_only"), &mut adapter)
+                    .is_err()
+            );
+            drop(store);
+
+            let mut store = OrchestrationStore::open(&root).unwrap();
+            store.reconcile_unknown_work(session.session_id).unwrap();
+            adapter.observation = Ok(observation);
+            assert_eq!(
+                store
+                    .request_specialist(&call, &request("read_only"), &mut adapter)
+                    .unwrap()
+                    .state,
+                "ready"
+            );
+            assert_eq!(
+                adapter
+                    .calls
+                    .iter()
+                    .filter(|entry| entry.starts_with("publish:"))
+                    .count(),
+                expected_publish_calls
+            );
+            assert_eq!(
+                adapter
+                    .calls
+                    .iter()
+                    .filter(|entry| entry.starts_with("thread:"))
+                    .count(),
+                expected_thread_calls
+            );
+            assert_eq!(
+                adapter
+                    .calls
+                    .iter()
+                    .filter(|entry| entry.starts_with("observe:"))
+                    .count(),
+                1
+            );
             std::fs::remove_dir_all(root).unwrap();
         }
     }
@@ -4844,7 +5509,7 @@ mod tests {
     }
 
     #[test]
-    fn live_bridge_rejects_unwired_effects_and_replays_business_rejections() {
+    fn live_bridge_connects_specialist_provisioning_and_replays_the_result() {
         let root = root();
         let (mut store, session) = active_session(&root, "fully_delegated");
         let mut adapter = FakeAdapter::default();
@@ -4852,8 +5517,8 @@ mod tests {
         let payload = serde_json::json!({
             "operation":"request_specialist",
             "role_ref":"reviewer",
-            "objective":"Do not publish this request.",
-            "expected_output":["Nothing"],
+            "objective":"Publish this request once.",
+            "expected_output":["Ready Specialist"],
             "requested_access":"read_only",
             "deadline_seconds":60,
         });
@@ -4862,9 +5527,9 @@ mod tests {
                 store: &mut store,
                 adapter: &mut adapter,
             };
-            let first = service.dispatch_live_bridge(&call, &payload).unwrap_err();
-            assert_eq!(first.code, "ORCHESTRATION_OPERATION_UNAVAILABLE");
-            assert!(service.adapter.calls.is_empty());
+            let first = service.dispatch_live_bridge(&call, &payload).unwrap();
+            assert_eq!(first["specialist_operation"]["state"], "ready");
+            assert_eq!(service.adapter.calls.len(), 2);
             first
         };
         drop(store);
@@ -4873,9 +5538,9 @@ mod tests {
             store: &mut store,
             adapter: &mut adapter,
         };
-        let replay = service.dispatch_live_bridge(&call, &payload).unwrap_err();
+        let replay = service.dispatch_live_bridge(&call, &payload).unwrap();
         assert_eq!(replay, first);
-        assert!(service.adapter.calls.is_empty());
+        assert_eq!(service.adapter.calls.len(), 2);
         assert_eq!(
             service
                 .store
