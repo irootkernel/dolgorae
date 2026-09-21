@@ -40,9 +40,9 @@ Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
-TASK-047, TASK-048, TASK-049, and TASK-050 are complete; TASK-051 is the next
-planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance is tracked
-separately and MUST NOT be inferred from provider QA.
+TASK-047, TASK-048, TASK-049, TASK-050, and TASK-051 are complete; TASK-054 is
+the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance
+is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -1727,7 +1727,7 @@ and cancellation never manufactures a known outcome. Next: TASK-051.
 
 ### TASK-051: Readable Results, Artifacts, and Redelivery
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-050`. Connect terminal observation to the accepted request,
 applicable output validator, existing immutable artifact store, and Broker

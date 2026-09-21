@@ -2212,6 +2212,19 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
             ControlResponseV1::Terminal { terminal } if terminal.turn_id == *turn_id => {
                 SpecialistTaskObservation::Terminal {
                     status: terminal.status,
+                    output: terminal
+                        .final_response
+                        .as_ref()
+                        .map(|response| {
+                            specialist_result_output(
+                                self.state_root,
+                                task.specialist_run_id,
+                                response,
+                                &carrier,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|error| AdapterFailure::Rejected(error.code))?,
                 }
             }
             ControlResponseV1::Failed { code, .. } if code == "OUTCOME_UNKNOWN" => {
@@ -2306,6 +2319,90 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
     ) -> Result<(), crate::orchestration::AdapterFailure> {
         unavailable_orchestration_effect()
     }
+}
+
+fn specialist_result_output(
+    state_root: &Path,
+    run_id: Uuid,
+    response: &crate::turn::FinalResponse,
+    carrier: &CredentialCarrier,
+) -> Result<crate::orchestration::CompletedTaskOutput, MachineError> {
+    use crate::turn::FinalResponse;
+
+    let (bytes, created_at) = match response {
+        FinalResponse::Inline { text } => (
+            text.as_bytes().to_vec(),
+            SystemLedgerClock::default().timestamp(),
+        ),
+        FinalResponse::Artifact {
+            artifact_id,
+            byte_length,
+            sha256,
+            created_at,
+        } => {
+            let snapshot = crate::snapshot::RunSnapshot::load(state_root, run_id, 0)?;
+            let metadata = crate::artifact::metadata(
+                state_root,
+                &snapshot,
+                &artifact_id.to_string(),
+                Some(carrier),
+            )?;
+            if metadata.artifact.byte_length != *byte_length || metadata.artifact.sha256 != *sha256
+            {
+                return Err(MachineError::new(
+                    "SPECIALIST_RESULT_INVALID",
+                    "Specialist terminal artifact metadata changed",
+                    false,
+                    json!({"run_id":run_id,"artifact_id":artifact_id}),
+                ));
+            }
+            let mut bytes = Vec::with_capacity(usize::try_from(*byte_length).map_err(|_| {
+                MachineError::invalid_argument("final_response", "artifact is too large")
+            })?);
+            while bytes.len() as u64 != *byte_length {
+                let remaining = *byte_length - bytes.len() as u64;
+                let length = remaining.min(u64::from(crate::artifact::MAX_CHUNK_BYTES)) as u32;
+                let chunk = crate::artifact::chunk(
+                    state_root,
+                    &snapshot,
+                    &artifact_id.to_string(),
+                    (bytes.len() as u64, length),
+                    Some(carrier),
+                )?;
+                if chunk.data.is_empty() {
+                    return Err(MachineError::new(
+                        "SPECIALIST_RESULT_INVALID",
+                        "Specialist terminal artifact made no read progress",
+                        false,
+                        json!({"run_id":run_id,"artifact_id":artifact_id}),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk.data);
+            }
+            (bytes, created_at.clone())
+        }
+        FinalResponse::Unavailable { .. } => {
+            return Err(MachineError::new(
+                "SPECIALIST_RESULT_INVALID",
+                "Specialist final response bytes are unavailable",
+                false,
+                json!({"run_id":run_id}),
+            ));
+        }
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        MachineError::new(
+            "SPECIALIST_RESULT_INVALID",
+            "Specialist final response is not valid UTF-8",
+            false,
+            json!({"run_id":run_id}),
+        )
+    })?;
+    Ok(crate::orchestration::CompletedTaskOutput {
+        value: Value::String(text.to_owned()),
+        bytes,
+        created_at,
+    })
 }
 
 fn brokered_start_arguments(

@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Publish completed brokered Specialist output as verified immutable
+  Primary-owned bytes with recoverable artifact association, exact redelivery,
+  and bounded UTF-8 `read_specialist_result` pages without exposing child
+  Controller authority.
 - Add bounded `any`/`all` operation and task waits, acceptance-anchored blocking
   budgets and execution deadlines, and fail-closed Specialist cancellation that
   requires terminal Turn proof instead of treating an interrupt acknowledgement

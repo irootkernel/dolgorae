@@ -5,6 +5,7 @@ use crate::interaction_payload::ChangeArtifactPayload;
 use crate::ledger::ObservedLedger;
 use crate::machine::MachineError;
 use crate::snapshot::RunSnapshot;
+use rusqlite::OptionalExtension as _;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -163,6 +164,7 @@ fn final_artifact(value: &Value, id: Uuid) -> Result<Option<ArtifactReference>, 
 }
 
 fn artifact_reference(
+    state_root: &Path,
     records: &ObservedLedger,
     run_id: Uuid,
     id: Uuid,
@@ -271,14 +273,74 @@ fn artifact_reference(
             found = Some(candidate);
         }
     }
-    found.ok_or_else(|| {
-        artifact_error(
-            run_id,
-            id,
-            "ARTIFACT_NOT_FOUND",
-            "artifact is not referenced by this Run",
+    if let Some(found) = found {
+        return Ok(found);
+    }
+    if let Some(projected) = specialist_result_reference(state_root, run_id, id)? {
+        return Ok(projected);
+    }
+    Err(artifact_error(
+        run_id,
+        id,
+        "ARTIFACT_NOT_FOUND",
+        "artifact is not referenced by this Run",
+    ))
+}
+
+fn specialist_result_reference(
+    state_root: &Path,
+    run_id: Uuid,
+    id: Uuid,
+) -> Result<Option<ArtifactReference>, MachineError> {
+    let path = state_root.join("orchestration/orchestration.sqlite3");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open(path)
+        .map_err(|_| invalid("Specialist result artifact association"))?;
+    let has_table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_result_publications')",
+            [],
+            |row| row.get(0),
         )
+        .map_err(|_| invalid("Specialist result artifact association"))?;
+    if !has_table {
+        return Ok(None);
+    }
+    let row = connection
+        .query_row(
+            "SELECT created_at,byte_length,result_sha256
+             FROM brokered_result_publications
+             WHERE primary_run_id=?1 AND artifact_id=?2 AND state='published'",
+            [run_id.to_string(), id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| invalid("Specialist result artifact association"))?;
+    row.map(|(created_at, byte_length, sha256)| {
+        digest(&sha256)?;
+        if byte_length > 32 * 1024 * 1024 {
+            return Err(invalid("Specialist result artifact provider bound"));
+        }
+        Ok(ArtifactReference {
+            artifact_id: id.to_string(),
+            created_at,
+            interaction_request_id: None,
+            kind: ArtifactKind::FinalResponse,
+            visibility: ArtifactVisibility::Observer,
+            media_type: "text/plain; charset=utf-8".to_owned(),
+            byte_length,
+            sha256,
+        })
     })
+    .transpose()
 }
 
 fn authorize_artifact(
@@ -418,8 +480,12 @@ pub fn metadata(
     carrier: Option<&CredentialCarrier>,
 ) -> Result<ArtifactMetadata, MachineError> {
     let id = identity(id, "artifact_id")?;
-    let reference =
-        artifact_reference(&ledger(state_root, snapshot)?, snapshot.manifest.run_id, id)?;
+    let reference = artifact_reference(
+        state_root,
+        &ledger(state_root, snapshot)?,
+        snapshot.manifest.run_id,
+        id,
+    )?;
     authorize_artifact(state_root, snapshot, id, &reference, carrier)?;
     verified_artifact(state_root, snapshot.manifest.run_id, id, &reference)?;
     authorize_artifact(state_root, snapshot, id, &reference, carrier)?;
@@ -438,7 +504,7 @@ pub fn chunk(
 ) -> Result<ArtifactChunk, MachineError> {
     let id = identity(id, "artifact_id")?;
     let run_id = snapshot.manifest.run_id;
-    let reference = artifact_reference(&ledger(state_root, snapshot)?, run_id, id)?;
+    let reference = artifact_reference(state_root, &ledger(state_root, snapshot)?, run_id, id)?;
     authorize_artifact(state_root, snapshot, id, &reference, carrier)?;
     let (offset, _) = range;
     let data = read_artifact_range(state_root, run_id, id, &reference, range)?;
@@ -603,6 +669,52 @@ mod tests {
         assert_eq!(
             tree.read((0, 1)).unwrap_err().code,
             "ARTIFACT_INTEGRITY_FAILURE"
+        );
+    }
+
+    #[test]
+    fn published_specialist_result_is_a_primary_owned_artifact_projection() {
+        let tree = ArtifactTree::new(b"specialist result");
+        let orchestration = tree.root.join("orchestration");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&orchestration)
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(orchestration.join("orchestration.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE brokered_result_publications(
+                   primary_run_id TEXT NOT NULL,
+                   artifact_id TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   byte_length INTEGER NOT NULL,
+                   result_sha256 TEXT NOT NULL,
+                   state TEXT NOT NULL
+                 ) STRICT;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO brokered_result_publications VALUES(?1,?2,?3,?4,?5,'published')",
+                rusqlite::params![
+                    tree.run_id.to_string(),
+                    tree.id.to_string(),
+                    "2026-09-22T00:00:00.000000Z",
+                    tree.reference.byte_length,
+                    tree.reference.sha256,
+                ],
+            )
+            .unwrap();
+        let reference = specialist_result_reference(&tree.root, tree.run_id, tree.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.artifact_id, tree.id.to_string());
+        assert_eq!(reference.visibility, ArtifactVisibility::Observer);
+        assert_eq!(reference.media_type, "text/plain; charset=utf-8");
+        assert_eq!(
+            tree.read((0, reference.byte_length as u32)).unwrap(),
+            b"specialist result"
         );
     }
 }

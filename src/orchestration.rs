@@ -50,6 +50,8 @@ pub enum OrchestrationBarrier {
     AfterTaskDispatch,
     BeforeResultAppend,
     AfterResultAppend,
+    BeforeResultPublication,
+    AfterResultPublication,
     BeforeDeliveryReceipt,
     AfterDeliveryReceipt,
 }
@@ -167,7 +169,20 @@ pub struct SpecialistTaskSnapshot {
     pub delivery_sequence: Option<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResultPublication {
+    session_id: Uuid,
+    primary_run_id: Uuid,
+    artifact_id: Uuid,
+    result_json: String,
+    content: String,
+    byte_length: u64,
+    sha256: String,
+    created_at: String,
+}
+
 const BROKERED_TOOL_RESULT_SCHEMA_V1: &str = "dolgorae.brokered-tool-result/v1";
+const MAX_SPECIALIST_RESULT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -570,6 +585,13 @@ pub struct CompletedTask {
     pub result: Value,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletedTaskOutput {
+    pub value: Value,
+    pub bytes: Vec<u8>,
+    pub created_at: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskDispatch {
     Accepted { turn_id: String },
@@ -587,7 +609,10 @@ pub enum TaskCancellation {
 pub enum SpecialistTaskObservation {
     Running,
     WaitingInteraction,
-    Terminal { status: String },
+    Terminal {
+        status: String,
+        output: Option<CompletedTaskOutput>,
+    },
     OutcomeUnknown,
 }
 
@@ -631,6 +656,11 @@ enum ToolRequest {
     CollectSpecialistResults {
         after_sequence: u64,
         limit: usize,
+    },
+    ReadSpecialistResult {
+        task_id: Uuid,
+        offset: u64,
+        limit: u32,
     },
     CancelSpecialistTask {
         task_id: Uuid,
@@ -879,6 +909,13 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                     "next_after_sequence":next_after_sequence,
                 }))
             }
+            ToolRequest::ReadSpecialistResult {
+                task_id,
+                offset,
+                limit,
+            } => self
+                .store
+                .read_specialist_result(context.session_id, task_id, offset, limit),
             ToolRequest::CancelSpecialistTask { task_id, reason } => {
                 checked(&reason, 1_024, "reason")?;
                 let state = self.store.settle_task_control(
@@ -921,6 +958,7 @@ impl ToolRequest {
             Self::AssignSpecialistTask { .. } => "assign_specialist_task",
             Self::AwaitSpecialistTasks { .. } => "await_specialist_tasks",
             Self::CollectSpecialistResults { .. } => "collect_specialist_results",
+            Self::ReadSpecialistResult { .. } => "read_specialist_result",
             Self::CancelSpecialistTask { .. } => "cancel_specialist_task",
             Self::ReleaseSpecialist { .. } => "release_specialist",
         }
@@ -935,6 +973,7 @@ impl ToolRequest {
                 | Self::AssignSpecialistTask { .. }
                 | Self::AwaitSpecialistTasks { .. }
                 | Self::CollectSpecialistResults { .. }
+                | Self::ReadSpecialistResult { .. }
                 | Self::CancelSpecialistTask { .. }
         )
     }
@@ -945,6 +984,7 @@ pub struct OrchestrationStore {
     faults: Arc<dyn OrchestrationFaultInjector>,
     clock: Arc<dyn OrchestrationClock>,
     credential_root: PathBuf,
+    state_root: PathBuf,
     uid: u32,
 }
 
@@ -976,13 +1016,16 @@ impl OrchestrationStore {
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(internal)?;
         connection.execute_batch(SCHEMA).map_err(internal)?;
-        Ok(Self {
+        let mut store = Self {
             connection,
             faults,
             clock,
             credential_root: state_root.join("orchestration/broker-credentials"),
+            state_root: state_root.to_owned(),
             uid: crate::darwin::DarwinSystem.current_uid(),
-        })
+        };
+        store.recover_result_publications()?;
+        Ok(store)
     }
 
     fn now_ms(&self) -> Result<i64, MachineError> {
@@ -2490,14 +2533,10 @@ impl OrchestrationStore {
         }
         let outcome = adapter.dispatch_task(&member, &accepted_task, &credential);
         self.faults.check(OrchestrationBarrier::AfterTaskDispatch)?;
-        let completed_synchronously = matches!(&outcome, Ok(TaskDispatch::Completed(_)));
-        if completed_synchronously {
-            self.faults
-                .check(OrchestrationBarrier::BeforeResultAppend)?;
-        }
         let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let mut turn_acceptance_sha256 = None;
+        let mut completed_output = None;
         let terminal_error = match outcome {
             Ok(TaskDispatch::Accepted { turn_id }) => {
                 turn_acceptance_sha256 = Some(digest_value(&serde_json::json!({
@@ -2515,24 +2554,23 @@ impl OrchestrationStore {
                 (changed == 0).then(|| interrupted_unknown(task_id))
             }
             Ok(TaskDispatch::Completed(completed)) => {
-                let result_json = canonical_string(&completed.result)?;
-                let result_sha256 = sha256_hex(result_json.as_bytes());
-                let artifact_id = new_uuid_v7();
+                turn_acceptance_sha256 = Some(digest_value(&serde_json::json!({
+                    "task_id": task_id,
+                    "target_run_id": accepted_task.specialist_run_id,
+                    "target_turn_id": completed.turn_id,
+                }))?);
                 let changed = transaction
                     .execute(
-                        "UPDATE brokered_tasks SET state='completed_not_delivered',target_turn_id=?2,
-                         result_json=?3,result_sha256=?4,result_artifact_id=?5,updated_at_ms=?6
+                        "UPDATE brokered_tasks SET state='running',target_turn_id=?2,updated_at_ms=?3
                          WHERE task_id=?1 AND state='dispatching'",
-                        params![
-                            task_id.to_string(),
-                            completed.turn_id,
-                            result_json,
-                            result_sha256,
-                            artifact_id.to_string(),
-                            now
-                        ],
+                        params![task_id.to_string(), completed.turn_id, now],
                     )
                     .map_err(internal)?;
+                completed_output = Some(CompletedTaskOutput {
+                    bytes: canonical_string(&completed.result)?.into_bytes(),
+                    value: completed.result,
+                    created_at: "1970-01-01T00:00:00.000000Z".to_owned(),
+                });
                 (changed == 0).then(|| interrupted_unknown(task_id))
             }
             Err(AdapterFailure::Rejected(code)) => {
@@ -2574,12 +2612,14 @@ impl OrchestrationStore {
             now,
         )?;
         transaction.commit().map_err(internal)?;
-        if completed_synchronously {
-            self.faults.check(OrchestrationBarrier::AfterResultAppend)?;
-        }
         match terminal_error {
             Some(error) => Err(error),
-            None => self.task(task_id),
+            None => {
+                if let Some(output) = completed_output {
+                    self.publish_task_result(context.session_id, task_id, output)?;
+                }
+                self.task(task_id)
+            }
         }
     }
 
@@ -2755,14 +2795,25 @@ impl OrchestrationStore {
                     "specialist_task_observed",
                 )?;
             }
-            Ok(SpecialistTaskObservation::Terminal { status }) => {
+            Ok(SpecialistTaskObservation::Terminal { status, output }) => {
+                if status == "completed" {
+                    if let Some(output) = output {
+                        self.publish_task_result(session_id, task.task_id, output)?;
+                    } else {
+                        self.fail_result_construction(
+                            session_id,
+                            task.task_id,
+                            "SPECIALIST_RESULT_INVALID",
+                        )?;
+                    }
+                    return Ok(());
+                }
                 let intent = self.task_control_intent(task.task_id)?;
                 let (state, code) = match (status.as_str(), intent.as_deref()) {
                     ("interrupted", Some("expiry")) => ("expired", Some("OPERATION_TIMEOUT")),
                     ("interrupted", Some("cancel")) => ("cancelled", None),
                     ("interrupted", _) => ("failed", Some("SPECIALIST_TURN_INTERRUPTED")),
                     ("failed", _) => ("failed", Some("SPECIALIST_TURN_FAILED")),
-                    ("completed", _) => ("running", Some("OUTCOME_UNKNOWN")),
                     _ => ("interrupted_unknown", Some("TARGET_TURN_OUTCOME_UNKNOWN")),
                 };
                 self.update_task_state_if(
@@ -2786,6 +2837,358 @@ impl OrchestrationStore {
             }
         }
         Ok(())
+    }
+
+    fn publish_task_result(
+        &mut self,
+        session_id: Uuid,
+        task_id: Uuid,
+        output: CompletedTaskOutput,
+    ) -> Result<(), MachineError> {
+        let accepted = self.accepted_task(task_id)?;
+        if accepted.task_id != task_id || self.task_session(task_id)? != session_id {
+            return Err(integrity(
+                "completed result disagrees with accepted task identity",
+            ));
+        }
+        if output.bytes.len() > MAX_SPECIALIST_RESULT_BYTES {
+            self.fail_result_construction(session_id, task_id, "SPECIALIST_RESULT_INVALID")?;
+            return Ok(());
+        }
+        if std::str::from_utf8(&output.bytes).is_err() {
+            self.fail_result_construction(session_id, task_id, "SPECIALIST_RESULT_INVALID")?;
+            return Ok(());
+        }
+        let result_json = canonical_string(&output.value)?;
+        let result_sha256 = sha256_hex(&output.bytes);
+        let artifact_id = new_uuid_v7();
+        let created_at = output.created_at;
+        self.faults
+            .check(OrchestrationBarrier::BeforeResultAppend)?;
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO brokered_result_publications(
+                   task_id,session_id,primary_run_id,artifact_id,result_json,content_text,
+                   byte_length,result_sha256,created_at,state,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,'prepared',?9,?9)",
+                params![
+                    task_id.to_string(),
+                    session_id.to_string(),
+                    artifact_id.to_string(),
+                    result_json,
+                    std::str::from_utf8(&output.bytes).map_err(internal)?,
+                    output.bytes.len() as u64,
+                    result_sha256,
+                    created_at,
+                    now,
+                ],
+            )
+            .map_err(internal)?;
+        transaction.commit().map_err(internal)?;
+        if inserted == 0 {
+            let existing = self.result_publication(task_id)?;
+            if existing.session_id != session_id
+                || existing.result_json != result_json
+                || existing.content.as_bytes() != output.bytes
+                || existing.sha256 != result_sha256
+            {
+                return Err(integrity("immutable Specialist result publication changed"));
+            }
+        }
+        self.reconcile_result_publication(task_id, true)
+    }
+
+    fn fail_result_construction(
+        &mut self,
+        session_id: Uuid,
+        task_id: Uuid,
+        code: &str,
+    ) -> Result<(), MachineError> {
+        self.update_task_state_if(
+            session_id,
+            task_id,
+            "running",
+            "failed",
+            Some(code),
+            "specialist_task_observed",
+        )?;
+        Ok(())
+    }
+
+    fn recover_result_publications(&mut self) -> Result<(), MachineError> {
+        let task_ids = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT task_id FROM brokered_result_publications WHERE state='prepared'")
+                .map_err(internal)?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(internal)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(internal)?
+        };
+        for task_id in task_ids {
+            self.reconcile_result_publication(parse_uuid(&task_id)?, false)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_result_publication(
+        &mut self,
+        task_id: Uuid,
+        inject_faults: bool,
+    ) -> Result<(), MachineError> {
+        let publication = self.result_publication(task_id)?;
+        if inject_faults {
+            self.faults
+                .check(OrchestrationBarrier::BeforeResultPublication)?;
+        }
+        self.write_result_artifact(&publication)?;
+        if inject_faults {
+            self.faults
+                .check(OrchestrationBarrier::AfterResultPublication)?;
+        }
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        let changed = transaction
+            .execute(
+                "UPDATE brokered_tasks SET state='completed_not_delivered',result_json=?2,
+                 result_sha256=?3,result_artifact_id=?4,safe_error_code=NULL,updated_at_ms=?5
+                 WHERE task_id=?1 AND state='running'",
+                params![
+                    task_id.to_string(),
+                    publication.result_json,
+                    publication.sha256,
+                    publication.artifact_id.to_string(),
+                    now,
+                ],
+            )
+            .map_err(internal)?;
+        let state = task_state_from_transaction(&transaction, task_id)?;
+        if changed != 1 && !matches!(state.as_str(), "completed_not_delivered" | "delivered") {
+            return Err(integrity("result publication target is not completable"));
+        }
+        transaction
+            .execute(
+                "UPDATE brokered_result_publications SET state='published',updated_at_ms=?2
+                 WHERE task_id=?1 AND state='prepared'",
+                params![task_id.to_string(), now],
+            )
+            .map_err(internal)?;
+        if changed == 1 {
+            append_event(
+                &transaction,
+                publication.session_id,
+                "specialist_result_published",
+                &publication.sha256,
+                now,
+            )?;
+        }
+        transaction.commit().map_err(internal)?;
+        if inject_faults {
+            self.faults.check(OrchestrationBarrier::AfterResultAppend)?;
+        }
+        Ok(())
+    }
+
+    fn result_publication(&self, task_id: Uuid) -> Result<ResultPublication, MachineError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT session_id,primary_run_id,artifact_id,result_json,content_text,
+                        byte_length,result_sha256,created_at
+                 FROM brokered_result_publications WHERE task_id=?1",
+                [task_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, u64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .map_err(|_| integrity("Specialist result publication evidence is missing"))?;
+        Ok(ResultPublication {
+            session_id: parse_uuid(&row.0)?,
+            primary_run_id: parse_uuid(&row.1)?,
+            artifact_id: parse_uuid(&row.2)?,
+            result_json: row.3,
+            content: row.4,
+            byte_length: row.5,
+            sha256: row.6,
+            created_at: row.7,
+        })
+    }
+
+    fn write_result_artifact(&self, publication: &ResultPublication) -> Result<(), MachineError> {
+        if publication.content.len() as u64 != publication.byte_length
+            || sha256_hex(publication.content.as_bytes()) != publication.sha256
+        {
+            return Err(integrity(
+                "prepared Specialist result bytes failed integrity validation",
+            ));
+        }
+        let root =
+            crate::run::run_root(&self.state_root, publication.primary_run_id).join("artifacts");
+        verify_secure_directory(&root, self.uid)?;
+        let path = root.join(format!("{}.bin", publication.artifact_id));
+        match atomic_create(
+            &SystemWorkspacePlatform,
+            &path,
+            publication.content.as_bytes(),
+            0o600,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(internal(error)),
+        }?;
+        let bytes = self.read_result_artifact(publication)?;
+        (bytes == publication.content.as_bytes())
+            .then_some(())
+            .ok_or_else(|| integrity("published Specialist result artifact changed"))
+    }
+
+    fn read_result_artifact(
+        &self,
+        publication: &ResultPublication,
+    ) -> Result<Vec<u8>, MachineError> {
+        let failure = || {
+            specialist_result_unreadable(
+                publication.artifact_id,
+                "result artifact integrity failed validation",
+            )
+        };
+        let mut directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(&self.state_root)
+            .map_err(|_| failure())?;
+        let secure_directory = |directory: &File| -> Result<(), MachineError> {
+            let metadata = directory.metadata().map_err(|_| failure())?;
+            if !metadata.is_dir() || metadata.uid() != self.uid || metadata.mode() & 0o777 != 0o700
+            {
+                return Err(failure());
+            }
+            Ok(())
+        };
+        secure_directory(&directory)?;
+        for component in [
+            "runs".to_owned(),
+            publication.primary_run_id.to_string(),
+            "artifacts".to_owned(),
+        ] {
+            directory = open_relative_nofollow(&directory, OsStr::new(&component), true)
+                .map_err(|_| failure())?;
+            secure_directory(&directory)?;
+        }
+        let mut file = open_relative_nofollow(
+            &directory,
+            OsStr::new(&format!("{}.bin", publication.artifact_id)),
+            false,
+        )
+        .map_err(|_| failure())?;
+        let metadata = file.metadata().map_err(|_| failure())?;
+        if !metadata.is_file()
+            || metadata.uid() != self.uid
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+            || metadata.len() != publication.byte_length
+            || metadata.len() > MAX_SPECIALIST_RESULT_BYTES as u64
+        {
+            return Err(failure());
+        }
+        let version = (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        );
+        let mut bytes = Vec::with_capacity(publication.byte_length as usize);
+        file.read_to_end(&mut bytes).map_err(|_| failure())?;
+        let after = file.metadata().map_err(|_| failure())?;
+        let after_version = (
+            after.dev(),
+            after.ino(),
+            after.len(),
+            after.mtime(),
+            after.mtime_nsec(),
+            after.ctime(),
+            after.ctime_nsec(),
+        );
+        if version != after_version
+            || bytes.len() as u64 != publication.byte_length
+            || sha256_hex(&bytes) != publication.sha256
+            || std::str::from_utf8(&bytes).is_err()
+        {
+            return Err(failure());
+        }
+        Ok(bytes)
+    }
+
+    pub fn read_specialist_result(
+        &self,
+        session_id: Uuid,
+        task_id: Uuid,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Value, MachineError> {
+        if limit == 0 || limit > 65_536 || self.task_session(task_id)? != session_id {
+            return Err(specialist_result_unreadable(
+                task_id,
+                "result range is invalid",
+            ));
+        }
+        let publication = self.result_publication(task_id)?;
+        let task = self.task(task_id)?;
+        if !matches!(task.state.as_str(), "completed_not_delivered" | "delivered") {
+            return Err(specialist_result_unreadable(
+                task_id,
+                "result is not published",
+            ));
+        }
+        let bytes = self.read_result_artifact(&publication)?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| specialist_result_unreadable(task_id, "result offset is invalid"))?;
+        if offset > bytes.len() || !std::str::from_utf8(&bytes[..offset]).is_ok() {
+            return Err(specialist_result_unreadable(
+                task_id,
+                "result offset is invalid",
+            ));
+        }
+        let remaining = &bytes[offset..];
+        let maximum = usize::try_from(limit)
+            .map_err(internal)?
+            .min(remaining.len());
+        let mut end = maximum;
+        while end > 0 && std::str::from_utf8(&remaining[..end]).is_err() {
+            end -= 1;
+        }
+        if !remaining.is_empty() && end == 0 {
+            return Err(specialist_result_unreadable(
+                task_id,
+                "result limit is too small for the next UTF-8 character",
+            ));
+        }
+        let content = std::str::from_utf8(&remaining[..end]).map_err(internal)?;
+        Ok(serde_json::json!({
+            "operation":"read_specialist_result_result",
+            "task_id":task_id,
+            "length":publication.byte_length,
+            "sha256":publication.sha256,
+            "offset":offset,
+            "content":content,
+            "truncated":offset + end < bytes.len(),
+        }))
     }
 
     pub fn collect_results(
@@ -3871,6 +4274,22 @@ CREATE TABLE IF NOT EXISTS brokered_task_controls(
   requested_at_ms INTEGER NOT NULL,
   FOREIGN KEY(task_id) REFERENCES brokered_tasks(task_id)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS brokered_result_publications(
+  task_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  primary_run_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL UNIQUE,
+  result_json TEXT NOT NULL,
+  content_text TEXT NOT NULL,
+  byte_length INTEGER NOT NULL,
+  result_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES brokered_tasks(task_id),
+  FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS brokered_delivery_receipts(
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL UNIQUE,
@@ -4040,6 +4459,7 @@ fn validate_tool_request_shape(payload: &Value) -> Result<(), MachineError> {
             "transport_wait_seconds",
         ],
         Some("collect_specialist_results") => &["operation", "after_sequence", "limit"],
+        Some("read_specialist_result") => &["operation", "task_id", "offset", "limit"],
         Some("cancel_specialist_task") => &["operation", "task_id", "reason"],
         Some("release_specialist") => &["operation", "run_id", "reason"],
         _ => &[],
@@ -4408,6 +4828,15 @@ fn task_failed(task_id: Uuid, code: &str) -> MachineError {
     )
 }
 
+fn specialist_result_unreadable(id: Uuid, reason: &str) -> MachineError {
+    MachineError::new(
+        "SPECIALIST_RESULT_UNREADABLE",
+        "Specialist result is unavailable or unreadable",
+        false,
+        serde_json::json!({"result_id":id,"reason":reason}),
+    )
+}
+
 fn integrity(reason: &str) -> MachineError {
     MachineError::new(
         "ORCHESTRATION_SCHEMA_UNSUPPORTED",
@@ -4435,6 +4864,7 @@ mod tests {
         InstalledSpecialistRole, RoleSource, RoleSourceReference, RoleSourceScope,
     };
     use std::collections::BTreeSet;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
@@ -4743,6 +5173,16 @@ mod tests {
     ) -> (OrchestrationStore, OrchestratedSessionSnapshot) {
         let mut store = OrchestrationStore::open(root).unwrap();
         let run_id = new_uuid_v7();
+        let artifact_root = crate::run::run_root(root, run_id).join("artifacts");
+        std::fs::create_dir_all(&artifact_root).unwrap();
+        for path in [
+            root.to_owned(),
+            root.join("runs"),
+            crate::run::run_root(root, run_id),
+            artifact_root,
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         store
             .prepare_session("workspace", run_id, "bootstrap", &"b".repeat(64), &policy)
             .unwrap();
@@ -4762,6 +5202,16 @@ mod tests {
         )
         .unwrap();
         let run_id = new_uuid_v7();
+        let artifact_root = crate::run::run_root(root, run_id).join("artifacts");
+        std::fs::create_dir_all(&artifact_root).unwrap();
+        for path in [
+            root.to_owned(),
+            root.join("runs"),
+            crate::run::run_root(root, run_id),
+            artifact_root,
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         store
             .prepare_session(
                 "workspace",
@@ -5604,11 +6054,13 @@ mod tests {
 
     #[test]
     fn task_and_delivery_faults_resume_only_before_external_acceptance() {
-        for (barrier, resumes) in [
-            (OrchestrationBarrier::BeforeTaskDispatch, true),
-            (OrchestrationBarrier::AfterTaskDispatch, false),
-            (OrchestrationBarrier::BeforeResultAppend, false),
-            (OrchestrationBarrier::AfterResultAppend, true),
+        for (barrier, recovery) in [
+            (OrchestrationBarrier::BeforeTaskDispatch, "retry"),
+            (OrchestrationBarrier::AfterTaskDispatch, "unknown"),
+            (OrchestrationBarrier::BeforeResultAppend, "observe"),
+            (OrchestrationBarrier::BeforeResultPublication, "retry"),
+            (OrchestrationBarrier::AfterResultPublication, "retry"),
+            (OrchestrationBarrier::AfterResultAppend, "retry"),
         ] {
             let root = root();
             let (store, session, child) = active_member(&root);
@@ -5629,7 +6081,7 @@ mod tests {
                 .count();
             drop(store);
             let mut store = OrchestrationStore::open(&root).unwrap();
-            if resumes {
+            if recovery == "retry" {
                 let completed = store.assign_task(&call, &task, &mut adapter).unwrap();
                 assert_eq!(completed.state, "completed_not_delivered");
                 assert_eq!(
@@ -5640,7 +6092,7 @@ mod tests {
                         .count(),
                     1
                 );
-            } else {
+            } else if recovery == "unknown" {
                 assert_eq!(
                     store
                         .assign_task(&call, &task, &mut adapter)
@@ -5657,6 +6109,35 @@ mod tests {
                     dispatches
                 );
                 store.reconcile_unknown_work(session.session_id).unwrap();
+            } else {
+                let running = store.assign_task(&call, &task, &mut adapter).unwrap();
+                assert_eq!(running.state, "running");
+                adapter.task_observation = Ok(SpecialistTaskObservation::Terminal {
+                    status: "completed".to_owned(),
+                    output: Some(CompletedTaskOutput {
+                        value: serde_json::json!({"answer":"verified"}),
+                        bytes: br#"{"answer":"verified"}"#.to_vec(),
+                        created_at: "2026-09-22T00:00:00.000000Z".to_owned(),
+                    }),
+                });
+                let observed = store
+                    .wait_tasks(
+                        session.session_id,
+                        &[running.task_id],
+                        "any",
+                        1,
+                        &mut adapter,
+                    )
+                    .unwrap();
+                assert_eq!(observed[0].state, "completed_not_delivered");
+                assert_eq!(
+                    adapter
+                        .calls
+                        .iter()
+                        .filter(|entry| entry.starts_with("dispatch:"))
+                        .count(),
+                    dispatches
+                );
             }
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -5690,6 +6171,75 @@ mod tests {
             assert_eq!(delivered[0].delivery_sequence, Some(1));
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn published_result_reader_preserves_utf8_pages_authorization_and_integrity() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "turn-readable-result".to_owned(),
+            }),
+            ..FakeAdapter::default()
+        };
+        let task = store
+            .assign_task(
+                &context(session.session_id, "readable-result"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let content = format!("가ab{}", "x".repeat(1024 * 1024));
+        adapter.task_observation = Ok(SpecialistTaskObservation::Terminal {
+            status: "completed".to_owned(),
+            output: Some(CompletedTaskOutput {
+                value: Value::String(content.clone()),
+                bytes: content.as_bytes().to_vec(),
+                created_at: "2026-09-22T00:00:00.000000Z".to_owned(),
+            }),
+        });
+        let completed = store
+            .wait_tasks(session.session_id, &[task.task_id], "any", 1, &mut adapter)
+            .unwrap();
+        assert_eq!(completed[0].state, "completed_not_delivered");
+        assert_eq!(
+            store
+                .read_specialist_result(session.session_id, task.task_id, 0, 2)
+                .unwrap_err()
+                .code,
+            "SPECIALIST_RESULT_UNREADABLE"
+        );
+        let first = store
+            .read_specialist_result(session.session_id, task.task_id, 0, 3)
+            .unwrap();
+        assert_eq!(first["content"], "가");
+        assert_eq!(first["truncated"], true);
+        let second = store
+            .read_specialist_result(session.session_id, task.task_id, 3, 2)
+            .unwrap();
+        assert_eq!(second["content"], "ab");
+        assert_eq!(
+            store
+                .read_specialist_result(new_uuid_v7(), task.task_id, 0, 3)
+                .unwrap_err()
+                .code,
+            "SPECIALIST_RESULT_UNREADABLE"
+        );
+        let artifact = completed[0].result_artifact_ref.unwrap();
+        let path = crate::run::run_root(&root, session.root_run_id)
+            .join("artifacts")
+            .join(format!("{artifact}.bin"));
+        std::fs::write(&path, b"tampered").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            store
+                .read_specialist_result(session.session_id, task.task_id, 0, 3)
+                .unwrap_err()
+                .code,
+            "SPECIALIST_RESULT_UNREADABLE"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6184,6 +6734,21 @@ mod tests {
         assert_eq!(collected["operation"], "collect_specialist_results_result");
         assert_eq!(collected["tasks"][0]["task_id"], task_id.to_string());
         assert_eq!(collected["next_after_sequence"], 1);
+
+        let read = service
+            .dispatch(
+                &context(session.session_id, "dispatch-read-result"),
+                &serde_json::json!({
+                    "operation":"read_specialist_result",
+                    "task_id":task_id,
+                    "offset":0,
+                    "limit":65_536,
+                }),
+            )
+            .unwrap();
+        assert_eq!(read["operation"], "read_specialist_result_result");
+        assert_eq!(read["content"], r#"{"answer":"verified"}"#);
+        assert_eq!(read["truncated"], false);
 
         let later = service
             .dispatch(
