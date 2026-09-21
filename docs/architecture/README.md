@@ -489,8 +489,10 @@ baseline, and the isolated probe is not the production adapter. Deterministic
 fixtures prove native worker Turn/call binding and show that shared MCP identity
 is ambiguous without a host-controlled carrier; Dedicated Lane isolation does
 not invent Turn or call identity. Unit tests use an internal fake adapter
-against the same service. The fake `dispatch_task` helper still returns a
-completed task; production TASK-049/050 must not keep that seam.
+against the same service. The deterministic fake `dispatch_task` helper may
+still return a completed task for legacy result tests. Production dispatch
+returns only the accepted Turn identity; TASK-050/051 own observation and
+result settlement.
 
 The bridge binds session, Primary Run, source Turn, tool-call ID, inherited root
 priority, Controller authority, and idempotency outside model arguments. The
@@ -623,6 +625,20 @@ checks and a single active member-task reservation precede writer or Turn
 effects. Exact acceptance replay is checked before fresh busy admission.
 Unsupported queue/collaboration/activation policies are refused before live
 Session allocation; future schema values and historical snapshots remain valid.
+
+The production assignment path resolves each context reference against the
+Primary Run's authorized immutable artifact observation, verifies the complete
+bytes, and persists those bytes with their media type, length, and SHA-256 in
+the accepted task JCS. The same record carries the Broker `task_id`, target Run,
+exact objective and expected-output strings, requested access, and durable
+deadline origin. Dispatch presents that record through the target member's
+broker-held Controller carrier and uses the Broker `task_id` as the Turn
+idempotency identity. A successful submit records the authoritative target Turn
+and leaves completion to later observation. An exact accepted-call replay reads
+the durable receipt before busy admission and never submits another Turn.
+Canonical workspace write requested from the active Primary tool Turn is a
+typed pre-acceptance writer conflict; there is no implicit interrupt or
+cross-Controller handoff.
 
 Turn dispatch must return an acceptance outcome independently from completion.
 The runtime observes accepted Turns and settles results without blocking its

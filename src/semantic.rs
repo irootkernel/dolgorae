@@ -1939,6 +1939,121 @@ impl<'a> ProductionOrchestrationEffects<'a> {
             }
         }
     }
+
+    fn validate_task_target(
+        &self,
+        member: &crate::orchestration::BrokeredMemberSnapshot,
+    ) -> Result<(), MachineError> {
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, member.run_id, 0)?;
+        let manifest = &snapshot.manifest;
+        validate_brokered_specialist_manifest(manifest, &member.agent_configuration)?;
+        let binding = manifest
+            .aggregate_binding
+            .as_ref()
+            .ok_or_else(|| MachineError::invalid_argument("aggregate_binding", "missing"))?;
+        let expected_access = if member.requested_access == "isolated_write" {
+            Access::Write
+        } else {
+            Access::Read
+        };
+        if manifest.run_id != member.run_id
+            || binding.aggregate_id != member.parent_run_id
+            || binding.operation_id != member.spawn_operation_id
+            || binding.role_reference.as_deref() != Some(member.role_ref.as_str())
+            || binding.role_snapshot_sha256.as_deref() != Some(member.role_snapshot_sha256.as_str())
+            || binding.agent_configuration_sha256.as_deref()
+                != Some(member.agent_configuration_sha256.as_str())
+            || manifest.controller != member.controller_binding
+            || manifest.initial_access != expected_access
+        {
+            return Err(MachineError::new(
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "the Specialist Run no longer matches its admitted task authority",
+                false,
+                json!({"run_id":member.run_id}),
+            ));
+        }
+        if member.requested_access == "isolated_write" {
+            let canonical = manifest.canonical_workspace.to_path_buf()?;
+            let isolated = crate::workspace::isolated_specialist_root(
+                self.state_root,
+                member.parent_run_id,
+                member.run_id,
+            );
+            verify_secure_directory(&isolated, DarwinSystem.current_uid())?;
+            if !crate::workspace::is_registered_git_worktree(&canonical, &isolated) {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the isolated Specialist worktree registration is invalid",
+                    false,
+                    json!({"run_id":member.run_id,"required_action":"restore_isolated_worktree"}),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_primary_contexts(
+        &self,
+        source_run_id: Uuid,
+        references: &[Uuid],
+    ) -> Result<Vec<crate::orchestration::AcceptedTaskContext>, MachineError> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, source_run_id, 0)?;
+        let mut contexts = Vec::with_capacity(references.len());
+        for artifact_id in references {
+            let metadata = crate::artifact::metadata(
+                self.state_root,
+                &snapshot,
+                &artifact_id.to_string(),
+                None,
+            )?
+            .artifact;
+            if metadata.byte_length == 0 || metadata.byte_length > 262_144 {
+                return Err(MachineError::invalid_argument(
+                    "context_refs",
+                    "each context artifact must contain 1 to 262144 UTF-8 bytes",
+                ));
+            }
+            if !(metadata.media_type.starts_with("text/")
+                || metadata.media_type == "application/json")
+            {
+                return Err(MachineError::invalid_argument(
+                    "context_refs",
+                    "context artifacts must use a textual media type",
+                ));
+            }
+            let chunk = crate::artifact::chunk(
+                self.state_root,
+                &snapshot,
+                &artifact_id.to_string(),
+                (0, metadata.byte_length as u32),
+                None,
+            )?;
+            let content = String::from_utf8(chunk.data).map_err(|_| {
+                MachineError::invalid_argument(
+                    "context_refs",
+                    "context artifact bytes must be valid UTF-8",
+                )
+            })?;
+            if content.contains('\0') {
+                return Err(MachineError::invalid_argument(
+                    "context_refs",
+                    "context artifact text must not contain NUL",
+                ));
+            }
+            contexts.push(crate::orchestration::AcceptedTaskContext {
+                artifact_id: *artifact_id,
+                media_type: metadata.media_type,
+                byte_length: metadata.byte_length,
+                sha256: metadata.sha256,
+                content,
+            });
+        }
+        Ok(contexts)
+    }
 }
 
 fn unavailable_orchestration_effect() -> Result<(), crate::orchestration::AdapterFailure> {
@@ -1948,6 +2063,14 @@ fn unavailable_orchestration_effect() -> Result<(), crate::orchestration::Adapte
 }
 
 impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffects<'_> {
+    fn resolve_task_contexts(
+        &mut self,
+        source_run_id: Uuid,
+        references: &[Uuid],
+    ) -> Result<Vec<crate::orchestration::AcceptedTaskContext>, MachineError> {
+        self.resolve_primary_contexts(source_run_id, references)
+    }
+
     fn publish_approval_request(
         &mut self,
         session_id: Uuid,
@@ -2006,13 +2129,51 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
 
     fn dispatch_task(
         &mut self,
-        _member: &crate::orchestration::BrokeredMemberSnapshot,
-        _request: &crate::orchestration::AssignSpecialistTask,
-        _credential: &crate::orchestration::BrokerCredential,
-    ) -> Result<crate::orchestration::CompletedTask, crate::orchestration::AdapterFailure> {
-        Err(crate::orchestration::AdapterFailure::Rejected(
-            "ORCHESTRATION_OPERATION_UNAVAILABLE".to_owned(),
-        ))
+        member: &crate::orchestration::BrokeredMemberSnapshot,
+        task: &crate::orchestration::AcceptedSpecialistTask,
+        credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<crate::orchestration::TaskDispatch, crate::orchestration::AdapterFailure> {
+        use crate::orchestration::{AdapterFailure, TaskDispatch};
+
+        self.validate_task_target(member)
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let prompt = task
+            .prompt()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let carrier = credential
+            .controller_carrier()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let response = crate::worker::call_run_worker(
+            self.state_root,
+            member.run_id,
+            DarwinSystem.current_uid(),
+            Some(carrier.raw_fd()),
+            |expected| ControlRequestV1::Submit {
+                expected,
+                caller: None,
+                request: TurnControlRequest {
+                    normalized_request_sha256: None,
+                    write: task.requested_access != "read_only",
+                    message: prompt,
+                    idempotency_key: format!("brokered-task:{}", task.task_id),
+                    effort: None,
+                    images: Vec::new(),
+                },
+            },
+        )
+        .map_err(|_| AdapterFailure::Unknown)?;
+        match response {
+            ControlResponseV1::Accepted { accepted }
+            | ControlResponseV1::AcceptedReceipt { accepted, .. } => Ok(TaskDispatch::Accepted {
+                turn_id: accepted.turn_id,
+            }),
+            ControlResponseV1::Failed {
+                code, retryable, ..
+            } if !retryable => Err(AdapterFailure::Rejected(code)),
+            ControlResponseV1::Rejected { code } => Err(AdapterFailure::Rejected(code)),
+            ControlResponseV1::Failed { .. } => Err(AdapterFailure::Unknown),
+            _ => Err(AdapterFailure::Unknown),
+        }
     }
 
     fn cancel_task(

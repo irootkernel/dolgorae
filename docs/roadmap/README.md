@@ -40,8 +40,9 @@ Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
-and TASK-047 are complete; TASK-048 is the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul
-acceptance is tracked separately and MUST NOT be inferred from provider QA.
+TASK-047, TASK-048, and TASK-049 are complete; TASK-050 is the next planned
+Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance is tracked
+separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -1653,7 +1654,7 @@ TASK-049.
 
 ### TASK-049: Accepted Task Admission and Live Dispatch
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-048`. Connect separate work assignment to existing ready
 Specialists. Reuse applicable task-content helpers without making the External
@@ -1676,6 +1677,15 @@ integrity, forged access, same-key replay/conflict, concurrent admission, busy
 rejection, independent members, correct working root/sandbox, writer conflicts,
 acceptance-response loss, pre/post-dispatch crash, and no automatic replay after
 unknown acceptance. Preserve external review and reusable engagement contracts.
+
+Completion evidence includes canonical accepted-task content with authorized
+immutable artifact bytes, durable acceptance and deadline origin before effects,
+production Turn submission through the target Specialist's Controller, exact
+acceptance replay, and fail-closed busy, writer-conflict, and ambiguous-dispatch
+recovery boundaries. The complete local gate passed, including the isolated
+fake-Codex E2E suite. The six-role Mulgae review completed with full coverage,
+passing CI, and no Low-or-higher findings. Separately authorized live behavior
+checks were not run as part of this task completion.
 
 Task acceptance: actual tasks are durably accepted and dispatched once with
 correct authority and traceable Turn acceptance. Next: TASK-050.

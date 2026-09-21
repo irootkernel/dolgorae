@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Connect accepted brokered tasks to actual Specialist Turn submission with
+  immutable readable artifact context, durable deadline origin and Turn
+  identity, exact acceptance replay, busy rejection, and fail-closed writer and
+  ambiguous-dispatch boundaries.
 - Connect policy-admitted Specialist requests to preallocated managed-agent
   Runs, Workers, and eager threads, with durable Controller approval routing,
   exact replay, deterministic idle reuse, and known/unknown publication recovery.

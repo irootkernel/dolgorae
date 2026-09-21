@@ -3413,6 +3413,20 @@ not a general-purpose mailbox. It may resume after recovery only when durable
 evidence proves that no external effect was accepted. Otherwise preserve
 `interrupted_unknown` and reconcile without replaying semantic work.
 
+The accepted request includes the Broker `task_id`, target Run, exact bounded
+objective and expected-output strings, requested access, acceptance-time
+deadline origin, and every context artifact's authorized immutable UTF-8 bytes,
+media type, byte length, and SHA-256. Context references must be distinct
+UUIDv7 identities owned by the Primary Run's readable artifact surface; bare
+identities, host paths, non-text bytes, mutable reads, and controller-only
+artifacts without authority fail before reservation. Each context is at most
+262,144 bytes and the complete accepted task is at most 1,048,576 bytes. The
+target Turn uses `brokered-task:<task_id>` as its idempotency key and persists
+the returned Turn identity before assignment acknowledgement. Exact replay of
+that acknowledgement does not re-evaluate current busy state or submit another
+Turn. A persisted `dispatching` boundary without authoritative Turn acceptance
+settles as `interrupted_unknown` rather than replaying the work.
+
 Task deadline starts at durable acceptance and MUST survive retry and restart.
 A bounded tool wait does not extend that deadline or cancel durable work when
 it expires or its client disconnects. `any` and `all` waits observe the accepted
