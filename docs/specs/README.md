@@ -3432,8 +3432,23 @@ A bounded tool wait does not extend that deadline or cancel durable work when
 it expires or its client disconnects. `any` and `all` waits observe the accepted
 tasks and end on their defined terminal condition or transport budget. An exact
 retry replays the original tool receipt; a new wait call may observe newer state.
-Cancellation follows ordinary interrupt and authoritative terminal-proof rules;
-an interrupt acknowledgement alone is not proof that no effect occurred.
+Assignment `blocking` ends at the earlier of acceptance plus 60 seconds and the
+durable task deadline, then returns the original acceptance receipt regardless
+of later state. The wait itself runs outside Run-drain and SQLite mutation
+ownership so approval responses and other Controller operations remain
+responsive.
+
+Cancellation MUST durably record its intent before any interrupt effect. A
+known pre-dispatch task MAY settle directly as `cancelled` or `expired`. After
+submission may have occurred, cancellation follows ordinary interrupt and
+authoritative terminal-proof rules: an interrupt acknowledgement alone is not
+proof that no effect occurred. A matching interrupted terminal proves the
+requested outcome; an acknowledged interrupt without terminal proof, an
+ambiguous dispatch boundary, or transport loss settles
+`interrupted_unknown`. If an already completed terminal wins the race, the
+task remains pending TASK-051 result construction and cancellation reports
+`already_terminal`; it MUST NOT discard the result or rewrite completion as
+cancellation.
 
 Primary result consumption MUST expose actual bounded content, not only an
 unreadable artifact identity. Verify accepted-request identity before choosing

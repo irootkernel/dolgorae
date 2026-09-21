@@ -27,7 +27,8 @@ use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -63,6 +64,24 @@ pub struct NoOrchestrationFaults;
 impl OrchestrationFaultInjector for NoOrchestrationFaults {
     fn check(&self, _barrier: OrchestrationBarrier) -> Result<(), MachineError> {
         Ok(())
+    }
+}
+
+trait OrchestrationClock: Send + Sync {
+    fn now_ms(&self) -> Result<i64, MachineError>;
+    fn wait(&self, duration: Duration);
+}
+
+#[derive(Default)]
+struct SystemOrchestrationClock;
+
+impl OrchestrationClock for SystemOrchestrationClock {
+    fn now_ms(&self) -> Result<i64, MachineError> {
+        now_ms()
+    }
+
+    fn wait(&self, duration: Duration) {
+        thread::sleep(duration);
     }
 }
 
@@ -513,11 +532,19 @@ pub trait OrchestrationAdapter {
         task: &AcceptedSpecialistTask,
         credential: &BrokerCredential,
     ) -> Result<TaskDispatch, AdapterFailure>;
+    /// Observe the accepted target Turn without causing a new Turn or holding
+    /// Broker mutation ownership. The observation may wait only for its own
+    /// short adapter budget.
+    fn observe_task(
+        &mut self,
+        task: &SpecialistTaskSnapshot,
+        credential: &BrokerCredential,
+    ) -> Result<SpecialistTaskObservation, AdapterFailure>;
     fn cancel_task(
         &mut self,
         task: &SpecialistTaskSnapshot,
         credential: &BrokerCredential,
-    ) -> Result<(), AdapterFailure>;
+    ) -> Result<TaskCancellation, AdapterFailure>;
     fn release_specialist(
         &mut self,
         member: &BrokeredMemberSnapshot,
@@ -547,6 +574,21 @@ pub struct CompletedTask {
 pub enum TaskDispatch {
     Accepted { turn_id: String },
     Completed(CompletedTask),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskCancellation {
+    TerminalInterrupted,
+    TerminalOther,
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpecialistTaskObservation {
+    Running,
+    WaitingInteraction,
+    Terminal { status: String },
+    OutcomeUnknown,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -719,9 +761,12 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                 transport_wait_seconds,
             } => {
                 validate_wait(&return_when, transport_wait_seconds)?;
-                let operations = self
-                    .store
-                    .specialist_operations(context.session_id, &operation_ids)?;
+                let operations = self.store.wait_operations(
+                    context.session_id,
+                    &operation_ids,
+                    &return_when,
+                    transport_wait_seconds,
+                )?;
                 let pending = operations
                     .iter()
                     .filter(|operation| {
@@ -764,7 +809,7 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                 context_refs,
                 expected_output,
                 execution_intent,
-                blocking: _,
+                blocking,
                 deadline_seconds,
             } => {
                 let run_id = self.store.resolve_target(context.session_id, &target)?;
@@ -780,6 +825,10 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                     },
                     self.adapter,
                 )?;
+                if blocking {
+                    self.store
+                        .wait_assignment(context.session_id, task.task_id, self.adapter)?;
+                }
                 Ok(serde_json::json!({
                     "operation":"assign_specialist_task_result",
                     "task_id":task.task_id,
@@ -793,7 +842,13 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                 transport_wait_seconds,
             } => {
                 validate_wait(&return_when, transport_wait_seconds)?;
-                let tasks = self.store.await_tasks(context.session_id, &task_ids)?;
+                let tasks = self.store.wait_tasks(
+                    context.session_id,
+                    &task_ids,
+                    &return_when,
+                    transport_wait_seconds,
+                    self.adapter,
+                )?;
                 let pending = tasks
                     .iter()
                     .filter(|task| !task_terminal(&task.state))
@@ -826,15 +881,20 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
             }
             ToolRequest::CancelSpecialistTask { task_id, reason } => {
                 checked(&reason, 1_024, "reason")?;
-                let prior = self.store.task(task_id)?;
-                let was_terminal = task_terminal(&prior.state);
-                let task = self
-                    .store
-                    .cancel_task(context.session_id, task_id, self.adapter)?;
+                let state = self.store.settle_task_control(
+                    context.session_id,
+                    task_id,
+                    "cancel",
+                    self.adapter,
+                )?;
                 Ok(serde_json::json!({
                     "operation":"cancel_specialist_task_result",
-                    "task_id":task.task_id,
-                    "state":if was_terminal { "already_terminal" } else if task.state == "interrupted_unknown" { "interrupted_unknown" } else { "cancelled" },
+                    "task_id":task_id,
+                    "state":match state {
+                        "cancelled" => "cancelled",
+                        "interrupted_unknown" => "interrupted_unknown",
+                        _ => "already_terminal",
+                    },
                 }))
             }
             ToolRequest::ReleaseSpecialist { run_id, reason } => {
@@ -875,6 +935,7 @@ impl ToolRequest {
                 | Self::AssignSpecialistTask { .. }
                 | Self::AwaitSpecialistTasks { .. }
                 | Self::CollectSpecialistResults { .. }
+                | Self::CancelSpecialistTask { .. }
         )
     }
 }
@@ -882,18 +943,31 @@ impl ToolRequest {
 pub struct OrchestrationStore {
     connection: Connection,
     faults: Arc<dyn OrchestrationFaultInjector>,
+    clock: Arc<dyn OrchestrationClock>,
     credential_root: PathBuf,
     uid: u32,
 }
 
 impl OrchestrationStore {
     pub fn open(state_root: &Path) -> Result<Self, MachineError> {
-        Self::open_with_faults(state_root, Arc::new(NoOrchestrationFaults))
+        Self::open_with_faults_and_clock(
+            state_root,
+            Arc::new(NoOrchestrationFaults),
+            Arc::new(SystemOrchestrationClock),
+        )
     }
 
     pub fn open_with_faults(
         state_root: &Path,
         faults: Arc<dyn OrchestrationFaultInjector>,
+    ) -> Result<Self, MachineError> {
+        Self::open_with_faults_and_clock(state_root, faults, Arc::new(SystemOrchestrationClock))
+    }
+
+    fn open_with_faults_and_clock(
+        state_root: &Path,
+        faults: Arc<dyn OrchestrationFaultInjector>,
+        clock: Arc<dyn OrchestrationClock>,
     ) -> Result<Self, MachineError> {
         let path = EngagementStore::workspace_database_path(state_root);
         let _ = EngagementStore::open(&path)?;
@@ -905,9 +979,14 @@ impl OrchestrationStore {
         Ok(Self {
             connection,
             faults,
+            clock,
             credential_root: state_root.join("orchestration/broker-credentials"),
             uid: crate::darwin::DarwinSystem.current_uid(),
         })
+    }
+
+    fn now_ms(&self) -> Result<i64, MachineError> {
+        self.clock.now_ms()
     }
 
     fn ensure_live_provider_policy(&self, session_id: Uuid) -> Result<(), MachineError> {
@@ -963,7 +1042,7 @@ impl OrchestrationStore {
         self.faults
             .check(OrchestrationBarrier::BeforeSessionCommit)?;
         let operation_id = new_uuid_v7();
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let policy_json = canonical_string(policy)?;
         let transaction = self.transaction()?;
         let external_membership: i64 = transaction
@@ -1035,7 +1114,7 @@ impl OrchestrationStore {
     pub fn mark_primary_intent(&mut self, session_id: Uuid) -> Result<(), MachineError> {
         self.faults
             .check(OrchestrationBarrier::BeforePrimaryIntent)?;
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -1109,7 +1188,7 @@ impl OrchestrationStore {
                 "Primary publication already has a different authoritative outcome",
             ));
         }
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let operation_changed = transaction
             .execute(
@@ -1471,7 +1550,7 @@ impl OrchestrationStore {
             return Ok(operation);
         }
         if !approved {
-            let now = now_ms()?;
+            let now = self.now_ms()?;
             let transaction = self.transaction()?;
             transaction
                 .execute(
@@ -1635,7 +1714,7 @@ impl OrchestrationStore {
                         decision,
                         idempotency_key,
                         receipt.to_string(),
-                        now_ms()?
+                        self.now_ms()?
                     ],
                 )
                 .map_err(internal)?;
@@ -1687,6 +1766,12 @@ impl OrchestrationStore {
             return Err(MachineError::invalid_argument(
                 "operation_ids",
                 "one to 16 operation identities are required",
+            ));
+        }
+        if operation_ids.iter().collect::<BTreeSet<_>>().len() != operation_ids.len() {
+            return Err(MachineError::invalid_argument(
+                "operation_ids",
+                "operation identities must be unique",
             ));
         }
         operation_ids
@@ -1844,7 +1929,7 @@ impl OrchestrationStore {
             .check(OrchestrationBarrier::BeforeSpawnReservation)?;
         let credential = BrokerCredential::create(&self.credential_root, self.uid, run_id)?;
         let reserved = if approval_request_id.is_some() {
-            let now = now_ms()?;
+            let now = self.now_ms()?;
             let transaction = self.transaction()?;
             let changed = transaction
                 .execute(
@@ -1909,7 +1994,7 @@ impl OrchestrationStore {
         credential: &BrokerCredential,
         adapter: &mut A,
     ) -> Result<SpecialistOperationSnapshot, MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -1978,7 +2063,7 @@ impl OrchestrationStore {
                 Some("SPECIALIST_PUBLICATION_UNKNOWN".to_owned()),
             ),
         };
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         transaction
             .execute(
@@ -2058,7 +2143,7 @@ impl OrchestrationStore {
                 )?;
             }
             Ok(SpecialistPublicationObservation::Absent) => {
-                let now = now_ms()?;
+                let now = self.now_ms()?;
                 let transaction = self.transaction()?;
                 transaction
                     .execute(
@@ -2124,7 +2209,7 @@ impl OrchestrationStore {
         residency: &str,
         error: Option<String>,
     ) -> Result<(), MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         transaction
             .execute(
@@ -2170,7 +2255,7 @@ impl OrchestrationStore {
         role: Option<&InstalledSpecialistRole>,
         controller: Option<&ControllerBinding>,
     ) -> Result<(), MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         transaction
             .execute(
@@ -2281,7 +2366,7 @@ impl OrchestrationStore {
                 ));
             }
             let task_id = new_uuid_v7();
-            let now = now_ms()?;
+            let now = self.now_ms()?;
             let accepted_task = AcceptedSpecialistTask {
                 task_id,
                 specialist_run_id: request.specialist_run_id,
@@ -2354,6 +2439,30 @@ impl OrchestrationStore {
         let member = self.member(context.session_id, accepted_task.specialist_run_id)?;
         let credential = BrokerCredential::load(&self.credential_root, self.uid, member.run_id)?;
         validate_member_credential(&member, &credential)?;
+        self.faults
+            .check(OrchestrationBarrier::BeforeTaskDispatch)?;
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        let reserved = transaction
+            .execute(
+                "UPDATE brokered_tasks SET state='dispatching',updated_at_ms=?2
+                 WHERE task_id=?1 AND state='accepted'",
+                params![task_id.to_string(), now],
+            )
+            .map_err(internal)?;
+        if reserved == 1 {
+            append_event(
+                &transaction,
+                context.session_id,
+                "specialist_task_dispatch_started",
+                &sha256_hex(task_id.as_bytes()),
+                now,
+            )?;
+        }
+        transaction.commit().map_err(internal)?;
+        if reserved == 0 {
+            return self.task(task_id);
+        }
         if accepted_task.requested_access == "canonical_workspace_write" {
             let writer = adapter
                 .release_writer(context.source_run_id)
@@ -2364,7 +2473,14 @@ impl OrchestrationStore {
                     AdapterFailure::Rejected(_) => ("failed", "SPECIALIST_WRITER_CONFLICT"),
                     AdapterFailure::Unknown => ("interrupted_unknown", "INTERRUPTED_UNKNOWN"),
                 };
-                self.settle_task_error(context.session_id, task_id, state, code)?;
+                self.update_task_state_if(
+                    context.session_id,
+                    task_id,
+                    "dispatching",
+                    state,
+                    Some(code),
+                    "specialist_task_settled",
+                )?;
                 return Err(if state == "interrupted_unknown" {
                     interrupted_unknown(task_id)
                 } else {
@@ -2372,24 +2488,6 @@ impl OrchestrationStore {
                 });
             }
         }
-        self.faults
-            .check(OrchestrationBarrier::BeforeTaskDispatch)?;
-        let now = now_ms()?;
-        let transaction = self.transaction()?;
-        transaction
-            .execute(
-                "UPDATE brokered_tasks SET state='dispatching',updated_at_ms=?2 WHERE task_id=?1",
-                params![task_id.to_string(), now],
-            )
-            .map_err(internal)?;
-        append_event(
-            &transaction,
-            context.session_id,
-            "specialist_task_dispatch_started",
-            &sha256_hex(task_id.as_bytes()),
-            now,
-        )?;
-        transaction.commit().map_err(internal)?;
         let outcome = adapter.dispatch_task(&member, &accepted_task, &credential);
         self.faults.check(OrchestrationBarrier::AfterTaskDispatch)?;
         let completed_synchronously = matches!(&outcome, Ok(TaskDispatch::Completed(_)));
@@ -2397,7 +2495,7 @@ impl OrchestrationStore {
             self.faults
                 .check(OrchestrationBarrier::BeforeResultAppend)?;
         }
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let mut turn_acceptance_sha256 = None;
         let terminal_error = match outcome {
@@ -2407,24 +2505,24 @@ impl OrchestrationStore {
                     "target_run_id": accepted_task.specialist_run_id,
                     "target_turn_id": turn_id,
                 }))?);
-                transaction
+                let changed = transaction
                     .execute(
                         "UPDATE brokered_tasks SET state='running',target_turn_id=?2,updated_at_ms=?3
                          WHERE task_id=?1 AND state='dispatching'",
                         params![task_id.to_string(), turn_id, now],
                     )
                     .map_err(internal)?;
-                None
+                (changed == 0).then(|| interrupted_unknown(task_id))
             }
             Ok(TaskDispatch::Completed(completed)) => {
                 let result_json = canonical_string(&completed.result)?;
                 let result_sha256 = sha256_hex(result_json.as_bytes());
                 let artifact_id = new_uuid_v7();
-                transaction
+                let changed = transaction
                     .execute(
                         "UPDATE brokered_tasks SET state='completed_not_delivered',target_turn_id=?2,
                          result_json=?3,result_sha256=?4,result_artifact_id=?5,updated_at_ms=?6
-                         WHERE task_id=?1",
+                         WHERE task_id=?1 AND state='dispatching'",
                         params![
                             task_id.to_string(),
                             completed.turn_id,
@@ -2435,23 +2533,28 @@ impl OrchestrationStore {
                         ],
                     )
                     .map_err(internal)?;
-                None
+                (changed == 0).then(|| interrupted_unknown(task_id))
             }
             Err(AdapterFailure::Rejected(code)) => {
-                transaction
+                let changed = transaction
                     .execute(
                         "UPDATE brokered_tasks SET state='failed',safe_error_code=?2,updated_at_ms=?3
-                         WHERE task_id=?1",
+                         WHERE task_id=?1 AND state='dispatching'",
                         params![task_id.to_string(), code, now],
                     )
                     .map_err(internal)?;
-                Some(task_failed(task_id, &code))
+                Some(if changed == 1 {
+                    task_failed(task_id, &code)
+                } else {
+                    interrupted_unknown(task_id)
+                })
             }
             Err(AdapterFailure::Unknown) => {
                 transaction
                     .execute(
                         "UPDATE brokered_tasks SET state='interrupted_unknown',
-                         safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2 WHERE task_id=?1",
+                         safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2
+                         WHERE task_id=?1 AND state='dispatching'",
                         params![task_id.to_string(), now],
                     )
                     .map_err(internal)?;
@@ -2487,12 +2590,12 @@ impl OrchestrationStore {
         state: &str,
         code: &str,
     ) -> Result<(), MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         transaction
             .execute(
                 "UPDATE brokered_tasks SET state=?2,safe_error_code=?3,updated_at_ms=?4
-                 WHERE task_id=?1 AND state='accepted'",
+                 WHERE task_id=?1 AND state IN ('accepted','dispatching')",
                 params![task_id.to_string(), state, code, now],
             )
             .map_err(internal)?;
@@ -2511,10 +2614,16 @@ impl OrchestrationStore {
         session_id: Uuid,
         task_ids: &[Uuid],
     ) -> Result<Vec<SpecialistTaskSnapshot>, MachineError> {
-        if task_ids.is_empty() || task_ids.len() > 64 {
+        if task_ids.is_empty() || task_ids.len() > 16 {
             return Err(MachineError::invalid_argument(
                 "task_ids",
-                "one to 64 task identities are required",
+                "one to 16 task identities are required",
+            ));
+        }
+        if task_ids.iter().collect::<BTreeSet<_>>().len() != task_ids.len() {
+            return Err(MachineError::invalid_argument(
+                "task_ids",
+                "task identities must be unique",
             ));
         }
         task_ids
@@ -2527,6 +2636,156 @@ impl OrchestrationStore {
                 Ok(task)
             })
             .collect()
+    }
+
+    fn wait_operations(
+        &self,
+        session_id: Uuid,
+        operation_ids: &[Uuid],
+        return_when: &str,
+        transport_wait_seconds: u64,
+    ) -> Result<Vec<SpecialistOperationSnapshot>, MachineError> {
+        let deadline = checked_deadline_ms(self.now_ms()?, transport_wait_seconds)?;
+        loop {
+            let operations = self.specialist_operations(session_id, operation_ids)?;
+            let terminal = operations
+                .iter()
+                .filter(|operation| operation_terminal(&operation.state))
+                .count();
+            if wait_condition(return_when, terminal, operations.len()) {
+                return Ok(operations);
+            }
+            let now = self.now_ms()?;
+            if now >= deadline {
+                return Ok(operations);
+            }
+            self.clock.wait(wait_slice(now, deadline));
+        }
+    }
+
+    fn wait_assignment<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        task_id: Uuid,
+        adapter: &mut A,
+    ) -> Result<(), MachineError> {
+        let accepted = self.accepted_task(task_id)?;
+        let blocking_deadline = checked_deadline_ms(accepted.deadline_origin_ms, 60)?;
+        let task_deadline =
+            checked_deadline_ms(accepted.deadline_origin_ms, accepted.deadline_seconds)?;
+        let deadline = blocking_deadline.min(task_deadline);
+        let _ = self.wait_tasks_until(session_id, &[task_id], "any", deadline, adapter)?;
+        Ok(())
+    }
+
+    fn wait_tasks<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        task_ids: &[Uuid],
+        return_when: &str,
+        transport_wait_seconds: u64,
+        adapter: &mut A,
+    ) -> Result<Vec<SpecialistTaskSnapshot>, MachineError> {
+        let deadline = checked_deadline_ms(self.now_ms()?, transport_wait_seconds)?;
+        self.wait_tasks_until(session_id, task_ids, return_when, deadline, adapter)
+    }
+
+    fn wait_tasks_until<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        task_ids: &[Uuid],
+        return_when: &str,
+        deadline: i64,
+        adapter: &mut A,
+    ) -> Result<Vec<SpecialistTaskSnapshot>, MachineError> {
+        loop {
+            let mut tasks = self.await_tasks(session_id, task_ids)?;
+            for task in &tasks {
+                if !task_terminal(&task.state) {
+                    self.reconcile_task_observation(session_id, task, adapter)?;
+                }
+            }
+            tasks = self.await_tasks(session_id, task_ids)?;
+            let terminal = tasks
+                .iter()
+                .filter(|task| task_terminal(&task.state))
+                .count();
+            if wait_condition(return_when, terminal, tasks.len()) {
+                return Ok(tasks);
+            }
+            let now = self.now_ms()?;
+            if now >= deadline {
+                return Ok(tasks);
+            }
+            self.clock.wait(wait_slice(now, deadline));
+        }
+    }
+
+    fn reconcile_task_observation<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        task: &SpecialistTaskSnapshot,
+        adapter: &mut A,
+    ) -> Result<(), MachineError> {
+        let accepted = self.accepted_task(task.task_id)?;
+        let task_deadline =
+            checked_deadline_ms(accepted.deadline_origin_ms, accepted.deadline_seconds)?;
+        if self.now_ms()? >= task_deadline {
+            let _ = self.settle_task_control(session_id, task.task_id, "expiry", adapter)?;
+            return Ok(());
+        }
+        if task.state != "running" {
+            return Ok(());
+        }
+        let member = self.member(session_id, task.specialist_run_id)?;
+        let credential =
+            BrokerCredential::load(&self.credential_root, self.uid, task.specialist_run_id)?;
+        validate_member_credential(&member, &credential)?;
+        match adapter.observe_task(task, &credential) {
+            Ok(
+                SpecialistTaskObservation::Running | SpecialistTaskObservation::WaitingInteraction,
+            ) => {}
+            Ok(SpecialistTaskObservation::OutcomeUnknown) | Err(AdapterFailure::Unknown) => {
+                self.update_task_state_if(
+                    session_id,
+                    task.task_id,
+                    "running",
+                    "interrupted_unknown",
+                    Some("TARGET_TURN_OUTCOME_UNKNOWN"),
+                    "specialist_task_observed",
+                )?;
+            }
+            Ok(SpecialistTaskObservation::Terminal { status }) => {
+                let intent = self.task_control_intent(task.task_id)?;
+                let (state, code) = match (status.as_str(), intent.as_deref()) {
+                    ("interrupted", Some("expiry")) => ("expired", Some("OPERATION_TIMEOUT")),
+                    ("interrupted", Some("cancel")) => ("cancelled", None),
+                    ("interrupted", _) => ("failed", Some("SPECIALIST_TURN_INTERRUPTED")),
+                    ("failed", _) => ("failed", Some("SPECIALIST_TURN_FAILED")),
+                    ("completed", _) => ("running", Some("OUTCOME_UNKNOWN")),
+                    _ => ("interrupted_unknown", Some("TARGET_TURN_OUTCOME_UNKNOWN")),
+                };
+                self.update_task_state_if(
+                    session_id,
+                    task.task_id,
+                    "running",
+                    state,
+                    code,
+                    "specialist_task_observed",
+                )?;
+            }
+            Err(AdapterFailure::Rejected(code)) => {
+                self.update_task_state_if(
+                    session_id,
+                    task.task_id,
+                    "running",
+                    "failed",
+                    Some(&code),
+                    "specialist_task_observed",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn collect_results(
@@ -2542,6 +2801,7 @@ impl OrchestrationStore {
             ));
         }
         let faults = Arc::clone(&self.faults);
+        let clock = Arc::clone(&self.clock);
         let transaction = self.transaction()?;
         let already_delivered = {
             let mut statement = transaction
@@ -2582,7 +2842,7 @@ impl OrchestrationStore {
             faults.check(OrchestrationBarrier::BeforeDeliveryReceipt)?;
         }
         for task_id in &task_ids {
-            let now = now_ms()?;
+            let now = clock.now_ms()?;
             let inserted = transaction
                 .execute(
                     "INSERT OR IGNORE INTO brokered_delivery_receipts(task_id,delivered_at_ms)
@@ -2643,49 +2903,181 @@ impl OrchestrationStore {
         task_id: Uuid,
         adapter: &mut A,
     ) -> Result<SpecialistTaskSnapshot, MachineError> {
+        self.settle_task_control(session_id, task_id, "cancel", adapter)?;
+        self.task(task_id)
+    }
+
+    fn settle_task_control<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        task_id: Uuid,
+        intent: &str,
+        adapter: &mut A,
+    ) -> Result<&'static str, MachineError> {
         if self.task_session(task_id)? != session_id {
             return Err(specialist_task_not_found(task_id));
         }
         let task = self.task(task_id)?;
-        if matches!(
-            task.state.as_str(),
-            "delivered" | "failed" | "interrupted_unknown" | "cancelled"
-        ) {
-            return Ok(task);
+        if task_terminal(&task.state) {
+            return Ok("already_terminal");
+        }
+        if !matches!(intent, "cancel" | "expiry") {
+            return Err(integrity("task control intent is invalid"));
+        }
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        transaction
+            .execute(
+                "INSERT INTO brokered_task_controls(task_id,intent,requested_at_ms)
+                 VALUES(?1,?2,?3)
+                 ON CONFLICT(task_id) DO NOTHING",
+                params![task_id.to_string(), intent, now],
+            )
+            .map_err(internal)?;
+        let recorded_intent: String = transaction
+            .query_row(
+                "SELECT intent FROM brokered_task_controls WHERE task_id=?1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if recorded_intent != intent {
+            transaction.commit().map_err(internal)?;
+            return Ok("already_requested");
+        }
+        if task.state == "accepted" {
+            let terminal = if intent == "expiry" {
+                "expired"
+            } else {
+                "cancelled"
+            };
+            let code = (intent == "expiry").then_some("OPERATION_TIMEOUT");
+            let changed = transaction
+                .execute(
+                    "UPDATE brokered_tasks SET state=?2,safe_error_code=?3,updated_at_ms=?4
+                     WHERE task_id=?1 AND state='accepted'",
+                    params![task_id.to_string(), terminal, code, now],
+                )
+                .map_err(internal)?;
+            if changed == 1 {
+                append_event(
+                    &transaction,
+                    session_id,
+                    "specialist_task_controlled",
+                    &sha256_hex(format!("{task_id}\0{terminal}").as_bytes()),
+                    now,
+                )?;
+                transaction.commit().map_err(internal)?;
+                return Ok(terminal);
+            }
+        }
+        transaction.commit().map_err(internal)?;
+        let task = self.task(task_id)?;
+        if task_terminal(&task.state) {
+            return Ok("already_terminal");
+        }
+        if task.state == "dispatching" {
+            self.update_task_state_if(
+                session_id,
+                task_id,
+                "dispatching",
+                "interrupted_unknown",
+                Some("CANCEL_OUTCOME_UNKNOWN"),
+                "specialist_task_controlled",
+            )?;
+            return Ok("interrupted_unknown");
         }
         let member = self.member(session_id, task.specialist_run_id)?;
         let credential =
             BrokerCredential::load(&self.credential_root, self.uid, task.specialist_run_id)?;
         validate_member_credential(&member, &credential)?;
-        let state = match adapter.cancel_task(&task, &credential) {
-            Ok(()) => "cancelled",
-            Err(AdapterFailure::Rejected(_)) if task.state == "accepted" => "cancelled",
-            Err(AdapterFailure::Rejected(_)) | Err(AdapterFailure::Unknown) => {
-                "interrupted_unknown"
+        let (mut state, mut code, mut result) = match adapter.cancel_task(&task, &credential) {
+            Ok(TaskCancellation::TerminalInterrupted) if intent == "expiry" => {
+                ("expired", Some("OPERATION_TIMEOUT"), "expired")
             }
+            Ok(TaskCancellation::TerminalInterrupted) => ("cancelled", None, "cancelled"),
+            Ok(TaskCancellation::TerminalOther) => {
+                ("running", Some("OUTCOME_UNKNOWN"), "already_terminal")
+            }
+            Ok(TaskCancellation::OutcomeUnknown)
+            | Err(AdapterFailure::Rejected(_))
+            | Err(AdapterFailure::Unknown) => (
+                "interrupted_unknown",
+                Some("CANCEL_OUTCOME_UNKNOWN"),
+                "interrupted_unknown",
+            ),
         };
-        let now = now_ms()?;
+        if matches!(state, "cancelled" | "expired")
+            && self.accepted_task(task_id)?.requested_access == "canonical_workspace_write"
+            && adapter
+                .release_writer(task.specialist_run_id)
+                .and_then(|()| adapter.verify_writer_none())
+                .is_err()
+        {
+            state = "interrupted_unknown";
+            code = Some("CANCEL_OUTCOME_UNKNOWN");
+            result = "interrupted_unknown";
+        }
+        let changed = self.update_task_state_if(
+            session_id,
+            task_id,
+            &task.state,
+            state,
+            code,
+            "specialist_task_cancelled",
+        )?;
+        if changed {
+            return Ok(result);
+        }
+        let current = self.task(task_id)?;
+        if current.state == "interrupted_unknown" {
+            Ok("interrupted_unknown")
+        } else {
+            Ok("already_terminal")
+        }
+    }
+
+    fn task_control_intent(&self, task_id: Uuid) -> Result<Option<String>, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT intent FROM brokered_task_controls WHERE task_id=?1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)
+    }
+
+    fn update_task_state_if(
+        &mut self,
+        session_id: Uuid,
+        task_id: Uuid,
+        expected: &str,
+        state: &str,
+        safe_error_code: Option<&str>,
+        event_kind: &str,
+    ) -> Result<bool, MachineError> {
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
-        transaction
+        let changed = transaction
             .execute(
-                "UPDATE brokered_tasks SET state=?2,safe_error_code=?3,updated_at_ms=?4 WHERE task_id=?1",
-                params![
-                    task_id.to_string(),
-                    state,
-                    (state == "interrupted_unknown").then_some("CANCEL_OUTCOME_UNKNOWN"),
-                    now
-                ],
+                "UPDATE brokered_tasks SET state=?3,safe_error_code=?4,updated_at_ms=?5
+                 WHERE task_id=?1 AND state=?2
+                 AND (state<>?3 OR safe_error_code IS NOT ?4)",
+                params![task_id.to_string(), expected, state, safe_error_code, now],
             )
             .map_err(internal)?;
-        append_event(
-            &transaction,
-            session_id,
-            "specialist_task_cancelled",
-            &sha256_hex(state.as_bytes()),
-            now,
-        )?;
+        if changed == 1 {
+            append_event(
+                &transaction,
+                session_id,
+                event_kind,
+                &sha256_hex(format!("{task_id}\0{state}").as_bytes()),
+                now,
+            )?;
+        }
         transaction.commit().map_err(internal)?;
-        self.task(task_id)
+        Ok(changed == 1)
     }
 
     pub fn release_specialist<A: OrchestrationAdapter>(
@@ -2719,7 +3111,7 @@ impl OrchestrationStore {
         adapter_result(adapter.verify_writer_none())?;
         match adapter.release_specialist(&member, &credential) {
             Ok(()) => {
-                let now = now_ms()?;
+                let now = self.now_ms()?;
                 let transaction = self.transaction()?;
                 transaction
                     .execute(
@@ -2740,7 +3132,7 @@ impl OrchestrationStore {
             }
             Err(AdapterFailure::Rejected(code)) => return Err(adapter_rejected(code)),
             Err(AdapterFailure::Unknown) => {
-                let now = now_ms()?;
+                let now = self.now_ms()?;
                 let transaction = self.transaction()?;
                 transaction
                     .execute(
@@ -2766,7 +3158,7 @@ impl OrchestrationStore {
         &mut self,
         session_id: Uuid,
     ) -> Result<OrchestratedSessionSnapshot, MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -2820,7 +3212,7 @@ impl OrchestrationStore {
             }
         }
         let transition = if abort { "aborting" } else { "completing" };
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
@@ -2851,7 +3243,7 @@ impl OrchestrationStore {
             }
         }
         let terminal = if abort { "aborted" } else { "completed" };
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         transaction
             .execute(
@@ -2872,7 +3264,7 @@ impl OrchestrationStore {
     }
 
     pub fn reconcile_unknown_work(&mut self, session_id: Uuid) -> Result<(), MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let spawn_changes = transaction
             .execute(
@@ -3021,7 +3413,7 @@ impl OrchestrationStore {
         request_sha256: &str,
         spawn_operation_id: Uuid,
     ) -> Result<SpecialistOperationSnapshot, MachineError> {
-        let now = now_ms()?;
+        let now = self.now_ms()?;
         let transaction = self.transaction()?;
         transaction
             .execute(
@@ -3343,7 +3735,7 @@ impl OrchestrationStore {
                     context.idempotency_key,
                     request_sha256,
                     canonical_string(&stored)?,
-                    now_ms()?
+                    self.now_ms()?
                 ],
             )
             .map_err(internal)?;
@@ -3471,6 +3863,12 @@ CREATE TABLE IF NOT EXISTS brokered_task_acceptances(
   accepted_request_sha256 TEXT NOT NULL,
   accepted_request_json TEXT NOT NULL,
   deadline_origin_ms INTEGER NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES brokered_tasks(task_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS brokered_task_controls(
+  task_id TEXT PRIMARY KEY,
+  intent TEXT NOT NULL,
+  requested_at_ms INTEGER NOT NULL,
   FOREIGN KEY(task_id) REFERENCES brokered_tasks(task_id)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS brokered_delivery_receipts(
@@ -3722,6 +4120,36 @@ fn task_terminal(state: &str) -> bool {
             | "interrupted_unknown"
             | "expired"
     )
+}
+
+fn operation_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "ready" | "denied" | "failed" | "cancelled" | "recovery_required"
+    )
+}
+
+fn wait_condition(return_when: &str, terminal: usize, total: usize) -> bool {
+    match return_when {
+        "any" => terminal != 0,
+        "all" => terminal == total,
+        _ => false,
+    }
+}
+
+fn checked_deadline_ms(origin_ms: i64, seconds: u64) -> Result<i64, MachineError> {
+    let milliseconds = i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .ok_or_else(|| internal("wait deadline exceeds the supported clock range"))?;
+    origin_ms
+        .checked_add(milliseconds)
+        .ok_or_else(|| internal("wait deadline exceeds the supported clock range"))
+}
+
+fn wait_slice(now_ms: i64, deadline_ms: i64) -> Duration {
+    let remaining = deadline_ms.saturating_sub(now_ms).max(1) as u64;
+    Duration::from_millis(remaining.min(25))
 }
 
 fn task_summary(task: &SpecialistTaskSnapshot) -> Value {
@@ -4008,6 +4436,39 @@ mod tests {
     };
     use std::collections::BTreeSet;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+
+    struct ManualClock {
+        now_ms: AtomicI64,
+        waits: AtomicUsize,
+    }
+
+    impl ManualClock {
+        fn new(now_ms: i64) -> Self {
+            Self {
+                now_ms: AtomicI64::new(now_ms),
+                waits: AtomicUsize::new(0),
+            }
+        }
+
+        fn now(&self) -> i64 {
+            self.now_ms.load(Ordering::SeqCst)
+        }
+    }
+
+    impl OrchestrationClock for ManualClock {
+        fn now_ms(&self) -> Result<i64, MachineError> {
+            Ok(self.now())
+        }
+
+        fn wait(&self, duration: Duration) {
+            self.waits.fetch_add(1, Ordering::SeqCst);
+            self.now_ms.fetch_add(
+                i64::try_from(duration.as_millis()).unwrap(),
+                Ordering::SeqCst,
+            );
+        }
+    }
 
     struct FakeAdapter {
         calls: Vec<String>,
@@ -4017,7 +4478,8 @@ mod tests {
         thread: Result<(), AdapterFailure>,
         observation: Result<SpecialistPublicationObservation, AdapterFailure>,
         dispatch: Result<TaskDispatch, AdapterFailure>,
-        cancel: Result<(), AdapterFailure>,
+        task_observation: Result<SpecialistTaskObservation, AdapterFailure>,
+        cancel: Result<TaskCancellation, AdapterFailure>,
         release: Result<(), AdapterFailure>,
         writer: Result<(), AdapterFailure>,
         writer_acquire: Result<(), AdapterFailure>,
@@ -4037,7 +4499,8 @@ mod tests {
                     turn_id: "turn-specialist".to_owned(),
                     result: serde_json::json!({"answer":"verified"}),
                 })),
-                cancel: Ok(()),
+                task_observation: Ok(SpecialistTaskObservation::Running),
+                cancel: Ok(TaskCancellation::TerminalInterrupted),
                 release: Ok(()),
                 writer: Ok(()),
                 writer_acquire: Ok(()),
@@ -4125,13 +4588,26 @@ mod tests {
             &mut self,
             task: &SpecialistTaskSnapshot,
             credential: &BrokerCredential,
-        ) -> Result<(), AdapterFailure> {
+        ) -> Result<TaskCancellation, AdapterFailure> {
             self.calls.push(format!("cancel:{}", task.task_id));
             assert_eq!(
                 credential.binding.capability_sha256,
                 controller_capability_digest(credential.capability())
             );
             self.cancel.clone()
+        }
+
+        fn observe_task(
+            &mut self,
+            task: &SpecialistTaskSnapshot,
+            credential: &BrokerCredential,
+        ) -> Result<SpecialistTaskObservation, AdapterFailure> {
+            self.calls.push(format!("observe-task:{}", task.task_id));
+            assert_eq!(
+                credential.binding.capability_sha256,
+                controller_capability_digest(credential.capability())
+            );
+            self.task_observation.clone()
         }
 
         fn release_specialist(
@@ -4269,6 +4745,31 @@ mod tests {
         let run_id = new_uuid_v7();
         store
             .prepare_session("workspace", run_id, "bootstrap", &"b".repeat(64), &policy)
+            .unwrap();
+        store.mark_primary_intent(run_id).unwrap();
+        let session = store.finish_primary_publication(run_id, Ok(())).unwrap();
+        (store, session)
+    }
+
+    fn active_session_with_clock(
+        root: &Path,
+        clock: Arc<dyn OrchestrationClock>,
+    ) -> (OrchestrationStore, OrchestratedSessionSnapshot) {
+        let mut store = OrchestrationStore::open_with_faults_and_clock(
+            root,
+            Arc::new(NoOrchestrationFaults),
+            clock,
+        )
+        .unwrap();
+        let run_id = new_uuid_v7();
+        store
+            .prepare_session(
+                "workspace",
+                run_id,
+                "bootstrap",
+                &"b".repeat(64),
+                &policy("fully_delegated"),
+            )
             .unwrap();
         store.mark_primary_intent(run_id).unwrap();
         let session = store.finish_primary_publication(run_id, Ok(())).unwrap();
@@ -6025,5 +6526,266 @@ mod tests {
             "ORCHESTRATION_SCHEMA_UNSUPPORTED"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blocking_assignment_uses_durable_acceptance_deadline_and_replays_without_waiting() {
+        let root = root();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let (mut store, session) = active_session_with_clock(&root, clock.clone());
+        let mut adapter = FakeAdapter::default();
+        let child = store
+            .request_specialist(
+                &context(session.session_id, "deadline-member"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap()
+            .specialist_run_id
+            .unwrap();
+        adapter.dispatch = Ok(TaskDispatch::Accepted {
+            turn_id: "turn-deadline".to_owned(),
+        });
+        let call = context(session.session_id, "blocking-deadline");
+        let payload = serde_json::json!({
+            "operation":"assign_specialist_task",
+            "target":{"run_id":child},
+            "objective":"Wait only within the durable task budget.",
+            "context_refs":[],
+            "expected_output":["Result"],
+            "execution_intent":"read_only",
+            "blocking":true,
+            "deadline_seconds":2,
+        });
+        let receipt = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&call, &payload)
+        .unwrap();
+        let task_id: Uuid = serde_json::from_value(receipt["task_id"].clone()).unwrap();
+        assert_eq!(receipt["state"], "accepted");
+        assert_eq!(
+            store.accepted_task(task_id).unwrap().deadline_origin_ms,
+            1_000
+        );
+        assert_eq!(store.task(task_id).unwrap().state, "expired");
+        assert_eq!(clock.now(), 3_000);
+        let waits = clock.waits.load(Ordering::SeqCst);
+
+        drop(store);
+        let mut store = OrchestrationStore::open_with_faults_and_clock(
+            &root,
+            Arc::new(NoOrchestrationFaults),
+            clock.clone(),
+        )
+        .unwrap();
+        let replay = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&call, &payload)
+        .unwrap();
+        assert_eq!(replay, receipt);
+        assert_eq!(clock.waits.load(Ordering::SeqCst), waits);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_wait_any_and_all_use_new_call_observations_without_cancelling_on_timeout() {
+        let root = root();
+        let clock = Arc::new(ManualClock::new(10_000));
+        let (mut store, session) = active_session_with_clock(&root, clock.clone());
+        let mut adapter = FakeAdapter::default();
+        let first = store
+            .request_specialist(
+                &context(session.session_id, "wait-member-one"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap()
+            .specialist_run_id
+            .unwrap();
+        let second = store
+            .request_specialist(
+                &context(session.session_id, "wait-member-two"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap()
+            .specialist_run_id
+            .unwrap();
+        let completed = store
+            .assign_task(
+                &context(session.session_id, "wait-completed"),
+                &task_request(first, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        adapter.dispatch = Ok(TaskDispatch::Accepted {
+            turn_id: "turn-still-running".to_owned(),
+        });
+        let running = store
+            .assign_task(
+                &context(session.session_id, "wait-running"),
+                &task_request(second, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+
+        let any = store
+            .wait_tasks(
+                session.session_id,
+                &[completed.task_id, running.task_id],
+                "any",
+                1,
+                &mut adapter,
+            )
+            .unwrap();
+        assert!(task_terminal(&any[0].state));
+        assert_eq!(clock.now(), 10_000);
+
+        let all = store
+            .wait_tasks(
+                session.session_id,
+                &[completed.task_id, running.task_id],
+                "all",
+                1,
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(all[1].state, "running");
+        assert_eq!(clock.now(), 11_000);
+        assert!(
+            store
+                .task_control_intent(running.task_id)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn operation_wait_observes_concurrent_approval_resolution() {
+        let root = root();
+        let (mut store, session) = active_session(&root, "user_approval_required");
+        let mut adapter = FakeAdapter::default();
+        let operation = store
+            .request_specialist(
+                &context(session.session_id, "approval-wait"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(operation.state, "awaiting_approval");
+        let approval_request_id = operation.approval_request_id.unwrap();
+        let operation_id = operation.operation_id;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let wait = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            store
+                .wait_operations(session.session_id, &[operation_id], "all", 1)
+                .unwrap()
+        });
+        started_rx.recv().unwrap();
+        let mut resolver = OrchestrationStore::open(&root).unwrap();
+        resolver
+            .resolve_specialist_approval(
+                session.session_id,
+                approval_request_id,
+                true,
+                "approve-while-waiting",
+                &mut adapter,
+            )
+            .unwrap();
+        let observed = wait.join().unwrap();
+        assert_eq!(observed[0].state, "ready");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancellation_requires_terminal_proof_and_pre_dispatch_cancel_has_no_effect() {
+        let pre_dispatch_root = root();
+        let (store, session, child) = active_member(&pre_dispatch_root);
+        drop(store);
+        let fault = Arc::new(OneFault {
+            barrier: OrchestrationBarrier::BeforeTaskDispatch,
+            fired: Mutex::new(false),
+        });
+        let mut store = OrchestrationStore::open_with_faults(&pre_dispatch_root, fault).unwrap();
+        let mut adapter = FakeAdapter::default();
+        let call = context(session.session_id, "cancel-before-dispatch");
+        assert!(
+            store
+                .assign_task(&call, &task_request(child, "read_only"), &mut adapter)
+                .is_err()
+        );
+        let task_id = store
+            .task_by_key(session.session_id, &call.idempotency_key)
+            .unwrap()
+            .unwrap()
+            .task_id;
+        drop(store);
+
+        let mut store = OrchestrationStore::open(&pre_dispatch_root).unwrap();
+        adapter.calls.clear();
+        let cancelled = store
+            .cancel_task(session.session_id, task_id, &mut adapter)
+            .unwrap();
+        assert_eq!(cancelled.state, "cancelled");
+        assert!(
+            adapter
+                .calls
+                .iter()
+                .all(|call| !call.starts_with("cancel:"))
+        );
+        assert_eq!(
+            store
+                .assign_task(&call, &task_request(child, "read_only"), &mut adapter)
+                .unwrap()
+                .state,
+            "cancelled"
+        );
+        assert!(
+            adapter
+                .calls
+                .iter()
+                .all(|call| !call.starts_with("dispatch:"))
+        );
+        std::fs::remove_dir_all(pre_dispatch_root).unwrap();
+
+        for (outcome, expected_state) in [
+            (TaskCancellation::TerminalInterrupted, "cancelled"),
+            (TaskCancellation::OutcomeUnknown, "interrupted_unknown"),
+            (TaskCancellation::TerminalOther, "running"),
+        ] {
+            let root = root();
+            let (mut store, session, child) = active_member(&root);
+            let mut adapter = FakeAdapter {
+                dispatch: Ok(TaskDispatch::Accepted {
+                    turn_id: "turn-cancel-race".to_owned(),
+                }),
+                ..FakeAdapter::default()
+            };
+            let task = store
+                .assign_task(
+                    &context(session.session_id, "cancel-race"),
+                    &task_request(child, "read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            adapter.cancel = Ok(outcome);
+            let cancelled = store
+                .cancel_task(session.session_id, task.task_id, &mut adapter)
+                .unwrap();
+            assert_eq!(cancelled.state, expected_state);
+            if expected_state == "running" {
+                assert_eq!(
+                    cancelled.safe_error_code.as_deref(),
+                    Some("OUTCOME_UNKNOWN")
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

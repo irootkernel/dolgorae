@@ -545,8 +545,23 @@ absence may safely republish, and partial or unreadable state remains
 `recovery_required`.
 
 Task assignment never auto-hires a missing role. A bounded tool wait may expire
-without cancelling the durable operation or task. Cancellation is fail-closed
-after possible Turn acceptance. Release is a graceful retirement operation that
+without cancelling the durable operation or task. Waits run outside the Run
+drain and SQLite mutation transactions, so Controller responses, cancellation,
+and other Run operations remain serviceable. `any` and `all` are evaluated from
+fresh durable observations until the bounded transport deadline; notifications
+are only an optimization. Assignment `blocking` uses the earlier of the fixed
+60-second acceptance budget and the task's acceptance-anchored deadline, but
+always returns the immutable acceptance receipt. Exact-call replay never waits
+again, while a new call may observe later state.
+
+Task cancellation records its intent before an external effect. A known
+pre-dispatch task settles without contacting the Worker. Once submission may
+have happened, the Broker uses the member Controller to request ordinary Turn
+interruption and then requires authoritative terminal evidence. An interrupt
+acknowledgement, transport loss, or a dispatch/cancel race without terminal
+proof settles `interrupted_unknown`; it never manufactures `cancelled` or
+`expired`. A completed Turn that wins the race remains pending result
+construction for TASK-051. Release is a graceful retirement operation that
 stops admission of new work. In EPIC-008, it waits for authoritative task and
 result-delivery quiescence under the existing Run lifecycle, writer,
 interaction, and process-safety rules. Mailbox quiescence is an additional

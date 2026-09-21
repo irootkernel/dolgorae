@@ -40,8 +40,8 @@ Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
-TASK-047, TASK-048, and TASK-049 are complete; TASK-050 is the next planned
-Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance is tracked
+TASK-047, TASK-048, TASK-049, and TASK-050 are complete; TASK-051 is the next
+planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance is tracked
 separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
@@ -1692,7 +1692,7 @@ correct authority and traceable Turn acceptance. Next: TASK-050.
 
 ### TASK-050: Bounded Wait, Durable Deadline, and Cancellation
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-049`. Implement the selected tool contract's operation/task
 waits, `any`/`all`, and `blocking` behavior with a bounded transport budget.
@@ -1710,6 +1710,17 @@ behavior, approval responsiveness, wait disconnect, remaining budget after
 restart, cancel/complete/expiry races, and interrupt acknowledgement without
 terminal proof. New live/OS assumptions require their designated empirical
 checks before completion.
+
+Completion evidence includes bounded operation and task waits that release
+database and Run-drain ownership, exact-replay receipts without a renewed wait,
+durable acceptance-anchored blocking and execution deadlines, and persisted
+cancellation intent across restart. Pre-dispatch cancellation avoids Worker and
+writer effects; running cancellation becomes known only from matching terminal
+proof and otherwise settles `interrupted_unknown`. The complete local gate
+passed, including the isolated fake-Codex E2E suite. The six-role Mulgae review
+completed with full coverage, passing CI, and no Low-or-higher findings.
+Separately authorized live behavior checks were not run as part of this task
+completion.
 
 Task acceptance: waits are responsive and bounded, deadlines survive retries,
 and cancellation never manufactures a known outcome. Next: TASK-051.

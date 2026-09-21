@@ -2176,12 +2176,109 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
         }
     }
 
+    fn observe_task(
+        &mut self,
+        task: &crate::orchestration::SpecialistTaskSnapshot,
+        credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<crate::orchestration::SpecialistTaskObservation, crate::orchestration::AdapterFailure>
+    {
+        use crate::orchestration::{AdapterFailure, SpecialistTaskObservation};
+
+        let turn_id = task
+            .target_turn_id
+            .as_ref()
+            .ok_or(AdapterFailure::Unknown)?;
+        let carrier = credential
+            .controller_carrier()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let response = crate::worker::call_run_worker(
+            self.state_root,
+            task.specialist_run_id,
+            DarwinSystem.current_uid(),
+            Some(carrier.raw_fd()),
+            |expected| ControlRequestV1::Wait {
+                expected,
+                caller: None,
+                turn_id: turn_id.clone(),
+                timeout_ms: Some(1),
+            },
+        )
+        .map_err(|_| AdapterFailure::Unknown)?;
+        Ok(match response {
+            ControlResponseV1::Running { .. } => SpecialistTaskObservation::Running,
+            ControlResponseV1::WaitingInteraction { .. } => {
+                SpecialistTaskObservation::WaitingInteraction
+            }
+            ControlResponseV1::Terminal { terminal } if terminal.turn_id == *turn_id => {
+                SpecialistTaskObservation::Terminal {
+                    status: terminal.status,
+                }
+            }
+            ControlResponseV1::Failed { code, .. } if code == "OUTCOME_UNKNOWN" => {
+                SpecialistTaskObservation::OutcomeUnknown
+            }
+            _ => SpecialistTaskObservation::OutcomeUnknown,
+        })
+    }
+
     fn cancel_task(
         &mut self,
-        _task: &crate::orchestration::SpecialistTaskSnapshot,
-        _credential: &crate::orchestration::BrokerCredential,
-    ) -> Result<(), crate::orchestration::AdapterFailure> {
-        unavailable_orchestration_effect()
+        task: &crate::orchestration::SpecialistTaskSnapshot,
+        credential: &crate::orchestration::BrokerCredential,
+    ) -> Result<crate::orchestration::TaskCancellation, crate::orchestration::AdapterFailure> {
+        use crate::orchestration::{AdapterFailure, TaskCancellation};
+
+        let turn_id = task
+            .target_turn_id
+            .as_ref()
+            .ok_or(AdapterFailure::Unknown)?;
+        let carrier = credential
+            .controller_carrier()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let interrupt = crate::worker::call_run_worker(
+            self.state_root,
+            task.specialist_run_id,
+            DarwinSystem.current_uid(),
+            Some(carrier.raw_fd()),
+            |expected| ControlRequestV1::Interrupt {
+                expected,
+                caller: None,
+            },
+        )
+        .map_err(|_| AdapterFailure::Unknown)?;
+        if !matches!(
+            interrupt,
+            ControlResponseV1::Interrupted { turn_id: ref interrupted, .. } if interrupted == turn_id
+        ) && !matches!(
+            interrupt,
+            ControlResponseV1::Failed { .. } | ControlResponseV1::Rejected { .. }
+        ) {
+            return Ok(TaskCancellation::OutcomeUnknown);
+        }
+        let observed = crate::worker::call_run_worker(
+            self.state_root,
+            task.specialist_run_id,
+            DarwinSystem.current_uid(),
+            Some(carrier.raw_fd()),
+            |expected| ControlRequestV1::Wait {
+                expected,
+                caller: None,
+                turn_id: turn_id.clone(),
+                timeout_ms: Some(5_000),
+            },
+        )
+        .map_err(|_| AdapterFailure::Unknown)?;
+        Ok(match observed {
+            ControlResponseV1::Terminal { terminal }
+                if terminal.turn_id == *turn_id && terminal.status == "interrupted" =>
+            {
+                TaskCancellation::TerminalInterrupted
+            }
+            ControlResponseV1::Terminal { terminal } if terminal.turn_id == *turn_id => {
+                TaskCancellation::TerminalOther
+            }
+            _ => TaskCancellation::OutcomeUnknown,
+        })
     }
 
     fn release_specialist(

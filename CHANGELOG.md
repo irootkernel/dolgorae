@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Add bounded `any`/`all` operation and task waits, acceptance-anchored blocking
+  budgets and execution deadlines, and fail-closed Specialist cancellation that
+  requires terminal Turn proof instead of treating an interrupt acknowledgement
+  as a known outcome.
 - Connect accepted brokered tasks to actual Specialist Turn submission with
   immutable readable artifact context, durable deadline origin and Turn
   identity, exact acceptance replay, busy rejection, and fail-closed writer and
