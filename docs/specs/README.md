@@ -3309,6 +3309,25 @@ durable spawn-operation reference; responses route to that operation, not to an
 unrelated Codex pending request that shares an identifier. A waiting tool
 request MUST NOT block approvals, interrupts, App Server events, or other Runs.
 
+The TASK-047 bridge advertises exactly one `dolgorae_orchestration` dynamic tool
+when a starting Run manifest identifies the current Run as the Primary of an
+Orchestrated Session. It enables the experimental App Server API only for that
+Run, derives session/Run/Thread/Turn/call authority before dispatch, and keeps
+the response destination in the owning Worker generation. Until their owning
+Tasks connect production effects, request, assign, cancel, and release
+operations return the frozen `ORCHESTRATION_NOT_AVAILABLE` result before any
+semantic mutation; the already-wired read operations reach the existing
+Primary Orchestration Service.
+
+The separately authorized focused acceptance target is
+`DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE=1 make test-live-primary-bridge`. It requires
+the exact Codex 0.153.4 production pin (selectable with
+`DOLGORAE_CODEX_BIN`), creates isolated HOME, Codex-home, Dolgorae, and Git
+roots, copies only the account credential into the temporary Codex home, and
+proves the real call through a durable `brokered_tool_results` receipt. It does
+not edit the caller's shared Profile or orchestration state and is not part of
+the default test gate.
+
 **Outcome classification (TASK-047 response handling; operations in
 TASK-048/049/050/051).** Distinguish a final business outcome from an
 infrastructure failure. Reuse existing call-result and operation records.
@@ -3324,6 +3343,12 @@ Do not persist every `MachineError`, freeze transient infrastructure failures as
 permanent business results, or store sensitive diagnostics in replayable errors.
 Exact replay still requires current caller authority. Semantic call identity and
 normalized request digest MUST agree across bridge, reservation, and ledger.
+Every `brokered_tool_results.response_json` value is the checked
+`dolgorae.brokered-tool-result/v1` envelope. The envelope distinguishes `ok`
+from `error` outside the response value, so a model-visible success payload
+cannot collide with replay metadata. Readers MUST reject unknown envelope
+versions and malformed outcome bodies rather than interpreting raw payload
+keys as durable control state.
 Generation fences are not that identity. If a final operation decision commits
 before the outer tool response is recorded, reconstruct the response from the
 committed decision.

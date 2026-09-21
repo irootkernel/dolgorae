@@ -91,9 +91,10 @@ A trusted interactive client starts a Dolgorae-Orchestrated Session by creating
 a protected Controller carrier with `--orchestration-policy <name>` and passing
 that carrier to a parentless, direct-interactive public-v1 `StartRun`. Dolgorae
 atomically prepares the session around the preallocated Primary Run identity.
-The transport-independent Primary orchestration service and durable Brokered
-Hierarchy core are available to internal adapters; a live model-facing Primary
-tool transport is a later release boundary.
+The Run-scoped `dolgorae_orchestration` dynamic tool connects that Primary to
+the existing orchestration service without editing the shared Profile. The
+current provider slice exposes wired reads and rejects later effectful
+operations before they can mutate semantic state.
 
 ## Task-aware completion review
 

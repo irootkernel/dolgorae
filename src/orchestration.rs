@@ -4,6 +4,7 @@ use crate::domain::{ControllerIdentity, ControllerKind};
 use crate::engagement::EngagementStore;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::{MachineError, new_uuid_v7};
+pub use crate::primary_tool::PrimaryCallContext;
 use crate::run::{
     AggregateBinding, AggregateMemberKind, ControllerBinding, controller_capability_digest,
 };
@@ -124,13 +125,49 @@ pub struct SpecialistTaskSnapshot {
     pub delivery_sequence: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PrimaryCallContext {
-    pub session_id: Uuid,
-    pub source_run_id: Uuid,
-    pub source_turn_id: String,
-    pub source_tool_call_id: String,
-    pub idempotency_key: String,
+const BROKERED_TOOL_RESULT_SCHEMA_V1: &str = "dolgorae.brokered-tool-result/v1";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum BrokeredToolResultV1 {
+    Ok {
+        schema_version: String,
+        value: Value,
+    },
+    Error {
+        schema_version: String,
+        error: MachineError,
+    },
+}
+
+impl BrokeredToolResultV1 {
+    fn from_result(result: &Result<Value, MachineError>) -> Self {
+        match result {
+            Ok(value) => Self::Ok {
+                schema_version: BROKERED_TOOL_RESULT_SCHEMA_V1.to_owned(),
+                value: value.clone(),
+            },
+            Err(error) => Self::Error {
+                schema_version: BROKERED_TOOL_RESULT_SCHEMA_V1.to_owned(),
+                error: error.clone(),
+            },
+        }
+    }
+
+    fn into_result(self) -> Result<Result<Value, MachineError>, MachineError> {
+        let schema_version = match &self {
+            Self::Ok { schema_version, .. } | Self::Error { schema_version, .. } => schema_version,
+        };
+        if schema_version != BROKERED_TOOL_RESULT_SCHEMA_V1 {
+            return Err(integrity(
+                "cached tool result has an unsupported schema version",
+            ));
+        }
+        Ok(match self {
+            Self::Ok { value, .. } => Ok(value),
+            Self::Error { error, .. } => Err(error),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -429,25 +466,55 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
         context: &PrimaryCallContext,
         payload: &Value,
     ) -> Result<Value, MachineError> {
+        self.dispatch_inner(context, payload, false)
+    }
+
+    /// Dispatch from the production Primary bridge.  Until the owning tasks
+    /// connect their effects, mutating operations are rejected before the
+    /// semantic service can reserve or publish anything.
+    pub fn dispatch_live_bridge(
+        &mut self,
+        context: &PrimaryCallContext,
+        payload: &Value,
+    ) -> Result<Value, MachineError> {
+        self.dispatch_inner(context, payload, true)
+    }
+
+    fn dispatch_inner(
+        &mut self,
+        context: &PrimaryCallContext,
+        payload: &Value,
+        live_bridge: bool,
+    ) -> Result<Value, MachineError> {
         validate_context(context)?;
         self.store.authorize_primary(context)?;
         let request_text = serde_json::to_string(payload).map_err(internal)?;
         let canonical = canonicalize(&parse(&request_text).map_err(internal)?).map_err(internal)?;
         let request_sha256 = sha256_hex(&canonical);
         if let Some(replay) = self.store.tool_result(context, &request_sha256)? {
-            return Ok(replay);
+            return replay;
         }
-        validate_tool_request_shape(payload)?;
-        let request: ToolRequest = serde_json::from_slice(&canonical).map_err(|_| {
-            MachineError::invalid_argument(
-                "tool_payload",
-                "payload does not match the private orchestration tool contract",
-            )
-        })?;
-        let response = self.execute(context, request)?;
-        self.store
-            .record_tool_result(context, &request_sha256, &response)?;
-        Ok(response)
+        let result = (|| {
+            validate_tool_request_shape(payload)?;
+            let request: ToolRequest = serde_json::from_slice(&canonical).map_err(|_| {
+                MachineError::invalid_argument(
+                    "tool_payload",
+                    "payload does not match the private orchestration tool contract",
+                )
+            })?;
+            if live_bridge && !request.live_bridge_available() {
+                return Err(operation_unavailable(request.operation()));
+            }
+            self.execute(context, request)
+        })();
+        if match &result {
+            Ok(_) => true,
+            Err(error) => is_replayable_business_error(error),
+        } {
+            self.store
+                .record_tool_result(context, &request_sha256, &result)?;
+        }
+        result
     }
 
     fn execute(
@@ -615,6 +682,31 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                 }))
             }
         }
+    }
+}
+
+impl ToolRequest {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::RequestSpecialist { .. } => "request_specialist",
+            Self::AwaitSpecialistOperations { .. } => "await_specialist_operations",
+            Self::ListSpecialists => "list_specialists",
+            Self::AssignSpecialistTask { .. } => "assign_specialist_task",
+            Self::AwaitSpecialistTasks { .. } => "await_specialist_tasks",
+            Self::CollectSpecialistResults { .. } => "collect_specialist_results",
+            Self::CancelSpecialistTask { .. } => "cancel_specialist_task",
+            Self::ReleaseSpecialist { .. } => "release_specialist",
+        }
+    }
+
+    fn live_bridge_available(&self) -> bool {
+        matches!(
+            self,
+            Self::AwaitSpecialistOperations { .. }
+                | Self::ListSpecialists
+                | Self::AwaitSpecialistTasks { .. }
+                | Self::CollectSpecialistResults { .. }
+        )
     }
 }
 
@@ -2543,7 +2635,7 @@ impl OrchestrationStore {
         &self,
         context: &PrimaryCallContext,
         request_sha256: &str,
-    ) -> Result<Option<Value>, MachineError> {
+    ) -> Result<Option<Result<Value, MachineError>>, MachineError> {
         let row = self
             .connection
             .query_row(
@@ -2571,7 +2663,9 @@ impl OrchestrationStore {
                     && key == context.idempotency_key
                     && observed == request_sha256 =>
             {
-                serde_json::from_str(&response).map(Some).map_err(internal)
+                let stored: BrokeredToolResultV1 = serde_json::from_str(&response)
+                    .map_err(|_| integrity("cached tool result is malformed"))?;
+                Ok(Some(stored.into_result()?))
             }
             Some(_) => Err(idempotency_conflict(&context.source_tool_call_id)),
         }
@@ -2581,8 +2675,9 @@ impl OrchestrationStore {
         &mut self,
         context: &PrimaryCallContext,
         request_sha256: &str,
-        response: &Value,
+        response: &Result<Value, MachineError>,
     ) -> Result<(), MachineError> {
+        let stored = BrokeredToolResultV1::from_result(response);
         self.connection
             .execute(
                 "INSERT INTO brokered_tool_results(
@@ -2596,7 +2691,7 @@ impl OrchestrationStore {
                     context.source_tool_call_id,
                     context.idempotency_key,
                     request_sha256,
-                    canonical_string(response)?,
+                    canonical_string(&stored)?,
                     now_ms()?
                 ],
             )
@@ -3108,6 +3203,32 @@ fn idempotency_conflict(key: &str) -> MachineError {
         false,
         serde_json::json!({"idempotency_key":key}),
     )
+}
+
+fn operation_unavailable(operation: &str) -> MachineError {
+    MachineError::new(
+        "ORCHESTRATION_OPERATION_UNAVAILABLE",
+        "the orchestration operation is not connected to production effects",
+        false,
+        serde_json::json!({"operation":operation}),
+    )
+}
+
+fn is_replayable_business_error(error: &MachineError) -> bool {
+    !error.retryable
+        && matches!(
+            error.code.as_str(),
+            "INVALID_ARGUMENT"
+                | "IDEMPOTENCY_CONFLICT"
+                | "RUN_STATE_CONFLICT"
+                | "SPECIALIST_NOT_MEMBER"
+                | "SPECIALIST_POLICY_DENIED"
+                | "SPECIALIST_REQUEST_DENIED"
+                | "SPECIALIST_TASK_NOT_FOUND"
+                | "SPECIALIST_WRITER_CONFLICT"
+                | "WRITER_BUSY"
+                | "ORCHESTRATION_OPERATION_UNAVAILABLE"
+        )
 }
 
 fn session_not_found(session_id: Uuid) -> MachineError {
@@ -4719,6 +4840,132 @@ mod tests {
             .unwrap();
         assert_eq!(released["operation"], "release_specialist_result");
         assert_eq!(released["state"], "retired");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_bridge_rejects_unwired_effects_and_replays_business_rejections() {
+        let root = root();
+        let (mut store, session) = active_session(&root, "fully_delegated");
+        let mut adapter = FakeAdapter::default();
+        let call = context(session.session_id, "live-unavailable");
+        let payload = serde_json::json!({
+            "operation":"request_specialist",
+            "role_ref":"reviewer",
+            "objective":"Do not publish this request.",
+            "expected_output":["Nothing"],
+            "requested_access":"read_only",
+            "deadline_seconds":60,
+        });
+        let first = {
+            let mut service = PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            };
+            let first = service.dispatch_live_bridge(&call, &payload).unwrap_err();
+            assert_eq!(first.code, "ORCHESTRATION_OPERATION_UNAVAILABLE");
+            assert!(service.adapter.calls.is_empty());
+            first
+        };
+        drop(store);
+        let mut store = OrchestrationStore::open(&root).unwrap();
+        let mut service = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        };
+        let replay = service.dispatch_live_bridge(&call, &payload).unwrap_err();
+        assert_eq!(replay, first);
+        assert!(service.adapter.calls.is_empty());
+        assert_eq!(
+            service
+                .store
+                .connection
+                .query_row("SELECT COUNT(*) FROM brokered_tool_results", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            1
+        );
+        let changed = serde_json::json!({
+            "operation":"request_specialist",
+            "role_ref":"reviewer",
+            "objective":"Different input.",
+            "expected_output":["Nothing"],
+            "requested_access":"read_only",
+            "deadline_seconds":60,
+        });
+        assert_eq!(
+            service
+                .dispatch_live_bridge(&call, &changed)
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+
+        let read = service
+            .dispatch_live_bridge(
+                &context(session.session_id, "live-list"),
+                &serde_json::json!({"operation":"list_specialists"}),
+            )
+            .unwrap();
+        assert_eq!(read["operation"], "list_specialists_result");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn brokered_tool_result_envelope_separates_payload_from_replay_metadata() {
+        let root = root();
+        let (mut store, session) = active_session(&root, "fully_delegated");
+        let call = context(session.session_id, "versioned-result");
+        let request_sha256 = "a".repeat(64);
+        let payload = serde_json::json!({
+            "$dolgorae_tool_outcome":"error",
+            "operation":"list_specialists_result",
+        });
+        store
+            .record_tool_result(&call, &request_sha256, &Ok(payload.clone()))
+            .unwrap();
+        assert_eq!(
+            store
+                .tool_result(&call, &request_sha256)
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            payload
+        );
+        let encoded: String = store
+            .connection
+            .query_row(
+                "SELECT response_json FROM brokered_tool_results WHERE source_tool_call_id=?1",
+                [&call.source_tool_call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let envelope: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(envelope["schema_version"], BROKERED_TOOL_RESULT_SCHEMA_V1);
+        assert_eq!(envelope["outcome"], "ok");
+        assert_eq!(envelope["value"], payload);
+
+        store
+            .connection
+            .execute(
+                "UPDATE brokered_tool_results SET response_json=?1 WHERE source_tool_call_id=?2",
+                params![
+                    serde_json::json!({
+                        "schema_version":"dolgorae.brokered-tool-result/v2",
+                        "outcome":"ok",
+                        "value":{},
+                    })
+                    .to_string(),
+                    call.source_tool_call_id,
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.tool_result(&call, &request_sha256).unwrap_err().code,
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

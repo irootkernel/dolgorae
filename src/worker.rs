@@ -25,9 +25,10 @@ use crate::run::{AggregateMemberKind, RunStore};
 use crate::turn::{
     AcceptedTurn, AppServer, CoordinatorConfig, CoordinatorState, DeliveryMode, DeliveryResult,
     ForeignDiagnostics, ForeignLane, IgnoredForeignRequest, ImageDetail, ImageSnapshot,
-    Interaction, ResponseArtifactStore, SessionSafetyPolicy, SharedLedgerJournal, StoredArtifact,
-    TerminalTurn, ThreadAttach, TransportStage, TurnCoordinator, TurnError, TurnFailureContext,
-    TurnRequest, recorded_terminal,
+    Interaction, MAX_PENDING_PRIMARY_TOOLS, PrimaryToolCall, PrimaryToolCompletion,
+    PrimaryToolConfig, PrimaryToolDispatcher, ResponseArtifactStore, SessionSafetyPolicy,
+    SharedLedgerJournal, StoredArtifact, TerminalTurn, ThreadAttach, TransportStage,
+    TurnCoordinator, TurnError, TurnFailureContext, TurnRequest, recorded_terminal,
 };
 use crate::workspace::SystemWorkspacePlatform;
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
@@ -2627,6 +2628,7 @@ impl MutationOutcome {
 /// What the Run's drain thread does next.
 enum SessionWork {
     Message(Result<Value, TurnError>),
+    PrimaryTool(PrimaryToolCompletion),
     Mutation(Box<SessionMutation>),
     Stop,
 }
@@ -2658,6 +2660,8 @@ struct MailboxState {
     /// to report the same loss rather than wait for one.
     lost: Option<TurnError>,
     mutations: VecDeque<SessionMutation>,
+    primary_tool_completions: VecDeque<PrimaryToolCompletion>,
+    primary_tools_in_flight: usize,
     /// True once shutdown has claimed this Run.  Work already queued still
     /// drains — it was accepted before shutdown began and is ordered ahead of
     /// it — but nothing new is taken on, so shutdown's interrupt and its
@@ -2791,11 +2795,14 @@ impl SessionMailbox {
             if let Some(mutation) = state.mutations.pop_front() {
                 return SessionWork::Mutation(Box::new(mutation));
             }
+            if let Some(completion) = state.primary_tool_completions.pop_front() {
+                return SessionWork::PrimaryTool(completion);
+            }
             if let Some(message) = state.delivered.take() {
                 self.changed.notify_all();
                 return SessionWork::Message(message);
             }
-            if state.stopping {
+            if state.stopping && state.primary_tools_in_flight == 0 {
                 return SessionWork::Stop;
             }
             if let Some(error) = state.lost.clone() {
@@ -2841,6 +2848,50 @@ impl SessionMailbox {
         None
     }
 
+    fn reserve_primary_tool(&self) -> Result<(), MachineError> {
+        let mut state = self.state.lock().map_err(|_| {
+            MachineError::new(
+                "ORCHESTRATION_TRANSPORT_UNAVAILABLE",
+                "the Primary tool mailbox is unavailable",
+                true,
+                serde_json::json!({}),
+            )
+        })?;
+        if state.stopping {
+            return Err(MachineError::new(
+                "ORCHESTRATION_TRANSPORT_UNAVAILABLE",
+                "the Primary tool mailbox is stopping",
+                true,
+                serde_json::json!({}),
+            ));
+        }
+        if state.primary_tools_in_flight >= MAX_PENDING_PRIMARY_TOOLS {
+            return Err(MachineError::new(
+                "RUN_BUSY",
+                "too many Primary tool calls are already in flight",
+                true,
+                serde_json::json!({}),
+            ));
+        }
+        state.primary_tools_in_flight += 1;
+        Ok(())
+    }
+
+    fn release_primary_tool(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.primary_tools_in_flight = state.primary_tools_in_flight.saturating_sub(1);
+        }
+        self.changed.notify_all();
+    }
+
+    fn complete_primary_tool(&self, completion: PrimaryToolCompletion) {
+        if let Ok(mut state) = self.state.lock() {
+            state.primary_tools_in_flight = state.primary_tools_in_flight.saturating_sub(1);
+            state.primary_tool_completions.push_back(completion);
+        }
+        self.changed.notify_all();
+    }
+
     /// Claim this Run for shutdown: no new caller mutation is taken on.
     ///
     /// This is raised before shutdown reads which Turn is live, so the Turn it
@@ -2866,6 +2917,42 @@ impl SessionMailbox {
         };
         self.changed.notify_all();
         refused
+    }
+}
+
+struct WorkerPrimaryToolDispatcher {
+    state_root: PathBuf,
+    mailbox: Arc<SessionMailbox>,
+}
+
+impl PrimaryToolDispatcher for WorkerPrimaryToolDispatcher {
+    fn dispatch(&self, call: PrimaryToolCall) -> Result<(), MachineError> {
+        self.mailbox.reserve_primary_tool()?;
+        let state_root = self.state_root.clone();
+        let mailbox = Arc::clone(&self.mailbox);
+        let spawned = thread::Builder::new()
+            .name("dolgorae-primary-tool".to_owned())
+            .spawn(move || {
+                let source_tool_call_id = call.context.source_tool_call_id.clone();
+                let result =
+                    crate::primary_bridge::dispatch(&state_root, &call.context, &call.payload);
+                mailbox.complete_primary_tool(PrimaryToolCompletion {
+                    request_id: call.request_id,
+                    run_generation: call.run_generation,
+                    source_tool_call_id,
+                    result,
+                });
+            });
+        if spawned.is_err() {
+            self.mailbox.release_primary_tool();
+            return Err(MachineError::new(
+                "ORCHESTRATION_TRANSPORT_UNAVAILABLE",
+                "the Primary tool worker could not start",
+                true,
+                serde_json::json!({}),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -3420,6 +3507,28 @@ impl WorkerSession {
             },
         };
         let mailbox = Arc::new(SessionMailbox::new(facts.clone()));
+        let manifest = RunStore::new(SystemWorkspacePlatform, state_root)
+            .load_manifest(facts.run_id)
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+        let primary_session_id = manifest.aggregate_binding.as_ref().and_then(|binding| {
+            (binding.aggregate_kind == AggregateKind::OrchestratedSession
+                && binding.member_kind == AggregateMemberKind::Primary
+                && binding.aggregate_id == facts.run_id)
+                .then_some(binding.aggregate_id)
+        });
+        let primary_tool = primary_session_id
+            .map(|session_id| {
+                Ok(PrimaryToolConfig {
+                    session_id,
+                    contract: crate::primary_tool::PrimaryToolContract::load()
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?,
+                    dispatcher: Arc::new(WorkerPrimaryToolDispatcher {
+                        state_root: state_root.to_path_buf(),
+                        mailbox: Arc::clone(&mailbox),
+                    }),
+                })
+            })
+            .transpose()?;
         // The reader starts before the handshake so `initialize` correlates its
         // own reply through the same mailbox every later request uses.
         let reader = thread::spawn({
@@ -3493,6 +3602,7 @@ impl WorkerSession {
                 run_id: facts.run_id,
                 controller_id: session.controller_id,
                 control_mode: session.control_mode.clone(),
+                primary_tool,
             },
             &session.canonical_codex_home,
         );
@@ -4355,6 +4465,14 @@ fn drain_run(
                             progress.fail(error);
                         }
                     }
+                }
+                publish_state(&coordinator, progress, control);
+            }
+            SessionWork::PrimaryTool(completion) => {
+                if let Err(error) = coordinator.complete_primary_tool(completion)
+                    && *coordinator.state() == CoordinatorState::OutcomeUnknown
+                {
+                    progress.fail(error);
                 }
                 publish_state(&coordinator, progress, control);
             }
@@ -7294,6 +7412,33 @@ mod tests {
             executable_inode: 1,
             executable_sha256: "22".repeat(32),
         }
+    }
+
+    #[test]
+    fn primary_completion_reservation_survives_shutdown_and_bounds_admission() {
+        let mailbox = SessionMailbox::new(RunFacts {
+            run_id: Uuid::now_v7(),
+            profile: "default".to_owned(),
+        });
+        for _ in 0..MAX_PENDING_PRIMARY_TOOLS {
+            mailbox.reserve_primary_tool().unwrap();
+        }
+        assert_eq!(mailbox.reserve_primary_tool().unwrap_err().code, "RUN_BUSY");
+        for _ in 1..MAX_PENDING_PRIMARY_TOOLS {
+            mailbox.release_primary_tool();
+        }
+        assert!(mailbox.stop().is_empty());
+        mailbox.complete_primary_tool(PrimaryToolCompletion {
+            request_id: 7,
+            run_generation: 3,
+            source_tool_call_id: "call-7".to_owned(),
+            result: Ok(serde_json::json!({"operation":"list_specialists_result"})),
+        });
+        let SessionWork::PrimaryTool(completion) = mailbox.next_work() else {
+            panic!("the reserved completion must drain before shutdown");
+        };
+        assert_eq!(completion.source_tool_call_id, "call-7");
+        assert!(matches!(mailbox.next_work(), SessionWork::Stop));
     }
 
     #[cfg(target_os = "macos")]

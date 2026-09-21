@@ -39,8 +39,8 @@ and audit interfaces, and final conformance and Personal Alpha acceptance.
 Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
-aggregate/result queries, and frozen-consumer regression. TASK-025 is complete;
-TASK-053 is the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul
+aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
+and TASK-047 are complete; TASK-048 is the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul
 acceptance is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
@@ -1589,7 +1589,7 @@ No new runtime implementation is claimed. Next: TASK-047.
 
 ### TASK-047: Trusted Live Primary Tool Bridge
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-053` and the completed TASK-025 transport. Implement the selected bridge through the production
 Primary Orchestration Service. Bind session, source Run/Turn/call, current
@@ -1605,6 +1605,13 @@ call, concurrent call isolation, cancellation/disconnect, and bridge restart;
 credential/socket/database/raw-frame canaries; focused pinned-live dispatch
 check as required by the completion gate. No collaboration registration or
 external-review MCP change.
+
+Completion evidence includes the isolated pinned Codex 0.153.4 campaign: an
+actual Primary Turn completed one `list_specialists` call, the durable result
+retained trusted Run/Turn/call and idempotency bindings in the versioned
+envelope, and no shared Profile state was mutated. The focused maintainability
+confirmation review reported all four requested structural fixes resolved with
+no direct regression.
 
 Task acceptance: the actual Primary tool reaches the existing service with
 verified authority and replay behavior, while unsupported effects remain

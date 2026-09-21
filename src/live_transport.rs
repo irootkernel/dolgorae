@@ -2,20 +2,11 @@
 
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
+pub use crate::primary_tool::TRANSPORT_BOUND_FIELDS;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
-
-pub const TRANSPORT_BOUND_FIELDS: [&str; 7] = [
-    "orchestrated_session_id",
-    "source_primary_run_id",
-    "source_turn_id",
-    "source_tool_call_id",
-    "controller_principal",
-    "root_priority",
-    "idempotency_key",
-];
 
 pub const REQUIRED_PROBE_SCENARIOS: [&str; 12] = [
     "source_binding",

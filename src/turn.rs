@@ -10,6 +10,7 @@ use crate::interaction_payload::{
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::ledger::{Ledger, LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
+use crate::primary_tool::{PrimaryCallContext, PrimaryToolContract};
 use crate::workspace::LosslessPath;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +28,7 @@ pub const MAX_INLINE_FINAL_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const MAX_FINAL_RESPONSE_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_INTERACTION_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TURN_ITEMS: usize = 16_384;
+pub const MAX_PENDING_PRIMARY_TOOLS: usize = 256;
 /// Retention bound for one streamed Turn read back from `thread/read`.  This is
 /// a product policy about how large a single Turn's items may be, not a
 /// transport bound on the reply: the reply itself streams unbounded and every
@@ -43,6 +45,37 @@ pub const MAX_IGNORED_FOREIGN_REQUESTS: usize = 64;
 /// diagnostic journal; the bound plus `MAX_IGNORED_FOREIGN_REQUESTS` is what
 /// keeps a foreign Thread from driving the journal's size.
 pub const MAX_FOREIGN_FIELD_CHARS: usize = 128;
+#[derive(Clone, Debug)]
+pub struct PrimaryToolCall {
+    pub request_id: u64,
+    pub run_generation: u64,
+    pub context: PrimaryCallContext,
+    pub payload: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct PrimaryToolCompletion {
+    pub request_id: u64,
+    pub run_generation: u64,
+    pub source_tool_call_id: String,
+    pub result: Result<Value, MachineError>,
+}
+
+pub trait PrimaryToolDispatcher: Send + Sync {
+    fn dispatch(&self, call: PrimaryToolCall) -> Result<(), MachineError>;
+}
+
+pub struct PrimaryToolConfig {
+    pub session_id: Uuid,
+    pub contract: PrimaryToolContract,
+    pub dispatcher: Arc<dyn PrimaryToolDispatcher>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPrimaryToolCall {
+    payload_sha256: String,
+    request_ids: Vec<u64>,
+}
 
 /// Interaction policy fixed for the lifetime of one Run worker session.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1470,6 +1503,8 @@ pub struct TurnCoordinator<S, J, A> {
     controller_id: Uuid,
     control_mode: String,
     foreign_diagnostics: Box<dyn ForeignDiagnostics>,
+    primary_tool: Option<PrimaryToolConfig>,
+    pending_primary_tools: BTreeMap<String, PendingPrimaryToolCall>,
 }
 
 pub struct CoordinatorConfig {
@@ -1490,6 +1525,7 @@ pub struct CoordinatorConfig {
     pub run_id: Uuid,
     pub controller_id: Uuid,
     pub control_mode: String,
+    pub primary_tool: Option<PrimaryToolConfig>,
 }
 
 impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordinator<S, J, A> {
@@ -1525,7 +1561,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         let initialized = server.request("initialize", serde_json::json!({
             "clientInfo": {"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},
-            "capabilities": {"experimentalApi":false,"optOutNotificationMethods":[]}
+            "capabilities": {"experimentalApi":config.primary_tool.is_some(),"optOutNotificationMethods":[]}
         }))?;
         if initialized.get("codexHome").and_then(Value::as_str) != Some(expected_codex_home) {
             return Err(TurnError::CorrelationMismatch);
@@ -1573,6 +1609,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             controller_id: config.controller_id,
             control_mode: config.control_mode,
             foreign_diagnostics: config.foreign_diagnostics,
+            primary_tool: config.primary_tool,
+            pending_primary_tools: BTreeMap::new(),
         })
     }
 
@@ -2207,6 +2245,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if !params.is_object() {
             return Err(TurnError::InvalidInput("thread parameters are invalid"));
         }
+        if method == "thread/start"
+            && let Some(primary_tool) = &self.primary_tool
+        {
+            params["dynamicTools"] = Value::Array(vec![primary_tool.contract.tool_spec()]);
+        }
         let result = self.server.request(method, params.take())?;
         let thread_id = nested_identity(&result, "thread", "id")
             .or_else(|| identity(&result, "threadId"))
@@ -2494,6 +2537,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             self.ignore_foreign_request(request_id, method, thread_id, turn_id);
             return Ok(());
         }
+        if method == "item/tool/call" {
+            return self.open_primary_tool(request_id, params);
+        }
         let supported = matches!(
             method,
             "item/commandExecution/requestApproval"
@@ -2627,6 +2673,165 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.pending.insert(request_id, interaction);
         self.state = CoordinatorState::WaitingInteraction;
         Ok(())
+    }
+
+    fn open_primary_tool(&mut self, request_id: u64, params: &Value) -> Result<(), TurnError> {
+        let Some((session_id, contract, dispatcher)) = self.primary_tool.as_ref().map(|config| {
+            (
+                config.session_id,
+                config.contract.clone(),
+                Arc::clone(&config.dispatcher),
+            )
+        }) else {
+            self.server
+                .respond_error(request_id, -32601, "method not supported")?;
+            return Ok(());
+        };
+        let thread_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        let turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        if self.active_turn_id.as_deref() != Some(turn_id) {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        let call_id = params
+            .get("callId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        if params.get("tool").and_then(Value::as_str) != Some(contract.name()) {
+            self.server
+                .respond_error(request_id, -32601, "tool not registered")?;
+            return Ok(());
+        }
+        let payload = params
+            .get("arguments")
+            .cloned()
+            .ok_or(TurnError::CorrelationMismatch)?;
+        let raw = serde_json::to_vec(&payload).map_err(|_| TurnError::CorrelationMismatch)?;
+        if raw.len() > MAX_INTERACTION_PAYLOAD_BYTES {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        if let Err(error) = contract.reject_model_identity(&payload) {
+            return self.respond_primary_tool(request_id, Err(error));
+        }
+        let payload_sha256 = sha256_hex(
+            &canonicalize(
+                &parse(
+                    &serde_json::to_string(&payload).map_err(|_| TurnError::CorrelationMismatch)?,
+                )
+                .map_err(|_| TurnError::CorrelationMismatch)?,
+            )
+            .map_err(|_| TurnError::CorrelationMismatch)?,
+        );
+        if let Some(pending) = self.pending_primary_tools.get_mut(call_id) {
+            if pending.payload_sha256 != payload_sha256 {
+                return self.respond_primary_tool(
+                    request_id,
+                    Err(MachineError::new(
+                        "IDEMPOTENCY_CONFLICT",
+                        "tool call identity was reused with different input",
+                        false,
+                        serde_json::json!({"source_tool_call_id":call_id}),
+                    )),
+                );
+            }
+            pending.request_ids.push(request_id);
+            return Ok(());
+        }
+        if self.pending_primary_tools.len() >= MAX_PENDING_PRIMARY_TOOLS {
+            return self.respond_primary_tool(
+                request_id,
+                Err(MachineError::new(
+                    "RUN_BUSY",
+                    "too many Primary tool calls are already in flight",
+                    true,
+                    serde_json::json!({}),
+                )),
+            );
+        }
+        let idempotency_key = sha256_hex(
+            format!(
+                "dolgorae-primary-tool-v1\0{}\0{}\0{thread_id}\0{turn_id}\0{call_id}",
+                session_id, self.run_id
+            )
+            .as_bytes(),
+        );
+        let call = PrimaryToolCall {
+            request_id,
+            run_generation: self.run_generation,
+            context: PrimaryCallContext {
+                session_id,
+                source_run_id: self.run_id,
+                source_turn_id: turn_id.to_owned(),
+                source_tool_call_id: call_id.to_owned(),
+                idempotency_key,
+            },
+            payload,
+        };
+        self.pending_primary_tools.insert(
+            call_id.to_owned(),
+            PendingPrimaryToolCall {
+                payload_sha256,
+                request_ids: vec![request_id],
+            },
+        );
+        if let Err(error) = dispatcher.dispatch(call) {
+            self.pending_primary_tools.remove(call_id);
+            return self.respond_primary_tool(request_id, Err(error));
+        }
+        Ok(())
+    }
+
+    pub fn complete_primary_tool(
+        &mut self,
+        completion: PrimaryToolCompletion,
+    ) -> Result<(), TurnError> {
+        if completion.run_generation != self.run_generation {
+            return Ok(());
+        }
+        let Some(pending) = self
+            .pending_primary_tools
+            .remove(&completion.source_tool_call_id)
+        else {
+            return Ok(());
+        };
+        if !pending.request_ids.contains(&completion.request_id) {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        for request_id in pending.request_ids {
+            self.respond_primary_tool(request_id, completion.result.clone())?;
+        }
+        Ok(())
+    }
+
+    fn respond_primary_tool(
+        &mut self,
+        request_id: u64,
+        result: Result<Value, MachineError>,
+    ) -> Result<(), TurnError> {
+        let (success, body) = match result {
+            Ok(value) => (true, value),
+            Err(error) => {
+                let primary_tool = self
+                    .primary_tool
+                    .as_ref()
+                    .ok_or(TurnError::CorrelationMismatch)?;
+                (false, primary_tool.contract.error_result(&error))
+            }
+        };
+        let text = serde_json::to_string(&body).map_err(|_| TurnError::CorrelationMismatch)?;
+        self.server.respond_result(
+            request_id,
+            serde_json::json!({
+                "success":success,
+                "contentItems":[{"type":"inputText","text":text}],
+            }),
+        )
     }
 
     fn normalized_interaction(
@@ -3735,8 +3940,21 @@ fn event_turn_id(params: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primary_tool::PRIMARY_TOOL_NAME;
     use std::collections::VecDeque;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    #[derive(Default)]
+    struct RecordingPrimaryDispatcher {
+        calls: Mutex<Vec<PrimaryToolCall>>,
+    }
+
+    impl PrimaryToolDispatcher for RecordingPrimaryDispatcher {
+        fn dispatch(&self, call: PrimaryToolCall) -> Result<(), MachineError> {
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        }
+    }
 
     #[derive(Default)]
     struct FakeServer {
@@ -3843,10 +4061,20 @@ mod tests {
     }
 
     fn coordinator_in(
+        server: FakeServer,
+        attach: ThreadAttach,
+        foreign_diagnostics: Box<dyn ForeignDiagnostics>,
+        safety_policy: SessionSafetyPolicy,
+    ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
+        coordinator_in_with_primary(server, attach, foreign_diagnostics, safety_policy, None)
+    }
+
+    fn coordinator_in_with_primary(
         mut server: FakeServer,
         attach: ThreadAttach,
         foreign_diagnostics: Box<dyn ForeignDiagnostics>,
         safety_policy: SessionSafetyPolicy,
+        primary_tool: Option<PrimaryToolConfig>,
     ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
         server
             .replies
@@ -3874,6 +4102,7 @@ mod tests {
                 run_id: Uuid::now_v7(),
                 controller_id: Uuid::now_v7(),
                 control_mode: "direct_interactive".to_owned(),
+                primary_tool,
             },
             "/tmp/codex-home",
         )
@@ -3906,6 +4135,23 @@ mod tests {
             .start_turn(request("key", DeliveryMode::Submit))
             .unwrap();
         assert_eq!(accepted.turn_id, "turn-1");
+        assert_eq!(
+            coordinator.server.calls[0]
+                .1
+                .pointer("/capabilities/experimentalApi"),
+            Some(&Value::Bool(false))
+        );
+        assert!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .find(|(method, _)| method == "thread/start")
+                .unwrap()
+                .1
+                .get("dynamicTools")
+                .is_none()
+        );
         assert!(matches!(
             coordinator.journal().entries[0],
             JournalEntry::Intent(_)
@@ -3918,6 +4164,204 @@ mod tests {
             .start_turn(request("key", DeliveryMode::Send))
             .unwrap();
         assert!(replay.replayed);
+    }
+
+    #[test]
+    fn primary_tool_is_run_scoped_authenticated_deduplicated_and_generation_fenced() {
+        let dispatcher = Arc::new(RecordingPrimaryDispatcher::default());
+        let session_id = Uuid::now_v7();
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        let mut coordinator = coordinator_in_with_primary(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::Standard,
+            Some(PrimaryToolConfig {
+                session_id,
+                contract: PrimaryToolContract::load().unwrap(),
+                dispatcher: dispatcher.clone(),
+            }),
+        );
+        coordinator
+            .start_turn(request("primary", DeliveryMode::Submit))
+            .unwrap();
+
+        let initialize = &coordinator.server.calls[0].1;
+        assert_eq!(
+            initialize.pointer("/capabilities/experimentalApi"),
+            Some(&Value::Bool(true))
+        );
+        let thread_start = coordinator
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .unwrap();
+        let tools = thread_start.1["dynamicTools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], PRIMARY_TOOL_NAME);
+        assert_eq!(
+            tools[0]["inputSchema"]["oneOf"].as_array().unwrap().len(),
+            8
+        );
+
+        coordinator
+            .ingest(
+                serde_json::json!({"id":40,"method":"item/tool/call","params":{
+                    "threadId":"substituted-thread",
+                    "turnId":"turn-1",
+                    "callId":"foreign-call",
+                    "tool":PRIMARY_TOOL_NAME,
+                    "arguments":{"operation":"list_specialists"}
+                }}),
+            )
+            .unwrap();
+        assert!(dispatcher.calls.lock().unwrap().is_empty());
+        assert!(coordinator.server.responses.is_empty());
+
+        let params = serde_json::json!({
+            "threadId":"thread-1",
+            "turnId":"turn-1",
+            "callId":"call-1",
+            "tool":PRIMARY_TOOL_NAME,
+            "arguments":{"operation":"list_specialists"},
+        });
+        coordinator
+            .ingest(serde_json::json!({"id":41,"method":"item/tool/call","params":params}))
+            .unwrap();
+        coordinator
+            .ingest(
+                serde_json::json!({"id":42,"method":"item/tool/call","params":{
+                    "threadId":"thread-1",
+                    "turnId":"turn-1",
+                    "callId":"call-1",
+                    "tool":PRIMARY_TOOL_NAME,
+                    "arguments":{"operation":"list_specialists"}
+                }}),
+            )
+            .unwrap();
+        let calls = dispatcher.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].context.session_id, session_id);
+        assert_eq!(calls[0].context.source_turn_id, "turn-1");
+        assert_eq!(calls[0].context.source_tool_call_id, "call-1");
+        assert_eq!(
+            calls[0].context.idempotency_key,
+            sha256_hex(
+                format!(
+                    "dolgorae-primary-tool-v1\0{session_id}\0{}\0thread-1\0turn-1\0call-1",
+                    coordinator.run_id
+                )
+                .as_bytes()
+            )
+        );
+
+        coordinator
+            .ingest(
+                serde_json::json!({"id":44,"method":"item/tool/call","params":{
+                    "threadId":"thread-1",
+                    "turnId":"turn-1",
+                    "callId":"call-1",
+                    "tool":PRIMARY_TOOL_NAME,
+                    "arguments":{"operation":"collect_specialist_results","after_sequence":0,"limit":1}
+                }}),
+            )
+            .unwrap();
+        assert_eq!(dispatcher.calls.lock().unwrap().len(), 1);
+        assert_eq!(coordinator.server.responses.last().unwrap().0, 44);
+        coordinator
+            .ingest(
+                serde_json::json!({"id":45,"method":"item/tool/call","params":{
+                    "threadId":"thread-1",
+                    "turnId":"turn-1",
+                    "callId":"call-2",
+                    "tool":PRIMARY_TOOL_NAME,
+                    "arguments":{"operation":"list_specialists"}
+                }}),
+            )
+            .unwrap();
+        assert_eq!(dispatcher.calls.lock().unwrap().len(), 2);
+
+        coordinator
+            .complete_primary_tool(PrimaryToolCompletion {
+                request_id: 41,
+                run_generation: 2,
+                source_tool_call_id: "call-1".to_owned(),
+                result: Ok(serde_json::json!({"ignored":true})),
+            })
+            .unwrap();
+        assert_eq!(coordinator.server.responses.len(), 1);
+        coordinator
+            .complete_primary_tool(PrimaryToolCompletion {
+                request_id: 41,
+                run_generation: 1,
+                source_tool_call_id: "call-1".to_owned(),
+                result: Ok(serde_json::json!({"operation":"list_specialists_result"})),
+            })
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .server
+                .responses
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![44, 41, 42]
+        );
+        assert!(
+            coordinator
+                .server
+                .responses
+                .iter()
+                .filter(|(id, _)| *id != 44)
+                .all(|(_, value)| {
+                    value["success"] == true
+                        && !value.to_string().contains("credential")
+                        && !value.to_string().contains("socket")
+                        && !value.to_string().contains("database")
+                })
+        );
+        coordinator
+            .complete_primary_tool(PrimaryToolCompletion {
+                request_id: 45,
+                run_generation: 1,
+                source_tool_call_id: "call-2".to_owned(),
+                result: Ok(serde_json::json!({"operation":"list_specialists_result"})),
+            })
+            .unwrap();
+
+        coordinator
+            .ingest(
+                serde_json::json!({"id":43,"method":"item/tool/call","params":{
+                    "threadId":"thread-1",
+                    "turnId":"turn-1",
+                    "callId":"forged",
+                    "tool":PRIMARY_TOOL_NAME,
+                    "arguments":{"operation":"list_specialists","source_primary_run_id":session_id}
+                }}),
+            )
+            .unwrap();
+        assert_eq!(dispatcher.calls.lock().unwrap().len(), 2);
+        assert_eq!(coordinator.server.responses.last().unwrap().0, 43);
+        assert_eq!(
+            coordinator.server.responses.last().unwrap().1["success"],
+            false
+        );
+        let error: Value = serde_json::from_str(
+            coordinator.server.responses.last().unwrap().1["contentItems"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error["operation"], "orchestration_error");
+        assert_eq!(error["code"], "ORCHESTRATION_NOT_AVAILABLE");
+        assert!(error.get("details").is_none());
     }
 
     #[test]

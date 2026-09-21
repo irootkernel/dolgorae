@@ -9,6 +9,8 @@ development commits.
 
 ### Added
 
+- Add the Run-scoped `dolgorae_orchestration` Primary tool bridge with trusted
+  Run/Turn/call binding, durable replay, generation fencing, and pinned Codex 0.153.4 live acceptance.
 - Freeze the checked `dolgorae.gul-consumer/v1` wire contract with two
   Controller-authorized orchestration queries, a 27-method required profile,
   whole-session close correlation, generated clients, and immutable fixtures.

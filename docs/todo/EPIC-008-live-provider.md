@@ -50,7 +50,7 @@ implementation; do not overwrite unrelated changes. These are code-inspection
 checkpoints, not evidence that live provider acceptance already passed.
 The consumer amendment was checked against clean commit 57e6be8 after TASK-025
 completion; do not replace its current transport/probe implementation with older
-review drafts. TASK-053 is the next planned contract-publication Task.
+review drafts. TASK-047 is complete; TASK-048 is the next planned Task.
 
 | Existing owner | Reuse and remaining integration concern |
 | --- | --- |
@@ -228,18 +228,19 @@ for this contract publication. Next: TASK-047.
 
 Input: the completed TASK-025 private transport and TASK-053 public consumer lock.
 
-- [ ] Wire only the Primary tool to the existing orchestration semantic service.
-- [ ] Construct trusted call context outside model arguments; validate Run/Turn/call
+- [x] Wire only the Primary tool to the existing orchestration semantic service.
+- [x] Construct trusted call context outside model arguments; validate Run/Turn/call
   and current Worker generation. Do not treat the probe `TrustedBinding` helper
   as production authentication.
-- [ ] Hold the pending upstream reply on the owning Worker generation and observe
+- [x] Hold the pending upstream reply on the owning Worker generation and observe
   Broker approval/completion through existing Run events; do not wait inside
   `drain_run`.
-- [ ] Preserve semantic retry identity while fencing stale generations.
-- [ ] Retain existing call/reuse receipts across lost replies and reconnect.
-- [ ] Isolate registration without editing a shared global Profile.
-- [ ] Keep incomplete operations unavailable before effects; test adversarial calls.
-- [ ] Include required live evidence, independent review, and one completion commit.
+- [x] Preserve semantic retry identity while fencing stale generations.
+- [x] Retain existing call/reuse receipts across lost replies and reconnect.
+- [x] Isolate registration without editing a shared global Profile.
+- [x] Keep incomplete operations unavailable before effects; test adversarial calls.
+- [x] Include required pinned-live evidence and independent review.
+- [x] Create one task-scoped completion commit.
 
 Do not add a transport framework or change external-review MCP disposition.
 Next: TASK-048.

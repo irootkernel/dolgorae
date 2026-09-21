@@ -572,6 +572,25 @@ must not be wired as the production adapter in TASK-025. TASK-047 performs
 source authentication on the live request and MUST NOT treat the probe
 `TrustedBinding` helper as that proof.
 
+TASK-047 implements that boundary in `TurnCoordinator`, `WorkerSession`, and
+`primary_bridge`, with the checked model-facing contract isolated in
+`primary_tool`. `WorkerSession` injects that contract into `TurnCoordinator`;
+the App Server layer does not own or duplicate the tool schema, transport-bound
+field list, or safe error mapping. `TurnCoordinator` validates the native
+request against its current Thread, active Turn, registered tool name, and
+Worker generation, then constructs `PrimaryCallContext` without consulting
+model arguments. A bounded background dispatch opens the existing
+orchestration store. Dispatch reserves one completion slot before work starts,
+and shutdown drains every reserved completion before stopping, so an admitted
+call cannot be silently dropped by mailbox backpressure. Only the owning
+generation may answer the saved JSON-RPC destinations. The semantic idempotency
+key excludes generation, so a replacement Worker can recover the same durable
+call result while an old completion cannot answer through the replacement.
+Only Primary manifests add the dynamic tool to `thread/start`; no Profile or
+MCP configuration is edited. The live adapter rejects operations whose
+production effects belong to later Tasks before invoking any effectful
+`OrchestrationAdapter` method.
+
 The future-collaboration portion of TASK-025 probes only source Run/Turn/call
 binding through an inert schema-shaped stub in an isolated test environment.
 Temporary test-only tool registration is allowed when needed for that proof.
