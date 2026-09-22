@@ -3607,6 +3607,10 @@ impl WorkerSession {
                 run_id: facts.run_id,
                 controller_id: session.controller_id,
                 control_mode: session.control_mode.clone(),
+                record_accepted_user_input: manifest
+                    .aggregate_binding
+                    .as_ref()
+                    .is_none_or(|binding| binding.member_kind != AggregateMemberKind::Specialist),
                 primary_tool,
             },
             &session.canonical_codex_home,

@@ -1,13 +1,73 @@
 //! Transport-neutral durable Interaction observations and protected response bounds.
+use crate::audit::AuditKind;
 use crate::domain::RunLifecycle;
+use crate::ledger::{ObservedLedger, audit_integrity_error};
 use crate::machine::MachineError;
 use crate::snapshot::RunSnapshot;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::Path;
 use uuid::Uuid;
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const MAX_PAYLOAD_BYTES: usize = 8_388_608;
+
+pub(crate) fn durable_interactions_at(
+    state_root: &Path,
+    run_id: Uuid,
+    head: u64,
+) -> Result<Vec<(Value, u64)>, MachineError> {
+    let ledger = ObservedLedger::open_run(state_root, run_id, head)?;
+    let decisions = ledger
+        .payloads_of_kind(AuditKind::ApprovalDecided)
+        .map_err(|error| audit_integrity_error(run_id, head, &error.to_string()))?
+        .into_iter()
+        .filter_map(|payload| {
+            let request_id = payload.get("request_id")?.as_str()?.parse::<u64>().ok()?;
+            Some((request_id, payload))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    ledger
+        .payloads_of_kind(AuditKind::ApprovalRequested)
+        .map_err(|error| audit_integrity_error(run_id, head, &error.to_string()))?
+        .into_iter()
+        .map(|wrapper| {
+            let upstream_id = wrapper
+                .get("upstream_request_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| invalid("durable interaction upstream id"))?;
+            let mut interaction = wrapper
+                .get("interaction")
+                .cloned()
+                .ok_or_else(|| invalid("durable normalized interaction"))?;
+            if let Some(decision) = decisions.get(&upstream_id) {
+                let object = interaction
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("durable normalized interaction"))?;
+                let resolution = decision
+                    .get("resolution")
+                    .cloned()
+                    .ok_or_else(|| invalid("durable interaction resolution"))?;
+                object.insert(
+                    "status".to_owned(),
+                    json!(
+                        if resolution.get("outcome").and_then(Value::as_str) == Some("stale") {
+                            "stale"
+                        } else {
+                            "resolved"
+                        }
+                    ),
+                );
+                object.insert(
+                    "resolved_at".to_owned(),
+                    decision.get("resolved_at").cloned().unwrap_or(Value::Null),
+                );
+                object.insert("resolution".to_owned(), resolution);
+            }
+            Ok((interaction, upstream_id))
+        })
+        .collect()
+}
 
 pub(crate) fn response_too_large(
     run_id: impl serde::Serialize,

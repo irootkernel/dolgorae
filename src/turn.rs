@@ -447,7 +447,7 @@ pub enum ImageDetail {
 }
 
 impl ImageDetail {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Low => "low",
@@ -540,6 +540,50 @@ pub struct OperationIntent {
     pub server_key: String,
     pub server_epoch: u64,
     pub provisional_thread: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_input: Option<AcceptedUserInput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedInputStorage {
+    pub artifact_id: Uuid,
+    pub created_at: String,
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AcceptedInputContent {
+    Inline { storage: AcceptedInputStorage },
+    Artifact { storage: AcceptedInputStorage },
+}
+
+impl AcceptedInputContent {
+    #[must_use]
+    pub const fn storage(&self) -> &AcceptedInputStorage {
+        match self {
+            Self::Inline { storage } | Self::Artifact { storage } => storage,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedImageMetadata {
+    pub ordinal: u32,
+    pub detail: ImageDetail,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedUserInput {
+    pub content: AcceptedInputContent,
+    pub images: Vec<AcceptedImageMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1502,6 +1546,7 @@ pub struct TurnCoordinator<S, J, A> {
     run_id: Uuid,
     controller_id: Uuid,
     control_mode: String,
+    record_accepted_user_input: bool,
     foreign_diagnostics: Box<dyn ForeignDiagnostics>,
     primary_tool: Option<PrimaryToolConfig>,
     pending_primary_tools: BTreeMap<String, PendingPrimaryToolCall>,
@@ -1525,6 +1570,7 @@ pub struct CoordinatorConfig {
     pub run_id: Uuid,
     pub controller_id: Uuid,
     pub control_mode: String,
+    pub record_accepted_user_input: bool,
     pub primary_tool: Option<PrimaryToolConfig>,
 }
 
@@ -1608,6 +1654,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             run_id: config.run_id,
             controller_id: config.controller_id,
             control_mode: config.control_mode,
+            record_accepted_user_input: config.record_accepted_user_input,
             foreign_diagnostics: config.foreign_diagnostics,
             primary_tool: config.primary_tool,
             pending_primary_tools: BTreeMap::new(),
@@ -2082,6 +2129,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         ) {
             return Err(TurnError::TurnBusy);
         }
+        let accepted_input = self
+            .record_accepted_user_input
+            .then(|| self.capture_accepted_input(&request))
+            .transpose()?;
         let operation_id = Uuid::now_v7();
         let intent = OperationIntent {
             operation_id,
@@ -2091,6 +2142,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             server_key: self.server_key.clone(),
             server_epoch: self.server_epoch,
             provisional_thread: self.thread_id.is_none(),
+            accepted_input,
         };
         self.journal.append_and_sync(JournalEntry::Intent(intent))?;
         self.unresolved_idempotency
@@ -2178,6 +2230,52 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             },
         );
         Ok(accepted)
+    }
+
+    fn capture_accepted_input(
+        &mut self,
+        request: &TurnRequest,
+    ) -> Result<AcceptedUserInput, TurnError> {
+        const MAX_INLINE_INPUT_BYTES: usize = 1024 * 1024;
+        const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
+        if request.message.len() > MAX_INPUT_BYTES {
+            return Err(TurnError::InvalidInput(
+                "message exceeds the 8 MiB request bound",
+            ));
+        }
+        if request.images.len() > 64 {
+            return Err(TurnError::InvalidInput("at most 64 images are accepted"));
+        }
+        let bytes = request.message.as_bytes();
+        let stored = self.artifacts.store(bytes)?;
+        let storage = AcceptedInputStorage {
+            artifact_id: stored.artifact_id,
+            created_at: stored.created_at,
+            byte_length: u64::try_from(bytes.len())
+                .map_err(|_| TurnError::InvalidInput("message is too large"))?,
+            sha256: sha256_hex(bytes),
+        };
+        let content = if bytes.len() <= MAX_INLINE_INPUT_BYTES {
+            AcceptedInputContent::Inline { storage }
+        } else {
+            AcceptedInputContent::Artifact { storage }
+        };
+        let images = request
+            .images
+            .iter()
+            .enumerate()
+            .map(|(ordinal, image)| {
+                Ok(AcceptedImageMetadata {
+                    ordinal: u32::try_from(ordinal)
+                        .map_err(|_| TurnError::InvalidInput("too many images"))?,
+                    detail: image.detail,
+                    media_type: image_media_type(&image.canonical_path)?,
+                    byte_length: image.byte_length,
+                    sha256: image.sha256.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, TurnError>>()?;
+        Ok(AcceptedUserInput { content, images })
     }
 
     /// Start a Turn and return as soon as the app-server has accepted it, or
@@ -3937,6 +4035,23 @@ fn turn_input(request: &TurnRequest) -> Result<Vec<Value>, TurnError> {
     Ok(input)
 }
 
+fn image_media_type(path: &LosslessPath) -> Result<String, TurnError> {
+    let path = path
+        .to_path_buf()
+        .map_err(|_| TurnError::InvalidInput("image path encoding is invalid"))?;
+    let extension = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("png") => Ok("image/png".to_owned()),
+        Some("jpg" | "jpeg") => Ok("image/jpeg".to_owned()),
+        Some("gif") => Ok("image/gif".to_owned()),
+        Some("webp") => Ok("image/webp".to_owned()),
+        _ => Err(TurnError::InvalidInput("image media type is unsupported")),
+    }
+}
+
 fn turn_sandbox(sandbox: &str, cwd: &Path) -> Value {
     if sandbox == "read-only" {
         // SPEC-002 pins the reader's turn policy whole: a `readOnly` sandbox
@@ -4132,6 +4247,7 @@ mod tests {
                 run_id: Uuid::now_v7(),
                 controller_id: Uuid::now_v7(),
                 control_mode: "direct_interactive".to_owned(),
+                record_accepted_user_input: true,
                 primary_tool,
             },
             "/tmp/codex-home",
@@ -4194,6 +4310,26 @@ mod tests {
             .start_turn(request("key", DeliveryMode::Send))
             .unwrap();
         assert!(replay.replayed);
+    }
+
+    #[test]
+    fn specialist_turn_does_not_become_accepted_human_input() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        let mut coordinator = coordinator(server);
+        coordinator.record_accepted_user_input = false;
+        coordinator
+            .start_turn(request("specialist", DeliveryMode::Submit))
+            .unwrap();
+        let JournalEntry::Intent(intent) = &coordinator.journal().entries[0] else {
+            panic!("first durable record is not the Turn intent");
+        };
+        assert!(intent.accepted_input.is_none());
     }
 
     #[test]
@@ -5781,6 +5917,7 @@ mod tests {
                     server_key: "a".repeat(64),
                     server_epoch: 1,
                     provisional_thread: true,
+                    accepted_input: None,
                 }))
                 .unwrap();
         }

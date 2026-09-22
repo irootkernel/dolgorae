@@ -52,6 +52,61 @@ struct RuntimeOperationIntent {
     server_epoch: u64,
     #[serde(rename = "provisional_thread")]
     _provisional_thread: bool,
+    #[serde(default, rename = "accepted_input")]
+    accepted_input: Option<RuntimeAcceptedUserInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeAcceptedUserInput {
+    content: RuntimeAcceptedInputContent,
+    images: Vec<RuntimeAcceptedImageMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RuntimeAcceptedInputContent {
+    Inline {
+        storage: RuntimeAcceptedInputStorage,
+    },
+    Artifact {
+        storage: RuntimeAcceptedInputStorage,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeAcceptedInputStorage {
+    artifact_id: Uuid,
+    created_at: String,
+    byte_length: u64,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeAcceptedImageMetadata {
+    ordinal: u32,
+    detail: RuntimeAcceptedImageDetail,
+    media_type: String,
+    byte_length: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeAcceptedImageDetail {
+    Auto,
+    Low,
+    High,
+}
+
+impl RuntimeAcceptedInputContent {
+    const fn storage(&self) -> &RuntimeAcceptedInputStorage {
+        match self {
+            Self::Inline { storage } | Self::Artifact { storage } => storage,
+        }
+    }
 }
 
 impl IdempotencyIntent {
@@ -1881,12 +1936,46 @@ fn runtime_operation_intent(
         || intent.run_generation != record.run_generation()
         || !is_sha256(&intent.server_key)
         || intent.server_epoch == 0
+        || intent
+            .accepted_input
+            .as_ref()
+            .is_some_and(|input| !runtime_accepted_input_valid(input))
     {
         return Err(ConformanceError::InvalidHistory(
             "runtime idempotency intent violates the checked shape".to_owned(),
         ));
     }
     Ok(intent)
+}
+
+fn runtime_accepted_input_valid(input: &RuntimeAcceptedUserInput) -> bool {
+    let storage = input.content.storage();
+    let content_length_valid = match &input.content {
+        RuntimeAcceptedInputContent::Inline { .. } => storage.byte_length <= 1024 * 1024,
+        RuntimeAcceptedInputContent::Artifact { .. } => {
+            storage.byte_length > 1024 * 1024 && storage.byte_length <= 8 * 1024 * 1024
+        }
+    };
+    content_length_valid
+        && storage.artifact_id.get_version_num() == 7
+        && crate::audit::is_microsecond_utc_timestamp(&storage.created_at)
+        && is_sha256(&storage.sha256)
+        && input.images.len() <= 64
+        && input.images.iter().enumerate().all(|(ordinal, image)| {
+            image.ordinal == u32::try_from(ordinal).unwrap_or(u32::MAX)
+                && matches!(
+                    image.detail,
+                    RuntimeAcceptedImageDetail::Auto
+                        | RuntimeAcceptedImageDetail::Low
+                        | RuntimeAcceptedImageDetail::High
+                )
+                && matches!(
+                    image.media_type.as_str(),
+                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                )
+                && image.byte_length > 0
+                && is_sha256(&image.sha256)
+        })
 }
 
 fn record_runtime_operation_intent(

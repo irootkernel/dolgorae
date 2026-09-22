@@ -171,7 +171,7 @@ fn interactions(
     state_root: &Path,
     snapshot: &RunSnapshot,
 ) -> Result<Vec<Interaction>, MachineError> {
-    crate::semantic::durable_interactions_at(
+    crate::interaction::durable_interactions_at(
         state_root,
         snapshot.manifest.run_id,
         snapshot.stamp.run_state_revision,
@@ -400,6 +400,7 @@ fn artifact_projection(value: crate::artifact::ArtifactReference) -> pb::Artifac
         kind: match value.kind {
             crate::artifact::ArtifactKind::FinalResponse => pb::ArtifactKind::FinalResponse,
             crate::artifact::ArtifactKind::FileChangeDiff => pb::ArtifactKind::FileChangeDiff,
+            crate::artifact::ArtifactKind::UserInput => pb::ArtifactKind::UserInput,
         } as i32,
         visibility: match value.visibility {
             crate::artifact::ArtifactVisibility::Observer => pb::ArtifactVisibility::Observer,

@@ -47,6 +47,7 @@ pub mod snapshot;
 pub mod specialist;
 pub mod specialist_policy;
 pub mod task_request;
+pub mod timeline;
 pub mod turn;
 pub mod worker;
 pub mod workspace;

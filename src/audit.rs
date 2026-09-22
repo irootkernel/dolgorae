@@ -452,6 +452,11 @@ impl AuditRecord {
         &self.payload
     }
 
+    pub fn payload_value(&self) -> Result<serde_json::Value, AuditError> {
+        let bytes = canonicalize(&self.payload)?;
+        serde_json::from_slice(&bytes).map_err(|_| AuditError::InvalidPayload)
+    }
+
     fn lossless(&self, include_hash: bool) -> LosslessJson {
         let mut entries = vec![
             (

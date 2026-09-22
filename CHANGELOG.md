@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Expose the complete Controller-authorized Run timeline through Machine CLI
+  and gRPC, preserving accepted UTF-8 prompts, safe image metadata, bounded
+  paging, long-input artifacts, interaction history, terminal outcomes, and
+  exact replay without admitting Specialist prompts as human history.
 - Publish completed brokered Specialist output as verified immutable
   Primary-owned bytes with recoverable artifact association, exact redelivery,
   and bounded UTF-8 `read_specialist_result` pages without exposing child

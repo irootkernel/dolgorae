@@ -17,6 +17,7 @@ pub const MAX_CHUNK_BYTES: u32 = 1_048_576;
 pub enum ArtifactKind {
     FinalResponse,
     FileChangeDiff,
+    UserInput,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -170,6 +171,21 @@ fn artifact_reference(
     id: Uuid,
 ) -> Result<ArtifactReference, MachineError> {
     let mut found: Option<ArtifactReference> = None;
+    let accepted_operations = records
+        .records()
+        .iter()
+        .filter(|record| record.kind() == crate::audit::AuditKind::TurnStarted)
+        .map(|record| {
+            let bytes = crate::jcs::canonicalize(record.payload())
+                .map_err(|_| invalid("accepted Turn artifact binding"))?;
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| invalid("accepted Turn artifact binding"))?;
+            value["operation_id"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| invalid("accepted Turn operation identity"))
+        })
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
     for record in records.records() {
         let candidate = if let Some(event) = record.client_projection() {
             if let ClientEventData::ResponseFinal(crate::event::ResponseEventPayload {
@@ -224,6 +240,20 @@ fn artifact_reference(
                             serde_json::from_value(artifact.clone())
                                 .map_err(|_| invalid("interaction artifact metadata"))?,
                         )?)
+                    } else {
+                        None
+                    }
+                }
+                crate::audit::AuditKind::IdempotencyReserved => {
+                    let bytes = crate::jcs::canonicalize(record.payload())
+                        .map_err(|_| invalid("accepted input artifact record"))?;
+                    let value: Value = serde_json::from_slice(&bytes)
+                        .map_err(|_| invalid("accepted input artifact payload"))?;
+                    let operation_id = value["operation_id"]
+                        .as_str()
+                        .and_then(|value| Uuid::parse_str(value).ok());
+                    if operation_id.is_some_and(|value| accepted_operations.contains(&value)) {
+                        user_input_artifact(&value, id)?
                     } else {
                         None
                     }
@@ -285,6 +315,65 @@ fn artifact_reference(
         "ARTIFACT_NOT_FOUND",
         "artifact is not referenced by this Run",
     ))
+}
+
+fn user_input_artifact(
+    intent: &Value,
+    id: Uuid,
+) -> Result<Option<ArtifactReference>, MachineError> {
+    let content = &intent["accepted_input"]["content"];
+    let storage = &content["storage"];
+    if content["kind"].as_str() != Some("artifact")
+        || storage["artifact_id"].as_str() != Some(id.to_string().as_str())
+    {
+        return Ok(None);
+    }
+    let created_at = storage["created_at"]
+        .as_str()
+        .filter(|value| crate::audit::is_microsecond_utc_timestamp(value))
+        .ok_or_else(|| invalid("accepted input artifact creation time"))?;
+    let byte_length = storage["byte_length"]
+        .as_u64()
+        .filter(|value| *value <= 8 * 1024 * 1024)
+        .ok_or_else(|| invalid("accepted input artifact byte length"))?;
+    let sha256 = storage["sha256"]
+        .as_str()
+        .ok_or_else(|| invalid("accepted input artifact digest"))?;
+    digest(sha256)?;
+    Ok(Some(ArtifactReference {
+        artifact_id: id.to_string(),
+        created_at: created_at.to_owned(),
+        interaction_request_id: None,
+        kind: ArtifactKind::UserInput,
+        visibility: ArtifactVisibility::ControllerOnly,
+        media_type: "text/plain; charset=utf-8".to_owned(),
+        byte_length,
+        sha256: sha256.to_owned(),
+    }))
+}
+
+pub(crate) fn accepted_input_text(
+    state_root: &Path,
+    run_id: Uuid,
+    artifact_id: Uuid,
+    created_at: &str,
+    byte_length: u64,
+    sha256: &str,
+) -> Result<String, MachineError> {
+    let reference = ArtifactReference {
+        artifact_id: artifact_id.to_string(),
+        created_at: created_at.to_owned(),
+        interaction_request_id: None,
+        kind: ArtifactKind::UserInput,
+        visibility: ArtifactVisibility::ControllerOnly,
+        media_type: "text/plain; charset=utf-8".to_owned(),
+        byte_length,
+        sha256: sha256.to_owned(),
+    };
+    let length =
+        u32::try_from(byte_length).map_err(|_| invalid("accepted input inline byte length"))?;
+    let bytes = read_artifact_range(state_root, run_id, artifact_id, &reference, (0, length))?;
+    String::from_utf8(bytes).map_err(|_| invalid("accepted input UTF-8"))
 }
 
 fn specialist_result_reference(

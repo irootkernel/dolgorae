@@ -122,6 +122,12 @@ pub trait GatewayBackend: Send + Sync + 'static {
     ) -> Result<EventPage, MachineError> {
         Err(unavailable("ObservationService.WatchRunEvents"))
     }
+    fn list_run_timeline_items(
+        &self,
+        _request: pb::ListRunTimelineItemsRequest,
+    ) -> Result<pb::ListRunTimelineItemsResponse, MachineError> {
+        Err(unavailable("ObservationService.ListRunTimelineItems"))
+    }
     fn list_pending_interactions(
         &self,
         _request: pb::ListPendingInteractionsRequest,
@@ -517,10 +523,11 @@ impl pb::observation_service_server::ObservationService for GatewayTransport {
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "ObservationService.ListRunTimelineItems"))?;
-        Err(error_status(
-            &unavailable("ObservationService.ListRunTimelineItems"),
-            "ObservationService.ListRunTimelineItems",
-        ))
+        self.execute("ObservationService.ListRunTimelineItems", move |backend| {
+            backend.list_run_timeline_items(request)
+        })
+        .await
+        .map(Response::new)
     }
 }
 

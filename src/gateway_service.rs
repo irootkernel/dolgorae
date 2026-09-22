@@ -417,6 +417,28 @@ impl GatewayBackend for CoreGatewayBackend {
             request.projection_version,
         )
     }
+    fn list_run_timeline_items(
+        &self,
+        request: pb::ListRunTimelineItemsRequest,
+    ) -> Result<pb::ListRunTimelineItemsResponse, MachineError> {
+        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        let controller = request.controller.as_ref().ok_or_else(|| {
+            MachineError::interaction_full_payload_requires_controller(
+                snapshot.manifest.run_id,
+                "run.timeline.list",
+            )
+        })?;
+        let carrier = self.run_controller(&snapshot, controller)?;
+        crate::timeline::list(
+            &root,
+            &snapshot,
+            &carrier,
+            &request.after_cursor,
+            request.limit,
+            request.timeline_version,
+            self.context(),
+        )
+    }
     fn list_pending_interactions(
         &self,
         request: pb::ListPendingInteractionsRequest,

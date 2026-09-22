@@ -1,4 +1,5 @@
-use crate::audit::{AuditError, AuditKind, AuditRecord, GENESIS_PREVIOUS_HASH};
+pub use crate::audit::AuditRecord;
+use crate::audit::{AuditError, AuditKind, GENESIS_PREVIOUS_HASH};
 use crate::darwin::DarwinSystem;
 use crate::fault::{FaultBarrier, FaultInjected, FaultInjector, NoFaults};
 use crate::jcs::{

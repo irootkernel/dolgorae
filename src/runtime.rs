@@ -218,6 +218,7 @@ impl RuntimeFeatures {
         features.sticky_dedicated_lanes = true;
         features.control_modes = true;
         features.event_replay = true;
+        features.controller_timeline = true;
         features.artifact_retrieval = true;
         features.safe_client_projection = true;
         features.public_local_socket = true;
@@ -245,6 +246,7 @@ pub fn capabilities() -> RuntimeCapabilities {
             "InteractionService.GetControllerInteraction",
             "InteractionService.ListPendingInteractions",
             "InteractionService.ResolveInteraction",
+            "ObservationService.ListRunTimelineItems",
             "ObservationService.WatchRunEvents",
             "RunService.CloseRun",
             "RunService.GetRun",
@@ -359,7 +361,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
-    fn task_023_advertises_the_implemented_public_surface() {
+    fn task_054_advertises_the_implemented_public_surface() {
         let capabilities = serde_json::to_value(capabilities()).unwrap();
         assert_eq!(capabilities["features"]["persistent_runs"], true);
         assert_eq!(
@@ -377,11 +379,18 @@ mod tests {
         assert_eq!(capabilities["features"]["operator_controller_reset"], true);
         assert_eq!(capabilities["features"]["safe_client_projection"], true);
         assert_eq!(capabilities["features"]["public_local_socket"], true);
+        assert_eq!(capabilities["features"]["controller_timeline"], true);
         assert_eq!(
             capabilities["supported_transports"],
             json!(["machine_cli", "local_grpc"])
         );
-        assert_eq!(capabilities["grpc_methods"].as_array().unwrap().len(), 24);
+        assert_eq!(capabilities["grpc_methods"].as_array().unwrap().len(), 25);
+        assert!(
+            capabilities["grpc_methods"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("ObservationService.ListRunTimelineItems"))
+        );
         assert!(
             !capabilities["grpc_methods"]
                 .as_array()

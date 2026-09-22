@@ -96,11 +96,19 @@ async fn public_bootstrap_and_machine_parity() {
     ))
     .unwrap();
     assert_eq!(capabilities.supported_methods, methods);
+    let mut expected = checked["delivery_stages"]["MILESTONE-BH1"]["required_methods"]
+        .as_array()
+        .unwrap()
+        .clone();
+    expected.push(Value::String(
+        "ObservationService.ListRunTimelineItems".to_owned(),
+    ));
+    expected.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
     assert_eq!(
         serde_json::to_value(&methods).unwrap(),
-        checked["delivery_stages"]["MILESTONE-BH1"]["required_methods"]
+        Value::Array(expected)
     );
-    assert_eq!(methods.len(), 24);
+    assert_eq!(methods.len(), 25);
     let workspace = runtime
         .inspect_workspace(pb::InspectWorkspaceRequest {
             context: context(),
@@ -712,19 +720,261 @@ async fn native_context_and_unavailable_method_rejection() {
             .unwrap_err(),
         "CAPABILITY_UNSUPPORTED",
     );
-    semantic_error(
-        &observations
-            .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
-                context: context(),
-                ..Default::default()
-            })
-            .await
-            .unwrap_err(),
-        "CAPABILITY_UNSUPPORTED",
-    );
     assert_eq!(audit(&fixture, &id), before);
     assert_eq!(run_count(&fixture), 1);
     assert_eq!(upstream_turn_starts(&fixture), 0);
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn controller_timeline_preserves_input_and_pages_without_replay_duplicates() {
+    let fixture = Fixture::with_scenario(timeline_scenario());
+    let id = fixture.start_run(&[]);
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let mut observations =
+        pb::observation_service_client::ObservationServiceClient::new(channel.clone());
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    let image_path = fixture.workspace.join("timeline.png");
+    use base64::Engine as _;
+    fs::write(
+        &image_path,
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jU1sAAAAASUVORK5CYII=")
+            .unwrap(),
+    )
+    .unwrap();
+    let message = "첫 줄 🐋\r\n둘째 줄\n";
+    let request = pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        idempotency_key: "timeline-original".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: message.to_owned(),
+        images: vec![pb::ImageInput {
+            absolute_file_path: image_path.to_string_lossy().into_owned(),
+            detail: pb::ImageDetail::High as i32,
+        }],
+        effort: None,
+        expected_state_revision: initial.state_revision,
+    };
+    let accepted = runs
+        .submit_turn(request.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+
+    let unauthorized = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: None,
+            after_cursor: "0".to_owned(),
+            limit: 100,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(
+        &unauthorized,
+        "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER",
+    );
+    let too_large = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: "0".to_owned(),
+            limit: 501,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&too_large, "INVALID_ARGUMENT");
+
+    let first = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: "0".to_owned(),
+            limit: 1,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(first.items.len(), 1);
+    let input = &first.items[0];
+    assert_eq!(input.r#type, pb::TimelineItemType::UserInputAccepted as i32);
+    assert_eq!(
+        input.turn_id,
+        accepted.accepted_turn.as_ref().unwrap().turn_id
+    );
+    assert_eq!(
+        input.content,
+        Some(pb::timeline_item::Content::InlineText(message.to_owned()))
+    );
+    assert_eq!(input.images.len(), 1);
+    assert_eq!(input.images[0].ordinal, 0);
+    assert_eq!(input.images[0].detail, pb::ImageDetail::High as i32);
+    assert_eq!(input.images[0].media_type, "image/png");
+    assert!(!format!("{input:?}").contains(image_path.to_str().unwrap()));
+    let next = first.next_after_cursor.clone().unwrap();
+    assert_eq!(next, input.cursor);
+
+    let rest = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: next,
+            limit: 100,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        rest.items
+            .iter()
+            .map(|item| item.r#type)
+            .collect::<Vec<_>>(),
+        [
+            pb::TimelineItemType::AssistantResponseFinal as i32,
+            pb::TimelineItemType::TurnTerminal as i32,
+        ]
+    );
+    assert_eq!(
+        rest.items[0].content,
+        Some(pb::timeline_item::Content::InlineText(
+            "타임라인 응답".to_owned()
+        ))
+    );
+    assert!(rest.next_after_cursor.is_none());
+
+    let replay = runs.submit_turn(request).await.unwrap().into_inner();
+    assert_eq!(replay.accepted_turn, accepted.accepted_turn);
+    let all = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: "0".to_owned(),
+            limit: 100,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        all.items
+            .iter()
+            .filter(|item| item.r#type == pb::TimelineItemType::UserInputAccepted as i32)
+            .count(),
+        1
+    );
+    let prior_head = all.captured_head_cursor.clone();
+    let current = native_snapshot(&mut runs, &fixture, &id).await;
+    let long_message = "x".repeat(1_048_577);
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        idempotency_key: "timeline-long-input".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: long_message.clone(),
+        images: Vec::new(),
+        effort: None,
+        expected_state_revision: current.state_revision,
+    })
+    .await
+    .unwrap();
+    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+    let added = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: prior_head,
+            limit: 100,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let artifact = match added.items[0].content.as_ref().unwrap() {
+        pb::timeline_item::Content::Artifact(artifact) => artifact,
+        other => panic!("long accepted input was not an artifact: {other:?}"),
+    };
+    assert_eq!(artifact.kind, pb::ArtifactKind::UserInput as i32);
+    assert_eq!(
+        artifact.visibility,
+        pb::ArtifactVisibility::ControllerOnly as i32
+    );
+    assert_eq!(artifact.byte_length, long_message.len() as u64);
+    let mut artifacts = pb::artifact_service_client::ArtifactServiceClient::new(channel);
+    let protected = artifacts
+        .get_artifact(pb::GetArtifactRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            artifact_id: artifact.artifact_id.clone(),
+            controller: None,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&protected, "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER");
+    let metadata = artifacts
+        .get_artifact(pb::GetArtifactRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            artifact_id: artifact.artifact_id.clone(),
+            controller: fixture.carrier(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(metadata.artifact.as_ref(), Some(artifact));
+    let first_chunk = artifacts
+        .read_artifact_chunk(pb::ReadArtifactChunkRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            artifact_id: artifact.artifact_id.clone(),
+            offset: 0,
+            length: 1_048_576,
+            controller: fixture.carrier(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let last_chunk = artifacts
+        .read_artifact_chunk(pb::ReadArtifactChunkRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            artifact_id: artifact.artifact_id.clone(),
+            offset: first_chunk.length as u64,
+            length: 1,
+            controller: fixture.carrier(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(first_chunk.data.len(), 1_048_576);
+    assert_eq!(last_chunk.data, b"x");
+    assert!(last_chunk.eof);
+    let cli = fixture.cli(&[
+        "run",
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+        "timeline",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        &id,
+    ]);
+    assert_eq!(cli["items"][0]["content"]["text"], message);
     gateway.terminate();
 }
 
@@ -1388,6 +1638,22 @@ fn active_turn_scenario(interaction: bool) -> Value {
     scenario
 }
 
+fn timeline_scenario() -> Value {
+    let mut scenario = support::base_scenario();
+    let step = scenario["steps"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|step| step["method"] == "turn/start" && step["occurrence"] == 1)
+        .unwrap();
+    step["emit"] = serde_json::json!([{"kind":"notification","method":"turn/completed","params":{
+        "threadId":"${thread_id}","turn":{"id":"turn-1","status":"completed","items":[{
+            "type":"agentMessage","status":"completed","phase":"final_answer","text":"타임라인 응답"
+        }]}
+    }}]);
+    scenario
+}
+
 async fn native_snapshot(
     runs: &mut pb::run_service_client::RunServiceClient<tonic::transport::Channel>,
     fixture: &Fixture,
@@ -1485,7 +1751,9 @@ async fn native_interrupt_invalidates_interaction() {
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
     let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
-    let mut interactions = pb::interaction_service_client::InteractionServiceClient::new(channel);
+    let mut interactions =
+        pb::interaction_service_client::InteractionServiceClient::new(channel.clone());
+    let mut observations = pb::observation_service_client::ObservationServiceClient::new(channel);
     let initial = native_snapshot(&mut runs, &fixture, &id).await;
     native_submit(&mut runs, &fixture, &initial, pb::WriteIntent::Read).await;
     let waiting = native_wait_lifecycle(
@@ -1594,6 +1862,43 @@ async fn native_interrupt_invalidates_interaction() {
             .map(|line| serde_json::from_slice::<Value>(line).unwrap())
             .any(|record| record["kind"] == "turn_terminal"
                 && record["payload"]["status"] == "interrupted")
+    );
+    let timeline = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: "0".to_owned(),
+            limit: 100,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        timeline
+            .items
+            .iter()
+            .map(|item| item.r#type)
+            .collect::<Vec<_>>(),
+        [
+            pb::TimelineItemType::UserInputAccepted as i32,
+            pb::TimelineItemType::InteractionOpened as i32,
+            pb::TimelineItemType::InteractionResolved as i32,
+            pb::TimelineItemType::TurnTerminal as i32,
+        ]
+    );
+    assert_eq!(
+        timeline.items[1].interaction_status,
+        Some(pb::InteractionStatus::Pending as i32)
+    );
+    assert_eq!(
+        timeline.items[2].interaction_status,
+        Some(pb::InteractionStatus::Stale as i32)
+    );
+    assert_eq!(
+        timeline.items[3].status,
+        Some(pb::TimelineItemStatus::Interrupted as i32)
     );
     gateway.terminate();
 }

@@ -923,9 +923,10 @@ open the Broker store or invoke the private Primary bridge directly.
 gRPC status, retry, and recovery mapping.
 The `controller` module owns the descriptor-relative confined carrier walk;
 the adapter supplies only the checked path and expected public identity.
-`interaction` owns the normalized durable Interaction record and observer-safe
-summary policy shared by Machine CLI and public gRPC, plus the protected response
-byte bound. `interaction_payload` owns the normalized payload DTOs and their
+`interaction` owns the normalized durable Interaction record, reconstruction at
+a captured ledger head, and observer-safe summary policy shared by Machine CLI
+and public gRPC, plus the protected response byte bound. `interaction_payload`
+owns the normalized payload DTOs and their
 transport-neutral field validation; both adapters validate the complete payload
 there before formatting it. The adapters retain their output formatting and
 observation filters.
@@ -938,6 +939,10 @@ reader used by Machine CLI `run artifact show` and `run artifact read`. That sha
 reader owns immutable file-change reference validation, visibility authorization,
 retention, safe file access, full-digest verification, and range bounds. Run enumeration likewise enters the shared
 semantic service; the adapter cannot define a different filtering policy.
+`timeline` owns the Controller-authorized accepted-input and safe-event
+projection shared by Machine CLI and gRPC. It joins accepted Turn identity to
+the durable input record, uses `interaction` for captured-head Interaction
+state, and delegates inline and long-input byte verification to `artifact`.
 `gateway_projection` formats typed snapshots and `gateway_event` formats
 historical client-safe events; neither chooses product transitions. `snapshot`
 performs bounded cross-owner durable capture for both adapters, including the

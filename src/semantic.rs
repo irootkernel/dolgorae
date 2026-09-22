@@ -70,6 +70,7 @@ pub enum RunVerb {
     Submit,
     Wait,
     Events,
+    Timeline,
     Pending,
     Respond,
     Interrupt,
@@ -224,9 +225,11 @@ fn interaction_pending_at(state_root: &Path, run_id: Uuid) -> Result<Value, Mach
         observed_control_socket_epoch(state_root, run_id),
     )?;
     let mut items = Vec::new();
-    for (interaction, _) in
-        durable_interactions_at(state_root, run_id, snapshot.stamp.run_state_revision)?
-    {
+    for (interaction, _) in crate::interaction::durable_interactions_at(
+        state_root,
+        run_id,
+        snapshot.stamp.run_state_revision,
+    )? {
         let interaction = crate::interaction::Interaction::parse(interaction, run_id)?;
         if !interaction.pending_at(&snapshot) {
             continue;
@@ -255,64 +258,11 @@ fn durable_interactions(
     state_root: &Path,
     run_id: Uuid,
 ) -> Result<Vec<(Value, u64)>, MachineError> {
-    durable_interactions_at(state_root, run_id, durable_head(state_root, run_id)?)
-}
-
-pub(crate) fn durable_interactions_at(
-    state_root: &Path,
-    run_id: Uuid,
-    head: u64,
-) -> Result<Vec<(Value, u64)>, MachineError> {
-    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
-    let decisions = ledger
-        .payloads_of_kind(AuditKind::ApprovalDecided)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
-        .into_iter()
-        .filter_map(|payload| {
-            let request_id = payload.get("request_id")?.as_str()?.parse::<u64>().ok()?;
-            Some((request_id, payload))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    ledger
-        .payloads_of_kind(AuditKind::ApprovalRequested)
-        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?
-        .into_iter()
-        .map(|wrapper| {
-            let upstream_id = wrapper
-                .get("upstream_request_id")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| internal("durable interaction upstream id is missing"))?;
-            let mut interaction = wrapper
-                .get("interaction")
-                .cloned()
-                .ok_or_else(|| internal("durable normalized interaction is missing"))?;
-            if let Some(decision) = decisions.get(&upstream_id) {
-                let object = interaction
-                    .as_object_mut()
-                    .ok_or_else(|| internal("durable normalized interaction is invalid"))?;
-                let resolution = decision
-                    .get("resolution")
-                    .cloned()
-                    .ok_or_else(|| internal("durable interaction resolution is missing"))?;
-                object.insert(
-                    "status".to_owned(),
-                    json!(
-                        if resolution.get("outcome").and_then(Value::as_str) == Some("stale") {
-                            "stale"
-                        } else {
-                            "resolved"
-                        }
-                    ),
-                );
-                object.insert(
-                    "resolved_at".to_owned(),
-                    decision.get("resolved_at").cloned().unwrap_or(Value::Null),
-                );
-                object.insert("resolution".to_owned(), resolution);
-            }
-            Ok((interaction, upstream_id))
-        })
-        .collect()
+    crate::interaction::durable_interactions_at(
+        state_root,
+        run_id,
+        durable_head(state_root, run_id)?,
+    )
 }
 
 fn resolve_public_interaction_id(
@@ -370,6 +320,7 @@ impl RunVerb {
             Self::Submit => "run.submit",
             Self::Wait => "run.wait",
             Self::Events => "run.events",
+            Self::Timeline => "run.timeline",
             Self::Pending => "run.pending",
             Self::Respond => "run.respond",
             Self::Interrupt => "run.interrupt",
@@ -3225,7 +3176,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
     let run_id = positional_run_id(args)?;
     let state_root = workspace_state_root(&view)?;
-    let carrier = if verb.mutates() {
+    let carrier = if verb.mutates() || verb == RunVerb::Timeline {
         Some(carrier_from_options(
             args,
             "--controller-file",
@@ -3287,6 +3238,14 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             let projection = parse_projection(optional(args, "--projection").as_deref())?;
             return run_events(&state_root, run_id, uid, requested, &projection);
         }
+        RunVerb::Timeline => {
+            return run_timeline(
+                &state_root,
+                run_id,
+                carrier.expect("timeline has a Controller carrier"),
+                args,
+            );
+        }
         RunVerb::Respond => Prepared::Respond {
             request_id: resolve_public_interaction_id(
                 &state_root,
@@ -3308,6 +3267,143 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         None,
     )
     .map(|(result, _)| result)
+}
+
+fn run_timeline(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: CredentialCarrier,
+    args: &[OsString],
+) -> Result<SemanticResult, MachineError> {
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, run_id, 0)?;
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, "run.timeline", &binding, &carrier)?;
+    let carrier = carrier.with_expected_generation(binding.identity.generation);
+    let after = optional(args, "--after").unwrap_or_else(|| "0".to_owned());
+    let limit = optional(args, "--limit")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| MachineError::invalid_argument("--limit", "limit exceeds u32"))
+        })
+        .transpose()?
+        .unwrap_or(100);
+    let page = crate::timeline::list(
+        state_root,
+        &snapshot,
+        &carrier,
+        &after,
+        limit,
+        1,
+        crate::protocol::public_v1::ResponseContext::default(),
+    )?;
+    let items = page
+        .items
+        .into_iter()
+        .map(|item| timeline_machine_item(state_root, &snapshot, &carrier, item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SemanticResult::Run(json!({
+        "schema_version": 1,
+        "run_id": run_id,
+        "captured_head_cursor": page.captured_head_cursor,
+        "next_after_cursor": page.next_after_cursor,
+        "items": items,
+    })))
+}
+
+fn timeline_machine_item(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+    carrier: &CredentialCarrier,
+    item: crate::protocol::public_v1::TimelineItem,
+) -> Result<Value, MachineError> {
+    use crate::protocol::public_v1 as pb;
+    let item_type = match pb::TimelineItemType::try_from(item.r#type) {
+        Ok(pb::TimelineItemType::UserInputAccepted) => "user_input.accepted",
+        Ok(pb::TimelineItemType::AssistantResponseFinal) => "assistant_response.final",
+        Ok(pb::TimelineItemType::InteractionOpened) => "interaction.opened",
+        Ok(pb::TimelineItemType::InteractionResolved) => "interaction.resolved",
+        Ok(pb::TimelineItemType::TurnTerminal) => "turn.terminal",
+        _ => return Err(internal("timeline item has an unsupported type")),
+    };
+    let content = match item.content {
+        Some(pb::timeline_item::Content::InlineText(text)) => json!({"kind":"inline","text":text}),
+        Some(pb::timeline_item::Content::Artifact(artifact)) => {
+            let metadata = crate::artifact::metadata(
+                state_root,
+                snapshot,
+                &artifact.artifact_id,
+                Some(carrier),
+            )?;
+            json!({"kind":"artifact","artifact":metadata.artifact.machine_value(snapshot.manifest.run_id)})
+        }
+        None => Value::Null,
+    };
+    let status = item
+        .status
+        .and_then(|value| pb::TimelineItemStatus::try_from(value).ok())
+        .map(|value| match value {
+            pb::TimelineItemStatus::Accepted => "accepted",
+            pb::TimelineItemStatus::Final => "final",
+            pb::TimelineItemStatus::Opened => "opened",
+            pb::TimelineItemStatus::Resolved => "resolved",
+            pb::TimelineItemStatus::Completed => "completed",
+            pb::TimelineItemStatus::Failed => "failed",
+            pb::TimelineItemStatus::Interrupted => "interrupted",
+            pb::TimelineItemStatus::OutcomeUnknown => "outcome_unknown",
+            pb::TimelineItemStatus::Unspecified => "unspecified",
+        });
+    let interaction_kind = item
+        .interaction_kind
+        .and_then(|value| pb::InteractionKind::try_from(value).ok())
+        .map(|value| match value {
+            pb::InteractionKind::CommandExecutionApproval => "command_execution_approval",
+            pb::InteractionKind::FileChangeApproval => "file_change_approval",
+            pb::InteractionKind::PermissionRequest => "permission_request",
+            pb::InteractionKind::UserInput => "user_input",
+            pb::InteractionKind::McpElicitation => "mcp_elicitation",
+            pb::InteractionKind::ConnectorApproval => "connector_approval",
+            pb::InteractionKind::UnsupportedRequest => "unsupported_request",
+            pb::InteractionKind::Unspecified => "unspecified",
+        });
+    let interaction_status = item
+        .interaction_status
+        .and_then(|value| pb::InteractionStatus::try_from(value).ok())
+        .map(|value| match value {
+            pb::InteractionStatus::Pending => "pending",
+            pb::InteractionStatus::Resolved => "resolved",
+            pb::InteractionStatus::Stale => "stale",
+            pb::InteractionStatus::Unspecified => "unspecified",
+        });
+    let images = item
+        .images
+        .into_iter()
+        .map(|image| {
+            let detail = match pb::ImageDetail::try_from(image.detail) {
+                Ok(pb::ImageDetail::Auto) => "auto",
+                Ok(pb::ImageDetail::Low) => "low",
+                Ok(pb::ImageDetail::High) => "high",
+                _ => "unspecified",
+            };
+            json!({"ordinal":image.ordinal,"detail":detail,"media_type":image.media_type,"byte_length":image.byte_length,"sha256":image.sha256})
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "type": item_type,
+        "cursor": item.cursor,
+        "run_id": item.run_id,
+        "turn_id": item.turn_id,
+        "occurred_at": item.occurred_at.map(|value| value.to_string()),
+        "provider_item_id": item.provider_item_id,
+        "provider_order": item.provider_order,
+        "content": content,
+        "images": images,
+        "interaction_id": item.interaction_id,
+        "status": status,
+        "interaction_kind": interaction_kind,
+        "interaction_status": interaction_status,
+        "interaction_safe_title": item.interaction_safe_title,
+    }))
 }
 
 fn checked_controller_request(
@@ -5638,7 +5734,9 @@ fn control_response_value(
                 }
                 // `events` answers with the event stream or nothing; anything
                 // else here would publish a shape the verb's schema forbids.
-                RunVerb::Events => return Err(internal("event read answered with run state")),
+                RunVerb::Events | RunVerb::Timeline => {
+                    return Err(internal("observation read answered with run state"));
+                }
                 RunVerb::Status => {
                     // The worker reports the terminal its own drain observed;
                     // a worker that was restarted, or never ran the Turn, has

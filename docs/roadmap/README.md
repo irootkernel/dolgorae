@@ -40,8 +40,8 @@ Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
-TASK-047, TASK-048, TASK-049, TASK-050, and TASK-051 are complete; TASK-054 is
-the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance
+TASK-047, TASK-048, TASK-049, TASK-050, TASK-051, and TASK-054 are complete;
+TASK-055 is the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance
 is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
@@ -1757,7 +1757,7 @@ results through the intended private/public boundaries. Next: TASK-054.
 
 ### TASK-054: Complete Controller Timeline and Durable Prompt History
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-051`. Move complete ListRunTimelineItems implementation from
 TASK-029 into v0.1.3. Reuse the ledger/timeline/artifact owners. Support every

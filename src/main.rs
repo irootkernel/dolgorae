@@ -813,6 +813,7 @@ fn run_verb(command: &RunCommand) -> Option<(SemanticRunVerb, &[OsString])> {
         RunCommand::Submit(leaf) => (SemanticRunVerb::Submit, leaf.args.as_slice()),
         RunCommand::Wait(leaf) => (SemanticRunVerb::Wait, leaf.args.as_slice()),
         RunCommand::Events(leaf) => (SemanticRunVerb::Events, leaf.args.as_slice()),
+        RunCommand::Timeline(leaf) => (SemanticRunVerb::Timeline, leaf.args.as_slice()),
         RunCommand::Pending(leaf) => (SemanticRunVerb::Pending, leaf.args.as_slice()),
         RunCommand::Respond(leaf) => (SemanticRunVerb::Respond, leaf.args.as_slice()),
         RunCommand::Interrupt(leaf) => (SemanticRunVerb::Interrupt, leaf.args.as_slice()),
