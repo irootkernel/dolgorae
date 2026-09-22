@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Make root `CloseRun` retire a complete Orchestrated Session through one
+  durable close operation, with admission fencing, owned-Specialist settlement,
+  restart recovery, explicit in-progress correlation, and fail-closed unknown
+  outcomes while preserving ordinary low-level Run controls.
 - Expose Controller-authorized Orchestrated Session snapshots and stable
   published Specialist results through the public gateway, with independent
   aggregate revisions, read-only captured-head paging, explicit Primary-owned

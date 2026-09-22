@@ -15,6 +15,18 @@ if __name__ == "__main__":
     )
     run_case(
         "gateway_semantic_native",
+        "root_close_persists_one_operation_and_survives_gateway_restart",
+    )
+    run_case(
+        "gateway_semantic_native",
+        "root_recovery_resumes_a_close_intent_committed_before_gateway_restart",
+    )
+    run_case(
+        "gateway_semantic_native",
+        "root_close_requires_explicit_interrupt_before_committing_active_work",
+    )
+    run_case(
+        "gateway_semantic_native",
         "controller_timeline_preserves_input_and_pages_without_replay_duplicates",
     )
     run_case("gateway_semantic_native", "native_interrupt_invalidates_interaction")

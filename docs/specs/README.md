@@ -4112,8 +4112,14 @@ The existing public v1 gRPC Run operations remain the low-level Gul wire
 contract. For a durably registered Orchestrated root, the
 [whole-session close contract](gul-consumer-v1.md#7-whole-session-close)
 requires Broker-owned termination of all owned work before successful closed
-state. Ordinary low-level and external Run meanings are unchanged. Primary
-pause/interrupt must not be presented as aggregate pause. A direct-interactive
+state. Close intent and its interrupt choice are durable before effects; one
+retained operation identity correlates accepted-in-progress errors, aggregate
+observation, recovery, and the completed response. New Broker admission stops
+at that commit boundary. Unknown spawn, task, child-retirement, root-close, or
+writer effects keep the aggregate in a typed reconciliation state and cannot be
+converted into successful closure. Ordinary low-level and external Run meanings
+are unchanged. Primary pause/interrupt must not be presented as aggregate pause.
+A direct-interactive
 root `StartRun` carrying checked launch metadata
 in its protected Controller carrier is aggregate-aware inside the semantic
 service and creates the Orchestration Session without a new RPC. The
@@ -4125,6 +4131,8 @@ Protobuf source or descriptor. TASK-053 separately adds the read-only
 GetOrchestratedSession and ListOrchestratedSessionResults consumer queries.
 Their required projections expose actual aggregate/close state and permitted
 result references, without granting child-control or mutation-on-read authority.
+`RecoverRun` and `ReconcileRun` resume only retained close work for an
+Orchestrated root; they do not auto-resume a paused Run or submit a new Turn.
 
 Gul v1 obtains a safe operational view from the existing Primary Run stream,
 Controller Interactions, `ListRuns`, and public parent projections. It MAY show

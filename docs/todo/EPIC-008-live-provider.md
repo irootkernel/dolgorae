@@ -339,14 +339,14 @@ Next: TASK-052.
 
 Input: complete task and result paths with their own local recovery checks.
 
-- [ ] Wire root CloseRun to whole-session completion/abort through the Broker, with durable closing intent and no successful closure while owned effects remain unknown.
-- [ ] Preserve Primary-scoped Pause/Interrupt, explicit interrupt confirmation, root recovery of close intent, history/results/files and unrelated runtimes.
-- [ ] Stop new admission without discarding accepted/unknown work or undelivered results.
-- [ ] Reconstruct original Run/thread/Profile/access/working-root/deadline bindings.
-- [ ] Preserve writer and Controller ownership across gateway/Worker replacement.
-- [ ] Reuse TASK-046 process verification; keep healthy shared servers alive on disconnect.
-- [ ] Test approval, dispatch, execution, result, and retirement restarts through connected paths.
-- [ ] Verify cleanup, compatibility, independent review, and one completion commit.
+- [x] Wire root CloseRun to whole-session completion/abort through the Broker, with durable closing intent and no successful closure while owned effects remain unknown.
+- [x] Preserve Primary-scoped Pause/Interrupt, explicit interrupt confirmation, root recovery of close intent, history/results/files and unrelated runtimes.
+- [x] Stop new admission without discarding accepted/unknown work or undelivered results.
+- [x] Reconstruct original Run/thread/Profile/access/working-root/deadline bindings.
+- [x] Preserve writer and Controller ownership across gateway/Worker replacement.
+- [x] Reuse TASK-046 process verification; keep healthy shared servers alive on disconnect.
+- [x] Test approval, dispatch, execution, result, and retirement restarts through connected paths.
+- [x] Verify cleanup, compatibility, independent review, and one completion commit.
 
 No automatic replay, unsolicited Primary Turn, paused-Run activation, or new
 cleanup subsystem. Next: TASK-056.

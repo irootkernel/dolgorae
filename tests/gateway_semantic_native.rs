@@ -175,6 +175,98 @@ fn run_count(fixture: &Fixture) -> usize {
         .count()
 }
 
+fn install_orchestration_controller(
+    fixture: &Fixture,
+    policy_name: &str,
+) -> pb::ControllerCarrierRef {
+    let roles = fixture.workspace.join(".dolgorae/roles");
+    fs::create_dir_all(&roles).unwrap();
+    fs::write(
+        roles.join(format!("{policy_name}-role.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "name": format!("{policy_name}-role"),
+            "display_name": "Retirement verifier",
+            "description": "Supports deterministic hierarchy retirement tests.",
+            "instructions": "Return bounded deterministic results."
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let policy = fixture.root.join(format!("{policy_name}.json"));
+    fs::write(
+        &policy,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "policy_name": policy_name,
+            "revision": 1,
+            "approval_policy": "fully_delegated",
+            "max_active_specialists": 1,
+            "roles": [{
+                "role_ref": format!("{policy_name}-role"),
+                "role_source": {"scope":"project","name":format!("{policy_name}-role")},
+                "agent_configuration": {
+                    "schema_version": 2,
+                    "selected_profile": fixture.profile,
+                    "global_profile_binding_sha256": null,
+                    "model": "gpt-5.6",
+                    "default_effort": "medium",
+                    "purpose": "review",
+                    "purpose_label": null,
+                    "required_capabilities": [],
+                    "execution_lane": "dedicated",
+                    "required_assurance": "best_effort_personal_alpha",
+                    "native_subagent_policy": "enabled"
+                },
+                "max_active_instances": 1,
+                "reuse_policy": "never",
+                "allowed_access": ["read_only"],
+                "activation_policy": "keep_resident",
+                "primary_may_request": true,
+                "collaboration_source": false,
+                "collaboration_target": false,
+                "auto_approve_when_fully_delegated": true
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fixture.cli(&[
+        "specialist",
+        "policy",
+        "add",
+        policy_name,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--file",
+        policy.to_str().unwrap(),
+    ]);
+    let controller_path = fixture.home.join(format!(
+        ".dolgorae/controller-carriers/gateway-native/test-installation/{policy_name}.json"
+    ));
+    let created = fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "interactive-client",
+        "--instance-id",
+        policy_name,
+        "--orchestration-policy",
+        policy_name,
+        "--output",
+        controller_path.to_str().unwrap(),
+    ]);
+    pb::ControllerCarrierRef {
+        absolute_file_path: controller_path.to_string_lossy().into_owned(),
+        expected_controller_id: created["controller"]["controller_id"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expected_controller_generation: 1,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_bootstrap_and_machine_parity() {
     let fixture = Fixture::new("run_start_model_list.json");
@@ -519,6 +611,365 @@ async fn orchestration_queries_reject_a_low_level_run_after_controller_authentic
         .unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument);
     semantic_error(&status, "INVALID_ARGUMENT");
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_close_persists_one_operation_and_survives_gateway_restart() {
+    let fixture = Fixture::new("run_start_model_list.json");
+    let controller = install_orchestration_controller(&fixture, "session-retirement");
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let started = runs
+        .start_run(pb::StartRunRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller: Some(controller.clone()),
+            idempotency_key: Uuid::now_v7().to_string(),
+            profile_name: fixture.profile.clone(),
+            control_mode: pb::ControlMode::DirectInteractive as i32,
+            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+            purpose: pb::PurposeKind::Interactive as i32,
+            purpose_label: None,
+            model: Some("gpt-5.6".to_owned()),
+            effort: Some("medium".to_owned()),
+            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+            required_capabilities: Vec::new(),
+            instructions: Some("Exercise durable whole-session retirement.".to_owned()),
+            parent: None,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    let run = pb::RunRef {
+        workspace: Some(fixture.workspace()),
+        run_id: started.run_id.clone(),
+    };
+    let close_request = pb::CloseRunRequest {
+        context: context(),
+        run: Some(run.clone()),
+        controller: Some(controller.clone()),
+        interrupt: false,
+        expected_state_revision: started.state_revision,
+    };
+    let mut concurrent_runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let (first_close, second_close) = tokio::join!(
+        runs.close_run(close_request.clone()),
+        concurrent_runs.close_run(close_request)
+    );
+    let (closed, concurrent) = match (first_close, second_close) {
+        (Ok(closed), concurrent) => (closed.into_inner(), concurrent),
+        (Err(first), Ok(closed)) => {
+            assert_eq!(first.code(), Code::FailedPrecondition, "{first:?}");
+            (closed.into_inner(), Err(first))
+        }
+        (Err(first), Err(second)) => panic!("both compatible closes failed: {first}; {second}"),
+    };
+    let operation_id = closed.context.unwrap().operation_id.unwrap();
+    match concurrent {
+        Ok(concurrent) => assert_eq!(
+            concurrent
+                .into_inner()
+                .context
+                .unwrap()
+                .operation_id
+                .as_deref(),
+            Some(operation_id.as_str())
+        ),
+        Err(status) => {
+            assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+            let detail = semantic_error(&status, "SESSION_CLOSE_IN_PROGRESS");
+            assert_eq!(detail.operation_id.as_deref(), Some(operation_id.as_str()));
+        }
+    }
+    let closed_run = closed.run.unwrap();
+    assert_eq!(closed_run.lifecycle, pb::RunLifecycle::Closed as i32);
+
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel);
+    let observed = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: Some(controller.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(
+        observed.lifecycle,
+        pb::OrchestratedSessionLifecycle::Completed as i32
+    );
+    assert_eq!(
+        observed.close_progress,
+        pb::SessionCloseProgress::Completed as i32
+    );
+    assert_eq!(
+        observed.close_operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+
+    gateway.terminate();
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
+    let restarted = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: Some(controller.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(restarted.close_operation_id, Some(operation_id.clone()));
+    assert_eq!(restarted.aggregate_revision, observed.aggregate_revision);
+
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel);
+    let replay = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            interrupt: false,
+            expected_state_revision: closed_run.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        replay.context.unwrap().operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    let conflict = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run),
+            controller: Some(controller),
+            interrupt: true,
+            expected_state_revision: replay.run.unwrap().state_revision,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code(), Code::Aborted);
+    semantic_error(&conflict, "RUN_STATE_CONFLICT");
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_recovery_resumes_a_close_intent_committed_before_gateway_restart() {
+    let fixture = Fixture::new("run_start_model_list.json");
+    let controller = install_orchestration_controller(&fixture, "session-close-recovery");
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel);
+    let started = runs
+        .start_run(pb::StartRunRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller: Some(controller.clone()),
+            idempotency_key: Uuid::now_v7().to_string(),
+            profile_name: fixture.profile.clone(),
+            control_mode: pb::ControlMode::DirectInteractive as i32,
+            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+            purpose: pb::PurposeKind::Interactive as i32,
+            purpose_label: None,
+            model: Some("gpt-5.6".to_owned()),
+            effort: Some("medium".to_owned()),
+            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+            required_capabilities: Vec::new(),
+            instructions: Some("Recover a retained close intent without new work.".to_owned()),
+            parent: None,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    let run_id = Uuid::parse_str(&started.run_id).unwrap();
+    let run = pb::RunRef {
+        workspace: Some(fixture.workspace()),
+        run_id: started.run_id.clone(),
+    };
+    gateway.terminate();
+
+    let mut store = OrchestrationStore::open(&fixture.state_root).unwrap();
+    let (close, admitted) = store.begin_session_close(run_id, false, 1).unwrap();
+    assert!(admitted);
+    let operation_id = close.unwrap().operation_id.to_string();
+    drop(store);
+
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
+    let interrupted = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: Some(controller.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(
+        interrupted.lifecycle,
+        pb::OrchestratedSessionLifecycle::Completing as i32
+    );
+    assert_eq!(
+        interrupted.close_operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel);
+    let recovered = runs
+        .recover_run(pb::RecoverRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            expected_state_revision: started.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        recovered.context.unwrap().operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    assert_eq!(
+        recovered.run.unwrap().lifecycle,
+        pb::RunLifecycle::Closed as i32
+    );
+    let completed = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run),
+            controller: Some(controller),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(
+        completed.close_progress,
+        pb::SessionCloseProgress::Completed as i32
+    );
+    assert_eq!(completed.close_operation_id, Some(operation_id));
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_close_requires_explicit_interrupt_before_committing_active_work() {
+    let fixture = Fixture::with_scenario(active_turn_scenario(false));
+    let controller = install_orchestration_controller(&fixture, "session-active-close");
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let started = runs
+        .start_run(pb::StartRunRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller: Some(controller.clone()),
+            idempotency_key: Uuid::now_v7().to_string(),
+            profile_name: fixture.profile.clone(),
+            control_mode: pb::ControlMode::DirectInteractive as i32,
+            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+            purpose: pb::PurposeKind::Interactive as i32,
+            purpose_label: None,
+            model: Some("gpt-5.6".to_owned()),
+            effort: Some("medium".to_owned()),
+            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+            required_capabilities: Vec::new(),
+            instructions: Some("Require explicit interruption before retirement.".to_owned()),
+            parent: None,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    let run = pb::RunRef {
+        workspace: Some(fixture.workspace()),
+        run_id: started.run_id.clone(),
+    };
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: Some(run.clone()),
+        controller: Some(controller.clone()),
+        idempotency_key: "active-before-root-close".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: "Remain active until explicitly interrupted.".to_owned(),
+        images: Vec::new(),
+        effort: None,
+        expected_state_revision: started.state_revision,
+    })
+    .await
+    .unwrap();
+    let active = native_wait_lifecycle(
+        &mut runs,
+        &fixture,
+        &started.run_id,
+        pb::RunLifecycle::Running,
+    )
+    .await;
+    let rejected = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            interrupt: false,
+            expected_state_revision: active.state_revision,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&rejected, "RUN_STATE_CONFLICT");
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel);
+    let before_interrupt = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: Some(controller.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert!(before_interrupt.close_operation_id.is_none());
+    assert_eq!(
+        before_interrupt.close_progress,
+        pb::SessionCloseProgress::None as i32
+    );
+
+    let closed = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run),
+            controller: Some(controller),
+            interrupt: true,
+            expected_state_revision: active.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(closed.context.unwrap().operation_id.is_some());
+    assert_eq!(
+        closed.run.unwrap().lifecycle,
+        pb::RunLifecycle::Closed as i32
+    );
+    assert_eq!(transcript_methods(&fixture, "turn/interrupt").len(), 1);
     gateway.terminate();
 }
 

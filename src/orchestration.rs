@@ -201,7 +201,20 @@ pub struct OrchestratedSessionObservation {
     pub accepted_unfinished_task_count: u64,
     pub unknown_outcome_task_count: u64,
     pub published_result_count: u64,
+    pub close_operation_id: Option<Uuid>,
+    pub close_interrupt: Option<bool>,
+    pub close_progress: Option<String>,
     pub captured_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCloseSnapshot {
+    pub operation_id: Uuid,
+    pub session_id: Uuid,
+    pub interrupt: bool,
+    pub initiating_controller_generation: u64,
+    pub progress: String,
+    pub safe_error_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,7 +394,7 @@ impl BrokerCredential {
         Ok(credential)
     }
 
-    fn load(root: &Path, uid: u32, run_id: Uuid) -> Result<Self, MachineError> {
+    pub(crate) fn load(root: &Path, uid: u32, run_id: Uuid) -> Result<Self, MachineError> {
         verify_secure_directory(root, uid)?;
         let directory = OpenOptions::new()
             .read(true)
@@ -1540,6 +1553,48 @@ impl OrchestrationStore {
             "SELECT COUNT(*) FROM brokered_result_publications
              WHERE session_id=?1 AND state='published'",
         )?;
+        let close_table_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='orchestrated_session_closes')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        let close = if close_table_exists {
+            transaction
+                .query_row(
+                    "SELECT operation_id,interrupt,progress FROM orchestrated_session_closes
+                     WHERE session_id=?1",
+                    [session_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(internal)?
+        } else {
+            None
+        };
+        let (close_operation_id, close_interrupt, close_progress) = match close {
+            Some((operation_id, interrupt, progress)) => {
+                if !matches!(
+                    progress.as_str(),
+                    "settling" | "recovery_required" | "outcome_unknown" | "completed" | "aborted"
+                ) {
+                    return Err(integrity("session close progress is invalid"));
+                }
+                (
+                    Some(parse_uuid(&operation_id)?),
+                    Some(interrupt),
+                    Some(progress),
+                )
+            }
+            None => (None, None, None),
+        };
         validate_event_chain_on(&transaction, session_id)?;
         let captured_at_ms = self.now_ms()?;
         transaction.commit().map_err(internal)?;
@@ -1565,6 +1620,9 @@ impl OrchestrationStore {
             accepted_unfinished_task_count,
             unknown_outcome_task_count,
             published_result_count,
+            close_operation_id,
+            close_interrupt,
+            close_progress,
             captured_at_ms,
         })
     }
@@ -3824,7 +3882,7 @@ impl OrchestrationStore {
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM brokered_tasks WHERE target_run_id=?1
-                 AND state IN ('accepted','dispatching','running','completed_not_delivered')",
+                 AND state IN ('accepted','queued','claimed','dispatching','running','result_publication_pending')",
                 [run_id.to_string()],
                 |row| row.get(0),
             )
@@ -3906,6 +3964,427 @@ impl OrchestrationStore {
                 now,
             )?;
         }
+        transaction.commit().map_err(internal)?;
+        self.session(session_id)
+    }
+
+    pub fn session_close(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<SessionCloseSnapshot>, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT operation_id,interrupt,initiating_controller_generation,progress,safe_error_code
+                 FROM orchestrated_session_closes WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(internal)?
+            .map(|row| {
+                if row.2 == 0
+                    || !matches!(
+                        row.3.as_str(),
+                        "settling"
+                            | "recovery_required"
+                            | "outcome_unknown"
+                            | "completed"
+                            | "aborted"
+                    )
+                {
+                    return Err(integrity("session close record is invalid"));
+                }
+                Ok(SessionCloseSnapshot {
+                    operation_id: parse_uuid(&row.0)?,
+                    session_id,
+                    interrupt: row.1,
+                    initiating_controller_generation: row.2,
+                    progress: row.3,
+                    safe_error_code: row.4,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn begin_session_close(
+        &mut self,
+        session_id: Uuid,
+        interrupt: bool,
+        initiating_controller_generation: u64,
+    ) -> Result<(Option<SessionCloseSnapshot>, bool), MachineError> {
+        if initiating_controller_generation == 0 {
+            return Err(integrity("session close Controller generation is invalid"));
+        }
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT operation_id,interrupt,initiating_controller_generation,progress,safe_error_code
+                 FROM orchestrated_session_closes WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(internal)?;
+        if let Some(existing) = existing {
+            let existing = SessionCloseSnapshot {
+                operation_id: parse_uuid(&existing.0)?,
+                session_id,
+                interrupt: existing.1,
+                initiating_controller_generation: existing.2,
+                progress: existing.3,
+                safe_error_code: existing.4,
+            };
+            if existing.initiating_controller_generation == 0
+                || !matches!(
+                    existing.progress.as_str(),
+                    "settling" | "recovery_required" | "outcome_unknown" | "completed" | "aborted"
+                )
+            {
+                return Err(integrity("session close record is invalid"));
+            }
+            if existing.interrupt != interrupt {
+                return Err(MachineError::new(
+                    "RUN_STATE_CONFLICT",
+                    "the retained session close intent uses a different interrupt choice",
+                    false,
+                    serde_json::json!({
+                        "session_id":session_id,
+                        "operation_id":existing.operation_id,
+                        "accepted_interrupt":existing.interrupt,
+                        "requested_interrupt":interrupt
+                    }),
+                ));
+            }
+            transaction.commit().map_err(internal)?;
+            return Ok((Some(existing), false));
+        }
+        let status: String = transaction
+            .query_row(
+                "SELECT status FROM orchestrated_sessions WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| session_not_found(session_id))?;
+        if matches!(status.as_str(), "completed" | "aborted") {
+            transaction.commit().map_err(internal)?;
+            return Ok((None, false));
+        }
+        if matches!(status.as_str(), "completing" | "aborting") {
+            return Err(integrity("closing session has no durable close record"));
+        }
+        if !interrupt {
+            let spawn_count: u64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_spawn_operations
+                     WHERE session_id=?1 AND state IN
+                       ('requested','awaiting_approval','approved','provisioning','publication_pending')",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            let task_count: u64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_tasks
+                     WHERE session_id=?1 AND state IN
+                       ('accepted','queued','claimed','dispatching','running','result_publication_pending','interrupted_unknown')",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if spawn_count != 0 || task_count != 0 {
+                return Err(session_conflict(
+                    session_id,
+                    "graceful completion requires the owned hierarchy to be quiescent",
+                ));
+            }
+        }
+        let operation_id = new_uuid_v7();
+        let progress = "settling";
+        transaction
+            .execute(
+                "INSERT INTO orchestrated_session_closes(
+                   operation_id,session_id,interrupt,initiating_controller_generation,
+                   progress,safe_error_code,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,?3,?4,?5,NULL,?6,?6)",
+                params![
+                    operation_id.to_string(),
+                    session_id.to_string(),
+                    interrupt,
+                    initiating_controller_generation,
+                    progress,
+                    now
+                ],
+            )
+            .map_err(internal)?;
+        transaction
+            .execute(
+                "UPDATE orchestrated_sessions SET status=?2,updated_at_ms=?3 WHERE session_id=?1",
+                params![
+                    session_id.to_string(),
+                    if interrupt { "aborting" } else { "completing" },
+                    now
+                ],
+            )
+            .map_err(internal)?;
+        append_event(
+            &transaction,
+            session_id,
+            "session_close_intent_committed",
+            &sha256_hex(format!("{operation_id}\0{interrupt}").as_bytes()),
+            now,
+        )?;
+        transaction.commit().map_err(internal)?;
+        Ok((
+            Some(
+                self.session_close(session_id)?
+                    .ok_or_else(|| integrity("session close record disappeared"))?,
+            ),
+            true,
+        ))
+    }
+
+    fn mark_session_close_progress(
+        &mut self,
+        session_id: Uuid,
+        progress: &str,
+        safe_error_code: Option<&str>,
+    ) -> Result<SessionCloseSnapshot, MachineError> {
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        let changed = transaction
+            .execute(
+                "UPDATE orchestrated_session_closes
+                 SET progress=?2,safe_error_code=?3,updated_at_ms=?4
+                 WHERE session_id=?1 AND (progress<>?2 OR safe_error_code IS NOT ?3)",
+                params![session_id.to_string(), progress, safe_error_code, now],
+            )
+            .map_err(internal)?;
+        if changed == 1 {
+            append_event(
+                &transaction,
+                session_id,
+                "session_close_progressed",
+                &sha256_hex(format!("{progress}\0{}", safe_error_code.unwrap_or("")).as_bytes()),
+                now,
+            )?;
+        }
+        transaction.commit().map_err(internal)?;
+        self.session_close(session_id)?
+            .ok_or_else(|| integrity("session close record disappeared"))
+    }
+
+    pub fn record_session_close_failure(
+        &mut self,
+        session_id: Uuid,
+        code: &str,
+    ) -> Result<SessionCloseSnapshot, MachineError> {
+        let progress = if matches!(
+            code,
+            "OUTCOME_UNKNOWN"
+                | "INTERRUPTED_UNKNOWN"
+                | "CANCEL_OUTCOME_UNKNOWN"
+                | "TARGET_TURN_OUTCOME_UNKNOWN"
+        ) {
+            "outcome_unknown"
+        } else {
+            "recovery_required"
+        };
+        self.mark_session_close_progress(session_id, progress, Some(code))
+    }
+
+    pub fn settle_session_close<A: OrchestrationAdapter>(
+        &mut self,
+        session_id: Uuid,
+        adapter: &mut A,
+    ) -> Result<SessionCloseSnapshot, MachineError> {
+        let close = self
+            .session_close(session_id)?
+            .ok_or_else(|| session_conflict(session_id, "session close intent is missing"))?;
+        if matches!(close.progress.as_str(), "completed" | "aborted") {
+            return Ok(close);
+        }
+        if close.interrupt {
+            let now = self.now_ms()?;
+            let transaction = self.transaction()?;
+            let cancelled = transaction
+                .execute(
+                    "UPDATE brokered_spawn_operations
+                     SET state='cancelled',safe_error_code='SESSION_ABORTED',updated_at_ms=?2
+                     WHERE session_id=?1 AND state IN ('requested','awaiting_approval','approved')",
+                    params![session_id.to_string(), now],
+                )
+                .map_err(internal)?;
+            if cancelled != 0 {
+                append_event(
+                    &transaction,
+                    session_id,
+                    "session_pending_spawns_cancelled",
+                    &sha256_hex(cancelled.to_string().as_bytes()),
+                    now,
+                )?;
+            }
+            transaction.commit().map_err(internal)?;
+            for task in self.session_tasks(session_id)? {
+                if !matches!(
+                    task.state.as_str(),
+                    "completed_not_delivered"
+                        | "delivered"
+                        | "failed"
+                        | "interrupted_unknown"
+                        | "cancelled"
+                ) && let Err(error) = self.cancel_task(session_id, task.task_id, adapter)
+                {
+                    let _ = self.mark_session_close_progress(
+                        session_id,
+                        "recovery_required",
+                        Some(&error.code),
+                    );
+                    return Err(error);
+                }
+            }
+        }
+        let nonterminal_spawns: u64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM brokered_spawn_operations
+                 WHERE session_id=?1 AND state IN ('requested','awaiting_approval','approved','provisioning','publication_pending','recovery_required')",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        let tasks = self.session_tasks(session_id)?;
+        if tasks.iter().any(|task| task.state == "interrupted_unknown") {
+            let close = self.mark_session_close_progress(
+                session_id,
+                "outcome_unknown",
+                Some("OUTCOME_UNKNOWN"),
+            )?;
+            return Err(session_close_error(
+                &close,
+                "OUTCOME_UNKNOWN",
+                "an owned Specialist effect has no authoritative terminal outcome",
+            ));
+        }
+        if nonterminal_spawns != 0 {
+            let close = self.mark_session_close_progress(
+                session_id,
+                "recovery_required",
+                Some("RECOVERY_REQUIRED"),
+            )?;
+            return Err(session_close_error(
+                &close,
+                "RECOVERY_REQUIRED",
+                "an owned Specialist spawn requires reconciliation before close can finish",
+            ));
+        }
+        if tasks.iter().any(|task| {
+            !matches!(
+                task.state.as_str(),
+                "completed_not_delivered" | "delivered" | "failed" | "cancelled"
+            )
+        }) {
+            return Err(session_close_error(
+                &close,
+                "SESSION_CLOSE_IN_PROGRESS",
+                "owned Specialist work is still settling",
+            ));
+        }
+        for member in self.members(session_id)? {
+            if member.membership_state != "retired" {
+                let released = match self.release_specialist(session_id, member.run_id, adapter) {
+                    Ok(released) => released,
+                    Err(error) => {
+                        let _ = self.mark_session_close_progress(
+                            session_id,
+                            "recovery_required",
+                            Some(&error.code),
+                        );
+                        return Err(error);
+                    }
+                };
+                if released.membership_state != "retired" {
+                    let close = self.mark_session_close_progress(
+                        session_id,
+                        "outcome_unknown",
+                        Some("OUTCOME_UNKNOWN"),
+                    )?;
+                    return Err(session_close_error(
+                        &close,
+                        "OUTCOME_UNKNOWN",
+                        "Specialist retirement has no authoritative outcome",
+                    ));
+                }
+            }
+        }
+        self.mark_session_close_progress(session_id, "settling", None)
+    }
+
+    pub fn complete_session_close(
+        &mut self,
+        session_id: Uuid,
+    ) -> Result<OrchestratedSessionSnapshot, MachineError> {
+        let close = self
+            .session_close(session_id)?
+            .ok_or_else(|| session_conflict(session_id, "session close intent is missing"))?;
+        let terminal = if close.interrupt {
+            "aborted"
+        } else {
+            "completed"
+        };
+        if close.progress == terminal {
+            return self.session(session_id);
+        }
+        if close.progress != "settling" {
+            return Err(session_close_error(
+                &close,
+                close
+                    .safe_error_code
+                    .as_deref()
+                    .unwrap_or("RECOVERY_REQUIRED"),
+                "session close is not ready to commit",
+            ));
+        }
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        transaction
+            .execute(
+                "UPDATE orchestrated_session_closes
+                 SET progress=?2,safe_error_code=NULL,updated_at_ms=?3 WHERE session_id=?1",
+                params![session_id.to_string(), terminal, now],
+            )
+            .map_err(internal)?;
+        transaction
+            .execute(
+                "UPDATE orchestrated_sessions SET status=?2,updated_at_ms=?3 WHERE session_id=?1",
+                params![session_id.to_string(), terminal, now],
+            )
+            .map_err(internal)?;
+        append_event(
+            &transaction,
+            session_id,
+            "session_closed",
+            &sha256_hex(format!("{}\0{terminal}", close.operation_id).as_bytes()),
+            now,
+        )?;
         transaction.commit().map_err(internal)?;
         self.session(session_id)
     }
@@ -4631,6 +5110,17 @@ CREATE TABLE IF NOT EXISTS brokered_delivery_receipts(
   delivered_at_ms INTEGER NOT NULL,
   FOREIGN KEY(task_id) REFERENCES brokered_tasks(task_id)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS orchestrated_session_closes(
+  operation_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL UNIQUE,
+  interrupt INTEGER NOT NULL CHECK(interrupt IN (0,1)),
+  initiating_controller_generation INTEGER NOT NULL,
+  progress TEXT NOT NULL,
+  safe_error_code TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS orchestration_events(
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
@@ -5175,6 +5665,25 @@ fn session_conflict(session_id: Uuid, reason: &str) -> MachineError {
         "Orchestrated Session state conflicts with the operation",
         false,
         serde_json::json!({"session_id":session_id,"reason":reason}),
+    )
+}
+
+fn session_close_error(close: &SessionCloseSnapshot, code: &str, message: &str) -> MachineError {
+    MachineError::new(
+        code,
+        message,
+        false,
+        serde_json::json!({
+            "run_id":close.session_id,
+            "session_id":close.session_id,
+            "operation_id":close.operation_id,
+            "interrupt":close.interrupt,
+            "required_action":if code == "SESSION_CLOSE_IN_PROGRESS" {
+                "refresh_snapshot"
+            } else {
+                "reconcile_run"
+            }
+        }),
     )
 }
 
@@ -6624,6 +7133,120 @@ mod tests {
                 .unwrap_err()
                 .code,
             "SPECIALIST_RESULT_UNREADABLE"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_close_intent_blocks_admission_replays_and_survives_reopen() {
+        let root = root();
+        let (mut store, session) = active_session(&root, "fully_delegated");
+        let close = store
+            .begin_session_close(session.session_id, false, 7)
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(close.progress, "settling");
+        assert!(!close.interrupt);
+        assert_eq!(
+            store
+                .begin_session_close(session.session_id, false, 99)
+                .unwrap()
+                .0
+                .unwrap()
+                .operation_id,
+            close.operation_id
+        );
+        assert_eq!(
+            store
+                .begin_session_close(session.session_id, true, 7)
+                .unwrap_err()
+                .code,
+            "RUN_STATE_CONFLICT"
+        );
+        let mut adapter = FakeAdapter::default();
+        assert_eq!(
+            store
+                .request_specialist(
+                    &context(session.session_id, "after-close-intent"),
+                    &request("read_only"),
+                    &mut adapter,
+                )
+                .unwrap_err()
+                .code,
+            "RUN_STATE_CONFLICT"
+        );
+        drop(store);
+
+        let mut reopened = OrchestrationStore::open(&root).unwrap();
+        let retained = reopened.session_close(session.session_id).unwrap().unwrap();
+        assert_eq!(retained.operation_id, close.operation_id);
+        assert_eq!(retained.initiating_controller_generation, 7);
+        reopened
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap();
+        assert_eq!(
+            reopened
+                .complete_session_close(session.session_id)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        let observed = reopened.observe_session(session.session_id).unwrap();
+        assert_eq!(observed.close_operation_id, Some(close.operation_id));
+        assert_eq!(observed.close_progress.as_deref(), Some("completed"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn close_rejects_unconfirmed_work_and_preserves_unknown_abort_outcomes() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "turn-close-race".to_owned(),
+            }),
+            cancel: Ok(TaskCancellation::OutcomeUnknown),
+            ..FakeAdapter::default()
+        };
+        store
+            .assign_task(
+                &context(session.session_id, "close-race-task"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .begin_session_close(session.session_id, false, 1)
+                .unwrap_err()
+                .code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert!(store.session_close(session.session_id).unwrap().is_none());
+
+        let close = store
+            .begin_session_close(session.session_id, true, 1)
+            .unwrap()
+            .0
+            .unwrap();
+        let error = store
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap_err();
+        assert_eq!(error.code, "OUTCOME_UNKNOWN");
+        assert_eq!(
+            error.details["operation_id"],
+            close.operation_id.to_string()
+        );
+        drop(store);
+
+        let reopened = OrchestrationStore::open(&root).unwrap();
+        let retained = reopened.session_close(session.session_id).unwrap().unwrap();
+        assert_eq!(retained.operation_id, close.operation_id);
+        assert_eq!(retained.progress, "outcome_unknown");
+        assert_eq!(
+            reopened.observe_session(session.session_id).unwrap().status,
+            "aborting"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

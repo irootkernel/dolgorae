@@ -1808,7 +1808,7 @@ results without reconstructing aggregate authority. Next: TASK-052.
 
 ### TASK-052: Live Hierarchy Retirement and Restart Recovery
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-055`. Connect graceful release, session completion/abort, and
 cross-component restart to existing lifecycle and recovery owners. Stop new

@@ -792,8 +792,10 @@ queue, steering or automatic interruption is introduced.
 
 Whole-session root CloseRun records durable close intent, stops new admission
 and retires owned children through the Broker. Admission races with spawn/task
-publication use the existing serialization order; waits hold no SQLite/global
-mutation owner. Unknown effects prevent successful closed state. Root recovery
+publication use the existing serialization order; a per-root close gate admits
+one settler while waits hold no SQLite transaction or global mutation owner.
+Compatible concurrent calls observe the retained operation. Unknown effects
+prevent successful closed state. Root recovery
 accounts for retained aggregate intent without new semantic work or auto-resume.
 History, results, workspace changes and unrelated runtimes remain intact.
 Primary Pause/Interrupt does not imply aggregate pause.

@@ -98,8 +98,13 @@ public gateway exposes `GetOrchestratedSession` and
 The first returns one coherent aggregate snapshot and independent revision; the
 second returns captured-head pages of retained Primary-owned result artifacts.
 These reads do not repair state, start Workers, acknowledge private delivery,
-or expose child Controller authority. Later effectful operations remain
-unavailable until their owning Tasks connect them completely.
+or expose child Controller authority. For a registered root, `CloseRun` now
+records one durable whole-session intent, stops new Broker admission, retires
+owned Specialists, and reports success only after the root and every known
+owned effect is settled. Compatible repeats and root recovery retain the same
+operation identity across gateway restarts; unknown effects remain visible
+for reconciliation instead of being replayed or hidden. Ordinary low-level Run
+close and Primary-scoped pause/interrupt semantics are unchanged.
 
 ## Task-aware completion review
 

@@ -17,7 +17,9 @@ use crate::snapshot::RunSnapshot;
 use crate::workspace::{WorkspaceService, WorkspaceView};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -185,6 +187,132 @@ impl CoreGatewayBackend {
         })
     }
 
+    fn orchestration_close_recovery_response(
+        &self,
+        reference: &pb::RunRef,
+        controller: &pb::ControllerCarrierRef,
+        expected_state_revision: u64,
+        operation: RunMutationOperation,
+    ) -> Result<Option<pb::RunMutationResponse>, MachineError> {
+        let gate = orchestration_close_gate(uuid(&reference.run_id, "run.run_id")?)?;
+        let _guard = gate
+            .lock()
+            .map_err(|_| internal_projection("orchestration close gate"))?;
+        let (state_root, snapshot) = self.run_state(reference)?;
+        let Some(binding) = snapshot
+            .manifest
+            .aggregate_binding
+            .as_ref()
+            .filter(|binding| {
+                binding.aggregate_kind == crate::domain::AggregateKind::OrchestratedSession
+                    && binding.member_kind == crate::run::AggregateMemberKind::Primary
+                    && binding.aggregate_id == snapshot.manifest.run_id
+            })
+        else {
+            return Ok(None);
+        };
+        let carrier = self.run_controller_for(&snapshot, controller, "run.recover")?;
+        if snapshot.stamp.run_state_revision != expected_state_revision {
+            return Err(MachineError::new(
+                "RUN_STATE_CONFLICT",
+                "run recovery expected state revision is stale",
+                false,
+                serde_json::json!({
+                    "run_id":snapshot.manifest.run_id,
+                    "expected_state_revision":expected_state_revision,
+                    "actual_state_revision":snapshot.stamp.run_state_revision
+                }),
+            ));
+        }
+        let mut store = open_orchestration_mutator(&state_root)?;
+        let session = store.session(snapshot.manifest.run_id)?;
+        if binding.operation_id != session.bootstrap_operation_id
+            || binding.policy_sha256.as_deref() != Some(session.specialist_policy_sha256.as_str())
+        {
+            return Err(internal_projection("Orchestrated Session root binding"));
+        }
+        let Some(close) = store.session_close(snapshot.manifest.run_id)? else {
+            return Ok(None);
+        };
+        snapshot.authorize_current_controller(&state_root, &carrier, "run.recover")?;
+        if matches!(
+            snapshot.projection.lifecycle,
+            domain::RunLifecycle::ReconciliationRequired | domain::RunLifecycle::OutcomeUnknown
+        ) && let Err(mut error) = self.mutate(
+            reference,
+            controller,
+            Some(expected_state_revision),
+            operation,
+        ) {
+            let _ = store.record_session_close_failure(snapshot.manifest.run_id, &error.code);
+            if let Some(details) = error.details.as_object_mut() {
+                details.insert(
+                    "operation_id".to_owned(),
+                    serde_json::Value::String(close.operation_id.to_string()),
+                );
+            }
+            return Err(error);
+        }
+        store.reconcile_unknown_work(snapshot.manifest.run_id)?;
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&state_root);
+        if let Err(mut error) = store.settle_session_close(snapshot.manifest.run_id, &mut effects) {
+            if let Some(details) = error.details.as_object_mut() {
+                details.insert(
+                    "operation_id".to_owned(),
+                    serde_json::Value::String(close.operation_id.to_string()),
+                );
+                details.insert(
+                    "run_id".to_owned(),
+                    serde_json::Value::String(snapshot.manifest.run_id.to_string()),
+                );
+            }
+            return Err(error);
+        }
+        let (_, current) = self.run_state(reference)?;
+        if current.projection.lifecycle != domain::RunLifecycle::Closed
+            && let Err(mut error) = self.mutate(
+                reference,
+                controller,
+                Some(current.stamp.run_state_revision),
+                RunMutationOperation::Close {
+                    interrupt: close.interrupt,
+                },
+            )
+        {
+            if error.code == "RUN_BUSY" {
+                return Err(session_close_in_progress(
+                    snapshot.manifest.run_id,
+                    close.operation_id,
+                ));
+            }
+            let (_, after_error) = self.run_state(reference)?;
+            if after_error.projection.lifecycle != domain::RunLifecycle::Closed {
+                if error.code == "RUN_STATE_CONFLICT" {
+                    return Err(session_close_in_progress(
+                        snapshot.manifest.run_id,
+                        close.operation_id,
+                    ));
+                }
+                let _ = store.record_session_close_failure(snapshot.manifest.run_id, &error.code);
+                if let Some(details) = error.details.as_object_mut() {
+                    details.insert(
+                        "operation_id".to_owned(),
+                        serde_json::Value::String(close.operation_id.to_string()),
+                    );
+                }
+                return Err(error);
+            }
+        }
+        store.complete_session_close(snapshot.manifest.run_id)?;
+        let (_, snapshot, facts) = self.run_snapshot(reference)?;
+        let mut context = self.context();
+        context.operation_id = Some(close.operation_id.to_string());
+        Ok(Some(pb::RunMutationResponse {
+            context: Some(context),
+            run: Some(project::run_projection(&snapshot, &facts)?),
+        }))
+    }
+
     fn profile(&self, name: &str) -> Result<pb::ProfileProjection, MachineError> {
         let observation = crate::profile::observe_global_profile(&self.home, name)?;
         let blockers = observation
@@ -241,6 +369,32 @@ impl CoreGatewayBackend {
             project::ownerless_writer_state(&writer, self.context())
         }
     }
+}
+
+fn open_orchestration_mutator(
+    state_root: &Path,
+) -> Result<crate::orchestration::OrchestrationStore, MachineError> {
+    static OPEN_SERIALIZER: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = OPEN_SERIALIZER
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| internal_projection("orchestration open serializer"))?;
+    crate::orchestration::OrchestrationStore::open(state_root)
+}
+
+fn orchestration_close_gate(run_id: Uuid) -> Result<Arc<Mutex<()>>, MachineError> {
+    static GATES: OnceLock<Mutex<HashMap<Uuid, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| internal_projection("orchestration close gate registry"))?;
+    gates.retain(|_, gate| gate.strong_count() != 0);
+    if let Some(gate) = gates.get(&run_id).and_then(Weak::upgrade) {
+        return Ok(gate);
+    }
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(run_id, Arc::downgrade(&gate));
+    Ok(gate)
 }
 
 pub(crate) fn invalid(field: &str, reason: &str) -> MachineError {
@@ -373,34 +527,25 @@ fn project_orchestrated_session(
         "fully_delegated" => pb::OrchestratedSessionApprovalPolicy::FullyDelegated,
         _ => return Err(internal_projection("orchestrated session approval policy")),
     };
-    let (close_intent, close_progress) = match value.status.as_str() {
-        "creating" | "active" | "degraded" | "recovering" => (
-            pb::SessionCloseIntent::None,
-            if value.status == "recovering" {
-                pb::SessionCloseProgress::RecoveryRequired
-            } else {
-                pb::SessionCloseProgress::None
-            },
-        ),
-        "completing" => (
-            pb::SessionCloseIntent::Complete,
-            pb::SessionCloseProgress::Settling,
-        ),
-        "aborting" => (
-            pb::SessionCloseIntent::Abort,
-            pb::SessionCloseProgress::Settling,
-        ),
-        "completed" => (
-            pb::SessionCloseIntent::Complete,
-            pb::SessionCloseProgress::Completed,
-        ),
-        "aborted" => (
-            pb::SessionCloseIntent::Abort,
-            pb::SessionCloseProgress::Aborted,
-        ),
-        _ => return Err(internal_projection("orchestrated session close progress")),
+    let close_intent = match value.close_interrupt {
+        Some(true) => pb::SessionCloseIntent::Abort,
+        Some(false) => pb::SessionCloseIntent::Complete,
+        None => pb::SessionCloseIntent::None,
     };
-    let recovery_required = matches!(value.status.as_str(), "degraded" | "recovering");
+    let close_progress = match value.close_progress.as_deref() {
+        Some("settling") => pb::SessionCloseProgress::Settling,
+        Some("completed") => pb::SessionCloseProgress::Completed,
+        Some("aborted") => pb::SessionCloseProgress::Aborted,
+        Some("recovery_required") => pb::SessionCloseProgress::RecoveryRequired,
+        Some("outcome_unknown") => pb::SessionCloseProgress::OutcomeUnknown,
+        Some(_) => return Err(internal_projection("orchestrated session close progress")),
+        None if value.status == "recovering" => pb::SessionCloseProgress::RecoveryRequired,
+        None => pb::SessionCloseProgress::None,
+    };
+    let recovery_required = matches!(
+        close_progress,
+        pb::SessionCloseProgress::RecoveryRequired | pb::SessionCloseProgress::OutcomeUnknown
+    ) || matches!(value.status.as_str(), "degraded" | "recovering");
     Ok(pb::OrchestratedSessionProjection {
         session_id: value.session_id.to_string(),
         primary_run: Some(pb::RunRef {
@@ -422,7 +567,7 @@ fn project_orchestrated_session(
         published_result_count: value.published_result_count,
         close_intent: close_intent as i32,
         close_progress: close_progress as i32,
-        close_operation_id: None,
+        close_operation_id: value.close_operation_id.map(|value| value.to_string()),
         recovery_classification: if recovery_required {
             pb::RecoveryClassification::ReconcileRequired
         } else {
@@ -477,6 +622,19 @@ fn internal_projection(invariant: &str) -> MachineError {
         "durable orchestration observation cannot be projected",
         false,
         serde_json::json!({"invariant":invariant}),
+    )
+}
+
+fn session_close_in_progress(run_id: Uuid, operation_id: Uuid) -> MachineError {
+    MachineError::new(
+        "SESSION_CLOSE_IN_PROGRESS",
+        "whole-session close was accepted and is still settling",
+        false,
+        serde_json::json!({
+            "run_id":run_id,
+            "operation_id":operation_id,
+            "required_action":"refresh_snapshot"
+        }),
     )
 }
 
@@ -1300,22 +1458,201 @@ impl GatewayBackend for CoreGatewayBackend {
         )
     }
     fn close_run(&self, r: pb::CloseRunRequest) -> Result<pb::RunMutationResponse, MachineError> {
-        self.mutation_response(
-            required(r.run.as_ref(), "run")?,
-            required(r.controller.as_ref(), "controller")?,
-            r.expected_state_revision,
-            RunMutationOperation::Close {
-                interrupt: r.interrupt,
-            },
-        )
+        let reference = required(r.run.as_ref(), "run")?;
+        let controller = required(r.controller.as_ref(), "controller")?;
+        let gate = orchestration_close_gate(uuid(&reference.run_id, "run.run_id")?)?;
+        let _guard = gate
+            .lock()
+            .map_err(|_| internal_projection("orchestration close gate"))?;
+        let (state_root, snapshot) = self.run_state(reference)?;
+        let Some(binding) = snapshot
+            .manifest
+            .aggregate_binding
+            .as_ref()
+            .filter(|binding| {
+                binding.aggregate_kind == crate::domain::AggregateKind::OrchestratedSession
+                    && binding.member_kind == crate::run::AggregateMemberKind::Primary
+                    && binding.aggregate_id == snapshot.manifest.run_id
+            })
+        else {
+            return self.mutation_response(
+                reference,
+                controller,
+                r.expected_state_revision,
+                RunMutationOperation::Close {
+                    interrupt: r.interrupt,
+                },
+            );
+        };
+        let carrier = self.run_controller_for(&snapshot, controller, "run.close")?;
+        let mut store = open_orchestration_mutator(&state_root)?;
+        let session = store.session(snapshot.manifest.run_id).map_err(|error| {
+            if error.code == "RUN_NOT_FOUND" {
+                invalid("run.run_id", "Run is not an Orchestrated Session root")
+            } else {
+                error
+            }
+        })?;
+        if binding.operation_id != session.bootstrap_operation_id
+            || binding.policy_sha256.as_deref() != Some(session.specialist_policy_sha256.as_str())
+        {
+            return Err(internal_projection("Orchestrated Session root binding"));
+        }
+        snapshot.authorize_current_controller(&state_root, &carrier, "run.close")?;
+        if store.session_close(snapshot.manifest.run_id)?.is_none() {
+            if snapshot.stamp.run_state_revision != r.expected_state_revision {
+                return Err(MachineError::new(
+                    "RUN_STATE_CONFLICT",
+                    "run.close expected state revision is stale",
+                    false,
+                    serde_json::json!({
+                        "run_id":snapshot.manifest.run_id,
+                        "expected_state_revision":r.expected_state_revision,
+                        "actual_state_revision":snapshot.stamp.run_state_revision
+                    }),
+                ));
+            }
+            if !r.interrupt
+                && (snapshot.projection.active_turn_id.is_some()
+                    || !snapshot.projection.pending_requests.is_empty())
+            {
+                return Err(MachineError::new(
+                    "RUN_STATE_CONFLICT",
+                    "graceful whole-session close requires an idle Primary",
+                    false,
+                    serde_json::json!({"run_id":snapshot.manifest.run_id}),
+                ));
+            }
+        }
+        let (close, newly_admitted) = store.begin_session_close(
+            snapshot.manifest.run_id,
+            r.interrupt,
+            controller.expected_controller_generation,
+        )?;
+        let Some(close) = close else {
+            let (_, snapshot, facts) = self.run_snapshot(reference)?;
+            return Ok(pb::RunMutationResponse {
+                context: Some(self.context()),
+                run: Some(project::run_projection(&snapshot, &facts)?),
+            });
+        };
+        if !newly_admitted {
+            if matches!(close.progress.as_str(), "completed" | "aborted")
+                || snapshot.projection.lifecycle == domain::RunLifecycle::Closed
+            {
+                store.complete_session_close(snapshot.manifest.run_id)?;
+                let (_, snapshot, facts) = self.run_snapshot(reference)?;
+                let mut context = self.context();
+                context.operation_id = Some(close.operation_id.to_string());
+                return Ok(pb::RunMutationResponse {
+                    context: Some(context),
+                    run: Some(project::run_projection(&snapshot, &facts)?),
+                });
+            }
+            return Err(match close.progress.as_str() {
+                "settling" => {
+                    session_close_in_progress(snapshot.manifest.run_id, close.operation_id)
+                }
+                "outcome_unknown" => MachineError::new(
+                    "OUTCOME_UNKNOWN",
+                    "whole-session close requires authoritative effect reconciliation",
+                    false,
+                    serde_json::json!({
+                        "run_id":snapshot.manifest.run_id,
+                        "operation_id":close.operation_id,
+                        "required_action":"reconcile_run"
+                    }),
+                ),
+                _ => MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "whole-session close requires recovery before settlement can continue",
+                    false,
+                    serde_json::json!({
+                        "run_id":snapshot.manifest.run_id,
+                        "operation_id":close.operation_id,
+                        "required_action":"recover_run"
+                    }),
+                ),
+            });
+        }
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&state_root);
+        if let Err(mut error) = store.settle_session_close(snapshot.manifest.run_id, &mut effects) {
+            if let Some(details) = error.details.as_object_mut() {
+                details.insert(
+                    "operation_id".to_owned(),
+                    serde_json::Value::String(close.operation_id.to_string()),
+                );
+                details.insert(
+                    "run_id".to_owned(),
+                    serde_json::Value::String(snapshot.manifest.run_id.to_string()),
+                );
+            }
+            return Err(error);
+        }
+        if snapshot.projection.lifecycle != domain::RunLifecycle::Closed
+            && let Err(mut error) = self.mutate(
+                reference,
+                controller,
+                Some(r.expected_state_revision),
+                RunMutationOperation::Close {
+                    interrupt: r.interrupt,
+                },
+            )
+        {
+            if error.code == "RUN_BUSY" {
+                return Err(session_close_in_progress(
+                    snapshot.manifest.run_id,
+                    close.operation_id,
+                ));
+            }
+            let (_, after_error) = self.run_state(reference)?;
+            if after_error.projection.lifecycle != domain::RunLifecycle::Closed {
+                if error.code == "RUN_STATE_CONFLICT" {
+                    return Err(session_close_in_progress(
+                        snapshot.manifest.run_id,
+                        close.operation_id,
+                    ));
+                }
+                let _ = store.record_session_close_failure(snapshot.manifest.run_id, &error.code);
+                if let Some(details) = error.details.as_object_mut() {
+                    details.insert(
+                        "operation_id".to_owned(),
+                        serde_json::Value::String(close.operation_id.to_string()),
+                    );
+                    details.insert(
+                        "run_id".to_owned(),
+                        serde_json::Value::String(snapshot.manifest.run_id.to_string()),
+                    );
+                }
+                return Err(error);
+            }
+        }
+        store.complete_session_close(snapshot.manifest.run_id)?;
+        let (_, snapshot, facts) = self.run_snapshot(reference)?;
+        let mut context = self.context();
+        context.operation_id = Some(close.operation_id.to_string());
+        Ok(pb::RunMutationResponse {
+            context: Some(context),
+            run: Some(project::run_projection(&snapshot, &facts)?),
+        })
     }
     fn recover_run(
         &self,
         r: pb::RecoverRunRequest,
     ) -> Result<pb::RunMutationResponse, MachineError> {
+        let reference = required(r.run.as_ref(), "run")?;
+        let controller = required(r.controller.as_ref(), "controller")?;
+        if let Some(response) = self.orchestration_close_recovery_response(
+            reference,
+            controller,
+            r.expected_state_revision,
+            RunMutationOperation::Recover,
+        )? {
+            return Ok(response);
+        }
         self.mutation_response(
-            required(r.run.as_ref(), "run")?,
-            required(r.controller.as_ref(), "controller")?,
+            reference,
+            controller,
             r.expected_state_revision,
             RunMutationOperation::Recover,
         )
@@ -1324,9 +1661,19 @@ impl GatewayBackend for CoreGatewayBackend {
         &self,
         r: pb::ReconcileRunRequest,
     ) -> Result<pb::RunMutationResponse, MachineError> {
+        let reference = required(r.run.as_ref(), "run")?;
+        let controller = required(r.controller.as_ref(), "controller")?;
+        if let Some(response) = self.orchestration_close_recovery_response(
+            reference,
+            controller,
+            r.expected_state_revision,
+            RunMutationOperation::Reconcile,
+        )? {
+            return Ok(response);
+        }
         self.mutation_response(
-            required(r.run.as_ref(), "run")?,
-            required(r.controller.as_ref(), "controller")?,
+            reference,
+            controller,
             r.expected_state_revision,
             RunMutationOperation::Reconcile,
         )

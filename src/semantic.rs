@@ -1798,11 +1798,15 @@ pub(crate) fn validate_broker_approval_response_size(
 
 pub(crate) struct ProductionOrchestrationEffects<'a> {
     state_root: &'a Path,
+    last_writer_release: Option<Uuid>,
 }
 
 impl<'a> ProductionOrchestrationEffects<'a> {
     pub(crate) fn new(state_root: &'a Path) -> Self {
-        Self { state_root }
+        Self {
+            state_root,
+            last_writer_release: None,
+        }
     }
 
     fn publish_brokered_run(
@@ -2011,6 +2015,21 @@ fn unavailable_orchestration_effect() -> Result<(), crate::orchestration::Adapte
     Err(crate::orchestration::AdapterFailure::Rejected(
         "ORCHESTRATION_OPERATION_UNAVAILABLE".to_owned(),
     ))
+}
+
+fn classify_orchestration_retirement_failure(
+    error: MachineError,
+) -> crate::orchestration::AdapterFailure {
+    if error.retryable
+        || matches!(
+            error.code.as_str(),
+            "OUTCOME_UNKNOWN" | "INTERNAL_ERROR" | "WORKER_UNREACHABLE"
+        )
+    {
+        crate::orchestration::AdapterFailure::Unknown
+    } else {
+        crate::orchestration::AdapterFailure::Rejected(error.code)
+    }
 }
 
 impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffects<'_> {
@@ -2247,21 +2266,113 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
 
     fn release_specialist(
         &mut self,
-        _member: &crate::orchestration::BrokeredMemberSnapshot,
-        _credential: &crate::orchestration::BrokerCredential,
+        member: &crate::orchestration::BrokeredMemberSnapshot,
+        credential: &crate::orchestration::BrokerCredential,
     ) -> Result<(), crate::orchestration::AdapterFailure> {
-        unavailable_orchestration_effect()
+        use crate::orchestration::AdapterFailure;
+
+        self.validate_task_target(member)
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, member.run_id, 0)
+            .map_err(|_| AdapterFailure::Unknown)?;
+        if snapshot.projection.lifecycle == RunLifecycle::Closed {
+            return Ok(());
+        }
+        let workspace = snapshot
+            .manifest
+            .canonical_workspace
+            .to_path_buf()
+            .map_err(|_| AdapterFailure::Rejected("WORKSPACE_PATH_INVALID".to_owned()))?;
+        let carrier = credential
+            .controller_carrier()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        CoreSemanticService
+            .mutate_run(RunMutationInput {
+                workspace,
+                expected_workspace_id: snapshot.manifest.workspace_id.clone(),
+                run_id: member.run_id,
+                expected_state_revision: Some(snapshot.stamp.run_state_revision),
+                carrier,
+                operation: RunMutationOperation::Close { interrupt: false },
+            })
+            .map_err(classify_orchestration_retirement_failure)?;
+        let closed = crate::snapshot::RunSnapshot::load(self.state_root, member.run_id, 0)
+            .map_err(|_| AdapterFailure::Unknown)?;
+        if closed.projection.lifecycle == RunLifecycle::Closed {
+            Ok(())
+        } else {
+            Err(AdapterFailure::Unknown)
+        }
     }
 
-    fn release_writer(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<(), crate::orchestration::AdapterFailure> {
-        unavailable_orchestration_effect()
+    fn release_writer(&mut self, run_id: Uuid) -> Result<(), crate::orchestration::AdapterFailure> {
+        use crate::orchestration::AdapterFailure;
+
+        self.last_writer_release = Some(run_id);
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, run_id, 0)
+            .map_err(|_| AdapterFailure::Unknown)?;
+        let writer = crate::writer::WriterStore::new(
+            self.state_root,
+            &snapshot.manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        let holder = writer
+            .load()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?
+            .holder;
+        if holder.as_ref().is_none_or(|holder| holder.run_id != run_id) {
+            return Ok(());
+        }
+        let credential = crate::orchestration::BrokerCredential::load(
+            &self.state_root.join("orchestration/broker-credentials"),
+            DarwinSystem.current_uid(),
+            run_id,
+        )
+        .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let carrier = credential
+            .controller_carrier()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
+        let workspace = snapshot
+            .manifest
+            .canonical_workspace
+            .to_path_buf()
+            .map_err(|_| AdapterFailure::Rejected("WORKSPACE_PATH_INVALID".to_owned()))?;
+        CoreSemanticService
+            .mutate_run(RunMutationInput {
+                workspace,
+                expected_workspace_id: snapshot.manifest.workspace_id.clone(),
+                run_id,
+                expected_state_revision: Some(snapshot.stamp.run_state_revision),
+                carrier,
+                operation: RunMutationOperation::ReleaseWriter,
+            })
+            .map_err(classify_orchestration_retirement_failure)?;
+        Ok(())
     }
 
     fn verify_writer_none(&mut self) -> Result<(), crate::orchestration::AdapterFailure> {
-        unavailable_orchestration_effect()
+        use crate::orchestration::AdapterFailure;
+
+        let run_id = self.last_writer_release.ok_or(AdapterFailure::Unknown)?;
+        let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, run_id, 0)
+            .map_err(|_| AdapterFailure::Unknown)?;
+        let writer = crate::writer::WriterStore::new(
+            self.state_root,
+            &snapshot.manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        let holder = writer
+            .load()
+            .map_err(|error| AdapterFailure::Rejected(error.code))?
+            .holder;
+        if holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == run_id)
+        {
+            Err(AdapterFailure::Unknown)
+        } else {
+            Ok(())
+        }
     }
 
     fn acquire_writer(
