@@ -40,8 +40,8 @@ Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
-TASK-047, TASK-048, TASK-049, TASK-050, TASK-051, and TASK-054 are complete;
-TASK-055 is the next planned Task. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance
+TASK-047, TASK-048, TASK-049, TASK-050, TASK-051, TASK-054, TASK-055,
+TASK-052, and TASK-056 are complete; TASK-026 is active. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance
 is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
@@ -1845,7 +1845,7 @@ Next: TASK-056.
 
 ### TASK-056: Frozen Consumer and Cross-Version Regression
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-052`. Run the exact TASK-053 generated consumer and fixtures
 without regeneration against the candidate. Keep a pre-extension low-level
@@ -1865,12 +1865,21 @@ Gul acceptance. Future-owner runtime tests must not accidentally block v0.1.3.
 Verification includes non-regenerated old-client execution, fault scenarios,
 static contract checks and independent review; no real Gul dependency.
 
+Completion evidence includes byte-pinned TASK-053 and pre-extension descriptor
+baselines, unchanged generated Go clients executed against an actual isolated
+gateway before and after restart, and the complete deterministic repository
+gate. The scenarios cover the required method profile, capability negotiation,
+prompt history, aggregate/result paging, event replay, protected Controller
+boundaries, whole-session closure, and retained closed state. Independent
+six-role review completed for the exact candidate with passing CI and no
+Low-or-higher findings; actual Gul and Personal Alpha acceptance remain separate.
+
 Task acceptance: the frozen public consumer works and future changes have an
 executable backward-compatibility boundary. Next: TASK-026.
 
 ### TASK-026: Provider Conformance and v0.1.3 Handoff
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Depends on `TASK-056` and therefore every preceding EPIC-008 Task. Implement the
 planned `private_boundary` driver using generated public-v1 clients against an

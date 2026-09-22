@@ -1,10 +1,12 @@
 SHELL := /bin/bash
 
 CARGO ?= cargo
+GO ?= go
 PYTHON_BIN ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 DOLGORAE_BIN ?= $(CURDIR)/target/debug/dolgorae
 TEST_THREADS ?= 4
 BUF_VERSION := 1.69.0
+GO_VERSION := go1.26.6
 
 INT_TESTS := \
 	--test conformance_contract \
@@ -56,11 +58,21 @@ test-prepare:
 		echo "Validation dependency mismatch: expected buf $(BUF_VERSION), got $$(buf --version)." >&2; \
 		exit 1; \
 	}
+	@command -v $(GO) >/dev/null 2>&1 || { \
+		echo "Missing validation dependency: Go $(GO_VERSION) is required." >&2; \
+		exit 1; \
+	}
+	@test "$$(GOTOOLCHAIN=local $(GO) env GOVERSION)" = "$(GO_VERSION)" || { \
+		echo "Validation dependency mismatch: expected Go $(GO_VERSION), got $$(GOTOOLCHAIN=local $(GO) env GOVERSION)." >&2; \
+		exit 1; \
+	}
 	buf lint docs/protocol
 	buf build docs/protocol >/dev/null
 	$(PYTHON_BIN) tools/validators/validate_json_schemas.py
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
 	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
+	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=local $(GO) test ./...
+	cd docs/protocol/generated/pre-task-053-low-level/go && GOTOOLCHAIN=local $(GO) test ./...
 	$(PYTHON_BIN) tools/validators/validate_markdown.py
 	$(MAKE) validate-agent-skills
 	$(MAKE) test-aquarium-dev-producer
@@ -113,6 +125,7 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_gateway_restart.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_slow_consumer_isolation.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_event_revision_action_barrier.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_frozen_consumer_compatibility.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_start_run_allocation_replay.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_run_configuration_restart.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_threadless_first_write_runtime.py --binary "$(DOLGORAE_BIN)"; \

@@ -18,6 +18,7 @@ use dolgorae::workspace::SystemWorkspacePlatform;
 use prost::Message;
 use serde_json::Value;
 use std::fs;
+use std::process::Command;
 use std::time::Duration;
 use support::{Fixture, context};
 use tonic::Code;
@@ -2666,6 +2667,142 @@ fn timeline_scenario() -> Value {
         }]}
     }}]);
     scenario
+}
+
+fn run_frozen_go_consumer(
+    fixture: &Fixture,
+    gateway: &support::Gateway,
+    run_id: &str,
+    controller: &pb::ControllerCarrierRef,
+    module: &str,
+    test_name: &str,
+    phase: &str,
+) {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let go_cache = repository.join("target/frozen-go-cache");
+    fs::create_dir_all(go_cache.join("mod")).unwrap();
+    fs::create_dir_all(go_cache.join("build")).unwrap();
+    fs::create_dir_all(go_cache.join("path")).unwrap();
+    let output = Command::new("go")
+        .args([
+            "test",
+            "./dolgorae/public/v1",
+            "-run",
+            test_name,
+            "-count=1",
+            "-v",
+        ])
+        .current_dir(repository.join(module))
+        .env("GOTOOLCHAIN", "local")
+        .env("GOMODCACHE", go_cache.join("mod"))
+        .env("GOCACHE", go_cache.join("build"))
+        .env("GOPATH", go_cache.join("path"))
+        .env("GOENV", "off")
+        .env("GOTELEMETRY", "off")
+        .env("DOLGORAE_REPOSITORY", repository)
+        .env("DOLGORAE_FROZEN_SOCKET", &gateway.socket)
+        .env("DOLGORAE_FROZEN_WORKSPACE", &fixture.workspace)
+        .env("DOLGORAE_FROZEN_WORKSPACE_ID", &fixture.workspace_id)
+        .env("DOLGORAE_FROZEN_RUN_ID", run_id)
+        .env("DOLGORAE_FROZEN_CONTROLLER", &controller.absolute_file_path)
+        .env(
+            "DOLGORAE_FROZEN_CONTROLLER_ID",
+            &controller.expected_controller_id,
+        )
+        .env(
+            "DOLGORAE_FROZEN_DESCRIPTOR_SHA256",
+            dolgorae::protocol::PUBLIC_V1_DESCRIPTOR_SHA256,
+        )
+        .env("DOLGORAE_FROZEN_PHASE", phase)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "frozen consumer failed ({module}, {phase}):\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frozen_generated_consumers_run_unchanged_against_candidate_and_restart() {
+    let fixture = Fixture::with_scenario(timeline_scenario());
+    let controller = install_orchestration_controller(&fixture, "frozen-consumer");
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let started = runs
+        .start_run(pb::StartRunRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller: Some(controller.clone()),
+            idempotency_key: Uuid::now_v7().to_string(),
+            profile_name: fixture.profile.clone(),
+            control_mode: pb::ControlMode::DirectInteractive as i32,
+            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+            purpose: pb::PurposeKind::Interactive as i32,
+            purpose_label: None,
+            model: Some("gpt-5.6".to_owned()),
+            effort: Some("medium".to_owned()),
+            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+            required_capabilities: Vec::new(),
+            instructions: Some("Exercise the frozen generated clients.".to_owned()),
+            parent: None,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+
+    run_frozen_go_consumer(
+        &fixture,
+        &gateway,
+        &started.run_id,
+        &controller,
+        "docs/protocol/generated/gul-consumer-v1/go",
+        "TestFrozenConsumerAgainstCandidate",
+        "active",
+    );
+    run_frozen_go_consumer(
+        &fixture,
+        &gateway,
+        &started.run_id,
+        &controller,
+        "docs/protocol/generated/pre-task-053-low-level/go",
+        "TestPreExtensionClientAgainstCandidate",
+        "active",
+    );
+    run_frozen_go_consumer(
+        &fixture,
+        &gateway,
+        &started.run_id,
+        &controller,
+        "docs/protocol/generated/gul-consumer-v1/go",
+        "TestFrozenConsumerAgainstCandidate",
+        "close",
+    );
+
+    gateway.terminate();
+    let mut gateway = fixture.start_gateway();
+    run_frozen_go_consumer(
+        &fixture,
+        &gateway,
+        &started.run_id,
+        &controller,
+        "docs/protocol/generated/gul-consumer-v1/go",
+        "TestFrozenConsumerAgainstCandidate",
+        "recovered",
+    );
+    run_frozen_go_consumer(
+        &fixture,
+        &gateway,
+        &started.run_id,
+        &controller,
+        "docs/protocol/generated/pre-task-053-low-level/go",
+        "TestPreExtensionClientAgainstCandidate",
+        "recovered",
+    );
+    gateway.terminate();
 }
 
 async fn native_snapshot(

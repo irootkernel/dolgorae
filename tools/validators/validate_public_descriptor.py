@@ -87,6 +87,7 @@ def main() -> int:
     source = PROTOCOL / manifest["source"]
     descriptor = PROTOCOL / manifest["descriptor"]
     baseline = PROTOCOL / manifest["buf_breaking"]["baseline"]
+    pre_extension = PROTOCOL / manifest["pre_extension_descriptor"]["path"]
     contract = load_json("dolgorae-gul-consumer-v1.json")
     fixtures = load_json("dolgorae-gul-consumer-v1.fixtures.json")
     lock = load_json("dolgorae-gul-consumer-v1.lock.json")
@@ -101,6 +102,8 @@ def main() -> int:
         errors.append("descriptor digest does not match the descriptor manifest")
     if digest(baseline) != manifest["buf_breaking"]["baseline_sha256"]:
         errors.append("breaking baseline digest does not match the descriptor manifest")
+    if digest(pre_extension) != manifest["pre_extension_descriptor"]["sha256"]:
+        errors.append("pre-extension descriptor digest does not match the descriptor manifest")
 
     for artifact in lock["artifacts"]:
         path = PROTOCOL / artifact["path"]

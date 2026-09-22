@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Preserve executable compatibility for the frozen TASK-053 and pre-extension
+  generated Go consumers, with immutable descriptor baselines, exact schema
+  digest checks, and real-gateway regression coverage across restart and
+  whole-session closure.
 - Make root `CloseRun` retire a complete Orchestrated Session through one
   durable close operation, with admission fencing, owned-Specialist settlement,
   restart recovery, explicit in-progress correlation, and fail-closed unknown

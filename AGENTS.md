@@ -87,7 +87,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - `docs/roadmap/README.md` is the sole delivery-order and delivery-status authority.
 - Aquarium release notes: CHANGELOG.md
 - If canonical documents disagree, resolve the contradiction before changing implementation. For behavior or architecture changes, update the owning document first, then synchronize affected protocol artifacts, implementation, tests, and roadmap entries.
-- The supported toolchain is Rust 1.97.1, Buf 1.69.0, and Python 3 with the validation dependencies in `tools/validation/requirements.txt`.
+- The supported toolchain is Rust 1.97.1, Buf 1.69.0, Go 1.26.6, and Python 3 with the validation dependencies in `tools/validation/requirements.txt`.
 - The complete repository gate is `make PYTHON_BIN=.venv/bin/python test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.
 - `make test-prepare` runs `cargo fmt` and may rewrite Rust source. Use `make format-check` when a read-only formatting check is required.
 - `make test-live-specialist-review`, `make test-live-scoped-specialist-review`, `make test-live-access-safety`, and `make test-live-codex-compatibility` contact an external Codex runtime and require explicit authorization plus their documented opt-in environment. They are not part of the default complete gate.

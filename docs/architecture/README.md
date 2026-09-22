@@ -2270,7 +2270,10 @@ complete membership handling.
 ## Runtime and Dependency Boundary
 
 The implementation is Rust 2024 pinned by `rust-toolchain.toml` to 1.97.1 with
-rustfmt, clippy, and `aarch64-apple-darwin`; Cargo.lock is committed. Blocking
+rustfmt, clippy, and `aarch64-apple-darwin`; Cargo.lock is committed. Go 1.26.6
+is a validation-only dependency for compiling and executing the immutable
+TASK-053 and pre-extension generated clients; it owns no product runtime state.
+Blocking
 durability and process work uses dedicated OS threads rather than an async
 runtime: control/protocol, stdout, stderr, ledger/state authority,
 kqueue/liveness, and `sigwait` each have an explicit owner.

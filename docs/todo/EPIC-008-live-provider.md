@@ -355,11 +355,11 @@ cleanup subsystem. Next: TASK-056.
 
 Input: TASK-052 and the unchanged TASK-053 consumer plus pre-extension clients.
 
-- [ ] Run the old generated clients without regeneration against the candidate.
-- [ ] Add immutable-baseline Buf breaking and actual schema-byte digest validation to the normal gate.
-- [ ] Verify history, sequential input, result discovery, close/recovery, events/cursors and missing required versus added optional methods.
-- [ ] Keep preview, Personal Alpha and actual-Gul acceptance requirements separate.
-- [ ] Retain this baseline for EPIC-009 and TASK-028/029/031 and complete ordinary review/commit gates.
+- [x] Run the old generated clients without regeneration against the candidate.
+- [x] Add immutable-baseline Buf breaking and actual schema-byte digest validation to the normal gate.
+- [x] Verify history, sequential input, result discovery, close/recovery, events/cursors and missing required versus added optional methods.
+- [x] Keep preview, Personal Alpha and actual-Gul acceptance requirements separate.
+- [x] Retain this baseline for EPIC-009 and TASK-028/029/031 and complete ordinary review/commit gates.
 
 Next: TASK-026.
 

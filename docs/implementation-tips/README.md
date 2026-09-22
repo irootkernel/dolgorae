@@ -8,8 +8,8 @@ changes.
 
 ## Development setup
 
-Install Rust 1.97.1, Buf 1.69.0, and Python 3. Then create an isolated Python
-environment for the small repository checks:
+Install Rust 1.97.1, Buf 1.69.0, Go 1.26.6, and Python 3. Then create an
+isolated Python environment for the small repository checks:
 
 ```sh
 python3 -m venv .venv
@@ -25,8 +25,8 @@ make PYTHON_BIN=.venv/bin/python test
 The Make targets define four ordered validation layers:
 
 - `make test-prepare` applies `cargo fmt`, then runs Clippy, `cargo check`,
-  architecture guardrails, Buf checks, JSON duplicate-key and schema
-  meta-validation, schema-example validation, Markdown-link validation,
+  architecture guardrails, Buf checks, both frozen Go consumer packages, JSON
+  duplicate-key and schema meta-validation, schema-example validation, Markdown-link validation,
   source-distributed agent-skill validation, Aquarium development-channel
   producer tests, and Git whitespace checks.
 - `make test-unit` runs Rust library and binary unit tests.
@@ -171,6 +171,11 @@ healthy shared Profile Servers intact; Primary pause is not aggregate pause.
 
 Publish exact contract and credential-schema hashes. TASK-056 runs the old
 consumer unchanged rather than regenerating it to match each new candidate.
+The immutable TASK-053 descriptor is the Buf compatibility baseline; the
+pre-TASK-053 descriptor remains only the source for the older low-level client.
+The candidate must advertise the SHA-256 of its actual checked descriptor bytes,
+and both generated clients execute against the production UDS gateway before
+and after restart.
 Keep contract-ready, runtime-ready, released-provider and actual-Gul evidence
 separate. Future Podway observation remains read-only and outside this release.
 

@@ -419,6 +419,11 @@ normal deterministic gate. Also retain a pre-extension low-level client to
 verify original Run behavior. A current source/descriptor equality check alone
 cannot establish backward compatibility. EPIC-009 and TASK-028/029/031 rerun
 these clients; they must not rewrite the baseline to make new behavior pass.
+The Buf baseline is the exact TASK-053 descriptor, not the older descriptor
+used to generate the pre-extension client. Each candidate supplies its checked
+descriptor-byte SHA-256 to the unchanged clients; successful negotiation
+requires the gateway to advertise that exact digest, while Buf independently
+proves compatibility with the frozen TASK-053 wire.
 
 | Scenario family | Required proof before v0.1.3 release eligibility |
 | --- | --- |

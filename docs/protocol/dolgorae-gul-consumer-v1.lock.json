@@ -9,6 +9,7 @@
   },
   "toolchain": {
     "buf": "1.69.0",
+    "go": "1.26.6",
     "protoc": "35.1",
     "protoc_gen_go": "1.36.11",
     "protoc_gen_go_grpc": "1.6.1"
@@ -17,16 +18,24 @@
     "descriptor": "buf build docs/protocol --as-file-descriptor-set -o docs/protocol/dolgorae-public-v1.descriptor.pb",
     "go_clients": "protoc -I docs/protocol -I /opt/homebrew/include --go_out=paths=source_relative:docs/protocol/generated/gul-consumer-v1/go --go-grpc_out=paths=source_relative:docs/protocol/generated/gul-consumer-v1/go docs/protocol/dolgorae/public/v1/dolgorae.proto",
     "pre_extension_go_clients": "protoc --descriptor_set_in=docs/protocol/baselines/dolgorae-public-v1-pre-task-053.descriptor.pb --go_out=paths=source_relative:docs/protocol/generated/pre-task-053-low-level/go --go-grpc_out=paths=source_relative:docs/protocol/generated/pre-task-053-low-level/go dolgorae/public/v1/dolgorae.proto",
-    "breaking": "copy the checked baseline descriptor outside the module, then run buf breaking docs/protocol --against <copied-baseline>"
+    "breaking": "copy the checked TASK-053 baseline descriptor outside the module, then run buf breaking docs/protocol --against <copied-baseline>",
+    "frozen_go_clients": "run go test ./... unchanged in each checked generated client module, then execute the named candidate test through test_frozen_consumer_compatibility.py"
   },
   "artifacts": [
     {"path": "dolgorae/public/v1/dolgorae.proto", "sha256": "561ccf51658b50703f9fb1a37c4de7c52188b34ab4db2ac9885ef3ccabdf0e48"},
     {"path": "dolgorae-public-v1.descriptor.pb", "sha256": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5"},
+    {"path": "baselines/dolgorae-public-v1-task-053.descriptor.pb", "sha256": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5"},
     {"path": "baselines/dolgorae-public-v1-pre-task-053.descriptor.pb", "sha256": "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252"},
     {"path": "generated/gul-consumer-v1/go/dolgorae/public/v1/dolgorae.pb.go", "sha256": "85d9cccd749cd08bba58684f5ca2a37eb3f6a78e7314096e694ffada653bfefd"},
     {"path": "generated/gul-consumer-v1/go/dolgorae/public/v1/dolgorae_grpc.pb.go", "sha256": "03cfc01df9abda25add84f9bdf6703a99d935b130ff8b19a3a6e0a1b4a9221f4"},
+    {"path": "generated/gul-consumer-v1/go/dolgorae/public/v1/compat_test.go", "sha256": "0669b0d33cd84d460dc3e4a2517c318598671b4a7b445595a232a32887eb77af"},
+    {"path": "generated/gul-consumer-v1/go/go.mod", "sha256": "504909e5de2a3e7f0470968c5966d15a3ce5d7e9cd60b9190e47a8175767b084"},
+    {"path": "generated/gul-consumer-v1/go/go.sum", "sha256": "fa8b94e328cae88eb7b9bba0a2994b4251ebb10d4907cbb33dc17f9a9dccb654"},
     {"path": "generated/pre-task-053-low-level/go/dolgorae/public/v1/dolgorae.pb.go", "sha256": "674e143d89ac60771b621f806c3b7f37e41797a799e9185effddd689130faa5a"},
     {"path": "generated/pre-task-053-low-level/go/dolgorae/public/v1/dolgorae_grpc.pb.go", "sha256": "d576b72dc75ddf922890296b6e080173cb81846e6a89b3b86de37545b809378e"},
+    {"path": "generated/pre-task-053-low-level/go/dolgorae/public/v1/compat_test.go", "sha256": "c1e940d42bd800119431be21e9581370ae9d0641305e835d9ae686c86a700e59"},
+    {"path": "generated/pre-task-053-low-level/go/go.mod", "sha256": "2c193d169ef8b75c7d5778a396c45a0a6f9c52755b78d01fd0b5461daa086284"},
+    {"path": "generated/pre-task-053-low-level/go/go.sum", "sha256": "fa8b94e328cae88eb7b9bba0a2994b4251ebb10d4907cbb33dc17f9a9dccb654"},
     {"path": "dolgorae-gul-consumer-v1.json", "sha256": "8211b403960edc114ac9f874d4c739e2a23674504d8dbb304284b5ef31eaa71b"},
     {"path": "dolgorae-gul-consumer-v1.fixtures.json", "sha256": "18a5a48b3240eb684225f5f1d7f41538dc874c724268c7794e481119907a5274"},
     {"path": "dolgorae-controller-credential-v1.schema.json", "sha256": "6e888023fa6f12964afbd2867832944307dc626cad3fe6c6bc517768ab98b84f"},

@@ -27,8 +27,10 @@ milestone boundaries.
 
 ## Build and use from source
 
-Build Dolgorae with the supported Rust 1.97.1 toolchain, then inspect the
-currently available command surface:
+Build Dolgorae with the supported Rust 1.97.1 toolchain. The complete test gate
+also requires Go 1.26.6 for the frozen public-v1 consumers, Buf 1.69.0, and the
+documented Python validation environment. Then inspect the currently available
+command surface:
 
 ```sh
 cargo build --locked

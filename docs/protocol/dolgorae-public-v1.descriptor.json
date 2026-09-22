@@ -11,9 +11,13 @@
   "include_imports": true,
   "include_source_info": true,
   "buf_breaking": {
-    "baseline": "baselines/dolgorae-public-v1-pre-task-053.descriptor.pb",
-    "baseline_sha256": "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252",
-    "result": "compatible_additive"
+    "baseline": "baselines/dolgorae-public-v1-task-053.descriptor.pb",
+    "baseline_sha256": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5",
+    "result": "compatible_frozen_consumer"
+  },
+  "pre_extension_descriptor": {
+    "path": "baselines/dolgorae-public-v1-pre-task-053.descriptor.pb",
+    "sha256": "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252"
   },
   "generator": {
     "protoc": "35.1",
