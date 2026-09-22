@@ -17,7 +17,9 @@ use crate::workspace::{
     sync_directory, verify_secure_directory,
 };
 use base64::Engine as _;
-use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -179,6 +181,53 @@ struct ResultPublication {
     byte_length: u64,
     sha256: String,
     created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrchestratedSessionObservation {
+    pub session_id: Uuid,
+    pub bootstrap_operation_id: Uuid,
+    pub root_run_id: Uuid,
+    pub status: String,
+    pub composition_state: String,
+    pub approval_policy: String,
+    pub specialist_policy_name: String,
+    pub specialist_policy_revision: u64,
+    pub specialist_policy_sha256: String,
+    pub aggregate_revision: u64,
+    pub nonretired_member_count: u64,
+    pub nonterminal_spawn_count: u64,
+    pub pending_approval_count: u64,
+    pub accepted_unfinished_task_count: u64,
+    pub unknown_outcome_task_count: u64,
+    pub published_result_count: u64,
+    pub captured_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishedResultObservation {
+    pub result_id: Uuid,
+    pub task_id: Uuid,
+    pub specialist_run_id: Uuid,
+    pub specialist_role: String,
+    pub publication_order: u64,
+    pub published_at_ms: i64,
+    pub created_at: String,
+    pub byte_length: u64,
+    pub sha256: String,
+    pub artifact_id: Uuid,
+    pub artifact_owner_run_id: Uuid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishedResultPage {
+    pub bootstrap_operation_id: Uuid,
+    pub specialist_policy_sha256: String,
+    pub captured_publication_head: u64,
+    pub source_revision: u64,
+    pub captured_at_ms: i64,
+    pub items: Vec<PublishedResultObservation>,
+    pub has_more: bool,
 }
 
 const BROKERED_TOOL_RESULT_SCHEMA_V1: &str = "dolgorae.brokered-tool-result/v1";
@@ -1016,6 +1065,32 @@ impl OrchestrationStore {
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(internal)?;
         connection.execute_batch(SCHEMA).map_err(internal)?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO brokered_result_publication_sequence(
+                   task_id,session_id,published_at_ms
+                 )
+                 SELECT task_id,session_id,updated_at_ms
+                 FROM brokered_result_publications
+                 WHERE state='published'
+                 ORDER BY updated_at_ms,task_id",
+                [],
+            )
+            .map_err(internal)?;
+        connection
+            .execute(
+                "UPDATE orchestrated_sessions
+                 SET revision=(
+                   SELECT COUNT(*) FROM orchestration_events e
+                   WHERE e.session_id=orchestrated_sessions.session_id
+                 )
+                 WHERE revision<>(
+                   SELECT COUNT(*) FROM orchestration_events e
+                   WHERE e.session_id=orchestrated_sessions.session_id
+                 )",
+                [],
+            )
+            .map_err(internal)?;
         let mut store = Self {
             connection,
             faults,
@@ -1026,6 +1101,28 @@ impl OrchestrationStore {
         };
         store.recover_result_publications()?;
         Ok(store)
+    }
+
+    /// Open the orchestration database without schema creation, recovery, or
+    /// any other logical write. Public observations use only this boundary.
+    pub fn open_observer(state_root: &Path) -> Result<Self, MachineError> {
+        let path = EngagementStore::workspace_database_path(state_root);
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| integrity("orchestration observation source is unavailable"))?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(internal)?;
+        Ok(Self {
+            connection,
+            faults: Arc::new(NoOrchestrationFaults),
+            clock: Arc::new(SystemOrchestrationClock),
+            credential_root: state_root.join("orchestration/broker-credentials"),
+            state_root: state_root.to_owned(),
+            uid: crate::darwin::DarwinSystem.current_uid(),
+        })
     }
 
     fn now_ms(&self) -> Result<i64, MachineError> {
@@ -1113,7 +1210,7 @@ impl OrchestrationStore {
                 "INSERT INTO orchestrated_sessions(
                    session_id,bootstrap_operation_id,root_run_id,workspace_id,status,
                    approval_policy,policy_json,policy_sha256,revision,created_at_ms,updated_at_ms
-                 ) VALUES(?1,?2,?1,?3,'creating',?4,?5,?6,1,?7,?7)",
+                 ) VALUES(?1,?2,?1,?3,'creating',?4,?5,?6,0,?7,?7)",
                 params![
                     root_run_id.to_string(),
                     operation_id.to_string(),
@@ -1242,7 +1339,7 @@ impl OrchestrationStore {
             .map_err(internal)?;
         let session_changed = transaction
             .execute(
-                "UPDATE orchestrated_sessions SET status=?2,revision=revision+1,updated_at_ms=?3
+                "UPDATE orchestrated_sessions SET status=?2,updated_at_ms=?3
                  WHERE session_id=?1 AND status IN ('creating','recovering')",
                 params![session_id.to_string(), session_state, now],
             )
@@ -1354,6 +1451,261 @@ impl OrchestrationStore {
             specialist_policy_sha256: row.6,
             revision: row.7,
             members,
+        })
+    }
+
+    pub fn observe_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<OrchestratedSessionObservation, MachineError> {
+        let transaction = self.connection.unchecked_transaction().map_err(internal)?;
+        let row = transaction
+            .query_row(
+                "SELECT bootstrap_operation_id,root_run_id,status,approval_policy,policy_json,
+                        policy_sha256,revision
+                 FROM orchestrated_sessions WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, u64>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| session_not_found(session_id))?;
+        let bootstrap_operation_id = parse_uuid(&row.0)?;
+        let root_run_id = parse_uuid(&row.1)?;
+        if root_run_id != session_id
+            || !matches!(
+                row.2.as_str(),
+                "creating"
+                    | "active"
+                    | "degraded"
+                    | "recovering"
+                    | "completing"
+                    | "aborting"
+                    | "completed"
+                    | "aborted"
+            )
+            || !matches!(row.3.as_str(), "user_approval_required" | "fully_delegated")
+            || row.6 == 0
+        {
+            return Err(integrity("session observation identity is invalid"));
+        }
+        let policy: InstalledSpecialistPolicy =
+            serde_json::from_str(&row.4).map_err(|_| integrity("session policy is invalid"))?;
+        validate_installed_policy(&policy)
+            .map_err(|_| integrity("session policy snapshot contract is invalid"))?;
+        if policy.digest()? != row.5 || policy.approval_policy != row.3 {
+            return Err(integrity("session policy snapshot digest is invalid"));
+        }
+        let count = |sql: &str| -> Result<u64, MachineError> {
+            transaction
+                .query_row(sql, [session_id.to_string()], |row| row.get(0))
+                .map_err(internal)
+        };
+        let specialist_count = count(
+            "SELECT COUNT(*) FROM brokered_members
+             WHERE session_id=?1 AND membership_state!='retired'",
+        )?;
+        let nonretired_member_count = specialist_count
+            .checked_add(1)
+            .ok_or_else(|| integrity("session member count overflow"))?;
+        let nonterminal_spawn_count = count(
+            "SELECT COUNT(*) FROM brokered_spawn_operations
+             WHERE session_id=?1
+             AND state IN ('requested','awaiting_approval','approved','provisioning','publication_pending')",
+        )?;
+        let pending_approval_count = count(
+            "SELECT COUNT(*) FROM brokered_spawn_operations
+             WHERE session_id=?1 AND state='awaiting_approval'",
+        )?;
+        let accepted_unfinished_task_count = count(
+            "SELECT COUNT(*) FROM brokered_tasks
+             WHERE session_id=?1
+             AND state IN ('accepted','dispatching','running','result_publication_pending','interrupted_unknown')",
+        )?;
+        let unknown_outcome_task_count = count(
+            "SELECT COUNT(*) FROM brokered_tasks
+             WHERE session_id=?1 AND state='interrupted_unknown'",
+        )?;
+        let published_result_count = count(
+            "SELECT COUNT(*) FROM brokered_result_publications
+             WHERE session_id=?1 AND state='published'",
+        )?;
+        validate_event_chain_on(&transaction, session_id)?;
+        let captured_at_ms = self.now_ms()?;
+        transaction.commit().map_err(internal)?;
+        Ok(OrchestratedSessionObservation {
+            session_id,
+            bootstrap_operation_id,
+            root_run_id,
+            status: row.2,
+            composition_state: if specialist_count == 0 {
+                "standalone_primary"
+            } else {
+                "brokered_hierarchy"
+            }
+            .to_owned(),
+            approval_policy: row.3,
+            specialist_policy_name: policy.policy_name,
+            specialist_policy_revision: policy.revision,
+            specialist_policy_sha256: row.5,
+            aggregate_revision: row.6,
+            nonretired_member_count,
+            nonterminal_spawn_count,
+            pending_approval_count,
+            accepted_unfinished_task_count,
+            unknown_outcome_task_count,
+            published_result_count,
+            captured_at_ms,
+        })
+    }
+
+    pub fn observe_published_results(
+        &self,
+        session_id: Uuid,
+        captured_head: Option<u64>,
+        after: u64,
+        limit: u32,
+    ) -> Result<PublishedResultPage, MachineError> {
+        if limit == 0 || limit > 500 {
+            return Err(MachineError::invalid_argument(
+                "limit",
+                "result page limit must be between 1 and 500",
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction().map_err(internal)?;
+        let (bootstrap_operation_id, root_run_id, specialist_policy_sha256, source_revision): (
+            String,
+            String,
+            String,
+            u64,
+        ) = transaction
+            .query_row(
+                "SELECT bootstrap_operation_id,root_run_id,policy_sha256,revision
+                 FROM orchestrated_sessions WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| session_not_found(session_id))?;
+        let bootstrap_operation_id = parse_uuid(&bootstrap_operation_id)?;
+        digest(
+            &specialist_policy_sha256,
+            "result observation policy digest",
+        )?;
+        if parse_uuid(&root_run_id)? != session_id || source_revision == 0 {
+            return Err(integrity("result observation session identity is invalid"));
+        }
+        let current_head: u64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence),0)
+                 FROM brokered_result_publication_sequence WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        let head = captured_head.unwrap_or(current_head);
+        if head > current_head || after > head {
+            return Err(MachineError::invalid_argument(
+                "page_cursor",
+                "result page cursor is outside the captured publication head",
+            ));
+        }
+        let mut statement = transaction
+            .prepare(
+                "SELECT p.artifact_id,p.task_id,t.target_run_id,m.role_ref,q.sequence,
+                        q.published_at_ms,p.created_at,p.byte_length,p.result_sha256,
+                        p.primary_run_id,p.session_id,t.session_id,m.session_id
+                 FROM brokered_result_publication_sequence q
+                 JOIN brokered_result_publications p USING(task_id)
+                 JOIN brokered_tasks t USING(task_id)
+                 JOIN brokered_members m ON m.run_id=t.target_run_id
+                 WHERE q.session_id=?1 AND q.sequence>?2 AND q.sequence<=?3
+                   AND p.state='published'
+                 ORDER BY q.sequence
+                 LIMIT ?4",
+            )
+            .map_err(internal)?;
+        let rows = statement
+            .query_map(
+                params![session_id.to_string(), after, head, u64::from(limit) + 1],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, u64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, u64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                    ))
+                },
+            )
+            .map_err(internal)?;
+        let mut items = Vec::new();
+        for row in rows {
+            let row = row.map_err(internal)?;
+            let artifact_id = parse_uuid(&row.0)?;
+            let task_id = parse_uuid(&row.1)?;
+            let specialist_run_id = parse_uuid(&row.2)?;
+            let artifact_owner_run_id = parse_uuid(&row.9)?;
+            if artifact_owner_run_id != session_id
+                || parse_uuid(&row.10)? != session_id
+                || parse_uuid(&row.11)? != session_id
+                || parse_uuid(&row.12)? != session_id
+                || row.4 == 0
+                || row.5 < 0
+                || row.7 > MAX_SPECIALIST_RESULT_BYTES as u64
+                || !crate::audit::is_microsecond_utc_timestamp(&row.6)
+            {
+                return Err(integrity("published result association is invalid"));
+            }
+            checked(&row.3, 256, "published result role")?;
+            digest(&row.8, "published result digest")?;
+            items.push(PublishedResultObservation {
+                result_id: artifact_id,
+                task_id,
+                specialist_run_id,
+                specialist_role: row.3,
+                publication_order: row.4,
+                published_at_ms: row.5,
+                created_at: row.6,
+                byte_length: row.7,
+                sha256: row.8,
+                artifact_id,
+                artifact_owner_run_id,
+            });
+        }
+        let has_more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        drop(statement);
+        validate_event_chain_on(&transaction, session_id)?;
+        let captured_at_ms = self.now_ms()?;
+        transaction.commit().map_err(internal)?;
+        Ok(PublishedResultPage {
+            bootstrap_operation_id,
+            specialist_policy_sha256,
+            captured_publication_head: head,
+            source_revision,
+            captured_at_ms,
+            items,
+            has_more,
         })
     }
 
@@ -1914,46 +2266,7 @@ impl OrchestrationStore {
     }
 
     fn validate_event_chain(&self, session_id: Uuid) -> Result<(), MachineError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT kind,payload_sha256,previous_hash,event_hash,created_at_ms
-                 FROM orchestration_events WHERE session_id=?1 ORDER BY sequence",
-            )
-            .map_err(internal)?;
-        let rows = statement
-            .query_map([session_id.to_string()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(internal)?;
-        let mut previous = "0".repeat(64);
-        let mut observed = false;
-        for row in rows {
-            let (kind, payload, stored_previous, event_hash, created_at_ms) =
-                row.map_err(internal)?;
-            digest(&payload, "event payload digest")?;
-            digest(&stored_previous, "event previous hash")?;
-            digest(&event_hash, "event hash")?;
-            checked(&kind, 128, "event kind")?;
-            let expected = sha256_hex(
-                format!("{previous}\0{session_id}\0{kind}\0{payload}\0{created_at_ms}").as_bytes(),
-            );
-            if stored_previous != previous || event_hash != expected {
-                return Err(integrity("orchestration event chain is invalid"));
-            }
-            previous = event_hash;
-            observed = true;
-        }
-        if !observed {
-            return Err(integrity("orchestration event chain is empty"));
-        }
-        Ok(())
+        validate_event_chain_on(&self.connection, session_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2124,7 +2437,7 @@ impl OrchestrationStore {
             .map_err(internal)?;
         transaction
             .execute(
-                "UPDATE orchestrated_sessions SET revision=revision+1,updated_at_ms=?2 WHERE session_id=?1",
+                "UPDATE orchestrated_sessions SET updated_at_ms=?2 WHERE session_id=?1",
                 params![context.session_id.to_string(), now],
             )
             .map_err(internal)?;
@@ -2270,7 +2583,7 @@ impl OrchestrationStore {
             .map_err(internal)?;
         transaction
             .execute(
-                "UPDATE orchestrated_sessions SET revision=revision+1,updated_at_ms=?2
+                "UPDATE orchestrated_sessions SET updated_at_ms=?2
                  WHERE session_id=?1",
                 params![session_id.to_string(), now],
             )
@@ -2977,6 +3290,14 @@ impl OrchestrationStore {
                 params![task_id.to_string(), now],
             )
             .map_err(internal)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO brokered_result_publication_sequence(
+                   task_id,session_id,published_at_ms
+                 ) VALUES(?1,?2,?3)",
+                params![task_id.to_string(), publication.session_id.to_string(), now],
+            )
+            .map_err(internal)?;
         if changed == 1 {
             append_event(
                 &transaction,
@@ -3035,8 +3356,14 @@ impl OrchestrationStore {
                 "prepared Specialist result bytes failed integrity validation",
             ));
         }
-        let root =
-            crate::run::run_root(&self.state_root, publication.primary_run_id).join("artifacts");
+        let run_root = crate::run::run_root(&self.state_root, publication.primary_run_id);
+        verify_secure_directory(&run_root, self.uid)?;
+        let root = run_root.join("artifacts");
+        match create_directory(&root, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(internal(error)),
+        }
         verify_secure_directory(&root, self.uid)?;
         let path = root.join(format!("{}.bin", publication.artifact_id));
         match atomic_create(
@@ -3565,7 +3892,7 @@ impl OrchestrationStore {
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
-                "UPDATE orchestrated_sessions SET status='degraded',revision=revision+1,updated_at_ms=?2
+                "UPDATE orchestrated_sessions SET status='degraded',updated_at_ms=?2
                  WHERE session_id=?1 AND status='active'",
                 params![session_id.to_string(), now],
             )
@@ -3619,7 +3946,7 @@ impl OrchestrationStore {
         let transaction = self.transaction()?;
         let changed = transaction
             .execute(
-                "UPDATE orchestrated_sessions SET status=?2,revision=revision+1,updated_at_ms=?3
+                "UPDATE orchestrated_sessions SET status=?2,updated_at_ms=?3
                  WHERE session_id=?1 AND status NOT IN ('completing','aborting','completed','aborted')",
                 params![session_id.to_string(), transition, now],
             )
@@ -3650,7 +3977,7 @@ impl OrchestrationStore {
         let transaction = self.transaction()?;
         transaction
             .execute(
-                "UPDATE orchestrated_sessions SET status=?2,revision=revision+1,updated_at_ms=?3
+                "UPDATE orchestrated_sessions SET status=?2,updated_at_ms=?3
                  WHERE session_id=?1",
                 params![session_id.to_string(), terminal, now],
             )
@@ -4290,6 +4617,14 @@ CREATE TABLE IF NOT EXISTS brokered_result_publications(
   FOREIGN KEY(task_id) REFERENCES brokered_tasks(task_id),
   FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS brokered_result_publication_sequence(
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  published_at_ms INTEGER NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES brokered_result_publications(task_id),
+  FOREIGN KEY(session_id) REFERENCES orchestrated_sessions(session_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS brokered_delivery_receipts(
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL UNIQUE,
@@ -4322,6 +4657,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_brokered_task_per_member
   ON brokered_tasks(target_run_id)
   WHERE state IN ('accepted','dispatching','running');
 ";
+
+fn validate_event_chain_on(connection: &Connection, session_id: Uuid) -> Result<(), MachineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT kind,payload_sha256,previous_hash,event_hash,created_at_ms
+             FROM orchestration_events WHERE session_id=?1 ORDER BY sequence",
+        )
+        .map_err(internal)?;
+    let rows = statement
+        .query_map([session_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(internal)?;
+    let mut previous = "0".repeat(64);
+    let mut observed = false;
+    for row in rows {
+        let (kind, payload, stored_previous, event_hash, created_at_ms) = row.map_err(internal)?;
+        digest(&payload, "event payload digest")?;
+        digest(&stored_previous, "event previous hash")?;
+        digest(&event_hash, "event hash")?;
+        checked(&kind, 128, "event kind")?;
+        let expected = sha256_hex(
+            format!("{previous}\0{session_id}\0{kind}\0{payload}\0{created_at_ms}").as_bytes(),
+        );
+        if stored_previous != previous || event_hash != expected {
+            return Err(integrity("orchestration event chain is invalid"));
+        }
+        previous = event_hash;
+        observed = true;
+    }
+    if !observed {
+        return Err(integrity("orchestration event chain is empty"));
+    }
+    Ok(())
+}
 
 fn append_event(
     transaction: &Transaction<'_>,
@@ -4357,6 +4733,16 @@ fn append_event(
             ],
         )
         .map_err(internal)?;
+    let changed = transaction
+        .execute(
+            "UPDATE orchestrated_sessions SET revision=revision+1,updated_at_ms=?2
+             WHERE session_id=?1",
+            params![session_id.to_string(), now],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(integrity("orchestration event has no owning session"));
+    }
     Ok(())
 }
 
@@ -6238,6 +6624,91 @@ mod tests {
                 .unwrap_err()
                 .code,
             "SPECIALIST_RESULT_UNREADABLE"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_observation_is_read_only_coherent_and_head_bound_after_delivery_and_close() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let initial_revision = store.session(session.session_id).unwrap().revision;
+        let mut adapter = FakeAdapter::default();
+        let first = store
+            .assign_task(
+                &context(session.session_id, "public-result-one"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let mut second_request = task_request(child, "read_only");
+        second_request.objective = "Return the second public result.".to_owned();
+        let second = store
+            .assign_task(
+                &context(session.session_id, "public-result-two"),
+                &second_request,
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(first.state, "completed_not_delivered");
+        assert_eq!(second.state, "completed_not_delivered");
+        assert!(
+            store.session(session.session_id).unwrap().revision > initial_revision,
+            "aggregate-only task and publication changes advance the aggregate revision"
+        );
+        assert_eq!(
+            store
+                .collect_results(session.session_id, 0, 8)
+                .unwrap()
+                .len(),
+            2
+        );
+        let closed = store
+            .finish_session(session.session_id, false, &mut adapter)
+            .unwrap();
+        assert_eq!(closed.status, "completed");
+        drop(store);
+
+        let observer = OrchestrationStore::open_observer(&root).unwrap();
+        let observed = observer.observe_session(session.session_id).unwrap();
+        assert_eq!(observed.status, "completed");
+        assert_eq!(observed.composition_state, "standalone_primary");
+        assert_eq!(observed.nonretired_member_count, 1);
+        assert_eq!(observed.accepted_unfinished_task_count, 0);
+        assert_eq!(observed.published_result_count, 2);
+        let first_page = observer
+            .observe_published_results(session.session_id, None, 0, 1)
+            .unwrap();
+        assert!(first_page.has_more);
+        assert_eq!(first_page.items.len(), 1);
+        let fixed_head = first_page.captured_publication_head;
+        let second_page = observer
+            .observe_published_results(
+                session.session_id,
+                Some(fixed_head),
+                first_page.items[0].publication_order,
+                1,
+            )
+            .unwrap();
+        assert!(!second_page.has_more);
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(
+            [first_page.items[0].task_id, second_page.items[0].task_id],
+            [first.task_id, second.task_id]
+        );
+        assert_eq!(
+            second_page.items[0].artifact_owner_run_id,
+            session.root_run_id
+        );
+        assert!(
+            observer
+                .connection
+                .execute(
+                    "UPDATE orchestrated_sessions SET status='active' WHERE session_id=?1",
+                    [session.session_id.to_string()],
+                )
+                .is_err(),
+            "the public observation connection is SQLite read-only"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -93,8 +93,13 @@ that carrier to a parentless, direct-interactive public-v1 `StartRun`. Dolgorae
 atomically prepares the session around the preallocated Primary Run identity.
 The Run-scoped `dolgorae_orchestration` dynamic tool connects that Primary to
 the existing orchestration service without editing the shared Profile. The
-current provider slice exposes wired reads and rejects later effectful
-operations before they can mutate semantic state.
+public gateway exposes `GetOrchestratedSession` and
+`ListOrchestratedSessionResults` only after authenticating the root Controller.
+The first returns one coherent aggregate snapshot and independent revision; the
+second returns captured-head pages of retained Primary-owned result artifacts.
+These reads do not repair state, start Workers, acknowledge private delivery,
+or expose child Controller authority. Later effectful operations remain
+unavailable until their owning Tasks connect them completely.
 
 ## Task-aware completion review
 

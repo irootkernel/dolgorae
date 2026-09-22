@@ -9,6 +9,11 @@ development commits.
 
 ### Added
 
+- Expose Controller-authorized Orchestrated Session snapshots and stable
+  published Specialist results through the public gateway, with independent
+  aggregate revisions, read-only captured-head paging, explicit Primary-owned
+  artifact references, and retained discovery after private collection and
+  gateway restart.
 - Expose the complete Controller-authorized Run timeline through Machine CLI
   and gRPC, preserving accepted UTF-8 prompts, safe image metadata, bounded
   paging, long-input artifacts, interaction history, terminal outcomes, and

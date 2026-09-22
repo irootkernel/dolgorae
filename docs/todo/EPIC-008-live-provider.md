@@ -313,12 +313,12 @@ fabricate a Primary final-response event for a Specialist result. Next: TASK-054
 
 Input: TASK-051 and TASK-053's checked consumer contract.
 
-- [ ] Implement every existing safe timeline kind, Controller checks, exact order/identity, captured-head paging and long user-input artifacts.
-- [ ] Persist accepted prompts before acknowledgement; preserve Unicode/CRLF, same-text distinct requests and safe image metadata.
-- [ ] Reject fresh human input during an active Turn, keep exact replay and current Interaction replies, and introduce no queue/steering/auto-send.
-- [ ] Verify pages, concurrent append, restart/close/interrupted/failed Turns, duplicate delivery and two-browser admission.
-- [ ] Keep history distinct from replay authority and prove secret-answer/reasoning/private-tool exclusion.
-- [ ] Complete implementation/tests/docs/review before advertising the Timeline RPC.
+- [x] Implement every existing safe timeline kind, Controller checks, exact order/identity, captured-head paging and long user-input artifacts.
+- [x] Persist accepted prompts before acknowledgement; preserve Unicode/CRLF, same-text distinct requests and safe image metadata.
+- [x] Reject fresh human input during an active Turn, keep exact replay and current Interaction replies, and introduce no queue/steering/auto-send.
+- [x] Verify pages, concurrent append, restart/close/interrupted/failed Turns, duplicate delivery and two-browser admission.
+- [x] Keep history distinct from replay authority and prove secret-answer/reasoning/private-tool exclusion.
+- [x] Complete implementation/tests/docs/review before advertising the Timeline RPC.
 
 Next: TASK-055.
 
@@ -326,12 +326,12 @@ Next: TASK-055.
 
 Input: TASK-054 and TASK-051's durable result-publication records.
 
-- [ ] Implement consistent root-authorized aggregate lifecycle, revision, policy, counts and close/recovery observations.
-- [ ] Implement bounded session/head-bound result pages with explicit Primary-owned ArtifactRef and owner RunRef.
-- [ ] Discover artifacts through this public query in tests; never obtain IDs from private fixture state or model prose.
-- [ ] Retain results after private collection and close; querying never acknowledges delivery or performs repair/startup.
-- [ ] Verify wrong Controller/foreign session, zero versus unknown, paging/restart/concurrent publication, artifact byte/digest and no child-control leakage.
-- [ ] Complete tests/docs/review and ordinary completion requirements.
+- [x] Implement consistent root-authorized aggregate lifecycle, revision, policy, counts and close/recovery observations.
+- [x] Implement bounded session/head-bound result pages with explicit Primary-owned ArtifactRef and owner RunRef.
+- [x] Discover artifacts through this public query in tests; never obtain IDs from private fixture state or model prose.
+- [x] Retain results after private collection and close; querying never acknowledges delivery or performs repair/startup.
+- [x] Verify wrong Controller/foreign session, zero versus unknown, paging/restart/concurrent publication, artifact byte/digest and no child-control leakage.
+- [x] Complete tests/docs/review and ordinary completion requirements.
 
 Next: TASK-052.
 

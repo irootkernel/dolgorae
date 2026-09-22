@@ -151,6 +151,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
+                "audit",
                 "controller",
                 "darwin",
                 "domain",
@@ -435,8 +436,10 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "gateway_observation",
                 "gateway_projection",
                 "global_profile",
+                "jcs",
                 "ledger",
                 "machine",
+                "orchestration",
                 "paths",
                 "profile",
                 "protocol",

@@ -3456,8 +3456,9 @@ an output validator, validate the requested format before result publication,
 and bind completed state to real immutable artifact bytes, length, and SHA-256.
 Use existing artifact storage and bounded read services. Preserve the completed
 private reader contract. TASK-053 separately freezes two additive public queries;
-TASK-055 implements bounded public result discovery with Primary-owned artifact
-references, without private-state access or model-text parsing. Authorization is aggregate-scoped; the Primary and external
+TASK-055 exposes bounded public result discovery with Controller-only,
+Primary-owned artifact references, without private-state access or model-text
+parsing. Authorization is aggregate-scoped; the Primary and external
 client MUST NOT receive a child Controller capability. Public retrieval may
 use a Primary-owned result projection backed by existing artifact services;
 it MUST NOT relax authorization on arbitrary child artifacts. TASK-025 freezes
@@ -4693,10 +4694,12 @@ An external AI opens and operates an External Specialist Engagement through the
 private External Specialist Facade, which compiles each hire and task into the
 same semantic Run core. A raw public `managed_agent` StartRun does not infer
 engagement membership. Dolgorae persists the accepted Specialist boundary but
-MUST NOT persist or execute an additional external task graph. Future aggregate-
-query RPCs follow additive v1 evolution. The two consumer queries are now
-required target scope for v0.1.3; their checked publication belongs to TASK-053
-and implementation to TASK-055.
+MUST NOT persist or execute an additional external task graph. The two additive
+aggregate-query RPCs are implemented under the immutable TASK-053 publication:
+they authorize the root Controller before and after one bounded read-only
+snapshot, expose an independent event-backed aggregate revision, and page only
+stable published-result associations. They never repair state, start a Worker,
+or acknowledge private delivery.
 
 Workspace initialization, profile mutation/lifecycle, Operator-authorized
 reset/repair/migration, and server-side filesystem export MUST remain Machine

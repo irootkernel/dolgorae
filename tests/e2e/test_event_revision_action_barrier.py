@@ -7,6 +7,14 @@ if __name__ == "__main__":
     run_case("gateway_semantic_native", "public_bootstrap_and_machine_parity")
     run_case(
         "gateway_semantic_native",
+        "orchestration_queries_reject_a_low_level_run_after_controller_authentication",
+    )
+    run_case(
+        "gateway_semantic_native",
+        "public_orchestrated_session_observation_survives_gateway_restart_without_mutation",
+    )
+    run_case(
+        "gateway_semantic_native",
         "controller_timeline_preserves_input_and_pages_without_replay_duplicates",
     )
     run_case("gateway_semantic_native", "native_interrupt_invalidates_interaction")

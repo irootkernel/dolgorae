@@ -1784,7 +1784,7 @@ conversation history after restart and close. Next: TASK-055.
 
 ### TASK-055: Public Orchestrated Session and Result Observations
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on `TASK-054`. Implement TASK-053's two read-only aggregate queries through
 the real public gateway and shared semantic/Broker layer. Authenticate the root

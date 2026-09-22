@@ -841,12 +841,17 @@ scheduler caches are reconstructable from SQLite.
 
 Historical TASK-023 provides 24 methods. TASK-053 freezes the additive public
 consumer wire: complete existing timeline plus two read-only aggregate queries,
-27 required methods over a 36-method descriptor. TASK-054 implements timeline,
-TASK-055 the aggregate queries; TASK-029 enables the remaining nine original
-methods. Preserve historical evidence separately from the current release
-profile. Runtime advertisement includes only complete implementations, never a
-planned method or generated stub. Missing optional later functionality must not
-block the required profile; incomplete handlers remain unavailable.
+27 required methods over a 36-method descriptor. TASK-054 implements timeline
+and TASK-055 implements the aggregate queries through a SQLite read-only
+snapshot boundary. Result publication order is durable and distinct from
+private delivery receipts; Controller-bound cursors fix the session,
+projection version, publication head and last returned order. Every durable
+orchestration event advances the independent aggregate revision. TASK-029
+enables the remaining nine original methods. Preserve historical evidence
+separately from the current release profile. Runtime advertisement includes
+only complete implementations, never a planned method or generated stub.
+Missing optional later functionality must not block the required profile;
+incomplete handlers remain unavailable.
 
 The gateway holds the installation-scoped Dolgorae-home
 `rpc/gateway.lock` for its lifetime and publishes `gateway.json` with

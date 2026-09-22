@@ -4,6 +4,7 @@ use crate::darwin::DarwinSystem;
 use crate::domain;
 use crate::gateway::GatewayBackend;
 use crate::gateway_projection::{self as project, ProjectionFacts};
+use crate::jcs::sha256_hex;
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::protocol::public_v1 as pb;
@@ -14,6 +15,8 @@ use crate::semantic::{
 };
 use crate::snapshot::RunSnapshot;
 use crate::workspace::{WorkspaceService, WorkspaceView};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -118,13 +121,22 @@ impl CoreGatewayBackend {
         snapshot: &RunSnapshot,
         reference: &pb::ControllerCarrierRef,
     ) -> Result<CredentialCarrier, MachineError> {
+        self.run_controller_for(snapshot, reference, "run.interaction.get")
+    }
+
+    fn run_controller_for(
+        &self,
+        snapshot: &RunSnapshot,
+        reference: &pb::ControllerCarrierRef,
+        operation: &str,
+    ) -> Result<CredentialCarrier, MachineError> {
         let carrier = self.controller(reference)?;
         if reference.expected_controller_generation != snapshot.controller.generation {
             return Err(controller_mismatch(snapshot.manifest.run_id));
         }
         authorize_controller(
             snapshot.manifest.run_id,
-            "run.interaction.get",
+            operation,
             snapshot.controller_authority()?,
             &carrier,
         )?;
@@ -262,6 +274,225 @@ fn timestamp_ms(value: i64) -> Result<prost_types::Timestamp, MachineError> {
         seconds: value / 1_000,
         nanos: ((value % 1_000) * 1_000_000) as i32,
     })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultPageCursor {
+    schema_version: u32,
+    session_id: Uuid,
+    projection_version: u32,
+    captured_publication_head: u64,
+    after_publication_order: u64,
+}
+
+fn result_cursor_mac(payload: &[u8], controller_digest: &str) -> String {
+    let mut authenticated = Vec::with_capacity(payload.len() + controller_digest.len() + 40);
+    authenticated.extend_from_slice(b"dolgorae-result-page-cursor-v1\0");
+    authenticated.extend_from_slice(payload);
+    authenticated.push(0);
+    authenticated.extend_from_slice(controller_digest.as_bytes());
+    sha256_hex(&authenticated)
+}
+
+fn encode_result_cursor(
+    cursor: &ResultPageCursor,
+    controller_digest: &str,
+) -> Result<String, MachineError> {
+    let payload = serde_json::to_vec(cursor).map_err(|_| {
+        MachineError::new(
+            "INTERNAL_ERROR",
+            "result cursor could not be encoded",
+            false,
+            serde_json::json!({"invariant":"result cursor encoding"}),
+        )
+    })?;
+    Ok(format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload),
+        result_cursor_mac(&payload, controller_digest)
+    ))
+}
+
+fn decode_result_cursor(
+    token: &str,
+    session_id: Uuid,
+    projection_version: u32,
+    controller_digest: &str,
+) -> Result<ResultPageCursor, MachineError> {
+    let invalid_cursor = || {
+        MachineError::invalid_argument(
+            "page_cursor",
+            "result page cursor is malformed or belongs to another observation",
+        )
+    };
+    if token.is_empty() || token.len() > 2_048 {
+        return Err(invalid_cursor());
+    }
+    let (encoded, mac) = token.split_once('.').ok_or_else(invalid_cursor)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_cursor())?;
+    if payload.len() > 1_024 || mac != result_cursor_mac(&payload, controller_digest) {
+        return Err(invalid_cursor());
+    }
+    let cursor: ResultPageCursor =
+        serde_json::from_slice(&payload).map_err(|_| invalid_cursor())?;
+    if cursor.schema_version != 1
+        || cursor.session_id != session_id
+        || cursor.projection_version != projection_version
+        || cursor.after_publication_order > cursor.captured_publication_head
+    {
+        return Err(invalid_cursor());
+    }
+    Ok(cursor)
+}
+
+fn project_orchestrated_session(
+    value: crate::orchestration::OrchestratedSessionObservation,
+    workspace: pb::WorkspaceRef,
+) -> Result<pb::OrchestratedSessionProjection, MachineError> {
+    let lifecycle = match value.status.as_str() {
+        "creating" => pb::OrchestratedSessionLifecycle::Creating,
+        "active" => pb::OrchestratedSessionLifecycle::Active,
+        "degraded" => pb::OrchestratedSessionLifecycle::Degraded,
+        "recovering" => pb::OrchestratedSessionLifecycle::Recovering,
+        "completing" => pb::OrchestratedSessionLifecycle::Completing,
+        "aborting" => pb::OrchestratedSessionLifecycle::Aborting,
+        "completed" => pb::OrchestratedSessionLifecycle::Completed,
+        "aborted" => pb::OrchestratedSessionLifecycle::Aborted,
+        _ => return Err(internal_projection("orchestrated session lifecycle")),
+    };
+    let composition = match value.composition_state.as_str() {
+        "standalone_primary" => pb::OrchestratedSessionComposition::StandalonePrimary,
+        "brokered_hierarchy" => pb::OrchestratedSessionComposition::BrokeredHierarchy,
+        _ => return Err(internal_projection("orchestrated session composition")),
+    };
+    let approval_policy = match value.approval_policy.as_str() {
+        "user_approval_required" => pb::OrchestratedSessionApprovalPolicy::UserApprovalRequired,
+        "fully_delegated" => pb::OrchestratedSessionApprovalPolicy::FullyDelegated,
+        _ => return Err(internal_projection("orchestrated session approval policy")),
+    };
+    let (close_intent, close_progress) = match value.status.as_str() {
+        "creating" | "active" | "degraded" | "recovering" => (
+            pb::SessionCloseIntent::None,
+            if value.status == "recovering" {
+                pb::SessionCloseProgress::RecoveryRequired
+            } else {
+                pb::SessionCloseProgress::None
+            },
+        ),
+        "completing" => (
+            pb::SessionCloseIntent::Complete,
+            pb::SessionCloseProgress::Settling,
+        ),
+        "aborting" => (
+            pb::SessionCloseIntent::Abort,
+            pb::SessionCloseProgress::Settling,
+        ),
+        "completed" => (
+            pb::SessionCloseIntent::Complete,
+            pb::SessionCloseProgress::Completed,
+        ),
+        "aborted" => (
+            pb::SessionCloseIntent::Abort,
+            pb::SessionCloseProgress::Aborted,
+        ),
+        _ => return Err(internal_projection("orchestrated session close progress")),
+    };
+    let recovery_required = matches!(value.status.as_str(), "degraded" | "recovering");
+    Ok(pb::OrchestratedSessionProjection {
+        session_id: value.session_id.to_string(),
+        primary_run: Some(pb::RunRef {
+            workspace: Some(workspace),
+            run_id: value.root_run_id.to_string(),
+        }),
+        aggregate_revision: value.aggregate_revision,
+        lifecycle: lifecycle as i32,
+        composition: composition as i32,
+        approval_policy: approval_policy as i32,
+        specialist_policy_name: value.specialist_policy_name,
+        specialist_policy_revision: value.specialist_policy_revision,
+        specialist_policy_sha256: value.specialist_policy_sha256,
+        nonretired_member_count: value.nonretired_member_count,
+        nonterminal_spawn_count: value.nonterminal_spawn_count,
+        pending_approval_count: value.pending_approval_count,
+        accepted_unfinished_task_count: value.accepted_unfinished_task_count,
+        unknown_outcome_task_count: value.unknown_outcome_task_count,
+        published_result_count: value.published_result_count,
+        close_intent: close_intent as i32,
+        close_progress: close_progress as i32,
+        close_operation_id: None,
+        recovery_classification: if recovery_required {
+            pb::RecoveryClassification::ReconcileRequired
+        } else {
+            pb::RecoveryClassification::None
+        } as i32,
+        required_action: if recovery_required {
+            pb::RequiredClientAction::ReconcileRun
+        } else {
+            pb::RequiredClientAction::None
+        } as i32,
+        captured_at: Some(timestamp_ms(value.captured_at_ms)?),
+        source_revision: value.aggregate_revision,
+        availability: pb::OrchestratedSessionAvailability::Available as i32,
+    })
+}
+
+fn project_published_result(
+    value: crate::orchestration::PublishedResultObservation,
+    workspace: pb::WorkspaceRef,
+) -> Result<pb::OrchestratedSessionResult, MachineError> {
+    Ok(pb::OrchestratedSessionResult {
+        result_id: value.result_id.to_string(),
+        task_id: value.task_id.to_string(),
+        specialist_run: Some(pb::RunRef {
+            workspace: Some(workspace.clone()),
+            run_id: value.specialist_run_id.to_string(),
+        }),
+        specialist_role: value.specialist_role,
+        publication_order: value.publication_order,
+        published_at: Some(timestamp_ms(value.published_at_ms)?),
+        format: pb::OrchestratedResultFormat::Utf8Text as i32,
+        byte_length: value.byte_length,
+        sha256: value.sha256.clone(),
+        artifact: Some(pb::ArtifactRef {
+            artifact_id: value.artifact_id.to_string(),
+            kind: pb::ArtifactKind::FinalResponse as i32,
+            visibility: pb::ArtifactVisibility::ControllerOnly as i32,
+            media_type: "text/plain; charset=utf-8".to_owned(),
+            byte_length: value.byte_length,
+            sha256: value.sha256,
+        }),
+        artifact_owner: Some(pb::RunRef {
+            workspace: Some(workspace),
+            run_id: value.artifact_owner_run_id.to_string(),
+        }),
+    })
+}
+
+fn internal_projection(invariant: &str) -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        "durable orchestration observation cannot be projected",
+        false,
+        serde_json::json!({"invariant":invariant}),
+    )
+}
+
+fn orchestrated_root_binding(
+    snapshot: &RunSnapshot,
+) -> Result<&crate::run::AggregateBinding, MachineError> {
+    snapshot
+        .manifest
+        .aggregate_binding
+        .as_ref()
+        .filter(|binding| {
+            binding.aggregate_kind == crate::domain::AggregateKind::OrchestratedSession
+                && binding.member_kind == crate::run::AggregateMemberKind::Primary
+                && binding.aggregate_id == snapshot.manifest.run_id
+        })
+        .ok_or_else(|| invalid("root_run.run_id", "Run is not an Orchestrated Session root"))
 }
 
 fn broker_approval_pending(interaction: &BrokerApprovalInteractionSnapshot) -> bool {
@@ -438,6 +669,148 @@ impl GatewayBackend for CoreGatewayBackend {
             request.timeline_version,
             self.context(),
         )
+    }
+    fn get_orchestrated_session(
+        &self,
+        request: pb::GetOrchestratedSessionRequest,
+    ) -> Result<pb::GetOrchestratedSessionResponse, MachineError> {
+        let reference = required(request.root_run.as_ref(), "root_run")?;
+        let workspace = required(reference.workspace.as_ref(), "root_run.workspace")?.clone();
+        let (state_root, snapshot) = self.run_state(reference)?;
+        let controller = required(request.controller.as_ref(), "controller")?;
+        let carrier =
+            self.run_controller_for(&snapshot, controller, "orchestration.session.observe")?;
+        let binding = orchestrated_root_binding(&snapshot)?;
+        let store = crate::orchestration::OrchestrationStore::open_observer(&state_root)?;
+        let observation = store
+            .observe_session(snapshot.manifest.run_id)
+            .map_err(|error| {
+                if error.code == "RUN_NOT_FOUND" {
+                    invalid("root_run.run_id", "Run is not an Orchestrated Session root")
+                } else {
+                    error
+                }
+            })?;
+        if binding.operation_id != observation.bootstrap_operation_id
+            || binding.policy_sha256.as_deref()
+                != Some(observation.specialist_policy_sha256.as_str())
+        {
+            return Err(internal_projection("Orchestrated Session root binding"));
+        }
+        snapshot.authorize_current_controller(
+            &state_root,
+            &carrier,
+            "orchestration.session.observe",
+        )?;
+        Ok(pb::GetOrchestratedSessionResponse {
+            context: Some(self.context()),
+            session: Some(project_orchestrated_session(observation, workspace)?),
+        })
+    }
+    fn list_orchestrated_session_results(
+        &self,
+        request: pb::ListOrchestratedSessionResultsRequest,
+    ) -> Result<pb::ListOrchestratedSessionResultsResponse, MachineError> {
+        if request.projection_version != 1 {
+            return Err(MachineError::new(
+                "UNSUPPORTED_SCHEMA_VERSION",
+                "unsupported Orchestrated Session result projection version",
+                false,
+                serde_json::json!({
+                    "schema":"dolgorae.public.v1.OrchestratedSessionResult",
+                    "requested":request.projection_version,
+                    "supported":[1]
+                }),
+            ));
+        }
+        let limit = if request.limit == 0 {
+            100
+        } else {
+            request.limit
+        };
+        if limit > 500 {
+            return Err(invalid("limit", "result page limit must be at most 500"));
+        }
+        let reference = required(request.root_run.as_ref(), "root_run")?;
+        let workspace = required(reference.workspace.as_ref(), "root_run.workspace")?.clone();
+        let (state_root, snapshot) = self.run_state(reference)?;
+        let controller = required(request.controller.as_ref(), "controller")?;
+        let carrier =
+            self.run_controller_for(&snapshot, controller, "orchestration.results.list")?;
+        let binding = orchestrated_root_binding(&snapshot)?;
+        let controller_digest = snapshot.controller_authority()?.capability_sha256.clone();
+        let cursor = request
+            .page_cursor
+            .as_deref()
+            .map(|token| {
+                decode_result_cursor(
+                    token,
+                    snapshot.manifest.run_id,
+                    request.projection_version,
+                    &controller_digest,
+                )
+            })
+            .transpose()?;
+        let store = crate::orchestration::OrchestrationStore::open_observer(&state_root)?;
+        let page = store
+            .observe_published_results(
+                snapshot.manifest.run_id,
+                cursor
+                    .as_ref()
+                    .map(|cursor| cursor.captured_publication_head),
+                cursor
+                    .as_ref()
+                    .map_or(0, |cursor| cursor.after_publication_order),
+                limit,
+            )
+            .map_err(|error| {
+                if error.code == "RUN_NOT_FOUND" {
+                    invalid("root_run.run_id", "Run is not an Orchestrated Session root")
+                } else {
+                    error
+                }
+            })?;
+        if binding.operation_id != page.bootstrap_operation_id
+            || binding.policy_sha256.as_deref() != Some(page.specialist_policy_sha256.as_str())
+        {
+            return Err(internal_projection("Orchestrated Session root binding"));
+        }
+        snapshot.authorize_current_controller(
+            &state_root,
+            &carrier,
+            "orchestration.results.list",
+        )?;
+        let next_page_cursor = if page.has_more {
+            Some(encode_result_cursor(
+                &ResultPageCursor {
+                    schema_version: 1,
+                    session_id: snapshot.manifest.run_id,
+                    projection_version: request.projection_version,
+                    captured_publication_head: page.captured_publication_head,
+                    after_publication_order: page
+                        .items
+                        .last()
+                        .ok_or_else(|| internal_projection("result page continuation"))?
+                        .publication_order,
+                },
+                &controller_digest,
+            )?)
+        } else {
+            None
+        };
+        let items = page
+            .items
+            .into_iter()
+            .map(|item| project_published_result(item, workspace.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(pb::ListOrchestratedSessionResultsResponse {
+            context: Some(self.context()),
+            captured_publication_head: page.captured_publication_head,
+            source_revision: page.source_revision,
+            captured_at: Some(timestamp_ms(page.captured_at_ms)?),
+            items,
+            next_page_cursor,
+        })
     }
     fn list_pending_interactions(
         &self,
@@ -1016,5 +1389,52 @@ mod broker_approval_tests {
                 "INTERACTION_RESPONSE_INVALID"
             );
         }
+    }
+
+    #[test]
+    fn result_page_cursor_is_session_head_projection_and_controller_bound() {
+        let session_id = Uuid::now_v7();
+        let cursor = ResultPageCursor {
+            schema_version: 1,
+            session_id,
+            projection_version: 1,
+            captured_publication_head: 9,
+            after_publication_order: 4,
+        };
+        let token = encode_result_cursor(&cursor, &"a".repeat(64)).unwrap();
+        let decoded = decode_result_cursor(&token, session_id, 1, &"a".repeat(64)).unwrap();
+        assert_eq!(decoded.captured_publication_head, 9);
+        assert_eq!(decoded.after_publication_order, 4);
+        assert_eq!(
+            decode_result_cursor(&token, Uuid::now_v7(), 1, &"a".repeat(64))
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            decode_result_cursor(&token, session_id, 2, &"a".repeat(64))
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            decode_result_cursor(&token, session_id, 1, &"b".repeat(64))
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        let mut tampered = token.into_bytes();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        assert_eq!(
+            decode_result_cursor(
+                std::str::from_utf8(&tampered).unwrap(),
+                session_id,
+                1,
+                &"a".repeat(64),
+            )
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
     }
 }

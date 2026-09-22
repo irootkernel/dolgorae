@@ -5,6 +5,13 @@
 #[path = "support/gateway_native.rs"]
 mod support;
 
+use dolgorae::machine::MachineError;
+use dolgorae::orchestration::{
+    AcceptedSpecialistTask, AcceptedTaskContext, AdapterFailure, AssignSpecialistTask,
+    BrokerCredential, BrokeredMemberSnapshot, BrokeredRunPlan, CompletedTask, OrchestrationAdapter,
+    OrchestrationStore, PrimaryCallContext, RequestSpecialist, SpecialistPublicationObservation,
+    SpecialistTaskObservation, SpecialistTaskSnapshot, TaskCancellation, TaskDispatch,
+};
 use dolgorae::protocol::public_v1 as pb;
 use dolgorae::run::{StartReservation, StartReservationStore};
 use dolgorae::workspace::SystemWorkspacePlatform;
@@ -15,6 +22,101 @@ use std::time::Duration;
 use support::{Fixture, context};
 use tonic::Code;
 use uuid::Uuid;
+
+struct PublicResultAdapter;
+
+impl OrchestrationAdapter for PublicResultAdapter {
+    fn resolve_task_contexts(
+        &mut self,
+        _source_run_id: Uuid,
+        references: &[Uuid],
+    ) -> Result<Vec<AcceptedTaskContext>, MachineError> {
+        assert!(references.is_empty());
+        Ok(Vec::new())
+    }
+
+    fn publish_approval_request(
+        &mut self,
+        _session_id: Uuid,
+        _operation_id: Uuid,
+        _approval_request_id: Uuid,
+        _request: &RequestSpecialist,
+    ) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+
+    fn publish_specialist(
+        &mut self,
+        _plan: &BrokeredRunPlan,
+        _credential: &BrokerCredential,
+    ) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+
+    fn create_thread(
+        &mut self,
+        _plan: &BrokeredRunPlan,
+        _credential: &BrokerCredential,
+    ) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+
+    fn observe_specialist(
+        &mut self,
+        _plan: &BrokeredRunPlan,
+        _credential: &BrokerCredential,
+    ) -> Result<SpecialistPublicationObservation, AdapterFailure> {
+        Ok(SpecialistPublicationObservation::Ready)
+    }
+
+    fn dispatch_task(
+        &mut self,
+        _member: &BrokeredMemberSnapshot,
+        _task: &AcceptedSpecialistTask,
+        _credential: &BrokerCredential,
+    ) -> Result<TaskDispatch, AdapterFailure> {
+        Ok(TaskDispatch::Completed(CompletedTask {
+            turn_id: "public-result-turn".to_owned(),
+            result: serde_json::json!({"answer":"공개 결과"}),
+        }))
+    }
+
+    fn observe_task(
+        &mut self,
+        _task: &SpecialistTaskSnapshot,
+        _credential: &BrokerCredential,
+    ) -> Result<SpecialistTaskObservation, AdapterFailure> {
+        Ok(SpecialistTaskObservation::Running)
+    }
+
+    fn cancel_task(
+        &mut self,
+        _task: &SpecialistTaskSnapshot,
+        _credential: &BrokerCredential,
+    ) -> Result<TaskCancellation, AdapterFailure> {
+        Ok(TaskCancellation::TerminalOther)
+    }
+
+    fn release_specialist(
+        &mut self,
+        _member: &BrokeredMemberSnapshot,
+        _credential: &BrokerCredential,
+    ) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+
+    fn release_writer(&mut self, _run_id: Uuid) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+
+    fn verify_writer_none(&mut self) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+
+    fn acquire_writer(&mut self, _run_id: Uuid) -> Result<(), AdapterFailure> {
+        Ok(())
+    }
+}
 
 #[derive(Clone, PartialEq, Message)]
 struct RichStatus {
@@ -96,19 +198,16 @@ async fn public_bootstrap_and_machine_parity() {
     ))
     .unwrap();
     assert_eq!(capabilities.supported_methods, methods);
-    let mut expected = checked["delivery_stages"]["MILESTONE-BH1"]["required_methods"]
+    let mut expected = checked["delivery_stages"]["MILESTONE-BH1-P"]["required_methods"]
         .as_array()
         .unwrap()
         .clone();
-    expected.push(Value::String(
-        "ObservationService.ListRunTimelineItems".to_owned(),
-    ));
     expected.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
     assert_eq!(
         serde_json::to_value(&methods).unwrap(),
         Value::Array(expected)
     );
-    assert_eq!(methods.len(), 25);
+    assert_eq!(methods.len(), 27);
     let workspace = runtime
         .inspect_workspace(pb::InspectWorkspaceRequest {
             context: context(),
@@ -384,6 +483,470 @@ async fn public_bootstrap_and_machine_parity() {
     assert_eq!(forwarded["path"], absolute_image);
     assert_eq!(forwarded["detail"], "high");
     gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orchestration_queries_reject_a_low_level_run_after_controller_authentication() {
+    let fixture = Fixture::new("run_start_model_list.json");
+    let run_id = fixture.start_run(&[]);
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
+    let status = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: fixture.run_ref(&run_id),
+            controller: fixture.carrier(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
+    assert_eq!(
+        semantic_error(&status, "INVALID_ARGUMENT").action,
+        pb::RequiredClientAction::FixRequest as i32
+    );
+    let status = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: fixture.run_ref(&run_id),
+            controller: fixture.carrier(),
+            page_cursor: None,
+            limit: 1,
+            projection_version: 1,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
+    semantic_error(&status, "INVALID_ARGUMENT");
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_orchestrated_session_observation_survives_gateway_restart_without_mutation() {
+    let fixture = Fixture::new("run_start_model_list.json");
+    let roles = fixture.workspace.join(".dolgorae/roles");
+    fs::create_dir_all(&roles).unwrap();
+    fs::write(
+        roles.join("observer.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "name": "observer",
+            "display_name": "Observer",
+            "description": "Returns bounded observations.",
+            "instructions": "Return a bounded observation without modifying the workspace."
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let policy = fixture.root.join("session-observe-policy.json");
+    fs::write(
+        &policy,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "policy_name": "session-observe",
+            "revision": 7,
+            "approval_policy": "fully_delegated",
+            "max_active_specialists": 1,
+            "roles": [{
+                "role_ref": "observer",
+                "role_source": {"scope":"project","name":"observer"},
+                "agent_configuration": {
+                    "schema_version": 2,
+                    "selected_profile": fixture.profile,
+                    "global_profile_binding_sha256": null,
+                    "model": "gpt-5.6",
+                    "default_effort": "medium",
+                    "purpose": "review",
+                    "purpose_label": null,
+                    "required_capabilities": [],
+                    "execution_lane": "dedicated",
+                    "required_assurance": "best_effort_personal_alpha",
+                    "native_subagent_policy": "enabled"
+                },
+                "max_active_instances": 1,
+                "reuse_policy": "never",
+                "allowed_access": ["read_only"],
+                "activation_policy": "keep_resident",
+                "primary_may_request": true,
+                "collaboration_source": false,
+                "collaboration_target": false,
+                "auto_approve_when_fully_delegated": true
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fixture.cli(&[
+        "specialist",
+        "policy",
+        "add",
+        "session-observe",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--file",
+        policy.to_str().unwrap(),
+    ]);
+    let controller_path = fixture
+        .home
+        .join(".dolgorae/controller-carriers/gateway-native/test-installation/orchestrator.json");
+    let created = fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "interactive-client",
+        "--instance-id",
+        "native-orchestrator",
+        "--orchestration-policy",
+        "session-observe",
+        "--output",
+        controller_path.to_str().unwrap(),
+    ]);
+    let controller_id = created["controller"]["controller_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let orchestrator = Some(pb::ControllerCarrierRef {
+        absolute_file_path: controller_path.to_string_lossy().into_owned(),
+        expected_controller_id: controller_id,
+        expected_controller_generation: 1,
+    });
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let started = runs
+        .start_run(pb::StartRunRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller: orchestrator.clone(),
+            idempotency_key: Uuid::now_v7().to_string(),
+            profile_name: fixture.profile.clone(),
+            control_mode: pb::ControlMode::DirectInteractive as i32,
+            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+            purpose: pb::PurposeKind::Interactive as i32,
+            purpose_label: None,
+            model: Some("gpt-5.6".to_owned()),
+            effort: Some("medium".to_owned()),
+            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+            required_capabilities: Vec::new(),
+            instructions: Some("Exercise public Orchestrated Session observation.".to_owned()),
+            parent: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let run = pb::RunRef {
+        workspace: Some(fixture.workspace()),
+        run_id: started.run.unwrap().run_id,
+    };
+    let request = pb::GetOrchestratedSessionRequest {
+        context: context(),
+        root_run: Some(run.clone()),
+        controller: orchestrator.clone(),
+    };
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
+    let first = orchestration
+        .get_orchestrated_session(request.clone())
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(first.session_id, run.run_id);
+    assert_eq!(
+        first.lifecycle,
+        pb::OrchestratedSessionLifecycle::Active as i32
+    );
+    assert_eq!(
+        first.composition,
+        pb::OrchestratedSessionComposition::StandalonePrimary as i32
+    );
+    assert_eq!(first.specialist_policy_name, "session-observe");
+    assert_eq!(first.specialist_policy_revision, 7);
+    assert_eq!(first.nonretired_member_count, 1);
+    assert_eq!(first.published_result_count, 0);
+    let denied = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: fixture.carrier(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
+    semantic_error(&denied, "CONTROLLER_MISMATCH");
+    let empty = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+            page_cursor: None,
+            limit: 0,
+            projection_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(empty.captured_publication_head, 0);
+    assert!(empty.items.is_empty());
+    assert!(empty.next_page_cursor.is_none());
+
+    let session_id = Uuid::parse_str(&run.run_id).unwrap();
+    let mut store = OrchestrationStore::open(&fixture.state_root).unwrap();
+    let mut adapter = PublicResultAdapter;
+    let call = |key: &str| PrimaryCallContext {
+        session_id,
+        source_run_id: session_id,
+        source_turn_id: "primary-turn".to_owned(),
+        source_tool_call_id: format!("tool-{key}"),
+        idempotency_key: key.to_owned(),
+    };
+    let specialist = store
+        .request_specialist(
+            &call("request"),
+            &RequestSpecialist {
+                role_ref: "observer".to_owned(),
+                objective: "Produce one public result.".to_owned(),
+                expected_output: vec!["One bounded result".to_owned()],
+                requested_access: "read_only".to_owned(),
+                deadline_seconds: 60,
+            },
+            &mut adapter,
+        )
+        .unwrap();
+    let specialist_run_id = specialist.specialist_run_id.unwrap();
+    let task = store
+        .assign_task(
+            &call("assign"),
+            &AssignSpecialistTask {
+                specialist_run_id,
+                objective: "Return the public result bytes.".to_owned(),
+                context_refs: Vec::new(),
+                expected_output: vec!["UTF-8 result".to_owned()],
+                requested_access: "read_only".to_owned(),
+                deadline_seconds: 60,
+            },
+            &mut adapter,
+        )
+        .unwrap();
+    let second_task = store
+        .assign_task(
+            &call("assign-two"),
+            &AssignSpecialistTask {
+                specialist_run_id,
+                objective: "Return the second public result bytes.".to_owned(),
+                context_refs: Vec::new(),
+                expected_output: vec!["Second UTF-8 result".to_owned()],
+                requested_access: "read_only".to_owned(),
+                deadline_seconds: 60,
+            },
+            &mut adapter,
+        )
+        .unwrap();
+    assert_eq!(task.state, "completed_not_delivered");
+    assert_eq!(second_task.state, "completed_not_delivered");
+    assert_eq!(store.collect_results(session_id, 0, 8).unwrap().len(), 2);
+    drop(store);
+
+    let published = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+            page_cursor: None,
+            limit: 1,
+            projection_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(published.items.len(), 1);
+    let fixed_head_cursor = published.next_page_cursor.clone().unwrap();
+    let mut malformed_cursor = fixed_head_cursor.clone().into_bytes();
+    malformed_cursor[0] = if malformed_cursor[0] == b'A' {
+        b'B'
+    } else {
+        b'A'
+    };
+    let malformed = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+            page_cursor: Some(String::from_utf8(malformed_cursor).unwrap()),
+            limit: 1,
+            projection_version: 1,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(malformed.code(), Code::InvalidArgument);
+    semantic_error(&malformed, "INVALID_ARGUMENT");
+    let result = &published.items[0];
+    assert_eq!(result.task_id, task.task_id.to_string());
+    assert_eq!(
+        result.artifact_owner.as_ref().unwrap().run_id,
+        session_id.to_string()
+    );
+    let artifact = result.artifact.as_ref().unwrap();
+    assert_eq!(
+        artifact.visibility,
+        pb::ArtifactVisibility::ControllerOnly as i32
+    );
+    let mut artifacts = pb::artifact_service_client::ArtifactServiceClient::new(channel);
+    let metadata = artifacts
+        .get_artifact(pb::GetArtifactRequest {
+            context: context(),
+            run: Some(run.clone()),
+            artifact_id: artifact.artifact_id.clone(),
+            controller: orchestrator.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .artifact
+        .unwrap();
+    assert_eq!(metadata.byte_length, result.byte_length);
+    assert_eq!(metadata.sha256, result.sha256);
+    let chunk = artifacts
+        .read_artifact_chunk(pb::ReadArtifactChunkRequest {
+            context: context(),
+            run: Some(run.clone()),
+            artifact_id: artifact.artifact_id.clone(),
+            offset: 0,
+            length: metadata.byte_length as u32,
+            controller: orchestrator.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(chunk.sha256, result.sha256);
+    assert_eq!(chunk.data.len() as u64, result.byte_length);
+
+    let mut store = OrchestrationStore::open(&fixture.state_root).unwrap();
+    let third_task = store
+        .assign_task(
+            &call("assign-three"),
+            &AssignSpecialistTask {
+                specialist_run_id,
+                objective: "Return a result published after page one.".to_owned(),
+                context_refs: Vec::new(),
+                expected_output: vec!["Third UTF-8 result".to_owned()],
+                requested_access: "read_only".to_owned(),
+                deadline_seconds: 60,
+            },
+            &mut adapter,
+        )
+        .unwrap();
+    assert_eq!(third_task.state, "completed_not_delivered");
+    assert_eq!(store.collect_results(session_id, 0, 8).unwrap().len(), 3);
+    drop(store);
+    let fixed_second_page = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+            page_cursor: Some(fixed_head_cursor),
+            limit: 1,
+            projection_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fixed_second_page.items.len(), 1);
+    assert_eq!(
+        fixed_second_page.items[0].task_id,
+        second_task.task_id.to_string()
+    );
+    assert!(fixed_second_page.next_page_cursor.is_none());
+    assert_eq!(
+        fixed_second_page.captured_publication_head,
+        published.captured_publication_head
+    );
+    let fresh_results = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+            page_cursor: None,
+            limit: 500,
+            projection_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fresh_results.items.len(), 3);
+    assert!(fresh_results.captured_publication_head > published.captured_publication_head);
+    let after_publication = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(after_publication.published_result_count, 3);
+    assert_eq!(after_publication.accepted_unfinished_task_count, 0);
+    assert!(after_publication.aggregate_revision > first.aggregate_revision);
+    gateway.terminate();
+
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel);
+    let restarted = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(
+        restarted.aggregate_revision,
+        after_publication.aggregate_revision
+    );
+    assert_eq!(restarted.source_revision, after_publication.source_revision);
+    let retained = orchestration
+        .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: orchestrator,
+            page_cursor: None,
+            limit: 1,
+            projection_version: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retained.items.len(), 1);
+    assert_eq!(
+        retained.captured_publication_head,
+        fresh_results.captured_publication_head
+    );
+    gateway.terminate();
+    let closed = fixture.command(&[
+        "run",
+        "--controller-file",
+        controller_path.to_str().unwrap(),
+        "close",
+        &run.run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    assert!(
+        closed.status.success(),
+        "orchestrated root close failed: {} {}",
+        String::from_utf8_lossy(&closed.stdout),
+        String::from_utf8_lossy(&closed.stderr)
+    );
 }
 
 fn audit(fixture: &Fixture, run_id: &str) -> Vec<u8> {

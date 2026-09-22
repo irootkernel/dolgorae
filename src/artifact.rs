@@ -423,7 +423,7 @@ fn specialist_result_reference(
             created_at,
             interaction_request_id: None,
             kind: ArtifactKind::FinalResponse,
-            visibility: ArtifactVisibility::Observer,
+            visibility: ArtifactVisibility::ControllerOnly,
             media_type: "text/plain; charset=utf-8".to_owned(),
             byte_length,
             sha256,
@@ -799,7 +799,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reference.artifact_id, tree.id.to_string());
-        assert_eq!(reference.visibility, ArtifactVisibility::Observer);
+        assert_eq!(reference.visibility, ArtifactVisibility::ControllerOnly);
         assert_eq!(reference.media_type, "text/plain; charset=utf-8");
         assert_eq!(
             tree.read((0, reference.byte_length as u32)).unwrap(),

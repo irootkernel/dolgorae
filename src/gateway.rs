@@ -182,6 +182,20 @@ pub trait GatewayBackend: Send + Sync + 'static {
     ) -> Result<pb::ReadArtifactChunkResponse, MachineError> {
         Err(unavailable("ArtifactService.ReadArtifactChunk"))
     }
+    fn get_orchestrated_session(
+        &self,
+        _request: pb::GetOrchestratedSessionRequest,
+    ) -> Result<pb::GetOrchestratedSessionResponse, MachineError> {
+        Err(unavailable("OrchestrationService.GetOrchestratedSession"))
+    }
+    fn list_orchestrated_session_results(
+        &self,
+        _request: pb::ListOrchestratedSessionResultsRequest,
+    ) -> Result<pb::ListOrchestratedSessionResultsResponse, MachineError> {
+        Err(unavailable(
+            "OrchestrationService.ListOrchestratedSessionResults",
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -697,6 +711,43 @@ impl pb::artifact_service_server::ArtifactService for GatewayTransport {
         self.execute("ArtifactService.ReadArtifactChunk", move |backend| {
             backend.read_artifact_chunk(request)
         })
+        .await
+        .map(Response::new)
+    }
+}
+
+#[tonic::async_trait]
+impl pb::orchestration_service_server::OrchestrationService for GatewayTransport {
+    async fn get_orchestrated_session(
+        &self,
+        request: Request<pb::GetOrchestratedSessionRequest>,
+    ) -> Result<Response<pb::GetOrchestratedSessionResponse>, Status> {
+        let request = request.into_inner();
+        validate_context(request.context.as_ref(), false)
+            .map_err(|error| error_status(&error, "OrchestrationService.GetOrchestratedSession"))?;
+        self.execute(
+            "OrchestrationService.GetOrchestratedSession",
+            move |backend| backend.get_orchestrated_session(request),
+        )
+        .await
+        .map(Response::new)
+    }
+
+    async fn list_orchestrated_session_results(
+        &self,
+        request: Request<pb::ListOrchestratedSessionResultsRequest>,
+    ) -> Result<Response<pb::ListOrchestratedSessionResultsResponse>, Status> {
+        let request = request.into_inner();
+        validate_context(request.context.as_ref(), false).map_err(|error| {
+            error_status(
+                &error,
+                "OrchestrationService.ListOrchestratedSessionResults",
+            )
+        })?;
+        self.execute(
+            "OrchestrationService.ListOrchestratedSessionResults",
+            move |backend| backend.list_orchestrated_session_results(request),
+        )
         .await
         .map(Response::new)
     }
@@ -1358,6 +1409,11 @@ async fn run_server_with_accept(
         )
         .add_service(
             pb::artifact_service_server::ArtifactServiceServer::new(service.clone())
+                .max_decoding_message_size(12 * 1024 * 1024)
+                .max_encoding_message_size(12 * 1024 * 1024),
+        )
+        .add_service(
+            pb::orchestration_service_server::OrchestrationServiceServer::new(service.clone())
                 .max_decoding_message_size(12 * 1024 * 1024)
                 .max_encoding_message_size(12 * 1024 * 1024),
         )

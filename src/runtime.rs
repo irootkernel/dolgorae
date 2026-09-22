@@ -248,6 +248,8 @@ pub fn capabilities() -> RuntimeCapabilities {
             "InteractionService.ResolveInteraction",
             "ObservationService.ListRunTimelineItems",
             "ObservationService.WatchRunEvents",
+            "OrchestrationService.GetOrchestratedSession",
+            "OrchestrationService.ListOrchestratedSessionResults",
             "RunService.CloseRun",
             "RunService.GetRun",
             "RunService.InterruptTurn",
@@ -361,7 +363,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
-    fn task_054_advertises_the_implemented_public_surface() {
+    fn task_055_advertises_the_implemented_public_surface() {
         let capabilities = serde_json::to_value(capabilities()).unwrap();
         assert_eq!(capabilities["features"]["persistent_runs"], true);
         assert_eq!(
@@ -384,7 +386,7 @@ mod tests {
             capabilities["supported_transports"],
             json!(["machine_cli", "local_grpc"])
         );
-        assert_eq!(capabilities["grpc_methods"].as_array().unwrap().len(), 25);
+        assert_eq!(capabilities["grpc_methods"].as_array().unwrap().len(), 27);
         assert!(
             capabilities["grpc_methods"]
                 .as_array()
@@ -392,13 +394,18 @@ mod tests {
                 .contains(&json!("ObservationService.ListRunTimelineItems"))
         );
         assert!(
-            !capabilities["grpc_methods"]
+            capabilities["grpc_methods"]
                 .as_array()
                 .unwrap()
-                .iter()
-                .any(|method| method
-                    .as_str()
-                    .is_some_and(|name| name.starts_with("OrchestrationService.")))
+                .contains(&json!("OrchestrationService.GetOrchestratedSession"))
+        );
+        assert!(
+            capabilities["grpc_methods"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(
+                    "OrchestrationService.ListOrchestratedSessionResults"
+                ))
         );
     }
 
