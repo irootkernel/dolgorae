@@ -16,6 +16,7 @@ EXPECTED_FILES = {
     "SKILL.md",
     "references/configuration.md",
     "references/lifecycle.md",
+    "references/provider.md",
     "references/recovery.md",
 }
 HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]")

@@ -134,10 +134,87 @@ completion-aware substitute.
 
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,
-configuration, immutable-target, one-shot review, and externally planned
-reusable Specialist Engagement surfaces. It is not an operator runbook or a
-semantic authority, and loading it never authorizes a mutation, external
-review, engagement lifecycle change, installation, or recovery action.
+configuration, immutable-target, one-shot review, public-provider, and
+externally planned reusable Specialist Engagement surfaces. It is not an
+operator runbook or a semantic authority, and loading it never authorizes a
+mutation, external review, live account use, engagement lifecycle change,
+installation, or recovery action.
+
+## v0.1.3 provider operation
+
+Use this runbook for the checked `dolgorae.gul-consumer/v1` provider profile,
+not for the deferred collaboration surface or actual Gul acceptance. Resolve
+one exact Dolgorae executable, verify its version and runtime capabilities, and
+run `profile doctor` for the selected Profile. Starting a Profile Server,
+installing a Specialist Policy, creating a Controller, submitting a live Turn,
+and closing a Session remain separately authorized mutations. A deterministic
+fake-Codex test does not authorize a live account or token use.
+
+Start `dolgorae serve` as described in the gateway recovery runbook above. A
+generated client first sends protocol zero to `GetCapabilities`, then requires
+protocol 1, the checked descriptor SHA-256, and all 27 methods in the frozen
+consumer profile. Additional advertised optional methods do not invalidate the
+required subset. Stop before allocation if the digest, required methods, limits,
+or accepted client range differs. The supported v0.1.3 slice has no
+busy-member queue, lateral collaboration, activation/passivation, or
+`reuse_any_compatible`; those capabilities must remain unadvertised.
+
+Create one generation-1 `interactive_client` Controller carrier with the
+intended orchestration policy. Keep the bearer bytes in Dolgorae's owner-only
+carrier file and pass only its checked reference in public requests. Never put
+the capability, private socket, database path, child Controller, worker
+identity, or host artifact path in model input, logs, or tracked evidence.
+
+The normal call order is:
+
+1. Inspect the workspace and Profile, verify the Controller, and call
+   `StartRun` with a fresh operation-scoped idempotency key.
+2. Call `SubmitTurn` with the current Run revision. While that Turn is active,
+   retain later human input as a client draft; v0.1.3 rejects a second live
+   submission instead of queueing or steering it.
+3. Let the Primary use its host-bound `dolgorae_orchestration` tool to request a
+   Specialist. Under `user_approval_required`, list and fetch the root Run's
+   pending approval and resolve the exact `specialist_approval` interaction
+   with the root Controller. Under `fully_delegated`, require the immutable Role
+   to permit automatic approval.
+4. Let the Primary list a ready member, assign one task, await or collect its
+   result, read every result page, and release or explicitly abort the member.
+5. Observe the aggregate through `GetOrchestratedSession`. Discover published
+   Primary-owned artifact references only through
+   `ListOrchestratedSessionResults`, then call `GetArtifact` and
+   `ReadArtifactChunk`. Concatenate bounded chunks and verify the advertised
+   byte length and SHA-256 before using the result.
+6. Call root `CloseRun` only with explicit whole-session-close authority.
+   Preserve its close operation identity until the aggregate reports a final
+   disposition.
+
+For example, a client starts negotiation with a request context whose protocol
+version is zero and accepts the server-selected version only after checking the
+descriptor and method set. Subsequent protected calls carry a Controller
+reference, not bearer bytes. A result reader first records the result-list page
+head, then downloads the listed artifact from offset zero in chunks no larger
+than the advertised maximum until the returned total length is reached; it
+rejects any digest or length mismatch.
+
+Treat a transport timeout as an unknown response, not rejection. For an
+idempotent mutation, refresh `GetRun` or the aggregate and reconcile the
+original key before issuing conflicting work. Exact accepted task replay
+returns its original receipt; a fresh assignment to a busy member is rejected
+before effects. An await timeout leaves accepted work running. Preserve the
+durable task deadline; restarting a client or gateway does not reset it.
+`SESSION_CLOSE_IN_PROGRESS` means observe or recover the recorded close, not
+submit another close intent.
+
+Resume `WatchRunEvents` strictly after the last durable cursor. A stream ending
+with `SERVER_SHUTDOWN` describes the gateway, not the Run; restart the gateway,
+recheck capabilities, refresh projections, and reconnect from that cursor.
+Never derive retry behavior from human-readable status text.
+
+Success requires the exact public profile, complete expected timeline and
+session/result projections, verified artifact bytes, and no leaked secret or
+private identifier. Provider conformance establishes `MILESTONE-BH1-P` only.
+Stable release, tag, publication, installation, Personal Alpha, and actual Gul
+integration require their own authorization and evidence.
 
 Development, testing, and release-engineering guidance belongs in the
 [implementation tips](../implementation-tips/README.md), not this operations

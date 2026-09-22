@@ -1,15 +1,14 @@
 ---
 name: use-dolgorae
-description: "Use Dolgorae safely through its local Machine CLI or an actually exposed checked tool when asked to inspect, initialize, configure, review, operate an External Specialist Engagement, diagnose, or recover Dolgorae state. Ground every action in the exact binary and advertised runtime capabilities; do not activate it for generic code review or merely because a repository contains Dolgorae files."
+description: "Use Dolgorae safely through its local Machine CLI, public-v1 gateway, or an actually exposed checked tool when asked to inspect, initialize, configure, review, operate an Orchestrated Session or External Specialist Engagement, diagnose, or recover Dolgorae state. Ground every action in the exact binary and advertised runtime capabilities; do not activate it for generic code review or merely because a repository contains Dolgorae files."
 ---
 
 # Use Dolgorae
 
 Dolgorae is a local durable control layer for Codex runs. This revision of the
 skill covers workspace and profile readiness, immutable review targets, and
-Specialist Policy operations, one-shot Specialist Review, and externally
-planned reusable Specialist Engagements. It does not provide a live
-Dolgorae-owned Primary tool or general persistent-Run workflow.
+Specialist Policy operations, one-shot Specialist Review, the v0.1.3 public
+provider profile, and externally planned reusable Specialist Engagements.
 
 ## Establish current authority
 
@@ -136,6 +135,34 @@ conversation memory. Follow its current tool schema and preserve the host-bound
 request identity. When the tool is absent, use the Machine CLI. Never start or
 invoke the hidden adapter entrypoint from the shell to make the tool appear.
 
+## Operate a v0.1.3 Orchestrated Session
+
+Use this mode only when the user explicitly requests a live Dolgorae Primary,
+Brokered Hierarchy, or public provider operation. Read
+[provider.md](references/provider.md) before starting a gateway, creating a
+Controller carrier, submitting a live Turn, resolving a Specialist approval,
+reading a result artifact, or closing a Session. A repository plan or passing
+deterministic test does not authorize use of an account credential or live
+model tokens.
+
+Start from protocol-zero `GetCapabilities` and require the checked descriptor
+digest plus all 27 required methods in the `dolgorae.gul-consumer/v1` profile;
+additional advertised optional methods do not invalidate the provider. Preserve the
+root Run, Controller carrier, application idempotency keys, projection
+revisions, event cursor, result page cursor, and close operation separately.
+Use `GetOrchestratedSession` and `ListOrchestratedSessionResults` as the public
+aggregate authorities. Never obtain a result artifact ID from model text,
+SQLite, a child carrier, or an untracked fixture.
+
+The model-facing `dolgorae_orchestration` tool is Run-scoped and host-bound; do
+not emulate it through a shell command or inject Run, Turn, call, credential,
+socket, database, or artifact identities into model arguments. v0.1.3 supports
+ready-member assignment, `never` and `reuse_idle_compatible`, both approval
+policies, bounded waits, result collection and paging, release, abort, and
+whole-session close. It does not support a busy-member queue, lateral
+collaboration, activation/passivation, the nine deferred TASK-029 methods, or
+actual Gul acceptance.
+
 ## Operate an External Specialist Engagement
 
 Use this mode only when the user explicitly asks an external AI host to open,
@@ -207,11 +234,10 @@ or let a Specialist hire or contact another Specialist.
   only what the new envelope proves. A successful review, profile check, or
   lifecycle command never authorizes Git commit, push, release, installation,
   or another mutation.
-- This skill does not operate general `run`, workspace-writer, or live
-  Dolgorae-orchestrated Primary tool flows. If one is
-  requested, inspect current capabilities and repository authority, report that
-  it is outside this skill's present workflow, and do not improvise from
-  planned command grammar.
+- General low-level `run` and workspace-writer mutation remains outside this
+  skill unless it is one of the explicit provider steps in
+  [provider.md](references/provider.md). Do not improvise another persistent-Run
+  workflow from command help or planned grammar.
 
 Read [recovery.md](references/recovery.md) after stale state, response loss,
 unknown outcome, integrity failure, or profile/capture recovery guidance.

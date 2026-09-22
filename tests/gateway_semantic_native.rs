@@ -616,6 +616,29 @@ async fn orchestration_queries_reject_a_low_level_run_after_controller_authentic
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_reconcile_rejects_a_healthy_run_without_effect() {
+    let fixture = Fixture::new("run_start_model_list.json");
+    let run_id = fixture.start_run(&[]);
+    let before = audit(&fixture, &run_id);
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let current = native_snapshot(&mut runs, &fixture, &run_id).await;
+    let rejected = runs
+        .reconcile_run(pb::ReconcileRunRequest {
+            context: context(),
+            run: fixture.run_ref(&run_id),
+            controller: fixture.carrier(),
+            expected_state_revision: current.state_revision,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code(), Code::Aborted);
+    semantic_error(&rejected, "RUN_STATE_CONFLICT");
+    assert_eq!(audit(&fixture, &run_id), before);
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_close_persists_one_operation_and_survives_gateway_restart() {
     let fixture = Fixture::new("run_start_model_list.json");
     let controller = install_orchestration_controller(&fixture, "session-retirement");
@@ -3318,7 +3341,10 @@ async fn native_close_and_pause_interrupt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_writer_release_and_reacquire() {
-    let fixture = Fixture::new("run_start_model_list.json");
+    // Writer release deliberately performs repeated executable-identity
+    // hashing. Keep this isolated test under its wrapper deadline without
+    // weakening that production census by stripping only the fixture copy.
+    let fixture = Fixture::new_compact("run_start_model_list.json");
     let id = fixture.start_run(&["--execution-lane", "dedicated"]);
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
@@ -3343,6 +3369,10 @@ async fn native_writer_release_and_reacquire() {
         pb::WriterAuthorityState::None as i32
     );
     assert!(released.owner_run_id.is_none());
+    assert_eq!(
+        released.effective_access,
+        pb::EffectiveAccess::Unknown as i32
+    );
     let current = native_snapshot(&mut runs, &fixture, &id).await;
     assert_eq!(
         current.writer_authority.as_ref().unwrap().state,
@@ -3356,8 +3386,22 @@ async fn native_writer_release_and_reacquire() {
     );
     assert_eq!(writer.owner_run_id.as_deref(), Some(id.as_str()));
     assert!(writer.writer_generation > first_generation);
-    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+    let idle = native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
     assert_eq!(transcript_methods(&fixture, "turn/start").len(), 2);
+    let closed = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            interrupt: false,
+            expected_state_revision: idle.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(closed.lifecycle, pb::RunLifecycle::Closed as i32);
     gateway.terminate();
 }
 

@@ -45,12 +45,15 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new(scenario: &str) -> Self {
-        Self::prepare(scenario, None)
+        Self::prepare(scenario, None, false)
+    }
+    pub fn new_compact(scenario: &str) -> Self {
+        Self::prepare(scenario, None, true)
     }
     pub fn with_scenario(scenario: Value) -> Self {
-        Self::prepare("custom", Some(scenario))
+        Self::prepare("custom", Some(scenario), false)
     }
-    fn prepare(scenario: &str, custom: Option<Value>) -> Self {
+    fn prepare(scenario: &str, custom: Option<Value>, compact_binary: bool) -> Self {
         // A short, exclusive directory is required by Darwin's 104-byte UDS
         // bound even when the enclosing Make invocation has a long TMPDIR.
         let root = PathBuf::from("/private/tmp").join(format!("dgg-{}", Uuid::now_v7().simple()));
@@ -64,6 +67,16 @@ impl Fixture {
         let binary = root.join("dolgorae");
         fs::copy(source_binary, &binary).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        if compact_binary {
+            assert!(
+                Command::new("/usr/bin/strip")
+                    .arg(&binary)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "failed to compact the native gateway fixture binary"
+            );
+        }
         let scenario = if let Some(custom) = custom {
             let path = root.join("custom-scenario.json");
             fs::write(&path, serde_json::to_vec(&custom).unwrap()).unwrap();

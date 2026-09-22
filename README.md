@@ -15,7 +15,8 @@ checked [protocol](docs/protocol/) artifacts. The
 
 The release train begins with `v0.1.0`, an Integration Preview covering the
 cumulative product scope through `EPIC-004`. Later `v0.1.x` previews advance at
-the `MILESTONE-ES1`, `MILESTONE-BH1`, and `MILESTONE-BC1` boundaries. They do
+the `MILESTONE-ES1`, provider `MILESTONE-BH1-P`, actual-Gul `MILESTONE-BH1`,
+and `MILESTONE-BC1` boundaries. They do
 not claim the complete target specification, Personal Alpha readiness, or
 customer support.
 
@@ -108,6 +109,16 @@ operation identity across gateway restarts; unknown effects remain visible
 for reconciliation instead of being replayed or hidden. Ordinary low-level Run
 close and Primary-scoped pause/interrupt semantics are unchanged.
 
+The verified v0.1.3 provider profile contains exactly 27 advertised public-v1
+methods. A generated client must negotiate protocol zero, compare the returned
+descriptor digest and method inventory with its checked contract, and then use
+the protected root Controller carrier for session, interaction, result, and
+Controller-only artifact calls. See the
+[provider operations runbook](docs/ops/README.md#v013-provider-operation) for
+the supported call order, retry rules, event reconnect, artifact verification,
+and version limits. Provider conformance does not claim actual Gul integration,
+release publication, or Personal Alpha readiness.
+
 ## Task-aware completion review
 
 Specialist Review v3 keeps the immutable Reviewer Role separate from the work
@@ -138,8 +149,8 @@ Legacy v1/v2 review commands and results retain their existing meaning.
 The source tree distributes the optional complete
 [`use-dolgorae` skill](skills/use-dolgorae/SKILL.md) for AI coding agents that
 operate Dolgorae's currently advertised workspace, profile, immutable-target,
-Specialist Policy, one-shot Specialist Review, and externally planned reusable
-Specialist Engagement surfaces. It is guidance, not a deployed runtime artifact:
+Specialist Policy, one-shot Specialist Review, public-provider, and externally
+planned reusable Specialist Engagement surfaces. It is guidance, not a deployed runtime artifact:
 installing the Dolgorae binary does not install or activate the skill.
 
 For Codex, run the following command from the repository root of a checkout of
@@ -165,7 +176,7 @@ the exact stable tag that contains the skill. It installs the directory under
   trap 'rm -rf -- "$dolgorae_skill_tmp"' EXIT
   mkdir -p "$dolgorae_skill_tmp/use-dolgorae/references"
   cp "$dolgorae_skill_source/SKILL.md" "$dolgorae_skill_tmp/use-dolgorae/SKILL.md"
-  for dolgorae_skill_reference in configuration lifecycle recovery; do
+  for dolgorae_skill_reference in configuration lifecycle provider recovery; do
     cp "$dolgorae_skill_source/references/$dolgorae_skill_reference.md" \
       "$dolgorae_skill_tmp/use-dolgorae/references/$dolgorae_skill_reference.md"
   done

@@ -19,6 +19,7 @@ INT_TESTS := \
 .PHONY: test test-prepare test-unit test-int test-e2e validate-agent-skills \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
+	test-live-provider-acceptance \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
 
@@ -73,6 +74,7 @@ test-prepare:
 	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
 	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=local $(GO) test ./...
 	cd docs/protocol/generated/pre-task-053-low-level/go && GOTOOLCHAIN=local $(GO) test ./...
+	cd tests/e2e/private_boundary_client && GOTOOLCHAIN=local $(GO) test ./...
 	$(PYTHON_BIN) tools/validators/validate_markdown.py
 	$(MAKE) validate-agent-skills
 	$(MAKE) test-aquarium-dev-producer
@@ -126,6 +128,7 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_slow_consumer_isolation.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_event_revision_action_barrier.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_frozen_consumer_compatibility.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_private_boundary.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_start_run_allocation_replay.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_run_configuration_restart.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_threadless_first_write_runtime.py --binary "$(DOLGORAE_BIN)"; \
@@ -141,7 +144,8 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_specialist_review_acceptance.py; \
 		$(PYTHON_BIN) tests/e2e/test_codex_compatibility.py; \
 		$(PYTHON_BIN) tests/e2e/test_live_transport_probe.py; \
-		$(PYTHON_BIN) tests/e2e/test_live_primary_bridge.py
+		$(PYTHON_BIN) tests/e2e/test_live_primary_bridge.py; \
+		$(PYTHON_BIN) tests/e2e/test_live_provider_acceptance.py
 	@echo "[test-e2e] completed"
 
 test-live-transport-probe:
@@ -157,6 +161,16 @@ test-live-primary-bridge:
 		exit 2; \
 	}
 	$(PYTHON_BIN) tests/e2e/run_live_primary_bridge.py \
+		--binary "$(DOLGORAE_BIN)" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--codex-home "$${DOLGORAE_LIVE_CODEX_HOME:-$(HOME)/.codex}"
+
+test-live-provider-acceptance:
+	@test "$${DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE=1 is required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_live_provider_acceptance.py \
 		--binary "$(DOLGORAE_BIN)" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--codex-home "$${DOLGORAE_LIVE_CODEX_HOME:-$(HOME)/.codex}"

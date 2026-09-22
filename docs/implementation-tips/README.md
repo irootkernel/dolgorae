@@ -81,18 +81,15 @@ outside the complete repository gate.
 
 ## Live provider implementation
 
-EPIC-008 follows the amended twelve-task roadmap. TASK-025 is complete;
-TASK-053 publishes the checked consumer contract before TASK-047 through
-`docs/protocol/dolgorae-gul-consumer-v1.lock.json`. TASK-054
-implements complete history, TASK-055 read-only aggregate/result queries,
-TASK-052 whole-session closure, and TASK-056 unchanged-consumer regression before
-TASK-026. Follow the Detailed SOT checklists and the
-[Gul consumer contract](../specs/gul-consumer-v1.md). Specifications own the
-v0.1.3 ready-member-only provider slice;
-actual Gul acceptance is separate. Tests, directly affected docs, and independent
-review belong in each Task's initial completion commit. Never defer a newly
-introduced effect's crash safety or return placeholder success for an unwired
-operation. Required commit and live-runtime approvals remain separate.
+EPIC-008 completed its amended twelve-task roadmap and established
+`MILESTONE-BH1-P`. TASK-053's checked contract remains frozen through
+`docs/protocol/dolgorae-gul-consumer-v1.lock.json`; TASK-054 provides complete
+history, TASK-055 read-only aggregate/result queries, TASK-052 whole-session
+closure, TASK-056 unchanged-consumer regression, and TASK-026 provider
+acceptance. Follow the canonical [provider specification](../specs/README.md#v013-live-provider-slice),
+[Gul consumer contract](../specs/gul-consumer-v1.md), and
+[operations runbook](../ops/README.md#v013-provider-operation). Actual Gul
+acceptance, release, publication, and installation remain separate.
 Preserve TASK-025's completed private contract and transport selection. Its
 isolated probes do not implement production bridge/provisioning/dispatch.
 The public 27-method consumer lock is a checked TASK-053 artifact; do not treat
@@ -186,11 +183,29 @@ both approval modes, Specialist execution, and actual result consumption.
 Plan approval does not authorize live Profile/account or token use. Missing
 required live evidence prevents Task completion. Scope live checks to new or
 changed external behavior; reuse earlier evidence only when its tested
-conditions and coverage still apply. TASK-026 still needs assembled-provider
-live acceptance, not only isolated probes. Planned test paths and schema checks
-are not live evidence. Publish verified call-order, Controller-carrier, retry,
-deadline, event-cursor, artifact, and version-limit examples in canonical guidance. Keep raw logs, provider prose,
-credentials, and local runtime identifiers out of tracked docs.
+conditions and coverage still apply. `tests/e2e/test_private_boundary.py` is
+the default-gate deterministic campaign: it starts the production gateway and
+uses public-v1 clients and production semantics, but deliberately substitutes a
+fake Codex boundary. It must cover exactly the frozen 27-method profile and
+must never be reported as live-model evidence.
+
+The separately authorized command below runs the assembled provider against
+the isolated campaign home and pinned Codex CLI. It copies only the selected
+authentication file, never uses the user's Dolgorae home, and emits a bounded
+sanitized summary rather than raw model or credential output:
+
+```sh
+DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE=1 \
+  make PYTHON_BIN=.venv/bin/python test-live-provider-acceptance
+```
+
+The live campaign must pass both `user_approval_required` and
+`fully_delegated`, prove an actual Primary tool call and Specialist execution,
+make the Primary consume a result above the private inline-page bound, and have
+the generated public client discover and verify that result through the public
+result-list and artifact APIs. Planned paths and static driver checks are not
+live evidence. Keep raw logs, provider prose, credentials, local runtime
+identifiers, and model output out of tracked documentation.
 
 Use non-writing Markdown/schema/example/descriptor/skill checks for plan changes.
 Implementation completion still requires the full deterministic gate and

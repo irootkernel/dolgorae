@@ -9,6 +9,11 @@ development commits.
 
 ### Added
 
+- Add a generated-client provider conformance campaign for the frozen 27-method
+  public profile, with production-gateway deterministic coverage and verified
+  pinned-live Codex Primary/Specialist execution in both approval modes. The
+  campaign includes public result discovery, digest-checked bounded reads, and
+  canonical provider operations guidance.
 - Preserve executable compatibility for the frozen TASK-053 and pre-extension
   generated Go consumers, with immutable descriptor baselines, exact schema
   digest checks, and real-gateway regression coverage across restart and

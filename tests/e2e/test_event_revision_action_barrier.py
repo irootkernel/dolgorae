@@ -37,3 +37,7 @@ if __name__ == "__main__":
     run_case("gateway_semantic_native", "native_concurrent_identical_admission")
     run_case("gateway_semantic_native", "native_resume_accepts_next_turn")
     run_case("gateway_semantic_native", "native_context_and_unavailable_method_rejection")
+    run_case(
+        "gateway_semantic_native",
+        "public_reconcile_rejects_a_healthy_run_without_effect",
+    )

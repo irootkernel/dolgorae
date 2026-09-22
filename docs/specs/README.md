@@ -5132,7 +5132,7 @@ the exact release candidate; planned paths are not passing evidence.
 | `protected_interaction_lost_response` | `TASK-023` | `secret_canary_and_fault_barrier` | `tests/e2e/test_protected_interaction_lost_response.py` |
 | `gateway_restart` | `TASK-023` | `active_run_restart_e2e` | `tests/e2e/test_gateway_restart.py` |
 | `socket_ownership` | `TASK-023` | `macos_uds_attack_matrix` | `tests/e2e/test_socket_ownership.py` |
-| `private_boundary` | `TASK-026` | `provider_grpc_e2e_and_pinned_live_codex` | `tests/e2e/test_private_boundary.py` (planned TASK-026 driver) |
+| `private_boundary` | `TASK-026` | `provider_grpc_e2e_and_pinned_live_codex` | `tests/e2e/test_private_boundary.py`; separately authorized `tests/e2e/run_live_provider_acceptance.py` |
 | `run_configuration_restart` | `TASK-023` | `accepted_configuration_restart_e2e` | `tests/e2e/test_run_configuration_restart.py` |
 | `start_run_allocation_replay` | `TASK-023` | `allocation_loss_conflict_and_tombstone_e2e` | `tests/e2e/test_start_run_allocation_replay.py` |
 | `interaction_size_and_secret_barrier` | `TASK-023` | `preparse_bound_and_no_secret_replay_e2e` | `tests/e2e/test_interaction_size_and_secret_barrier.py` |
@@ -5166,8 +5166,9 @@ The client remains a small test and handoff fixture, not a Gul clone, UI, SDK,
 new service, or alternate source of aggregate authority.
 
 The `private_boundary` conformance case is the provider acceptance owner. Its
-planned test driver and required evidence are not claims that the test already
-exists or passes. The existing `MILESTONE-BH1` method-set keys in checked
+deterministic driver is part of the default gate, while the pinned-live-Codex
+driver remains separately authorized and records candidate-specific evidence.
+The existing `MILESTONE-BH1` method-set keys in checked
 capability/conformance artifacts retain their historical inventory meaning;
 using that inventory does not certify Gul integration. Runtime capabilities
 continue to describe implementation, not roadmap completion. Full conformance

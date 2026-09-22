@@ -78,13 +78,8 @@ roadmap identity, order, status, or dependencies.
 
 ## Adopted Epic dossiers
 
-- [EPIC-008: Live Dolgorae Provider](EPIC-008-live-provider.md) is adopted for
-  implementation. The roadmap alone owns current status and the amended
-  twelve-task order. TASK-025 completion is preserved; TASK-053 is next planned.
-  Documentation adoption does not start a runtime,
-  commit changes, or authorize live credentials.
-
-The term adopted here does not imply that the roadmap state is `ACTIVE`.
+No adopted Epic dossier is currently open. The term adopted here does not
+imply that the roadmap state is `ACTIVE`.
 
 An unadopted `TODO-*.md` file has no roadmap identity. On adoption, retain its
 dossier from planning through execution and review until Epic closeout, list it

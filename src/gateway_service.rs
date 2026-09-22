@@ -1279,8 +1279,7 @@ impl GatewayBackend for CoreGatewayBackend {
             Some(r.expected_state_revision),
             RunMutationOperation::ReleaseWriter,
         )?;
-        let (_, snapshot, facts) = self.run_snapshot(reference)?;
-        project::writer_state(&snapshot, &facts, self.context())
+        self.workspace_writer(required(reference.workspace.as_ref(), "run.workspace")?)
     }
     fn get_capabilities(
         &self,

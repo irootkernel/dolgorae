@@ -19,6 +19,9 @@ claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
 `TASK-045` are `COMPLETE`; the Epic precedes `EPIC-008` in delivery order.
 `EPIC-015` and `TASK-046` are `COMPLETE` as the detached-process corrective
 boundary immediately before `EPIC-008`.
+`EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
+live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
+integration. `EPIC-009` and `TASK-027` are now `ACTIVE`.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -41,8 +44,9 @@ EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
 TASK-047, TASK-048, TASK-049, TASK-050, TASK-051, TASK-054, TASK-055,
-TASK-052, and TASK-056 are complete; TASK-026 is active. `v0.1.3` remains owned by EPIC-008; actual Gul acceptance
-is tracked separately and MUST NOT be inferred from provider QA.
+TASK-052, TASK-056, and TASK-026 are complete. `v0.1.3` is eligible for its
+separate release-candidate lifecycle; actual Gul acceptance is tracked
+separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -1445,9 +1449,16 @@ the Task and Epic become `COMPLETE`.
 
 ## EPIC-008: Live Dolgorae Provider and Brokered Hierarchy
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [EPIC-008 execution dossier](../todo/EPIC-008-live-provider.md)
+Canonical Outcomes: [provider specification](../specs/README.md#v013-live-provider-slice),
+[provider acceptance boundary](../specs/README.md#provider-and-gul-acceptance-boundaries),
+[live integration architecture](../architecture/README.md#live-provider-integration-boundary),
+[frozen consumer contract](../specs/gul-consumer-v1.md),
+[provider operations runbook](../ops/README.md#v013-provider-operation),
+[checked conformance registry](../protocol/dolgorae-grpc-conformance-v1.json),
+[generated-client deterministic campaign](../../tests/e2e/test_private_boundary.py),
+and [authorized live campaign driver](../../tests/e2e/run_live_provider_acceptance.py)
 
 Goal: Connect the existing gateway and durable Broker to actual pinned Codex
 Primary/Specialist execution and deliver a verified public provider interface.
@@ -1879,7 +1890,7 @@ executable backward-compatibility boundary. Next: TASK-026.
 
 ### TASK-026: Provider Conformance and v0.1.3 Handoff
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Depends on `TASK-056` and therefore every preceding EPIC-008 Task. Implement the
 planned `private_boundary` driver using generated public-v1 clients against an
@@ -1918,16 +1929,31 @@ eligible for separate release-candidate QA and authorized publication as a
 Milestone Preview, not Personal Alpha. Actual-Gul `MILESTONE-BH1` remains
 unclaimed until its deferred consumer campaign passes.
 
+Completion evidence includes the generated public-v1 client exercising the
+exact 27-method profile through an isolated production gateway and semantic
+path, plus the complete deterministic repository gate. The separately
+authorized pinned Codex 0.155.1 campaign passed both
+`user_approval_required` and `fully_delegated` with actual Primary and
+Specialist execution. The delegated case published a 113,562-byte result,
+which the Primary consumed and the public client independently discovered and
+verified across two bounded pages by byte length and SHA-256. Both campaigns
+used isolated Dolgorae and Codex homes without changing the shared Profile.
+The full-surface conformance registry remains byte-pinned by the TASK-053
+consumer lock; its TASK-032 non-UTF-8 case is a later Personal Alpha gate and
+does not block this provider milestone. Independent review and the task-scoped
+completion commit close this Task. No release, tag, publication, installation,
+or actual Gul campaign is part of this completion.
+
 ## EPIC-009: Brokered Specialist Collaboration
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
 Brokered Hierarchy without making the Primary Agent a message relay.
 
 ### TASK-027: Durable Mailbox, Virtual Actor, and Collaboration Plane
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Depends on completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
 foundations, including selected transport TASK-025 and provider acceptance
