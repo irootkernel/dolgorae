@@ -2,16 +2,16 @@ version: 4
 project:
   name: "dolgorae"
 providers:
-  grok: {}
+  zcode: {}
 execution:
   workspace_access: "none"
 roles:
-  logic: {enabled: true, primary_provider: "grok"}
-  security: {enabled: true, primary_provider: "grok"}
-  maintainability: {enabled: true, primary_provider: "grok"}
-  product: {enabled: true, primary_provider: "grok"}
-  documentation: {enabled: true, primary_provider: "grok"}
-  testing: {enabled: true, primary_provider: "grok"}
+  logic: {enabled: true, primary_provider: "zcode"}
+  security: {enabled: true, primary_provider: "zcode"}
+  maintainability: {enabled: true, primary_provider: "zcode"}
+  product: {enabled: true, primary_provider: "zcode"}
+  documentation: {enabled: true, primary_provider: "zcode"}
+  testing: {enabled: true, primary_provider: "zcode"}
 review:
   required_roles: ["logic"]
   request_changes_on: ["high", "critical", "blocker"]
