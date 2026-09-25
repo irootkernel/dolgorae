@@ -4254,6 +4254,7 @@ impl OrchestrationStore {
                         | "failed"
                         | "interrupted_unknown"
                         | "cancelled"
+                        | "expired"
                 ) && let Err(error) = self.cancel_task(session_id, task.task_id, adapter)
                 {
                     let _ = self.mark_session_close_progress(
@@ -4302,7 +4303,7 @@ impl OrchestrationStore {
         if tasks.iter().any(|task| {
             !matches!(
                 task.state.as_str(),
-                "completed_not_delivered" | "delivered" | "failed" | "cancelled"
+                "completed_not_delivered" | "delivered" | "failed" | "cancelled" | "expired"
             )
         }) {
             return Err(session_close_error(
@@ -8250,6 +8251,19 @@ mod tests {
         .unwrap();
         assert_eq!(replay, receipt);
         assert_eq!(clock.waits.load(Ordering::SeqCst), waits);
+        store
+            .begin_session_close(session.session_id, false, 1)
+            .unwrap();
+        store
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap();
+        assert_eq!(
+            store
+                .complete_session_close(session.session_id)
+                .unwrap()
+                .status,
+            "completed"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
