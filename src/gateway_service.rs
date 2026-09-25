@@ -253,19 +253,35 @@ impl CoreGatewayBackend {
             }
             return Err(error);
         }
-        store.reconcile_unknown_work(snapshot.manifest.run_id)?;
-        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&state_root);
-        if let Err(mut error) = store.settle_session_close(snapshot.manifest.run_id, &mut effects) {
-            if let Some(details) = error.details.as_object_mut() {
-                details.insert(
-                    "operation_id".to_owned(),
-                    serde_json::Value::String(close.operation_id.to_string()),
-                );
-                details.insert(
-                    "run_id".to_owned(),
-                    serde_json::Value::String(snapshot.manifest.run_id.to_string()),
-                );
-            }
+        // Close settlement can still obtain terminal proof from a live member.
+        // Reconcile ambiguous spawn publication without preemptively marking
+        // every running task as unobservable.
+        store.reconcile_unknown_spawns(snapshot.manifest.run_id)?;
+        let (_, current) = self.run_state(reference)?;
+        self.settle_and_complete_session_close(
+            &state_root,
+            &mut store,
+            reference,
+            controller,
+            &close,
+            current.stamp.run_state_revision,
+        )
+        .map(Some)
+    }
+
+    fn settle_and_complete_session_close(
+        &self,
+        state_root: &Path,
+        store: &mut crate::orchestration::OrchestrationStore,
+        reference: &pb::RunRef,
+        controller: &pb::ControllerCarrierRef,
+        close: &crate::orchestration::SessionCloseSnapshot,
+        expected_state_revision: u64,
+    ) -> Result<pb::RunMutationResponse, MachineError> {
+        let run_id = close.session_id;
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(state_root);
+        if let Err(mut error) = store.settle_session_close(run_id, &mut effects) {
+            close_error_details(&mut error, close, run_id);
             return Err(error);
         }
         let (_, current) = self.run_state(reference)?;
@@ -273,44 +289,33 @@ impl CoreGatewayBackend {
             && let Err(mut error) = self.mutate(
                 reference,
                 controller,
-                Some(current.stamp.run_state_revision),
+                Some(expected_state_revision),
                 RunMutationOperation::Close {
                     interrupt: close.interrupt,
                 },
             )
         {
             if error.code == "RUN_BUSY" {
-                return Err(session_close_in_progress(
-                    snapshot.manifest.run_id,
-                    close.operation_id,
-                ));
+                return Err(session_close_in_progress(run_id, close.operation_id));
             }
             let (_, after_error) = self.run_state(reference)?;
             if after_error.projection.lifecycle != domain::RunLifecycle::Closed {
                 if error.code == "RUN_STATE_CONFLICT" {
-                    return Err(session_close_in_progress(
-                        snapshot.manifest.run_id,
-                        close.operation_id,
-                    ));
+                    return Err(session_close_in_progress(run_id, close.operation_id));
                 }
-                let _ = store.record_session_close_failure(snapshot.manifest.run_id, &error.code);
-                if let Some(details) = error.details.as_object_mut() {
-                    details.insert(
-                        "operation_id".to_owned(),
-                        serde_json::Value::String(close.operation_id.to_string()),
-                    );
-                }
+                let _ = store.record_session_close_failure(run_id, &error.code);
+                close_error_details(&mut error, close, run_id);
                 return Err(error);
             }
         }
-        store.complete_session_close(snapshot.manifest.run_id)?;
+        store.complete_session_close(run_id)?;
         let (_, snapshot, facts) = self.run_snapshot(reference)?;
         let mut context = self.context();
         context.operation_id = Some(close.operation_id.to_string());
-        Ok(Some(pb::RunMutationResponse {
+        Ok(pb::RunMutationResponse {
             context: Some(context),
             run: Some(project::run_projection(&snapshot, &facts)?),
-        }))
+        })
     }
 
     fn profile(&self, name: &str) -> Result<pb::ProfileProjection, MachineError> {
@@ -636,6 +641,23 @@ fn session_close_in_progress(run_id: Uuid, operation_id: Uuid) -> MachineError {
             "required_action":"refresh_snapshot"
         }),
     )
+}
+
+fn close_error_details(
+    error: &mut MachineError,
+    close: &crate::orchestration::SessionCloseSnapshot,
+    run_id: Uuid,
+) {
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert(
+            "operation_id".to_owned(),
+            serde_json::Value::String(close.operation_id.to_string()),
+        );
+        details.insert(
+            "run_id".to_owned(),
+            serde_json::Value::String(run_id.to_string()),
+        );
+    }
 }
 
 fn orchestrated_root_binding(
@@ -1578,66 +1600,14 @@ impl GatewayBackend for CoreGatewayBackend {
                 ),
             });
         }
-        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&state_root);
-        if let Err(mut error) = store.settle_session_close(snapshot.manifest.run_id, &mut effects) {
-            if let Some(details) = error.details.as_object_mut() {
-                details.insert(
-                    "operation_id".to_owned(),
-                    serde_json::Value::String(close.operation_id.to_string()),
-                );
-                details.insert(
-                    "run_id".to_owned(),
-                    serde_json::Value::String(snapshot.manifest.run_id.to_string()),
-                );
-            }
-            return Err(error);
-        }
-        if snapshot.projection.lifecycle != domain::RunLifecycle::Closed
-            && let Err(mut error) = self.mutate(
-                reference,
-                controller,
-                Some(r.expected_state_revision),
-                RunMutationOperation::Close {
-                    interrupt: r.interrupt,
-                },
-            )
-        {
-            if error.code == "RUN_BUSY" {
-                return Err(session_close_in_progress(
-                    snapshot.manifest.run_id,
-                    close.operation_id,
-                ));
-            }
-            let (_, after_error) = self.run_state(reference)?;
-            if after_error.projection.lifecycle != domain::RunLifecycle::Closed {
-                if error.code == "RUN_STATE_CONFLICT" {
-                    return Err(session_close_in_progress(
-                        snapshot.manifest.run_id,
-                        close.operation_id,
-                    ));
-                }
-                let _ = store.record_session_close_failure(snapshot.manifest.run_id, &error.code);
-                if let Some(details) = error.details.as_object_mut() {
-                    details.insert(
-                        "operation_id".to_owned(),
-                        serde_json::Value::String(close.operation_id.to_string()),
-                    );
-                    details.insert(
-                        "run_id".to_owned(),
-                        serde_json::Value::String(snapshot.manifest.run_id.to_string()),
-                    );
-                }
-                return Err(error);
-            }
-        }
-        store.complete_session_close(snapshot.manifest.run_id)?;
-        let (_, snapshot, facts) = self.run_snapshot(reference)?;
-        let mut context = self.context();
-        context.operation_id = Some(close.operation_id.to_string());
-        Ok(pb::RunMutationResponse {
-            context: Some(context),
-            run: Some(project::run_projection(&snapshot, &facts)?),
-        })
+        self.settle_and_complete_session_close(
+            &state_root,
+            &mut store,
+            reference,
+            controller,
+            &close,
+            r.expected_state_revision,
+        )
     }
     fn recover_run(
         &self,

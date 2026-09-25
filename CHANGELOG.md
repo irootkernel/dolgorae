@@ -71,6 +71,8 @@ development commits.
 
 - Report nonterminal Specialist cancellation as `interrupt_requested`.
 - Close Orchestrated Sessions with expired tasks.
+- Refuse Machine CLI `run close` for Orchestrated roots so public `CloseRun`
+  settles their owned work.
 - Bound transient Specialist result-capture recovery by the durable task
   deadline, restrict ledger fallback to fail-closed quiescent restart recovery,
   anchor one-shot v3 waits to durable acceptance, preserve legacy review failure

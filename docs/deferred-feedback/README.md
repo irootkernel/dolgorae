@@ -198,6 +198,16 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: changing registry removal, workspace-entry traversal, or
   the affected Machine test helpers.
 
+## DF-019: Retire the legacy Orchestrated Session finish path
+
+- Owner: Orchestration persistence maintainers
+- Finding: `finish_session` remains a public store method used only by unit
+  tests. Production close uses the durable begin, settle, and complete protocol.
+- Reason for deferral: no production caller can create a session closure without
+  the close record through this method. Removing it requires migrating older
+  store tests and is independent of current close and recovery behavior.
+- Revisit condition: changing the session close protocol or its store tests.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

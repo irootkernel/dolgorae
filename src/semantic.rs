@@ -3288,6 +3288,21 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
     let run_id = positional_run_id(args)?;
     let state_root = workspace_state_root(&view)?;
+    if verb == RunVerb::Close {
+        let manifest = RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+        if manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+            binding.aggregate_kind == AggregateKind::OrchestratedSession
+                && binding.member_kind == crate::run::AggregateMemberKind::Primary
+                && binding.aggregate_id == run_id
+        }) {
+            return Err(MachineError::new(
+                "RUN_STATE_CONFLICT",
+                "Orchestrated Session roots close through public CloseRun",
+                false,
+                serde_json::json!({"run_id":run_id,"required_action":"close_run"}),
+            ));
+        }
+    }
     let carrier = if verb.mutates() || verb == RunVerb::Timeline {
         Some(carrier_from_options(
             args,

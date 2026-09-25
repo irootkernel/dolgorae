@@ -4505,6 +4505,18 @@ impl OrchestrationStore {
     }
 
     pub fn reconcile_unknown_work(&mut self, session_id: Uuid) -> Result<(), MachineError> {
+        self.reconcile_unknown_work_inner(session_id, true)
+    }
+
+    pub fn reconcile_unknown_spawns(&mut self, session_id: Uuid) -> Result<(), MachineError> {
+        self.reconcile_unknown_work_inner(session_id, false)
+    }
+
+    fn reconcile_unknown_work_inner(
+        &mut self,
+        session_id: Uuid,
+        include_tasks: bool,
+    ) -> Result<(), MachineError> {
         let now = self.now_ms()?;
         let transaction = self.transaction()?;
         let spawn_changes = transaction
@@ -4526,14 +4538,18 @@ impl OrchestrationStore {
                 params![session_id.to_string(), now],
             )
             .map_err(internal)?;
-        let task_changes = transaction
-            .execute(
-                "UPDATE brokered_tasks SET state='interrupted_unknown',
-                 safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2
-                 WHERE session_id=?1 AND state IN ('dispatching','running')",
-                params![session_id.to_string(), now],
-            )
-            .map_err(internal)?;
+        let task_changes = if include_tasks {
+            transaction
+                .execute(
+                    "UPDATE brokered_tasks SET state='interrupted_unknown',
+                     safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2
+                     WHERE session_id=?1 AND state IN ('dispatching','running')",
+                    params![session_id.to_string(), now],
+                )
+                .map_err(internal)?
+        } else {
+            0
+        };
         if spawn_changes + member_changes + task_changes != 0 {
             append_event(
                 &transaction,
@@ -7279,6 +7295,58 @@ mod tests {
         assert_eq!(
             reopened.observe_session(session.session_id).unwrap().status,
             "aborting"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn close_recovery_cancels_running_task_before_declaring_unknown() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "turn-close-recovery".to_owned(),
+            }),
+            ..FakeAdapter::default()
+        };
+        let task = store
+            .assign_task(
+                &context(session.session_id, "close-recovery-task"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(task.state, "running");
+        let close = store
+            .begin_session_close(session.session_id, true, 1)
+            .unwrap()
+            .0
+            .unwrap();
+        drop(store);
+
+        let mut reopened = OrchestrationStore::open(&root).unwrap();
+        reopened
+            .reconcile_unknown_spawns(session.session_id)
+            .unwrap();
+        assert_eq!(reopened.task(task.task_id).unwrap().state, "running");
+        reopened
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap();
+        assert_eq!(reopened.task(task.task_id).unwrap().state, "cancelled");
+        assert_eq!(
+            reopened
+                .complete_session_close(session.session_id)
+                .unwrap()
+                .status,
+            "aborted"
+        );
+        assert_eq!(
+            reopened
+                .session_close(session.session_id)
+                .unwrap()
+                .unwrap()
+                .operation_id,
+            close.operation_id
         );
         std::fs::remove_dir_all(root).unwrap();
     }

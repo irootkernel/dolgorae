@@ -4121,8 +4121,10 @@ at that commit boundary. Unknown spawn, task, child-retirement, root-close, or
 writer effects keep the aggregate in a typed reconciliation state and cannot be
 converted into successful closure. Ordinary low-level and external Run meanings
 are unchanged. Primary pause/interrupt must not be presented as aggregate pause.
-A direct-interactive
-root `StartRun` carrying checked launch metadata
+The Machine CLI `run close` refuses an Orchestrated root and directs its
+Controller to public `CloseRun`, which owns the whole-session close record;
+it retains ordinary low-level Run close behavior for other Runs.
+A direct-interactive root `StartRun` carrying checked launch metadata
 in its protected Controller carrier is aggregate-aware inside the semantic
 service and creates the Orchestration Session without a new RPC. The
 Machine CLI additionally carries the private External Specialist Facade through

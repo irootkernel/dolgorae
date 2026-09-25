@@ -1571,6 +1571,9 @@ async fn public_orchestrated_session_observation_survives_gateway_restart_withou
         .unwrap();
     assert_eq!(third_task.state, "completed_not_delivered");
     assert_eq!(store.collect_results(session_id, 0, 8).unwrap().len(), 3);
+    store
+        .release_specialist(session_id, specialist_run_id, &mut adapter)
+        .unwrap();
     drop(store);
     let fixed_second_page = orchestration
         .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
@@ -1626,6 +1629,7 @@ async fn public_orchestrated_session_observation_survives_gateway_restart_withou
 
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
     let mut orchestration =
         pb::orchestration_service_client::OrchestrationServiceClient::new(channel);
     let restarted = orchestration
@@ -1648,7 +1652,7 @@ async fn public_orchestrated_session_observation_survives_gateway_restart_withou
         .list_orchestrated_session_results(pb::ListOrchestratedSessionResultsRequest {
             context: context(),
             root_run: Some(run.clone()),
-            controller: orchestrator,
+            controller: orchestrator.clone(),
             page_cursor: None,
             limit: 1,
             projection_version: 1,
@@ -1661,8 +1665,7 @@ async fn public_orchestrated_session_observation_survives_gateway_restart_withou
         retained.captured_publication_head,
         fresh_results.captured_publication_head
     );
-    gateway.terminate();
-    let closed = fixture.command(&[
+    let refused = fixture.command(&[
         "run",
         "--controller-file",
         controller_path.to_str().unwrap(),
@@ -1671,12 +1674,26 @@ async fn public_orchestrated_session_observation_survives_gateway_restart_withou
         "--workspace",
         fixture.workspace.to_str().unwrap(),
     ]);
-    assert!(
-        closed.status.success(),
-        "orchestrated root close failed: {} {}",
-        String::from_utf8_lossy(&closed.stdout),
-        String::from_utf8_lossy(&closed.stderr)
+    assert!(!refused.status.success());
+    let refused_json: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused_json["error"]["code"], "RUN_STATE_CONFLICT");
+    let current = native_snapshot(&mut runs, &fixture, &run.run_id).await;
+    let closed = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: orchestrator,
+            interrupt: false,
+            expected_state_revision: current.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        closed.run.unwrap().lifecycle,
+        pb::RunLifecycle::Closed as i32
     );
+    gateway.terminate();
 }
 
 fn audit(fixture: &Fixture, run_id: &str) -> Vec<u8> {
