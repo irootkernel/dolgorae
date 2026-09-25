@@ -6,6 +6,17 @@ roadmap identity, order, status, or dependencies.
 
 ## Future candidates
 
+### Separate Specialist launch preparation from the external facade
+
+- Owner: Shared semantic service and Specialist workspace maintainers
+- Problem: brokered Run provisioning in `semantic` calls launch-root and
+  sandbox helpers in `external_engagement`, which already depends on `semantic`.
+  The resulting module cycle couples the two Specialist facades.
+- Candidate: move the shared launch preparation and cleanup helpers to the
+  workspace module, then update the architecture dependency checks.
+- Revisit condition: the next change to Specialist launch-root or sandbox
+  preparation, or an intentional extraction of either facade.
+
 ### Global Profile journal capacity and operator maintenance
 
 - Owner: Global Profile persistence and operator-recovery maintainers
