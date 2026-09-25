@@ -412,12 +412,37 @@ async fn broker_approval_provisions_and_dispatches_through_production_effects() 
     assert!(full.interaction.unwrap().payload.is_some());
     let resolution = pb::ResolveInteractionRequest {
         context: context(),
-        run: run_ref,
+        run: run_ref.clone(),
         controller: Some(controller.clone()),
         interaction_id,
         idempotency_key: "production-broker-approval".to_owned(),
         response_json: br#"{"answers":{"specialist_approval":{"answers":["approve"]}}}"#.to_vec(),
     };
+    let mut missing_key = resolution.clone();
+    missing_key.idempotency_key.clear();
+    semantic_error(
+        &interactions
+            .resolve_interaction(missing_key)
+            .await
+            .unwrap_err(),
+        "INVALID_ARGUMENT",
+    );
+    let mut oversized_response = resolution.clone();
+    oversized_response.response_json = vec![b'x'; 1024 * 1024 + 1];
+    semantic_error(
+        &interactions
+            .resolve_interaction(oversized_response)
+            .await
+            .unwrap_err(),
+        "INTERACTION_RESPONSE_TOO_LARGE",
+    );
+    assert!(
+        OrchestrationStore::open_observer(&fixture.state_root)
+            .unwrap()
+            .members(session_id)
+            .unwrap()
+            .is_empty()
+    );
     let approved = interactions
         .resolve_interaction(resolution.clone())
         .await
@@ -3251,6 +3276,9 @@ async fn native_interrupt_invalidates_interaction() {
         pb::RunLifecycle::WaitingInteraction,
     )
     .await;
+    let orchestration_db =
+        dolgorae::engagement::EngagementStore::workspace_database_path(&fixture.state_root);
+    assert!(!orchestration_db.exists());
     let pending = interactions
         .list_pending_interactions(pb::ListPendingInteractionsRequest {
             context: context(),
@@ -3260,6 +3288,7 @@ async fn native_interrupt_invalidates_interaction() {
         .unwrap()
         .into_inner();
     assert_eq!(pending.items.len(), 1);
+    assert!(!orchestration_db.exists());
     let interaction_id = pending.items[0].interaction_id.clone();
     let before = audit(&fixture, &id);
     let interrupts = transcript_methods(&fixture, "turn/interrupt").len();

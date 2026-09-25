@@ -1750,7 +1750,8 @@ pub(crate) fn broker_approval_interactions(
     state_root: &Path,
     session_id: Uuid,
 ) -> Result<Vec<BrokerApprovalInteractionSnapshot>, MachineError> {
-    crate::orchestration::OrchestrationStore::open(state_root)?.approval_interactions(session_id)
+    crate::orchestration::OrchestrationStore::open_observer(state_root)?
+        .approval_interactions(session_id)
 }
 
 pub(crate) fn broker_approval_interaction(
@@ -1758,7 +1759,7 @@ pub(crate) fn broker_approval_interaction(
     session_id: Uuid,
     approval_request_id: Uuid,
 ) -> Result<Option<BrokerApprovalInteractionSnapshot>, MachineError> {
-    crate::orchestration::OrchestrationStore::open(state_root)?
+    crate::orchestration::OrchestrationStore::open_observer(state_root)?
         .approval_interaction(session_id, approval_request_id)
 }
 

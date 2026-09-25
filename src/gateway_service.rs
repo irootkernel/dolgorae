@@ -835,7 +835,12 @@ impl GatewayBackend for CoreGatewayBackend {
         let reference = required(request.root_run.as_ref(), "root_run")?;
         let workspace = required(reference.workspace.as_ref(), "root_run.workspace")?.clone();
         let (state_root, snapshot) = self.run_state(reference)?;
-        let controller = required(request.controller.as_ref(), "controller")?;
+        let controller = request.controller.as_ref().ok_or_else(|| {
+            MachineError::interaction_full_payload_requires_controller(
+                snapshot.manifest.run_id,
+                "run.respond",
+            )
+        })?;
         let carrier =
             self.run_controller_for(&snapshot, controller, "orchestration.session.observe")?;
         let binding = orchestrated_root_binding(&snapshot)?;
@@ -977,11 +982,13 @@ impl GatewayBackend for CoreGatewayBackend {
         let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
         let mut response =
             crate::gateway_observation::list_pending(&root, &snapshot, self.context())?;
-        for interaction in broker_approval_interactions(&root, snapshot.manifest.run_id)? {
-            if broker_approval_pending(&interaction) {
-                response
-                    .items
-                    .push(broker_approval_summary(&interaction, &snapshot)?);
+        if orchestrated_root_binding(&snapshot).is_ok() {
+            for interaction in broker_approval_interactions(&root, snapshot.manifest.run_id)? {
+                if broker_approval_pending(&interaction) {
+                    response
+                        .items
+                        .push(broker_approval_summary(&interaction, &snapshot)?);
+                }
             }
         }
         Ok(response)
@@ -998,11 +1005,12 @@ impl GatewayBackend for CoreGatewayBackend {
             )
         })?;
         let carrier = self.run_controller(&snapshot, controller)?;
+        snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
         if let Ok(interaction_id) = Uuid::parse_str(&request.interaction_id)
+            && orchestrated_root_binding(&snapshot).is_ok()
             && let Some(interaction) =
                 broker_approval_interaction(&root, snapshot.manifest.run_id, interaction_id)?
         {
-            snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
             return broker_approval_projection(&interaction, &snapshot, self.context());
         }
         crate::gateway_observation::get_interaction(
@@ -1018,18 +1026,14 @@ impl GatewayBackend for CoreGatewayBackend {
         mut request: pb::ResolveInteractionRequest,
     ) -> Result<pb::ResolveInteractionResponse, MachineError> {
         let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        let controller = required(request.controller.as_ref(), "controller")?;
+        let carrier = self.run_controller(&snapshot, controller)?;
+        snapshot.authorize_current_controller(&root, &carrier, "run.respond")?;
         if let Ok(interaction_id) = Uuid::parse_str(&request.interaction_id)
+            && orchestrated_root_binding(&snapshot).is_ok()
             && broker_approval_interaction(&root, snapshot.manifest.run_id, interaction_id)?
                 .is_some()
         {
-            let controller = request.controller.as_ref().ok_or_else(|| {
-                MachineError::interaction_full_payload_requires_controller(
-                    snapshot.manifest.run_id,
-                    "run.respond",
-                )
-            })?;
-            let carrier = self.run_controller(&snapshot, controller)?;
-            snapshot.authorize_current_controller(&root, &carrier, "run.respond")?;
             if request.idempotency_key.is_empty() || request.idempotency_key.len() > 256 {
                 return Err(MachineError::invalid_argument(
                     "idempotency_key",
