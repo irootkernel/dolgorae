@@ -63,8 +63,8 @@ test-prepare:
 		echo "Missing validation dependency: Go $(GO_VERSION) is required." >&2; \
 		exit 1; \
 	}
-	@test "$$(GOTOOLCHAIN=local $(GO) env GOVERSION)" = "$(GO_VERSION)" || { \
-		echo "Validation dependency mismatch: expected Go $(GO_VERSION), got $$(GOTOOLCHAIN=local $(GO) env GOVERSION)." >&2; \
+	@test "$$(GOTOOLCHAIN=$(GO_VERSION) $(GO) env GOVERSION)" = "$(GO_VERSION)" || { \
+		echo "Validation dependency mismatch: expected Go $(GO_VERSION), got $$(GOTOOLCHAIN=$(GO_VERSION) $(GO) env GOVERSION)." >&2; \
 		exit 1; \
 	}
 	buf lint docs/protocol
@@ -72,9 +72,9 @@ test-prepare:
 	$(PYTHON_BIN) tools/validators/validate_json_schemas.py
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
 	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
-	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=local $(GO) test ./...
-	cd docs/protocol/generated/pre-task-053-low-level/go && GOTOOLCHAIN=local $(GO) test ./...
-	cd tests/e2e/private_boundary_client && GOTOOLCHAIN=local $(GO) test ./...
+	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
+	cd docs/protocol/generated/pre-task-053-low-level/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
+	cd tests/e2e/private_boundary_client && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	$(PYTHON_BIN) tools/validators/validate_markdown.py
 	$(MAKE) validate-agent-skills
 	$(MAKE) test-aquarium-dev-producer
