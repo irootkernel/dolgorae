@@ -2062,6 +2062,30 @@ async fn controller_timeline_preserves_input_and_pages_without_replay_duplicates
         .await
         .unwrap_err();
     semantic_error(&too_large, "INVALID_ARGUMENT");
+    let unsupported_version = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: "0".to_owned(),
+            limit: 100,
+            timeline_version: 2,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&unsupported_version, "UNSUPPORTED_SCHEMA_VERSION");
+    let beyond_head = observations
+        .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            after_cursor: u64::MAX.to_string(),
+            limit: 100,
+            timeline_version: 1,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&beyond_head, "EVENT_CURSOR_INVALID");
 
     let first = observations
         .list_run_timeline_items(pb::ListRunTimelineItemsRequest {
