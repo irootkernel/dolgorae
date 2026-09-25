@@ -3445,10 +3445,12 @@ authoritative terminal-proof rules: an interrupt acknowledgement alone is not
 proof that no effect occurred. A matching interrupted terminal proves the
 requested outcome; an acknowledged interrupt without terminal proof, an
 ambiguous dispatch boundary, or transport loss settles
-`interrupted_unknown`. If an already completed terminal wins the race, the
-task remains pending TASK-051 result construction and cancellation reports
-`already_terminal`; it MUST NOT discard the result or rewrite completion as
-cancellation.
+`interrupted_unknown`. If the task's terminal state is already durable,
+cancellation reports `already_terminal`; it MUST NOT discard the result or
+rewrite completion as cancellation. If the target Turn is terminal but TASK-051
+result construction is still pending, the task remains nonterminal and
+cancellation reports `interrupt_requested` with `OUTCOME_UNKNOWN` until
+reconciliation.
 
 Primary result consumption MUST expose actual bounded content, not only an
 unreadable artifact identity. Verify accepted-request identity before choosing

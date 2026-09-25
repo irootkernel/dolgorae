@@ -69,6 +69,7 @@ development commits.
 
 ### Changed
 
+- Report nonterminal Specialist cancellation as `interrupt_requested`.
 - Bound transient Specialist result-capture recovery by the durable task
   deadline, restrict ledger fallback to fail-closed quiescent restart recovery,
   anchor one-shot v3 waits to durable acceptance, preserve legacy review failure

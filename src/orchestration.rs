@@ -992,6 +992,7 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                     "state":match state {
                         "cancelled" => "cancelled",
                         "interrupted_unknown" => "interrupted_unknown",
+                        "already_requested" | "interrupt_requested" => "interrupt_requested",
                         _ => "already_terminal",
                     },
                 }))
@@ -3785,7 +3786,7 @@ impl OrchestrationStore {
             }
             Ok(TaskCancellation::TerminalInterrupted) => ("cancelled", None, "cancelled"),
             Ok(TaskCancellation::TerminalOther) => {
-                ("running", Some("OUTCOME_UNKNOWN"), "already_terminal")
+                ("running", Some("OUTCOME_UNKNOWN"), "interrupt_requested")
             }
             Ok(TaskCancellation::OutcomeUnknown)
             | Err(AdapterFailure::Rejected(_))
@@ -3820,6 +3821,8 @@ impl OrchestrationStore {
         let current = self.task(task_id)?;
         if current.state == "interrupted_unknown" {
             Ok("interrupted_unknown")
+        } else if !task_terminal(&current.state) {
+            Ok("interrupt_requested")
         } else {
             Ok("already_terminal")
         }
@@ -8443,6 +8446,20 @@ mod tests {
                     cancelled.safe_error_code.as_deref(),
                     Some("OUTCOME_UNKNOWN")
                 );
+                let result = PrimaryOrchestrationService {
+                    store: &mut store,
+                    adapter: &mut adapter,
+                }
+                .dispatch(
+                    &context(session.session_id, "cancel-running-result"),
+                    &serde_json::json!({
+                        "operation":"cancel_specialist_task",
+                        "task_id":task.task_id,
+                        "reason":"Check the result of an accepted interrupt.",
+                    }),
+                )
+                .unwrap();
+                assert_eq!(result["state"], "interrupt_requested");
             }
             std::fs::remove_dir_all(root).unwrap();
         }
