@@ -156,12 +156,13 @@ SQLite, a child carrier, or an untracked fixture.
 
 The model-facing `dolgorae_orchestration` tool is Run-scoped and host-bound; do
 not emulate it through a shell command or inject Run, Turn, call, credential,
-socket, database, or artifact identities into model arguments. v0.1.3 supports
-ready-member assignment, `never` and `reuse_idle_compatible`, both approval
-policies, bounded waits, result collection and paging, release, abort, and
-whole-session close. It does not support a busy-member queue, lateral
-collaboration, activation/passivation, the nine deferred TASK-029 methods, or
-actual Gul acceptance.
+socket, database, or artifact identities into model arguments. The v0.1.3
+Primary tool supports ready-member assignment, `never` and
+`reuse_idle_compatible`, both approval policies, bounded waits, and result
+collection and paging. The client retires members or aborts the session through
+whole-session `CloseRun`. The live Primary tool does not support a busy-member
+queue, lateral collaboration, or activation/passivation. The nine deferred
+TASK-029 methods and actual Gul acceptance remain outside v0.1.3.
 
 ## Operate an External Specialist Engagement
 

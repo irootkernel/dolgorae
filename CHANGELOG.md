@@ -55,8 +55,8 @@ development commits.
 - Add verified orphan inspection and cleanup for detached Dolgorae processes, including disposable E2E owners.
 - Add task-aware Specialist Review v3 for one-shot and reusable assignments,
   with exact accepted briefs, inline contexts, ordered completion criteria, and criterion-complete structured results.
-- Foreground local gRPC gateway with same-user Unix socket ownership, bounded
-  event subscriptions, and the 24-method Brokered Hierarchy bootstrap surface.
+- Add a same-user Unix socket gateway with bounded event subscriptions and the
+  27-method v0.1.3 provider profile.
 - Shared Run, Controller, Writer, interaction, and artifact observations for Machine CLI and gRPC,
   with durable event revisions and immutable Turn acceptance replay across gateway and worker replacement.
 - Checked common and project Specialist Role sources, create-exclusive

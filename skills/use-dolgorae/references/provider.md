@@ -44,8 +44,10 @@ permits it. In either mode, a rejected or unresolved request does not allocate
 a usable member.
 
 The Primary may request a Specialist, wait for its operation, list ready
-members, assign one task, await or collect the result, read the immutable result
-in pages, and release the member. A wait timeout leaves accepted work running.
+members, assign one task, await or collect the result, and read the immutable
+result in pages. Retire members through whole-session `CloseRun`; direct
+`release_specialist` through the live Primary tool returns
+`ORCHESTRATION_NOT_AVAILABLE`. A wait timeout leaves accepted work running.
 Exact accepted-task replay returns the original receipt; a fresh assignment to
 a busy member fails before effects. Never provide the Primary with a child
 Controller, private socket, database path, host artifact path, or hidden

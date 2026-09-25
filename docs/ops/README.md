@@ -178,7 +178,8 @@ The normal call order is:
    with the root Controller. Under `fully_delegated`, require the immutable Role
    to permit automatic approval.
 4. Let the Primary list a ready member, assign one task, await or collect its
-   result, read every result page, and release or explicitly abort the member.
+   result, and read every result page. Retire members through whole-session
+   `CloseRun`; the live Primary tool cannot release an individual member.
 5. Observe the aggregate through `GetOrchestratedSession`. Discover published
    Primary-owned artifact references only through
    `ListOrchestratedSessionResults`, then call `GetArtifact` and
