@@ -697,7 +697,12 @@ write-ahead association and idempotent reconciliation between existing artifact
 storage and SQLite; do not claim atomicity across them. A Primary-owned result
 projection or the frozen private `read_specialist_result` reader gives the
 Primary and its Controller access without exposing a child credential or
-arbitrary child files. The specification fixes assignment receipt/wait and UTF-8 result-page rules.
+arbitrary child files. The shared artifact reader obtains published Specialist
+result associations through the Orchestration Store's read-only observer API;
+orchestration alone owns the SQLite schema and publication-state interpretation.
+Broker approval observations use the same read-only boundary and cannot run
+publication recovery as a side effect of a public read. The specification fixes
+assignment receipt, wait, and UTF-8 result-page rules.
 TASK-051 implements the reader. A page is a nonempty UTF-8-boundary-preserving
 prefix before EOF; invalid byte ranges or an undersized next-character budget
 return a checked error, not a lossy or non-progressing page.

@@ -5,7 +5,6 @@ use crate::interaction_payload::ChangeArtifactPayload;
 use crate::ledger::ObservedLedger;
 use crate::machine::MachineError;
 use crate::snapshot::RunSnapshot;
-use rusqlite::OptionalExtension as _;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -381,38 +380,12 @@ fn specialist_result_reference(
     run_id: Uuid,
     id: Uuid,
 ) -> Result<Option<ArtifactReference>, MachineError> {
-    let path = state_root.join("orchestration/orchestration.sqlite3");
+    let path = crate::engagement::EngagementStore::workspace_database_path(state_root);
     if !path.exists() {
         return Ok(None);
     }
-    let connection = rusqlite::Connection::open(path)
-        .map_err(|_| invalid("Specialist result artifact association"))?;
-    let has_table: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_result_publications')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| invalid("Specialist result artifact association"))?;
-    if !has_table {
-        return Ok(None);
-    }
-    let row = connection
-        .query_row(
-            "SELECT created_at,byte_length,result_sha256
-             FROM brokered_result_publications
-             WHERE primary_run_id=?1 AND artifact_id=?2 AND state='published'",
-            [run_id.to_string(), id.to_string()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| invalid("Specialist result artifact association"))?;
+    let row = crate::orchestration::OrchestrationStore::open_observer(state_root)?
+        .published_result_artifact(run_id, id)?;
     row.map(|(created_at, byte_length, sha256)| {
         digest(&sha256)?;
         if byte_length > 32 * 1024 * 1024 {

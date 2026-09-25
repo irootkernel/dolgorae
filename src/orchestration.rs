@@ -1139,6 +1139,34 @@ impl OrchestrationStore {
         })
     }
 
+    pub fn published_result_artifact(
+        &self,
+        primary_run_id: Uuid,
+        artifact_id: Uuid,
+    ) -> Result<Option<(String, u64, String)>, MachineError> {
+        let has_table: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_result_publications')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if !has_table {
+            return Ok(None);
+        }
+        self.connection
+            .query_row(
+                "SELECT created_at,byte_length,result_sha256
+                 FROM brokered_result_publications
+                 WHERE primary_run_id=?1 AND artifact_id=?2 AND state='published'",
+                params![primary_run_id.to_string(), artifact_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(internal)
+    }
+
     fn now_ms(&self) -> Result<i64, MachineError> {
         self.clock.now_ms()
     }
