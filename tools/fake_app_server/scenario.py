@@ -97,7 +97,10 @@ class Scenario:
     """One validated scenario, addressable by inbound method name."""
 
     def __init__(self, document: dict[str, Any], overrides: dict[str, str]) -> None:
+        self.document = document
+        self.overrides = overrides
         self.name: str = document["name"]
+        self.concurrent_connections = document.get("concurrent_connections", False)
         self.fragment_bytes = document.get("fragment_bytes")
         if self.fragment_bytes is not None:
             self.fragment_bytes = int(self.fragment_bytes)
@@ -105,6 +108,9 @@ class Scenario:
         self.bindings.setdefault("codex_home", document.get("codex_home", "/tmp/codex-home"))
         self.steps: list[dict[str, Any]] = document["steps"]
         self.counts: dict[str, int] = {}
+
+    def fresh_connection(self) -> "Scenario":
+        return Scenario(self.document, self.overrides)
 
     @classmethod
     def load(cls, path: pathlib.Path, overrides: dict[str, str] | None = None) -> "Scenario":

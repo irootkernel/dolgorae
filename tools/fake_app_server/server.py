@@ -12,6 +12,7 @@ import os
 import pathlib
 import socket
 import stat
+import threading
 from typing import Any
 
 import jsonlite
@@ -63,12 +64,32 @@ class FakeAppServer:
         assert self.listener is not None
         while True:
             connection, _ = self.listener.accept()
+            if self.scenario.concurrent_connections:
+                threading.Thread(
+                    target=self.serve_isolated_connection,
+                    args=(connection,),
+                    daemon=True,
+                ).start()
+                continue
             try:
                 self.serve_connection(connection)
             except (wsframe.ProtocolError, jsonlite.JsonError, ConnectionError, OSError):
                 pass
             finally:
                 connection.close()
+
+    def serve_isolated_connection(self, connection: socket.socket) -> None:
+        worker = FakeAppServer(
+            self.socket_path,
+            self.scenario.fresh_connection(),
+            transcript=self.transcript,
+        )
+        try:
+            worker.serve_connection(connection)
+        except (wsframe.ProtocolError, jsonlite.JsonError, ConnectionError, OSError):
+            pass
+        finally:
+            connection.close()
 
     def serve_connection(self, connection: socket.socket) -> None:
         headers = wsframe.read_handshake(connection)
@@ -86,6 +107,7 @@ class FakeAppServer:
                 raise wsframe.ProtocolError("a JSON-RPC message must be an object")
             self.record(text)
             if "method" not in message:
+                self.remember_tool_result(message)
                 # A client reply to one of this fixture's own requests.  Any
                 # emission the scenario held back for it is released now, in
                 # the order the step declared.
@@ -136,12 +158,46 @@ class FakeAppServer:
         return True
 
     def release_deferred(self, connection: socket.socket) -> bool:
-        """Send every emission that was waiting on a client reply."""
+        """Send deferred emissions through the next reply boundary."""
         pending, self.deferred = self.deferred, []
-        for emission in pending:
+        if pending and not self.emit(connection, pending.pop(0)):
+            return False
+        while pending:
+            emission = pending.pop(0)
+            if emission.get("await_reply", False):
+                self.deferred.append(emission)
+                self.deferred.extend(pending)
+                return True
             if not self.emit(connection, emission):
                 return False
         return True
+
+    def remember_tool_result(self, message: dict[str, Any]) -> None:
+        result = message.get("result")
+        if not isinstance(result, dict) or result.get("success") is not True:
+            return
+        items = result.get("contentItems")
+        if not isinstance(items, list) or not items:
+            return
+        first = items[0]
+        if not isinstance(first, dict) or not isinstance(first.get("text"), str):
+            return
+        try:
+            payload = jsonlite.loads(first["text"])
+        except jsonlite.JsonError:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get("operation") == "list_specialists_result":
+            specialists = payload.get("specialists")
+            if isinstance(specialists, list) and len(specialists) == 1:
+                run_id = specialists[0].get("run_id")
+                if isinstance(run_id, str):
+                    self.scenario.bind("specialist_run_id", run_id)
+        elif payload.get("operation") == "assign_specialist_task_result":
+            task_id = payload.get("task_id")
+            if isinstance(task_id, str):
+                self.scenario.bind("specialist_task_id", task_id)
 
     def build_response(self, request_id: Any, respond: dict[str, Any]) -> dict[str, Any]:
         if "error" in respond:

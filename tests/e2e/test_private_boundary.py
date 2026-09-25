@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from run_native_gateway_case import run_case as execute_native_case
+from run_native_gateway_case import run_case
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -129,6 +130,10 @@ def main() -> int:
     )
     for target, case, _ in CASES:
         execute_native_case(target, case)
+    run_case(
+        "gateway_semantic_native",
+        "broker_approval_provisions_and_dispatches_through_production_effects",
+    )
     print("private_boundary deterministic campaign passed")
     return 0
 

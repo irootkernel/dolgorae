@@ -180,6 +180,20 @@ fn install_orchestration_controller(
     fixture: &Fixture,
     policy_name: &str,
 ) -> pb::ControllerCarrierRef {
+    install_orchestration_controller_with_approval(
+        fixture,
+        policy_name,
+        "fully_delegated",
+        &fixture.profile,
+    )
+}
+
+fn install_orchestration_controller_with_approval(
+    fixture: &Fixture,
+    policy_name: &str,
+    approval_policy: &str,
+    specialist_profile: &str,
+) -> pb::ControllerCarrierRef {
     let roles = fixture.workspace.join(".dolgorae/roles");
     fs::create_dir_all(&roles).unwrap();
     fs::write(
@@ -201,14 +215,14 @@ fn install_orchestration_controller(
             "schema_version": 2,
             "policy_name": policy_name,
             "revision": 1,
-            "approval_policy": "fully_delegated",
+            "approval_policy": approval_policy,
             "max_active_specialists": 1,
             "roles": [{
                 "role_ref": format!("{policy_name}-role"),
                 "role_source": {"scope":"project","name":format!("{policy_name}-role")},
                 "agent_configuration": {
                     "schema_version": 2,
-                    "selected_profile": fixture.profile,
+                    "selected_profile": specialist_profile,
                     "global_profile_binding_sha256": null,
                     "model": "gpt-5.6",
                     "default_effort": "medium",
@@ -266,6 +280,222 @@ fn install_orchestration_controller(
             .to_owned(),
         expected_controller_generation: 1,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broker_approval_provisions_and_dispatches_through_production_effects() {
+    let mut scenario = support::base_scenario();
+    scenario["concurrent_connections"] = true.into();
+    for step in scenario["steps"].as_array_mut().unwrap() {
+        if step["method"] == "turn/start" {
+            if step["occurrence"] == 1 {
+                step["emit"] = serde_json::json!([
+                    {"kind":"request","id":50,"method":"item/tool/call","params":{
+                        "threadId":"${thread_id}","turnId":"${turn_id}","callId":"request-member",
+                        "tool":"dolgorae_orchestration","arguments":{
+                            "operation":"request_specialist","role_ref":"production-broker-role",
+                            "objective":"Return a bounded result.","expected_output":["One result"],
+                            "requested_access":"read_only","deadline_seconds":60
+                        }
+                    }},
+                    {"kind":"notification","method":"turn/completed","await_reply":true,"params":{
+                        "threadId":"${thread_id}","turn":{
+                            "id":"${turn_id}","status":"completed",
+                            "items":[{"type":"agentMessage","phase":"final_answer","status":"completed","text":"Production Specialist result"}]
+                        }
+                    }
+                }]);
+            } else {
+                step["emit"] = serde_json::json!([
+                {"kind":"request","id":51,"method":"item/tool/call","params":{
+                    "threadId":"${thread_id}","turnId":"${turn_id}","callId":"list-member",
+                    "tool":"dolgorae_orchestration","arguments":{"operation":"list_specialists"}
+                }},
+                {"kind":"request","id":52,"method":"item/tool/call","await_reply":true,"params":{
+                    "threadId":"${thread_id}","turnId":"${turn_id}","callId":"assign-member",
+                    "tool":"dolgorae_orchestration","arguments":{
+                        "operation":"assign_specialist_task",
+                        "target":{"run_id":"${specialist_run_id}"},
+                        "objective":"Return the fake Codex answer.","context_refs":[],
+                        "expected_output":["One result"],"execution_intent":"read_only",
+                        "blocking":false,"deadline_seconds":60
+                    }
+                }},
+                {"kind":"request","id":53,"method":"item/tool/call","await_reply":true,"params":{
+                    "threadId":"${thread_id}","turnId":"${turn_id}","callId":"await-member",
+                    "tool":"dolgorae_orchestration","arguments":{
+                        "operation":"await_specialist_tasks","task_ids":["${specialist_task_id}"],
+                        "return_when":"all","transport_wait_seconds":10
+                    }
+                }},
+                {"kind":"notification","method":"turn/completed","await_reply":true,"params":{
+                    "threadId":"${thread_id}","turn":{
+                        "id":"${turn_id}","status":"completed",
+                        "items":[{"type":"agentMessage","phase":"final_answer","status":"completed","text":"Production Specialist result"}]
+                    }
+                }}
+                ]);
+            }
+        }
+    }
+    let fixture = Fixture::with_scenario(scenario);
+    let controller = install_orchestration_controller_with_approval(
+        &fixture,
+        "production-broker",
+        "user_approval_required",
+        &fixture.profile,
+    );
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let started = runs
+        .start_run(pb::StartRunRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller: Some(controller.clone()),
+            idempotency_key: "production-broker-start".to_owned(),
+            profile_name: fixture.profile.clone(),
+            control_mode: pb::ControlMode::DirectInteractive as i32,
+            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+            purpose: pb::PurposeKind::Interactive as i32,
+            purpose_label: None,
+            model: Some("gpt-5.6".to_owned()),
+            effort: Some("medium".to_owned()),
+            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+            required_capabilities: Vec::new(),
+            instructions: Some("Exercise the production broker adapter.".to_owned()),
+            parent: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let run = started.run.unwrap();
+    let session_id = Uuid::parse_str(&run.run_id).unwrap();
+    let run_ref = fixture.run_ref(&run.run_id);
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: run_ref.clone(),
+        controller: Some(controller.clone()),
+        idempotency_key: "production-broker-warm-primary".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: "Prepare the Primary Worker.".to_owned(),
+        images: Vec::new(),
+        effort: None,
+        expected_state_revision: run.state_revision,
+    })
+    .await
+    .unwrap();
+    native_wait_lifecycle(&mut runs, &fixture, &run.run_id, pb::RunLifecycle::Idle).await;
+    assert_eq!(run_count(&fixture), 1);
+
+    let mut interactions = pb::interaction_service_client::InteractionServiceClient::new(channel);
+    let pending = interactions
+        .list_pending_interactions(pb::ListPendingInteractionsRequest {
+            context: context(),
+            run: run_ref.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(pending.items.len(), 1);
+    let interaction_id = pending.items[0].interaction_id.clone();
+    let full = interactions
+        .get_controller_interaction(pb::GetControllerInteractionRequest {
+            context: context(),
+            run: run_ref.clone(),
+            controller: Some(controller.clone()),
+            interaction_id: interaction_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(full.interaction.unwrap().payload.is_some());
+    let resolution = pb::ResolveInteractionRequest {
+        context: context(),
+        run: run_ref,
+        controller: Some(controller.clone()),
+        interaction_id,
+        idempotency_key: "production-broker-approval".to_owned(),
+        response_json: br#"{"answers":{"specialist_approval":{"answers":["approve"]}}}"#.to_vec(),
+    };
+    let approved = interactions
+        .resolve_interaction(resolution.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let replay = interactions
+        .resolve_interaction(resolution)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(approved.resolution_receipt, replay.resolution_receipt);
+
+    let store = OrchestrationStore::open(&fixture.state_root).unwrap();
+    let members = store.members(session_id).unwrap();
+    assert_eq!(members.len(), 1);
+    let child = &members[0];
+    assert_eq!(child.membership_state, "active");
+    assert_eq!(run_count(&fixture), 2);
+    let snapshot =
+        dolgorae::snapshot::RunSnapshot::load(&fixture.state_root, child.run_id, 0).unwrap();
+    assert!(snapshot.projection.thread_id.is_some());
+    assert_eq!(
+        snapshot
+            .manifest
+            .aggregate_binding
+            .as_ref()
+            .unwrap()
+            .aggregate_id,
+        session_id
+    );
+    drop(store);
+
+    let snapshot = native_snapshot(&mut runs, &fixture, &session_id.to_string()).await;
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&session_id.to_string()),
+        controller: Some(controller.clone()),
+        idempotency_key: "production-broker-task-turn".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: "Assign the ready member and await its result.".to_owned(),
+        images: Vec::new(),
+        effort: None,
+        expected_state_revision: snapshot.state_revision,
+    })
+    .await
+    .unwrap();
+    native_wait_lifecycle(
+        &mut runs,
+        &fixture,
+        &session_id.to_string(),
+        pb::RunLifecycle::Idle,
+    )
+    .await;
+    let results = OrchestrationStore::open(&fixture.state_root)
+        .unwrap()
+        .collect_results(session_id, 0, 10)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].state, "delivered");
+    assert!(results[0].result_artifact_ref.is_some());
+    assert!(results[0].result_sha256.is_some());
+    let current = native_snapshot(&mut runs, &fixture, &session_id.to_string()).await;
+    let closed = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: fixture.run_ref(&session_id.to_string()),
+            controller: Some(controller),
+            interrupt: false,
+            expected_state_revision: current.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        closed.run.unwrap().lifecycle,
+        pb::RunLifecycle::Closed as i32
+    );
+    gateway.terminate();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
