@@ -5518,6 +5518,32 @@ mod tests {
     }
 
     #[test]
+    fn accepted_input_bounds_reject_before_turn_intent() {
+        let mut coordinator = coordinator(FakeServer::default());
+        let mut oversized = request("oversized-input", DeliveryMode::Submit);
+        oversized.message = "x".repeat(8 * 1024 * 1024 + 1);
+        assert!(matches!(
+            coordinator.start_turn(oversized),
+            Err(TurnError::InvalidInput(
+                "message exceeds the 8 MiB request bound"
+            ))
+        ));
+        assert!(coordinator.journal.entries.is_empty());
+
+        let path = std::env::temp_dir().join(format!("dolgorae-input-image-{}", Uuid::now_v7()));
+        std::fs::write(&path, b"image").unwrap();
+        let image = ImageSnapshot::capture(&path, ImageDetail::Low).unwrap();
+        let mut too_many_images = request("too-many-images", DeliveryMode::Submit);
+        too_many_images.images = vec![image; 65];
+        assert!(matches!(
+            coordinator.start_turn(too_many_images),
+            Err(TurnError::InvalidInput("at most 64 images are accepted"))
+        ));
+        assert!(coordinator.journal.entries.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn malformed_active_event_quarantines_but_duplicate_known_terminal_does_not() {
         let mut server = FakeServer::default();
         server

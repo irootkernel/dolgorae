@@ -208,6 +208,17 @@ from current work. It is not a second roadmap or status authority.
   store tests and is independent of current close and recovery behavior.
 - Revisit condition: changing the session close protocol or its store tests.
 
+## DF-020: Cover artifact-backed final responses in the timeline
+
+- Owner: Controller timeline maintainers
+- Finding: tests cover artifact storage for large final responses and inline
+  timeline projection, but do not combine them in a timeline assertion.
+- Reason for deferral: the timeline uses the same observer-visible artifact
+  reference as the shared artifact reader, and no projection mismatch was
+  found. This is independent regression coverage.
+- Revisit condition: changing final-response artifact classification or the
+  timeline item projection.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

@@ -51,9 +51,10 @@ pub fn list(
     let after = if after.is_empty() { "0" } else { after };
     let parsed = crate::ledger::parse_event_cursor(after);
     if parsed.is_none_or(|value| value > head) {
+        let requested = after.chars().take(256).collect::<String>();
         return Err(crate::ledger::event_cursor_invalid(
             snapshot.manifest.run_id,
-            &after.parse::<u64>().unwrap_or(0).to_string(),
+            &requested,
             &head.to_string(),
         ));
     }
