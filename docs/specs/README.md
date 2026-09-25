@@ -3315,10 +3315,10 @@ Orchestrated Session. It enables the experimental App Server API only for that
 Run, derives session/Run/Thread/Turn/call authority before dispatch, and keeps
 the response destination in the owning Worker generation. TASK-048 connects
 `request_specialist` to production provisioning and the shared Controller
-Interaction path. Assign, cancel, and release remain unavailable until their
-owning Tasks connect those production effects; they return the frozen
-`ORCHESTRATION_NOT_AVAILABLE` result before any semantic mutation. The wired
-request and read operations reach the existing Primary Orchestration Service.
+Interaction path. Assignment and cancellation are connected to their production
+effects. Direct `release_specialist` remains unavailable through the live
+Primary tool and returns `ORCHESTRATION_NOT_AVAILABLE` before any semantic
+mutation. The wired operations reach the existing Primary Orchestration Service.
 
 The separately authorized focused acceptance target is
 `DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE=1 make test-live-primary-bridge`. It requires

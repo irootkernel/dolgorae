@@ -751,9 +751,9 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
         self.dispatch_inner(context, payload, false)
     }
 
-    /// Dispatch from the production Primary bridge.  Until the owning tasks
-    /// connect their effects, mutating operations are rejected before the
-    /// semantic service can reserve or publish anything.
+    /// Dispatch from the production Primary bridge. Release remains unavailable
+    /// here; canonical writer yield is refused during an active Primary Turn,
+    /// and new Specialist requests require the live provider policy.
     pub fn dispatch_live_bridge(
         &mut self,
         context: &PrimaryCallContext,
