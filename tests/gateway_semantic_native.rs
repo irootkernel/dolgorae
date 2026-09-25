@@ -2784,6 +2784,66 @@ async fn orchestrated_start_run_pins_policy_and_replays_without_registry_source(
         codex.to_str().unwrap(),
     ]);
     fixture.cli(&["profile", "server", "start", "default"]);
+    let mut out_of_slice: Value =
+        serde_json::from_slice(&fs::read(&policy_input).unwrap()).unwrap();
+    out_of_slice["policy_name"] = Value::String("out-of-slice-review".to_owned());
+    out_of_slice["roles"][0]["reuse_policy"] = Value::String("reuse_any_compatible".to_owned());
+    let out_of_slice_path = fixture.root.join("out-of-slice-policy.json");
+    fs::write(
+        &out_of_slice_path,
+        serde_json::to_vec(&out_of_slice).unwrap(),
+    )
+    .unwrap();
+    fixture.cli(&[
+        "specialist",
+        "policy",
+        "add",
+        "out-of-slice-review",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--file",
+        out_of_slice_path.to_str().unwrap(),
+    ]);
+    let out_of_slice_carrier = fixture.root.join("out-of-slice-controller.json");
+    fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "interactive-client",
+        "--instance-id",
+        "out-of-slice-test",
+        "--orchestration-policy",
+        "out-of-slice-review",
+        "--output",
+        out_of_slice_carrier.to_str().unwrap(),
+    ]);
+    let refused = fixture.command(&[
+        "run",
+        "--controller-file",
+        out_of_slice_carrier.to_str().unwrap(),
+        "start",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--profile",
+        "default",
+        "--control-mode",
+        "direct-interactive",
+        "--execution-lane",
+        "shared-readonly",
+        "--required-assurance",
+        "best-effort-personal-alpha",
+        "--purpose",
+        "interactive",
+        "--instructions",
+        "Reject an unsupported live policy before allocation.",
+        "--idempotency-key",
+        "orchestrated-out-of-slice",
+    ]);
+    assert!(!refused.status.success());
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["code"], "POLICY_REJECTED");
+    assert_eq!(run_count(&fixture), 0);
     fs::remove_file(role_path).unwrap();
     let carrier_ref = pb::ControllerCarrierRef {
         absolute_file_path: carrier.to_string_lossy().into_owned(),

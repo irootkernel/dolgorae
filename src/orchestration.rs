@@ -8047,6 +8047,69 @@ mod tests {
                 .code,
             "SPECIALIST_WRITER_CONFLICT"
         );
+        let calls_before_release = service.adapter.calls.len();
+        assert_eq!(
+            service
+                .dispatch_live_bridge(
+                    &context(session.session_id, "live-release-refused"),
+                    &serde_json::json!({
+                        "operation":"release_specialist",
+                        "run_id":child,
+                        "reason":"Attempt direct retirement.",
+                    }),
+                )
+                .unwrap_err()
+                .code,
+            "ORCHESTRATION_OPERATION_UNAVAILABLE"
+        );
+        assert_eq!(service.adapter.calls.len(), calls_before_release);
+        assert_eq!(
+            service
+                .store
+                .member(session.session_id, child)
+                .unwrap()
+                .membership_state,
+            "active"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_bridge_refuses_out_of_slice_policy_before_provisioning() {
+        let root = root();
+        let mut unsupported = policy("fully_delegated");
+        unsupported.roles[0].reuse_policy = "reuse_any_compatible".to_owned();
+        let (mut store, session) = active_session_with_policy(&root, unsupported);
+        let mut adapter = FakeAdapter::default();
+        let mut service = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        };
+        assert_eq!(
+            service
+                .dispatch_live_bridge(
+                    &context(session.session_id, "unsupported-live-policy"),
+                    &serde_json::json!({
+                        "operation":"request_specialist",
+                        "role_ref":"reviewer",
+                        "objective":"No provisioning should occur.",
+                        "expected_output":["None"],
+                        "requested_access":"read_only",
+                        "deadline_seconds":60,
+                    }),
+                )
+                .unwrap_err()
+                .code,
+            "LIVE_POLICY_UNSUPPORTED"
+        );
+        assert!(service.adapter.calls.is_empty());
+        assert!(
+            service
+                .store
+                .members(session.session_id)
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
