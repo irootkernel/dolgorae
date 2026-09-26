@@ -102,8 +102,8 @@ owners. Share task-content helpers and applicable result validators without
 using the External Specialist CLI/facade as the Broker backend or forcing review
 criteria onto ordinary tasks. Do not mutate shared global Profiles for one
 Run's tool registration. TASK-025 selected native `item/tool/call` on the isolated-home live campaign
-pin (locally installed Codex CLI, currently 0.155.1). That campaign pin is not
-a change to the Codex App Server 0.153.4 product compatibility baseline.
+pin (locally installed Codex CLI 0.155.1). That historical campaign did not
+change the then-current Codex App Server 0.153.4 compatibility baseline.
 Deterministic probes and the checked selection artifact live under
 `src/live_transport.rs` and
 `docs/protocol/dolgorae-live-transport-selection-v1.json`. The hidden

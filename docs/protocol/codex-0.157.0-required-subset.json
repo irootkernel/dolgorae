@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
-  "target_version": "0.153.4",
-  "architecture_contract_eligible": true,
+  "target_version": "0.157.0",
+  "architecture_contract_eligible": false,
   "production_runtime_eligible": false,
   "eligibility_owners": {
     "architecture_contract_eligible": "TASK-000-D",
     "production_runtime_eligible": "TASK-034"
   },
   "architecture_contract_requirements": {
-    "runtime_baseline": "0.153.4",
+    "runtime_baseline": "0.157.1",
     "topology": "shared_readonly_plus_sticky_dedicated_lanes",
     "background_authority": "dolgorae_dedicated_lane_process_census",
     "required_live_evidence": ["same_home_shared_and_multiple_dedicated_servers", "globally_unique_server_epochs", "fixed_thread_residency", "closed_generation_history_barrier", "complete_dedicated_lane_census", "exact_cleanup", "unrelated_process_not_signalled"],
-    "failure": null
+    "failure": "0.157.1 architecture campaign and independent review are pending"
   },
-  "stable_schema_bundle_sha256": "eda0804dd77deb0503fc3dbaa8d9d61199dfdb9ae598a1e4c67ba99e193d817d",
-  "experimental_schema_bundle_sha256": "c8dc661a28c5e2fc0ea8b1dddd3fd6756d19a1d5601102f3cd5fb9a437f960ec",
+  "stable_schema_bundle_sha256": "da1efd332c38eccf3275ab0029a81e76c4f34c3d3cc8dfc96d297cd63b7683e7",
+  "experimental_schema_bundle_sha256": "9b1b77375db6622965466126f5115a47ca21e25e892e1032480f7aa9bbf5f71b",
   "experimental_thread_surfaces": {
     "required_schema_files": [
       "v2/ThreadUnsubscribeParams.json",
@@ -43,6 +43,7 @@
   },
   "profile_launch": {
     "mode": "dolgorae_owned_direct_executable",
+    "unix_socket_rendezvous": "deterministic_symlink_to_private_physical_socket",
     "global_arguments": {
       "value_flags": ["--profile", "--enable", "--disable"],
       "flag_only": ["--strict-config"],
@@ -59,7 +60,7 @@
       "classification_status": "verified_by_TASK-005"
     },
     "configuration_fields": {
-      "process_static": ["features", "model_context_window", "model_auto_compact_token_limit", "model_provider", "model_providers", "mcp_servers", "agents", "apps", "approvals_reviewer", "hooks", "marketplaces", "notify", "plugins", "shell_environment_policy", "skills"],
+      "process_static": ["features", "model_context_window", "model_auto_compact_token_limit", "model_provider", "model_providers", "openai_base_url", "experimental_realtime_webrtc_call_base_url", "mcp_servers", "agents", "apps", "approvals_reviewer", "hooks", "marketplaces", "notify", "plugins", "shell_environment_policy", "skills"],
       "operator_migratable": ["model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "personality", "plan_mode_reasoning_effort"],
       "runtime_mutable": ["approval_policy", "sandbox_mode", "sandbox_workspace_write", "web_search", "tools"],
       "ignored": ["analytics", "check_for_update_on_startup", "desktop", "disable_response_storage", "feedback", "file_opener", "hide_agent_reasoning", "history", "notice", "notices", "otel", "project_doc_fallback_filenames", "project_doc_max_bytes", "projects", "show_raw_agent_reasoning", "tui"]
@@ -75,12 +76,12 @@
         "enabled_capability_before_complete_probe": "unverified",
         "disable_enforcement": "unavailable",
         "quiescence_rule": "active_or_unverified_native_state_blocks_transition",
-        "reason": "Codex 0.153.4 retains the enabled-only production policy; the historical 0.147.0 disable probe did not prove enforceable disablement"
+        "reason": "Codex 0.157.0 retains the enabled-only production policy; the historical 0.147.0 disable probe did not prove enforceable disablement"
       }
     },
     "initialize_capabilities": {
       "optOutNotificationMethods": [],
-      "reason": "Codex 0.153.4 native lifecycle and child correlation require item/started and item/completed; exact reasoning-only suppression is not safely separable for this pin",
+      "reason": "Codex 0.157.0 native lifecycle and child correlation require item/started and item/completed; exact reasoning-only suppression is not safely separable for this pin",
       "suppression_observed_capability": "unverified",
       "suppression_observed_transition_rule": "reject_quiescence_dependent_operations"
     },
@@ -273,7 +274,7 @@
       "classification": "content_not_retained",
       "known_method_prefixes": ["item/reasoning/"],
       "known_content_suffixes": ["textDelta", "summaryTextDelta", "summaryPartAdded"],
-      "initialization_suppression": "forbidden_for_0.153.4_profile; discard reasoning content after receipt because native lifecycle correlation requires unsuppressed item notifications",
+      "initialization_suppression": "forbidden_for_0.157.0_profile; discard reasoning content after receipt because native lifecycle correlation requires unsuppressed item notifications",
       "durable_fields": ["method", "byte_length", "sha256", "reason"]
     }
   },
@@ -294,24 +295,24 @@
     "unanswered_command_approval_status_after_restart": "interrupted",
     "recognized_unsupported_method_not_found_request": "mcpServer/elicitation/request",
     "recognized_unsupported_method_not_found_reply_code": -32601,
-    "recognized_unsupported_method_not_found_result": "historical_0.149.0_generation_survived_turn_completed;0.153.4_unverified",
-    "user_input_schema_classification": "experimental_pinned_to_0.153.4",
+    "recognized_unsupported_method_not_found_result": "historical_0.149.0_generation_survived_turn_completed;0.157.0_unverified",
+    "user_input_schema_classification": "experimental_pinned_to_0.157.0",
     "user_input_secret_answer_persistence": "forbidden",
-    "access_policy_transition": "passed_0.153.4_live_access_safety",
-    "thread_scoped_background_terminal_api": "historical_live_completeness_failed_zero_entries;0.153.4_unverified",
+    "access_policy_transition": "passed_0.157.0_live_access_safety",
+    "thread_scoped_background_terminal_api": "historical_live_completeness_failed_zero_entries;0.157.0_unverified",
     "writer_background_execution_policy": "dedicated_lane_process_census_best_effort_personal_alpha",
     "same_home_basic_coexistence": "historical_0.147.0_passed_task000g_live_probe",
     "same_home_bounded_storage_integrity": "historical_0.147.0_passed_task000i_live_probe",
     "same_home_long_duration": "unverified",
     "forced_authentication_refresh": "unverified",
     "configuration_classification": "verified_task005_closed_manifest_and_snapshot_separation",
-    "same_thread_cross_server_migration": "historical_rejected_unsubscribe_left_source_loaded_and_resume_failed_active_writer;0.153.4_unverified",
-    "sticky_dedicated_policy_transition": "historical_0.147.0_passed_task000g_live_probe;0.153.4_unverified",
-    "multi_workspace_concurrent_writers": "historical_0.147.0_passed_task000g_live_probe;0.153.4_unverified",
-    "closed_generation_history_barrier": "historical_0.147.0_passed_task000g_live_probe;0.153.4_unverified",
-    "native_subagent_enabled_lifecycle": "historical_0.147.0_passed_task000h_enabled_profile;0.153.4_unverified",
-    "native_subagent_disable_enforcement": "historical_0.147.0_unavailable_task000h_disabled_request_created_child;0.153.4_unverified",
-    "native_subagent_quiescence_tracking": "0.153.4_unverified_fail_closed",
+    "same_thread_cross_server_migration": "historical_rejected_unsubscribe_left_source_loaded_and_resume_failed_active_writer;0.157.0_unverified",
+    "sticky_dedicated_policy_transition": "historical_0.147.0_passed_task000g_live_probe;0.157.0_unverified",
+    "multi_workspace_concurrent_writers": "historical_0.147.0_passed_task000g_live_probe;0.157.0_unverified",
+    "closed_generation_history_barrier": "historical_0.147.0_passed_task000g_live_probe;0.157.0_unverified",
+    "native_subagent_enabled_lifecycle": "historical_0.147.0_passed_task000h_enabled_profile;0.157.0_unverified",
+    "native_subagent_disable_enforcement": "historical_0.147.0_unavailable_task000h_disabled_request_created_child;0.157.0_unverified",
+    "native_subagent_quiescence_tracking": "0.157.0_unverified_fail_closed",
     "command_execution_process_id": "opaque_correlation_hint_only",
     "dedicated_lane_process_identity": "boot_pid_ppid_uid_pgid_session_start_executable"
   }

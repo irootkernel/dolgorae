@@ -470,8 +470,8 @@ def select(result: dict[str, Any]) -> dict[str, Any]:
             "selected": "native_run_bound",
             "live_evidence": "recorded",
             "reason": (
-                f"Local Codex CLI {result['codex_cli']} (TASK-025 campaign pin, not the "
-                "0.153.4 product baseline) exposes item/tool/call with required "
+                f"Local Codex CLI {result['codex_cli']} in the isolated-home "
+                "transport campaign exposes item/tool/call with required "
                 "thread/turn/call fields. Isolated-home MCP forwarding proved host _meta, "
                 "retry, conflict, injection, concurrency, canaries, wait expiry, "
                 "in-flight disconnect, restart replay, and shared-identity ambiguity. "

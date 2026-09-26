@@ -89,7 +89,7 @@
       "additionalProperties": false,
       "required": ["version", "file_identity", "sha256", "capability_result"],
       "properties": {
-        "version": { "const": "0.153.4" },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
         "file_identity": { "$ref": "#/$defs/executable_identity" },
         "sha256": { "$ref": "#/$defs/sha256" },
         "capability_result": {
@@ -97,7 +97,7 @@
           "additionalProperties": false,
           "required": ["compatibility_verdict", "schema_bundle_sha256", "launch_contract_sha256"],
           "properties": {
-            "compatibility_verdict": { "const": "tested" },
+            "compatibility_verdict": { "enum": ["tested", "unverified"] },
             "schema_bundle_sha256": { "$ref": "#/$defs/sha256" },
             "launch_contract_sha256": { "$ref": "#/$defs/sha256" }
           }

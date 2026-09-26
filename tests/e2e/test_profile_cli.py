@@ -99,7 +99,7 @@ args = sys.argv[1:]
 control_path = pathlib.Path(__file__).with_name("codex-mode.json")
 control = json.loads(control_path.read_text(encoding="utf-8")) if control_path.exists() else {{}}
 if args == ["--version"]:
-    print("codex-cli " + control.get("version", "0.153.4"))
+    print("codex-cli " + control.get("version", "0.157.1"))
     raise SystemExit(0)
 if "generate-json-schema" in args:
     if control.get("schema") == "command-missing":
@@ -145,7 +145,7 @@ def create_script_codex(path: pathlib.Path) -> None:
     path.chmod(0o755)
 
 
-def set_mode(path: pathlib.Path, *, version: str = "0.153.4", schema: str = "ok") -> None:
+def set_mode(path: pathlib.Path, *, version: str = "0.157.1", schema: str = "ok") -> None:
     path.with_name("codex-mode.json").write_text(
         json.dumps({"version": version, "schema": schema}), encoding="utf-8"
     )
@@ -410,7 +410,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"exact compatibility failed: {exact.stdout}")
         exact_data = exact_envelope["data"]
         assert_valid(exact_envelope, machine, "profile-doctor Machine envelope")
-        if exact_data["compatibility"] != "tested" or exact_data["codex_version"] != "0.153.4":
+        if exact_data["compatibility"] != "unverified" or exact_data["codex_version"] != "0.157.1":
             raise AssertionError(f"exact compatibility returned wrong facts: {exact.stdout}")
         never_started_root = home / ".dolgorae" / "profiles" / exact_data["server_key"]
         never_started_verify = run(
@@ -443,7 +443,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if any(state != "unverified" for state in bare_capabilities.values()):
             raise AssertionError(f"bare doctor fabricated a non-unverified capability: {bare_capabilities}")
 
-        set_mode(fake, version="0.154.0")
+        set_mode(fake, version="0.158.0")
         newer = run(
             binary,
             home,
@@ -454,7 +454,15 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if newer.returncode != 0 or envelope(newer)["data"]["compatibility"] != "unverified":
             raise AssertionError(f"newer compatible version failed: {newer.stdout}")
 
-        set_mode(fake, version="0.153.3")
+        set_mode(fake, version="0.157.0")
+        below_minimum = run(binary, home, "profile", "doctor", "default")
+        if (
+            below_minimum.returncode != 0
+            or envelope(below_minimum)["data"]["compatibility"] != "rejected"
+        ):
+            raise AssertionError(f"pre-minimum version was not rejected: {below_minimum.stdout}")
+
+        set_mode(fake, version="0.153.4")
         older = run(
             binary,
             home,
@@ -1256,7 +1264,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"conflict profile cleanup failed: {conflicting_remove.stdout}")
         assert_valid(envelope(conflicting_remove), machine, "profile-remove Machine envelope")
 
-        set_mode(fake, version="0.154.0")
+        set_mode(fake, version="0.158.0")
         migrated_snapshot = envelope(
             run(binary, home, "profile", "doctor", "default")
         )["data"]
@@ -1381,6 +1389,13 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             encoding="utf-8",
         )
         active_path.chmod(0o600)
+        set_mode(fake, version="0.157.2")
+        changed_contract = run(binary, home, "profile", "doctor", "default")
+        if (
+            changed_contract.returncode != 0
+            or envelope(changed_contract)["data"]["server_key"] == exact_data["server_key"]
+        ):
+            raise AssertionError(f"version change did not produce a new contract: {changed_contract.stdout}")
         recovered_stop = run(
             binary,
             home,
@@ -1401,6 +1416,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(
             envelope(recovered_stop), machine, "stranded-stop-state-reset Machine envelope"
         )
+        set_mode(fake)
         if state_path.exists() or active_path.exists():
             raise AssertionError("state reset left a stranded lifecycle record")
         recovered_membership = envelope(
@@ -1422,6 +1438,35 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(
             recovered_membership, machine, "recovered-stop-membership Machine envelope"
         )
+
+        # Without state, a dangling rendezvous has no recorded process or
+        # inode identity. Reset must report the collision instead of claiming
+        # success and leaving the next start blocked.
+        unrecorded_socket = pathlib.Path(stranded_state["socket_path"])
+        unrecorded_socket.symlink_to(unrecorded_socket.with_name("missing.sock"))
+        blocked_reset = run(
+            binary,
+            home,
+            "profile",
+            "state",
+            "reset",
+            "default",
+            "--operator-file",
+            str(operator),
+            "--confirm-server-key",
+            exact_data["server_key"],
+            "--require-server-absence",
+        )
+        blocked_reset_envelope = envelope(blocked_reset)
+        if (
+            blocked_reset.returncode != 4
+            or blocked_reset_envelope["error"]["code"] != "PROFILE_SERVER_BUSY"
+            or not unrecorded_socket.is_symlink()
+        ):
+            raise AssertionError(
+                f"state reset accepted an unrecorded dangling socket: {blocked_reset.stdout}"
+            )
+        unrecorded_socket.unlink()
 
         # Fabricate a blocked migration fence naming this now-absent server
         # key and a never-started key. State reset proves both lifetimes absent

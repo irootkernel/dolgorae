@@ -17,9 +17,10 @@ import select
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ from run_live_primary_bridge import (
 
 
 OPT_IN = "DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE"
-PINNED_CODEX_VERSION = "codex-cli 0.155.1"
+PINNED_CODEX_VERSION = "codex-cli 0.157.1"
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT_SOURCE = ROOT / "tests/e2e/private_boundary_client"
 RESULT_PAGE_BYTES = 65_536
@@ -43,6 +44,29 @@ MAXIMUM_TOOL_RESULT_ENVELOPE_BYTES = 1_048_576
 CAMPAIGN_TEMP_ROOT = Path("/private/tmp")
 GATEWAY_READY_TIMEOUT_SECONDS = 15
 GATEWAY_READY_MAXIMUM_BYTES = 65_536
+
+
+@contextmanager
+def campaign_root(suffix: str):
+    root = Path(tempfile.mkdtemp(prefix=f"d26-{suffix}-", dir=CAMPAIGN_TEMP_ROOT))
+
+    def remove_credentials():
+        for credential in (
+            root / "codex-home/auth.json",
+            root / "operator.json",
+            root / "home/.dolgorae/controller-carriers/task026" / suffix / "controller.json",
+        ):
+            credential.unlink(missing_ok=True)
+
+    try:
+        yield root
+    except BaseException:
+        remove_credentials()
+        print(f"live provider diagnostic root preserved: {root}", file=sys.stderr)
+        raise
+    else:
+        remove_credentials()
+        shutil.rmtree(root)
 
 
 def machine(
@@ -217,9 +241,15 @@ def stop_profile_server(
             timeout=90,
         )
         if completed.returncode:
-            raise RuntimeError("Profile Server cleanup failed")
-    except Exception:
-        raise RuntimeError("Profile Server cleanup failed") from None
+            try:
+                code = json.loads(completed.stdout).get("error", {}).get("code", "UNKNOWN")
+            except json.JSONDecodeError:
+                code = "NON_MACHINE_OUTPUT"
+            raise RuntimeError(f"Profile Server cleanup failed ({code})")
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"Profile Server cleanup failed ({type(error).__name__})") from error
 
 
 def tool_results(state_root: Path) -> list[dict[str, Any]]:
@@ -328,11 +358,7 @@ def campaign(
     suffix = "user" if approval == "user_approval_required" else "delegated"
     with ExitStack() as cleanup:
         root = Path(
-            cleanup.enter_context(
-                tempfile.TemporaryDirectory(
-                    prefix=f"d26-{suffix}-", dir=CAMPAIGN_TEMP_ROOT
-                )
-            )
+            cleanup.enter_context(campaign_root(suffix))
         ).resolve(strict=True)
         home = root / "home"
         codex_home = root / "codex-home"

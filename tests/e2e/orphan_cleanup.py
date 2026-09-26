@@ -29,20 +29,28 @@ def cleanup_removed_root(binary: pathlib.Path, owner_root: pathlib.Path) -> None
     owner_root = owner_root.resolve()
     if owner_root.exists():
         raise RuntimeError(f"owner root must be removed before orphan cleanup: {owner_root}")
-    for _ in range(20):
+    last_observation: dict | None = None
+    for _ in range(50):
         inspected = _call(binary, "inspect", owner_root)["data"]
+        last_observation = inspected
         if any(candidate["verdict"] == "unverifiable" for candidate in inspected["candidates"]):
-            raise RuntimeError(f"unverifiable Dolgorae process in E2E scope: {inspected}")
+            # A process can exit between the inventory's BSD identity and
+            # live-process probes. Never clean an uncertain candidate; allow
+            # a bounded re-observation to prove its final state.
+            time.sleep(0.1)
+            continue
         result = _call(
             binary, "cleanup", owner_root,
             "--confirm-selection-sha256", inspected["selection_sha256"],
         )
+        last_observation = result
         if result["ok"]:
             remaining = _call(binary, "inspect", owner_root)["data"]
+            last_observation = remaining
             if not any(candidate["verdict"] in {"orphan", "unverifiable"} for candidate in remaining["candidates"]):
                 return
         time.sleep(0.1)
-    raise RuntimeError(f"Dolgorae process did not reach verified absence: {remaining if result['ok'] else result}")
+    raise RuntimeError(f"Dolgorae process did not reach verified absence: {last_observation}")
 
 
 def main() -> int:

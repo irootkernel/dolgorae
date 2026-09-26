@@ -21,7 +21,7 @@ def main() -> int:
     ast.parse(source)
     required = (
         'OPT_IN = "DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE"',
-        'PINNED_CODEX_VERSION = "codex-cli 0.153.4"',
+        'PINNED_CODEX_VERSION = "codex-cli 0.157.1"',
         '"--orchestration-policy"',
         "list_specialists",
         '"list_specialists_result"',

@@ -361,7 +361,11 @@ Review selects the Profile configuration's explicit `model` and
 unavailable selection without substitution. If either setting is absent,
 its existing server-default model or first-advertised-effort rule applies.
 
-Codex App Server 0.153.4 is the current compatibility baseline.
+Codex App Server 0.157.1 is the minimum runtime version. The checked 0.157.0
+schema bundle remains the required-subset comparison baseline; it is byte-for-
+byte identical to the 0.157.1 stable and experimental bundles. A version at or
+above the minimum remains `unverified` until its complete behavioral campaign
+qualifies it.
 Background-process safety is owned by each Sticky Dedicated logical lane across its successive physical generations and
 by the macOS process census; it MUST NOT depend on a future Codex terminal-
 management API. A newer native API MAY supply additional evidence but never
@@ -562,7 +566,7 @@ and cleanup, so it advertises lifecycle observation and quiescence tracking as
 native state still blocks pause, physical-generation replacement, profile stop,
 and shutdown. A disabled diagnostic result is recorded as `unverified`; it can
 never be published as a usable profile capability.
-For the 0.153.4 production profile, initialize MUST send
+For the 0.157.1 minimum runtime profile, initialize MUST send
 `optOutNotificationMethods:[]`. It MUST NOT suppress `item/started`,
 `item/completed`, `thread/started`, turn lifecycle, or correlation methods.
 Observed lifecycle suppression downgrades `native_subagents` to `unverified`
@@ -816,6 +820,9 @@ argv order is significant.
 
 Configuration fields are classified by a checked closed manifest as
 `process_static`, `operator_migratable`, `runtime_mutable`, or `ignored`.
+The `openai_base_url` and `experimental_realtime_webrtc_call_base_url`
+endpoint overrides are `process_static`: changing either value changes the
+server launch contract and requires a new physical generation.
 Unknown fields and unclassified include mechanisms fail compatibility. Only
 normalized process-static and explicitly accepted migratable fields enter the
 launch contract. Runtime-mutated trust and operational state are recorded as an
@@ -888,6 +895,25 @@ The socket node instead uses the macOS-safe short path
 `/tmp/dolgorae-<uid>/p/<server-token>.sock`, where `server-token` is uppercase
 unpadded base32 of the first 160 server-key bits. The private root is validated
 like worker sockets; full path and device/inode are recorded in server state.
+With Codex 0.157.1, this rendezvous path is a symlink to the physical Unix
+socket in the user-owned mode-0700 `/private/tmp/codex-daemon-<uid>/` directory
+(using the canonical `/tmp` root). The target basename is SHA-256 of the
+canonical rendezvous parent joined to its filename. Dolgorae MUST verify this
+exact target, its protected parent, and the physical socket's owner, mode,
+device, and inode before publishing or reusing a server. Recorded device/inode
+identify the physical socket. A redirect to any other target is a collision.
+After the recorded process scope is proven absent, cleanup MUST remove a
+remaining physical socket only when its owner, mode, device, and inode match
+the recorded identity. It MUST also remove the exact same-user rendezvous
+link, including when its deterministic target is already absent. If the link
+has disappeared but the recorded physical socket remains, cleanup MUST still
+remove that socket. A changed link or physical socket remains a collision.
+Before launching a Dedicated Lane Server, Dolgorae MUST prove both its
+rendezvous path and deterministic physical socket path vacant. If that launch
+fails before the socket identity is recorded, Dolgorae MAY remove only an
+exact same-user socket created in that vacant launch window, and only after
+proving its spawned process group absent. An unrelated link, physical entry,
+or unverifiable process group remains a collision.
 The token is only a locator. An existing node is attachable only when profile
 state proves the full 32-byte server key, Codex Profile identity, canonical
 home, launch-contract digest, epoch, socket device/inode, PID/PGID/UID/start
@@ -1017,7 +1043,12 @@ referenced manifest and immutable server binding, and reports missing,
 malformed, or mismatched orphans without mutation. `profile membership tombstone-orphan` requires the
 operator credential and exact server-key, workspace-ID, and run-ID
 confirmations; `profile state reset` additionally requires recorded singleton
-absence. Repairs append and fsync a tombstone/audit record and new membership
+absence. After a Profile contract changes, state reset MAY accept the exact
+previous active server key only when its recorded state proves the same Profile
+and canonical `CODEX_HOME`, the active record still names that key and epoch,
+and the existing process, socket, and membership absence checks pass. Missing
+previous state or a changed active record MUST fail closed. Repairs append and
+fsync a tombstone/audit record and new membership
 revision, never delete history or fabricate a turn result. Run start failure,
 close/delete, workspace relocation/deletion, and profile/server-key migration
 each have an explicit append-only membership transition.
@@ -2514,7 +2545,7 @@ Policy-rejected interrupted/failed statuses are skipped rather than treated
 as generic terminal boundaries. If confirmed history exists but no forkable boundary is
 accepted, the command returns `COMPATIBILITY_REJECTED`; only the separately
 defined outcome-unknown/no-confirmed-turn fallback creates a fresh thread.
-Codex 0.153.4 accepts an interrupted `lastTurnId`; that observation does not
+Codex 0.157.1 accepts an interrupted `lastTurnId`; that observation does not
 expand Dolgorae's completed-only fork policy.
 
 Any fork that must copy confirmed history requires the source Codex thread to
@@ -2604,7 +2635,7 @@ explicit context or artifact handoff.
 
 ## SPEC-009: Pending Requests and Approvals
 
-The checked [Codex required-subset manifest](../protocol/codex-0.153.4-required-subset.json)
+The checked [Codex required-subset manifest](../protocol/codex-0.157.0-required-subset.json)
 maps stable server requests as follows:
 
 - `item/commandExecution/requestApproval` and
@@ -2708,7 +2739,7 @@ For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `decline`, and `cancel`.
 
 The opt-in access-safety acceptance carrier is `make test-live-access-safety`.
-It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.153.4
+It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.157.1
 executable. It verifies the complete writer `sandboxPolicy`, successful writes
 to both the canonical workspace and the OS temporary directory, and live
 command-execution and file-change approval requests against the pinned schema.
@@ -2914,7 +2945,7 @@ Reasoning text, reasoning summaries, reasoning deltas, and internal planning
 streams MUST NOT be persisted in the ledger, projections, logs, diagnostics, or
 exports. The worker MUST independently filter every reasoning method before
 representation. Initialization-time suppression is not available on the pinned
-0.153.4 production profile, whose SPEC-003 launch contract requires
+0.157.1 minimum runtime profile, whose SPEC-003 launch contract requires
 `optOutNotificationMethods:[]` because reasoning-only methods cannot be
 isolated from required native lifecycle evidence. Receipt-side filtering is
 therefore the sole normative mechanism for that profile; a future pin that
@@ -3264,8 +3295,8 @@ nor Gul UI acceptance blocks the provider slice or its release eligibility.
 The roadmap owns completion status and the version boundary.
 
 TASK-025 selected native run-bound `item/tool/call` on the locally installed
-Codex CLI isolated-home campaign pin (0.155.1). That campaign pin is not a
-change to the pinned Codex App Server 0.153.4 compatibility baseline. Do not
+Codex CLI isolated-home campaign pin (0.155.1). That historical campaign did
+not change the then-current Codex App Server 0.153.4 baseline. Do not
 build a multi-transport framework or upgrade the product pin implicitly.
 The probe MUST establish registration, source Run/Turn/call binding, retry
 identity, cancellation, bounded wait, disconnect, and restart behavior.
@@ -3322,7 +3353,7 @@ mutation. The wired operations reach the existing Primary Orchestration Service.
 
 The separately authorized focused acceptance target is
 `DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE=1 make test-live-primary-bridge`. It requires
-the exact Codex 0.153.4 production pin (selectable with
+the exact Codex 0.157.1 minimum runtime (selectable with
 `DOLGORAE_CODEX_BIN`), creates isolated HOME, Codex-home, Dolgorae, and Git
 roots, copies only the account credential into the temporary Codex home, and
 proves the real call through a durable `brokered_tool_results` receipt. It does
@@ -4024,6 +4055,8 @@ modified, and prove that the workflow issued no source mutation. Source
 identity MUST remain stable through capture publication. A later source change
 by another actor MUST NOT stale the immutable target or its result. Reviewer
 verdict MUST be reported separately from engagement, Run, and settlement state.
+The result records the observed Reviewer Codex version and compatibility verdict;
+an eligible but not fully qualified version reports `unverified`.
 Cancellation requires explicit user authority, and active or unknown work MUST
 NOT be replayed or cleaned up as if terminal.
 
@@ -4170,7 +4203,7 @@ Dolgorae uses the stable app-server API surface plus the narrowly pinned
 `item/tool/requestUserInput` capability. A connection that requires tested
 user-input may advertise `experimentalApi`; all other experimental requests
 remain unsupported and are not implied by that carrier. Dolgorae validates the
-0.153.4 required schema subset and TASK-005 profile handshake/lifecycle surface
+0.157.0 required schema subset and TASK-005 profile handshake/lifecycle surface
 as tested. Production-runtime eligibility and native/dedicated-lane behavioral
 observations remain separately gated and cannot inherit 0.147.0 evidence. For an
 unlisted newer version, Dolgorae may run the version as `unverified` only when:
@@ -4193,6 +4226,8 @@ The explicit `make test-live-codex-compatibility` gate requires
 `DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY=1` and a prepared `CODEX_HOME`. It uses
 `gpt-5.6-luna` / `low` to check history, early response identity, completed and
 interrupted native forks, interruption, and unanswered-approval restart/resume.
+It accepts a Codex version at or above the 0.157.1 minimum and reports the
+observed version; a pass applies only to that tested candidate.
 The access-safety and Specialist Review live gates independently cover sandbox,
 approval requests, selected model/effort, result delivery, cancellation, and
 settlement. These gates are outside the default offline repository gate.
@@ -4259,7 +4294,7 @@ native item families, child identity, parent relationship, ordered
 active-to-terminal lifecycle, persisted history, restart behavior, and cleanup.
 A binary-level query without a profile reports lifecycle and quiescence as
 `unverified`. The exact 0.147.0 enabled probe passed that complete gate; the
-0.153.4 profile reports those native lifecycle and quiescence capabilities as
+0.157.1 profile reports those native lifecycle and quiescence capabilities as
 `unverified` until the same gate is rerun. Disable
 enforcement is `unavailable` because the diagnostic disabled case still created
 a child. A later pin must rerun the same gate; a policy change still
@@ -4588,9 +4623,9 @@ Assurance levels are ordered `best_effort_personal_alpha`,
 `verified_thread_scoped_control`, and `strong_process_containment`. Run creation
 MUST compare `required_assurance` with the profile snapshot before allocating a
 Run ID, lane, thread, or server. Failure is `ASSURANCE_LEVEL_UNAVAILABLE`.
-Requested and achieved levels are durable Run state. Codex 0.153.4 is capped at
+Requested and achieved levels are durable Run state. Codex 0.157.1 is capped at
 `best_effort_personal_alpha` conservatively; it does not inherit the following
-historical 0.147.0 campaign as 0.153.4 evidence. In that historical campaign,
+historical 0.147.0 campaign as 0.157.1 evidence. In that historical campaign,
 same-home, policy transition, multi-workspace, closed-generation history, and
 Dolgorae process-census cleanup tests passed, while background-terminal
 completeness failed. The prior native-subagent semantic

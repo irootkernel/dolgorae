@@ -23,8 +23,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const MANIFEST: &str = include_str!("../docs/protocol/codex-0.153.4-required-subset.json");
-const SUPPORTED_CODEX_VERSION: &str = "0.153.4";
+const MANIFEST: &str = include_str!("../docs/protocol/codex-0.157.0-required-subset.json");
+const MINIMUM_CODEX_VERSION: &str = "0.157.1";
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 /// One diagnostic record is bounded so a single observation can never
@@ -1902,21 +1902,34 @@ fn state_reset(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
     let snapshot = snapshot_for(&context, &name, &profile)?;
     let confirm_server_key = parsed.required("--confirm-server-key")?;
-    if confirm_server_key != snapshot.server_key {
-        return Err(profile_mismatch(
+    require_canonical_server_key("--confirm-server-key", &confirm_server_key)?;
+    let previous_contract = confirm_server_key != snapshot.server_key;
+    let home = home_root(&context, &snapshot.canonical_codex_home)?;
+    if previous_contract {
+        let previous_state = read_state(
+            &context
+                .dolgorae_home_root
+                .join("profiles")
+                .join(&confirm_server_key)
+                .join("state.json"),
+        )?;
+        require_previous_reset_target(
             &name,
-            "confirm_server_key",
-            json!(snapshot.server_key),
-            json!(confirm_server_key),
-        ));
+            &snapshot,
+            &confirm_server_key,
+            &home.join("active.json"),
+            previous_state.as_ref(),
+        )?;
     }
-    let paths = LifecyclePaths::open(&context, &snapshot)?;
+    let mut reset_snapshot = snapshot.clone();
+    reset_snapshot.server_key = confirm_server_key.clone();
+    let paths = LifecyclePaths::open(&context, &reset_snapshot)?;
     if let Some(state) = read_state(&paths.state_path)?
         && !recorded_processes_absent(&state)?
     {
         return Err(profile_server_busy(
             &name,
-            &snapshot.server_key,
+            &confirm_server_key,
             "profile process group or log drainer absence is not proven",
         ));
     }
@@ -1928,48 +1941,118 @@ fn state_reset(parsed: &Parsed) -> Result<Value, MachineError> {
     operator.handoff(&home_lock);
     let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
-        &snapshot.profile_name,
-        &snapshot.server_key,
+        &name,
+        &confirm_server_key,
     )?;
-    if let Some(state) = read_state(&paths.state_path)? {
+    let state = read_state(&paths.state_path)?;
+    if previous_contract {
+        require_previous_reset_target(
+            &name,
+            &snapshot,
+            &confirm_server_key,
+            &paths.active_path,
+            state.as_ref(),
+        )?;
+    }
+    if let Some(state) = state {
         if !recorded_processes_absent(&state)? {
             return Err(profile_server_busy(
                 &name,
-                &snapshot.server_key,
+                &confirm_server_key,
                 "profile process group or log drainer absence is not proven",
             ));
         }
         let socket = Path::new(&state.socket_path);
-        if fs::symlink_metadata(socket).is_ok() {
-            verify_recorded_socket(&name, &state)?;
-            fs::remove_file(socket).map_err(io_error)?;
-            sync_parent(socket)?;
-        }
+        remove_recorded_socket(&name, &state)?;
+        sync_parent(socket)?;
         membership_store
             .release_after_server_absence_under_lifecycle_locks(&paths.root, state.server_epoch)?;
         fs::remove_file(&paths.state_path).map_err(io_error)?;
         sync_parent(&paths.state_path)?;
     } else {
         membership_store.require_quiescent_under_server_lock(&name, "state_reset")?;
-        if socket_path(&snapshot.server_key)?.exists() {
-            return Err(profile_server_busy(
-                &name,
-                &snapshot.server_key,
-                "a Profile Server socket has no recorded state for an absence proof",
-            ));
+        match fs::symlink_metadata(socket_path(&snapshot.server_key)?) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+            Ok(_) => {
+                return Err(profile_server_busy(
+                    &name,
+                    &snapshot.server_key,
+                    "a Profile Server socket has no recorded state for an absence proof",
+                ));
+            }
         }
     }
-    clear_home_active(
-        &snapshot.profile_name,
-        &paths.active_path,
-        &snapshot.server_key,
-    )?;
+    clear_home_active(&name, &paths.active_path, &confirm_server_key)?;
     let migration_repaired =
-        repair_stale_migration_fence(&context, &paths.home_root, &snapshot.server_key)?;
+        repair_stale_migration_fence(&context, &paths.home_root, &confirm_server_key)?;
     drop(server_lock);
     drop(home_lock);
     operator.release();
     Ok(json!({"profile": name, "reset": true, "migration_repaired": migration_repaired}))
+}
+
+fn require_previous_reset_target(
+    profile_name: &str,
+    current: &ProfileSnapshot,
+    confirmed_key: &str,
+    active_path: &Path,
+    previous: Option<&ServerState>,
+) -> Result<(), MachineError> {
+    let active = read_home_active(active_path)?;
+    let previous = previous.ok_or_else(|| {
+        if active
+            .as_ref()
+            .is_some_and(|active| active.server_key == confirmed_key)
+        {
+            profile_mismatch(
+                profile_name,
+                "previous_state_recorded",
+                json!(true),
+                json!(false),
+            )
+        } else {
+            profile_mismatch(
+                profile_name,
+                "confirm_server_key",
+                json!(current.server_key),
+                json!(confirmed_key),
+            )
+        }
+    })?;
+    if previous.server_key != confirmed_key
+        || previous.snapshot.profile_name != profile_name
+        || previous.snapshot.canonical_codex_home != current.canonical_codex_home
+    {
+        return Err(profile_mismatch(
+            profile_name,
+            "previous_state_binding",
+            json!(true),
+            json!(false),
+        ));
+    }
+    let active = active.ok_or_else(|| {
+        profile_mismatch(
+            profile_name,
+            "previous_home_active",
+            json!(true),
+            json!(false),
+        )
+    })?;
+    if active.schema_version != 1
+        || active.canonical_codex_home != current.canonical_codex_home
+        || active.server_key != confirmed_key
+        || active.server_epoch != previous.server_epoch
+        || active.pid != Some(previous.pid)
+        || !matches!(active.lifecycle.as_str(), "ready" | "stopping")
+    {
+        return Err(profile_launch_conflict(
+            profile_name,
+            &active.server_key,
+            "previous active contract does not match its recorded server lifetime",
+        ));
+    }
+    Ok(())
 }
 
 fn diagnostics(parsed: &Parsed, events: bool) -> Result<Value, MachineError> {
@@ -2630,19 +2713,15 @@ fn version_verdict(
     version: &str,
 ) -> Result<CompatibilityVerdict, MachineError> {
     let actual = parse_version(profile_name, version)?;
-    let supported = parse_version(profile_name, SUPPORTED_CODEX_VERSION)?;
-    if actual < supported {
+    let minimum = parse_version(profile_name, MINIMUM_CODEX_VERSION)?;
+    if actual < minimum {
         return Err(compatibility(
             profile_name,
             "codex_version",
-            "Codex version is older than the supported baseline",
+            "Codex version is older than the supported minimum",
         ));
     }
-    Ok(if actual == supported {
-        CompatibilityVerdict::Tested
-    } else {
-        CompatibilityVerdict::Unverified
-    })
+    Ok(CompatibilityVerdict::Unverified)
 }
 
 fn parse_version(profile_name: &str, value: &str) -> Result<(u64, u64, u64), MachineError> {
@@ -2934,7 +3013,7 @@ fn verify_exact_bundle_digests(
     version: &str,
     stable_digest: &str,
 ) -> Result<(), MachineError> {
-    if version != SUPPORTED_CODEX_VERSION {
+    if version != MINIMUM_CODEX_VERSION {
         return Ok(());
     }
     let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
@@ -3455,7 +3534,7 @@ fn attach_running(
 /// socket: same device, same inode, still a socket.
 fn verify_recorded_socket(profile_name: &str, state: &ServerState) -> Result<(), MachineError> {
     let path = Path::new(&state.socket_path);
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
+    let metadata = crate::codex_socket::inspect(path, state.uid).map_err(|error| {
         profile_mismatch(
             profile_name,
             "socket_identity",
@@ -3490,6 +3569,27 @@ fn verify_recorded_socket(profile_name: &str, state: &ServerState) -> Result<(),
     Ok(())
 }
 
+fn remove_recorded_socket(profile_name: &str, state: &ServerState) -> Result<(), MachineError> {
+    crate::codex_socket::remove_recorded(
+        Path::new(&state.socket_path),
+        state.uid,
+        state.socket_device,
+        state.socket_inode,
+    )
+    .map_err(|error| {
+        profile_mismatch(
+            profile_name,
+            "socket_identity",
+            json!({
+                "socket_path": state.socket_path,
+                "socket_device": state.socket_device,
+                "socket_inode": state.socket_inode,
+            }),
+            json!({"error": error.to_string()}),
+        )
+    })
+}
+
 /// Removes a socket file left behind by a lifetime this profile can prove is
 /// over, and refuses to touch one it cannot.
 fn clear_stale_socket(
@@ -3497,58 +3597,31 @@ fn clear_stale_socket(
     socket: &Path,
     state_path: &Path,
 ) -> Result<(), MachineError> {
-    let Ok(metadata) = fs::symlink_metadata(socket) else {
-        return Ok(());
-    };
-    if !metadata.file_type().is_socket() {
+    let Some(stale) = read_state(state_path)? else {
+        if fs::symlink_metadata(socket)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(());
+        }
         return Err(profile_mismatch(
-            &snapshot.profile_name,
-            "socket_identity",
-            json!("socket"),
-            json!(format!("{:?}", metadata.file_type())),
-        ));
-    }
-    let stale = read_state(state_path)?.ok_or_else(|| {
-        profile_mismatch(
             &snapshot.profile_name,
             "socket_stale_record",
             json!(true),
             json!(false),
-        )
-    })?;
-    let stale_still_alive = process_identity_matches_on_boot(
-        stale.boot_session_uuid,
-        stale.pid,
-        stale.uid,
-        stale.pgid,
-        &stale.process_fingerprint,
-    );
+        ));
+    };
     if stale.server_key != snapshot.server_key
         || stale.socket_path != path_utf8(socket)?
-        || stale.socket_device != metadata.dev()
-        || stale.socket_inode != metadata.ino()
-        || stale_still_alive
+        || !recorded_processes_absent(&stale)?
     {
         return Err(profile_mismatch(
             &snapshot.profile_name,
             "socket_stale_identity",
-            json!({
-                "server_key": snapshot.server_key,
-                "socket_path": path_utf8(socket)?,
-                "socket_device": metadata.dev(),
-                "socket_inode": metadata.ino(),
-                "pid_alive": false,
-            }),
-            json!({
-                "server_key": stale.server_key,
-                "socket_path": stale.socket_path,
-                "socket_device": stale.socket_device,
-                "socket_inode": stale.socket_inode,
-                "pid_alive": stale_still_alive,
-            }),
+            json!({"server_key": snapshot.server_key, "socket_path": path_utf8(socket)?, "processes_absent": true}),
+            json!({"server_key": stale.server_key, "socket_path": stale.socket_path}),
         ));
     }
-    fs::remove_file(socket).map_err(io_error)
+    remove_recorded_socket(&snapshot.profile_name, &stale)
 }
 
 /// APPLY: spawn the drainer and the app-server, wait for the socket, and probe
@@ -3666,7 +3739,8 @@ fn apply_start(
         if verified.uid != DarwinSystem.current_uid() || verified.process_group_id != pid {
             return Err(transport("app-server process identity is invalid"));
         }
-        let metadata = fs::symlink_metadata(&reservation.socket).map_err(io_error)?;
+        let metadata = crate::codex_socket::inspect(&reservation.socket, verified.uid)
+            .map_err(io_error)?;
         if !metadata.file_type().is_socket() {
             return Err(transport("app-server did not bind a Unix socket"));
         }
@@ -3704,11 +3778,17 @@ fn apply_start(
             .is_some_and(|registration| registration.abort_spawn().is_ok())
         {
             let _ = DarwinSystem.reap_child_nonblocking(pid);
-            if let Ok(metadata) = fs::symlink_metadata(&reservation.socket)
+            if let Ok(metadata) =
+                crate::codex_socket::inspect(&reservation.socket, DarwinSystem.current_uid())
                 && metadata.file_type().is_socket()
                 && metadata.uid() == DarwinSystem.current_uid()
             {
-                let _ = fs::remove_file(&reservation.socket);
+                let _ = crate::codex_socket::remove_recorded(
+                    &reservation.socket,
+                    DarwinSystem.current_uid(),
+                    metadata.dev(),
+                    metadata.ino(),
+                );
             }
         }
         if let Some(registration) = drainer_registration.as_mut() {
@@ -3762,7 +3842,8 @@ fn commit_start(
             }),
         ));
     }
-    let metadata = fs::symlink_metadata(&reservation.socket).map_err(io_error)?;
+    let metadata = crate::codex_socket::inspect(&reservation.socket, applied.process_identity.uid)
+        .map_err(io_error)?;
     if !metadata.file_type().is_socket()
         || metadata.dev() != applied.socket_device
         || metadata.ino() != applied.socket_inode
@@ -4749,10 +4830,6 @@ fn commit_stop(
             ));
         }
     }
-    if fs::symlink_metadata(&reservation.state.socket_path).is_ok() {
-        verify_recorded_socket(&snapshot.profile_name, &reservation.state)?;
-        fs::remove_file(&reservation.state.socket_path).map_err(io_error)?;
-    }
     if !recorded_processes_absent(&reservation.state)? {
         return Err(profile_server_busy(
             &snapshot.profile_name,
@@ -4760,6 +4837,7 @@ fn commit_stop(
             "the Profile Server process group or log drainer is still present",
         ));
     }
+    remove_recorded_socket(&snapshot.profile_name, &reservation.state)?;
     crate::process_inventory::retire_pid(reservation.state.pid)
         .map_err(|error| transport(error.message))?;
     crate::process_inventory::retire_pid(reservation.state.drainer_pid)
@@ -4852,10 +4930,7 @@ fn settle_terminated_migration_stop(
                 json!(current.epoch_id),
             ));
         }
-        if fs::symlink_metadata(&reservation.state.socket_path).is_ok() {
-            verify_recorded_socket(&snapshot.profile_name, &reservation.state)?;
-            fs::remove_file(&reservation.state.socket_path).map_err(io_error)?;
-        }
+        remove_recorded_socket(&snapshot.profile_name, &reservation.state)?;
         fs::remove_file(&paths.state_path).map_err(io_error)?;
     }
     sync_parent(&paths.state_path)?;
@@ -4965,14 +5040,13 @@ fn cleanup_failed_start(socket: &Path, applied: &mut StartApplied) {
     let server_stopped = applied.server_registration.abort_spawn().is_ok();
     let _ = DarwinSystem.reap_child_nonblocking(applied.pid);
     let _ = applied.drainer_registration.abort_spawn();
-    if server_stopped
-        && let Ok(metadata) = fs::symlink_metadata(socket)
-        && metadata.file_type().is_socket()
-        && metadata.uid() == DarwinSystem.current_uid()
-        && metadata.dev() == applied.socket_device
-        && metadata.ino() == applied.socket_inode
-    {
-        let _ = fs::remove_file(socket);
+    if server_stopped {
+        let _ = crate::codex_socket::remove_recorded(
+            socket,
+            DarwinSystem.current_uid(),
+            applied.socket_device,
+            applied.socket_inode,
+        );
     }
 }
 
@@ -5139,7 +5213,7 @@ fn repair_stale_migration_fence(
 fn wait_for_socket(path: &Path, pid: u32) -> Result<(), MachineError> {
     let deadline = Instant::now() + SOCKET_BIND_BUDGET;
     while Instant::now() < deadline {
-        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+        if crate::codex_socket::inspect(path, DarwinSystem.current_uid()).is_ok() {
             return Ok(());
         }
         if !process_exists(pid) {
@@ -5832,7 +5906,7 @@ fn compatibility(profile: &str, check: &str, observed: impl Into<String>) -> Mac
         json!({
             "profile": profile,
             "check": check,
-            "expected": format!("conformance with pinned Codex {SUPPORTED_CODEX_VERSION}"),
+            "expected": format!("conformance with Codex >= {MINIMUM_CODEX_VERSION}"),
             "actual": observed.into(),
         }),
     )
@@ -6298,17 +6372,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_policy_is_exact_tested_and_newer_unverified() {
+    fn version_policy_rejects_pre_minimum_and_keeps_newer_unverified() {
         assert_eq!(
-            version_verdict("default", "0.153.4").unwrap(),
-            CompatibilityVerdict::Tested
+            version_verdict("default", "0.157.0").unwrap_err().code,
+            "COMPATIBILITY_REJECTED"
         );
         assert_eq!(
-            version_verdict("default", "0.154.0").unwrap(),
+            version_verdict("default", "0.157.1").unwrap(),
             CompatibilityVerdict::Unverified
         );
         assert_eq!(
-            version_verdict("default", "0.153.3").unwrap_err().code,
+            version_verdict("default", "0.158.0").unwrap(),
+            CompatibilityVerdict::Unverified
+        );
+        assert_eq!(
+            version_verdict("default", "0.153.4").unwrap_err().code,
             "COMPATIBILITY_REJECTED"
         );
     }
@@ -6351,25 +6429,42 @@ mod tests {
         let config = root.join("config.toml");
         fs::write(
             &config,
-            "approval_policy = \"never\"\nmodel = \"gpt-5\"\napprovals_reviewer = \"user\"\n[desktop]\nfollowUpQueueMode = \"queue\"\n",
+            "approval_policy = \"never\"\nmodel = \"gpt-5\"\napprovals_reviewer = \"user\"\nopenai_base_url = \"https://example.test/v1\"\nexperimental_realtime_webrtc_call_base_url = \"https://voice.example.test/v1\"\n[desktop]\nfollowUpQueueMode = \"queue\"\n",
         )
         .unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let snapshot = configuration_snapshot("default", &profile, &profile.codex_home).unwrap();
         assert_eq!(snapshot.launch["model"], "gpt-5");
         assert_eq!(snapshot.launch["approvals_reviewer"], "user");
+        assert_eq!(
+            snapshot.launch["openai_base_url"],
+            "https://example.test/v1"
+        );
+        assert_eq!(
+            snapshot.launch["experimental_realtime_webrtc_call_base_url"],
+            "https://voice.example.test/v1"
+        );
         assert_eq!(snapshot.observation["approval_policy"], "never");
         assert_eq!(
             snapshot.observation["desktop"]["followUpQueueMode"],
             "queue"
         );
-        fs::write(&config, "unknown_future_field = true\n").unwrap();
-        assert_eq!(
-            configuration_snapshot("default", &profile, &profile.codex_home)
-                .unwrap_err()
-                .code,
-            "COMPATIBILITY_REJECTED"
-        );
+        for unsupported in [
+            "unknown_future_field = true\n",
+            "allow_symlinked_codex_home = true\n",
+            "cloud = { skills = { enabled = true } }\n",
+            "mcp_enterprise_managed_auth = { enabled = true }\n",
+            "model_post_turn_compact_threshold_percent = 80\n",
+            "thread_unload_delay_secs = 60\n",
+        ] {
+            fs::write(&config, unsupported).unwrap();
+            assert_eq!(
+                configuration_snapshot("default", &profile, &profile.codex_home)
+                    .unwrap_err()
+                    .code,
+                "COMPATIBILITY_REJECTED"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7111,6 +7206,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn previous_contract_reset_requires_the_recorded_profile_and_active_epoch() {
+        let root = std::env::temp_dir().join(format!("dolgorae-previous-reset-{}", Uuid::now_v7()));
+        secure_dir(&root).unwrap();
+        let active_path = root.join("active.json");
+        let previous = stopped_state();
+        let mut current = stopped_snapshot();
+        current.server_key = "b".repeat(64);
+        let active = HomeActive {
+            schema_version: 1,
+            canonical_codex_home: current.canonical_codex_home.clone(),
+            server_key: previous.server_key.clone(),
+            server_epoch: previous.server_epoch,
+            lifecycle: "ready".to_owned(),
+            pid: Some(previous.pid),
+            transition_token: None,
+        };
+        write_home_active(&active_path, &active).unwrap();
+        assert!(
+            require_previous_reset_target(
+                "default",
+                &current,
+                &previous.server_key,
+                &active_path,
+                Some(&previous),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            require_previous_reset_target(
+                "default",
+                &current,
+                &previous.server_key,
+                &active_path,
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "PROFILE_MISMATCH"
+        );
+        let mut other_profile = previous.clone();
+        other_profile.snapshot.profile_name = "other".to_owned();
+        assert_eq!(
+            require_previous_reset_target(
+                "default",
+                &current,
+                &previous.server_key,
+                &active_path,
+                Some(&other_profile),
+            )
+            .unwrap_err()
+            .code,
+            "PROFILE_MISMATCH"
+        );
+        let mut changed_active = active;
+        changed_active.server_epoch += 1;
+        write_home_active(&active_path, &changed_active).unwrap();
+        assert_eq!(
+            require_previous_reset_target(
+                "default",
+                &current,
+                &previous.server_key,
+                &active_path,
+                Some(&previous),
+            )
+            .unwrap_err()
+            .code,
+            "PROFILE_LAUNCH_CONFLICT"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn stopped_snapshot() -> ProfileSnapshot {
         ProfileSnapshot {
             schema_version: 1,
@@ -7130,7 +7297,7 @@ mod tests {
                 inode: 0,
                 sha256: "0".repeat(64),
             },
-            codex_version: SUPPORTED_CODEX_VERSION.to_owned(),
+            codex_version: MINIMUM_CODEX_VERSION.to_owned(),
             schema_bundle_sha256: "0".repeat(64),
             compatibility_manifest_sha256: "0".repeat(64),
             launch_contract_sha256: "0".repeat(64),

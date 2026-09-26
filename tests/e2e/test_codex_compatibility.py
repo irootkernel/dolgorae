@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 
-from run_codex_compatibility import AppServer, terminal
+from run_codex_compatibility import AppServer, checked_codex, terminal
 
 
 class BufferedServer(AppServer):
@@ -33,6 +35,23 @@ def completed(thread: str, turn: str, status: str) -> dict:
 
 
 def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="dolgorae-codex-version-") as directory:
+        codex = Path(directory) / "codex"
+        for version, accepted in (
+            ("codex-cli 0.156.9", False),
+            ("codex-cli 0.157.0", False),
+            ("codex-cli 0.157.1", True),
+            ("codex-cli 0.158.0", True),
+            ("codex-cli 0.157.1-dev", False),
+        ):
+            codex.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n", encoding="utf-8")
+            codex.chmod(0o700)
+            try:
+                checked, observed = checked_codex(codex)
+            except ValueError:
+                assert not accepted, version
+            else:
+                assert accepted and checked == codex.resolve() and observed == version, version
     for method, status in (("turn/start", "completed"), ("turn/interrupt", "interrupted")):
         for notification_first in (True, False):
             for actual in (status, "failed"):

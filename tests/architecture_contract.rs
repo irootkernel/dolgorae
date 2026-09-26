@@ -34,6 +34,7 @@ fn direct_crate_dependencies(source: &str) -> BTreeSet<String> {
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
         ("app_server", &["jcs"][..]),
+        ("codex_socket", &[][..]),
         ("audit", &["event", "jcs"][..]),
         (
             "interaction",
@@ -143,7 +144,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         ("machine", &["paths", "workspace"][..]),
-        ("process_inventory", &["darwin", "jcs", "machine"][..]),
+        (
+            "process_inventory",
+            &["codex_socket", "darwin", "jcs", "machine"][..],
+        ),
         (
             "mutation_admission",
             &["audit", "domain", "fault", "jcs", "ledger", "machine"][..],
@@ -180,6 +184,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "profile",
             &[
                 "app_server",
+                "codex_socket",
                 "controller",
                 "darwin",
                 "global_profile",
@@ -364,6 +369,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "app_server",
                 "audit",
+                "codex_socket",
                 "conformance",
                 "controller",
                 "darwin",

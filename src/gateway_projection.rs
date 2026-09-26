@@ -1119,7 +1119,7 @@ mod profile_tests {
                     inode: 2,
                     sha256: "a".repeat(64),
                 },
-                codex_version: "0.153.4".to_owned(),
+                codex_version: "0.157.0".to_owned(),
                 schema_bundle_sha256: "b".repeat(64),
                 compatibility_manifest_sha256: "c".repeat(64),
                 launch_contract_sha256: "d".repeat(64),

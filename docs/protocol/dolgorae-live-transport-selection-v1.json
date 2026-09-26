@@ -26,5 +26,5 @@
     "private_mcp_dedicated_without_meta": "isolation_does_not_prove_turn_or_call",
     "collaboration_stub": "inert_binding_only"
   },
-  "reason": "Local Codex CLI 0.155.1 is the TASK-025 isolated-home campaign pin, not a change to the 0.153.4 product baseline. Live schema required fields prove native item/tool/call identity. Isolated-home MCP forwarding proved host _meta, retry, conflict, injection, concurrency, canaries, wait expiry, in-flight disconnect, restart replay, and shared-identity ambiguity. Cancellation and stale-generation remain fixture_proved without a model turn."
+  "reason": "Local Codex CLI 0.155.1 was the TASK-025 isolated-home campaign pin and did not change the then-current 0.153.4 product baseline. Live schema required fields proved native item/tool/call identity for that campaign. Isolated-home MCP forwarding proved host _meta, retry, conflict, injection, concurrency, canaries, wait expiry, in-flight disconnect, restart replay, and shared-identity ambiguity. Cancellation and stale-generation remained fixture_proved without a model turn."
 }

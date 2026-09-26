@@ -45,7 +45,7 @@
       ]
     },
     "fingerprint": {"type": ["string", "null"]},
-    "socket_device": {"type": ["integer", "null"], "minimum": 1},
-    "socket_inode": {"type": ["integer", "null"], "minimum": 1}
+    "socket_device": {"type": ["integer", "null"], "minimum": 1, "description": "Verified physical socket device when the registered Codex socket uses a rendezvous."},
+    "socket_inode": {"type": ["integer", "null"], "minimum": 1, "description": "Verified physical socket inode when the registered Codex socket uses a rendezvous."}
   }
 }

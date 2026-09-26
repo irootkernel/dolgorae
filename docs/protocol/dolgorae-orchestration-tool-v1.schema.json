@@ -907,7 +907,7 @@
       }
     }
   },
-  "x-privateTransport": "Native run-bound item/tool/call selected by the TASK-025 isolated-home campaign on locally installed Codex CLI 0.155.1; that campaign pin is not a change to the Codex App Server 0.153.4 product compatibility baseline. Thread, turn, and call identity are protocol fields, not model arguments. Not part of dolgorae.public.v1.",
+  "x-privateTransport": "Native run-bound item/tool/call selected by the TASK-025 isolated-home campaign on Codex CLI 0.155.1; that historical campaign did not change the then-current Codex App Server 0.153.4 compatibility baseline. Thread, turn, and call identity are protocol fields, not model arguments. Not part of dolgorae.public.v1.",
   "x-transportBoundFields": [
     "orchestrated_session_id",
     "source_primary_run_id",

@@ -1840,7 +1840,7 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
     the walk, its cursor chaining, and the pinned Codex 0.149 item shapes
     provable without a real app-server answering a real account.
 
-    The installed Codex 0.153.4 is used for exactly one thing: generating the
+    The installed Codex 0.157.1 is used for exactly one thing: generating the
     app-server JSON Schema bundle, whose digest the profile contract pins and
     whose contents are not checked into the tree. That is setup — it answers no
     protocol call, and the case fails closed when it is absent.

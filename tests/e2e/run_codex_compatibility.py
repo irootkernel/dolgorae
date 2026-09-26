@@ -6,20 +6,40 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import tempfile
 import time
 import uuid
 from pathlib import Path
 
 from run_access_safety_acceptance import (
-    AppServer, PINNED_VERSION, TARGET_EFFORT, TARGET_MODEL, exact_codex, target_model,
+    AppServer, TARGET_EFFORT, TARGET_MODEL, target_model,
 )
 
 OPT_IN = "DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY"
+MINIMUM_VERSION = "codex-cli 0.157.1"
 OBSERVATIONS = json.loads(
-    (Path(__file__).resolve().parents[2] / "docs/protocol/codex-0.153.4-required-subset.json")
+    (Path(__file__).resolve().parents[2] / "docs/protocol/codex-0.157.0-required-subset.json")
     .read_text(encoding="utf-8")
 )["behavioral_observations"]
+
+
+def checked_codex(candidate: Path) -> tuple[Path, str]:
+    codex = candidate.expanduser().resolve(strict=True)
+    observed = subprocess.run(
+        [str(codex), "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    pattern = re.compile(r"codex-cli (\d+)\.(\d+)\.(\d+)")
+    actual = pattern.fullmatch(observed)
+    minimum = pattern.fullmatch(MINIMUM_VERSION)
+    if (
+        actual is None
+        or minimum is None
+        or tuple(map(int, actual.groups())) < tuple(map(int, minimum.groups()))
+    ):
+        raise ValueError(f"expected Codex >= {MINIMUM_VERSION!r}, observed {observed!r}")
+    return codex, observed
 
 
 def initialize(server: AppServer) -> None:
@@ -78,7 +98,7 @@ def terminal(server: AppServer, thread_id: str, turn_id: str, expected: str) -> 
     raise TimeoutError("turn completion was not observed")
 
 
-def run(codex: Path) -> dict:
+def run(codex: Path, observed_version: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="dolgorae-live-history-") as temporary:
         workspace = Path(temporary)
         server = AppServer(codex, workspace)
@@ -167,7 +187,7 @@ def run(codex: Path) -> dict:
             if any(m.get("method") == "item/commandExecution/requestApproval" for m in server.messages):
                 raise RuntimeError("restart replayed the unanswered approval")
             return {
-                "schema_version": 1, "codex_version": PINNED_VERSION,
+                "schema_version": 1, "codex_version": observed_version,
                 "model": TARGET_MODEL, "effort": TARGET_EFFORT,
                 "absent_thread_error": -32600, "early_response_id": True,
                 "completed_history": True, "completed_fork": True,
@@ -188,7 +208,8 @@ def main() -> int:
         raise SystemExit(f"{OPT_IN}=1 is required")
     if not os.environ.get("CODEX_HOME"):
         raise SystemExit("an explicit prepared CODEX_HOME is required")
-    print(json.dumps(run(exact_codex(args.codex)), sort_keys=True))
+    codex, observed_version = checked_codex(args.codex)
+    print(json.dumps(run(codex, observed_version), sort_keys=True))
     return 0
 
 

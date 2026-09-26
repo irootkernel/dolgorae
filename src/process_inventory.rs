@@ -283,6 +283,7 @@ impl Registration {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
+        remove_registered_socket(&self.record)?;
         fs::remove_file(&self.path).map_err(|error| unsafe_state(error.to_string()))?;
         Ok(())
     }
@@ -317,7 +318,7 @@ impl Registration {
             .record
             .socket
             .as_ref()
-            .map(fs::symlink_metadata)
+            .map(|socket| crate::codex_socket::inspect(socket, process.uid))
             .transpose()
             .map_err(|error| unsafe_state(error.to_string()))?;
         if socket_metadata.as_ref().is_some_and(|metadata| {
@@ -693,20 +694,21 @@ fn cleanup_one(path: &Path, record: &Record) -> Result<(), MachineError> {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    if let (Some(socket), Some(device), Some(inode)) =
-        (&record.socket, record.socket_device, record.socket_inode)
-        && let Ok(metadata) = fs::symlink_metadata(socket)
-    {
-        if !metadata.file_type().is_socket()
-            || metadata.uid() != process.uid
-            || metadata.dev() != device
-            || metadata.ino() != inode
-        {
-            return Err(unsafe_state("socket identity changed"));
-        }
-        fs::remove_file(socket).map_err(|error| unsafe_state(error.to_string()))?;
-    }
+    remove_registered_socket(record)?;
     fs::remove_file(path).map_err(|error| unsafe_state(error.to_string()))?;
+    Ok(())
+}
+
+fn remove_registered_socket(record: &Record) -> Result<(), MachineError> {
+    if let (Some(socket), Some(device), Some(inode), Some(process)) = (
+        &record.socket,
+        record.socket_device,
+        record.socket_inode,
+        record.process,
+    ) {
+        crate::codex_socket::remove_recorded(socket, process.uid, device, inode)
+            .map_err(|error| unsafe_state(error.to_string()))?;
+    }
     Ok(())
 }
 
@@ -765,6 +767,7 @@ pub fn execute(cleanup: bool, arguments: &[OsString]) -> Result<Value, MachineEr
             cleanup_one(path, record)?;
             cleaned.push(candidate.id);
         } else if candidate.verdict == Verdict::Absent && classify(record) == Verdict::Absent {
+            remove_registered_socket(record)?;
             fs::remove_file(path).map_err(|error| unsafe_state(error.to_string()))?;
             retired.push(candidate.id);
         } else {
@@ -803,6 +806,7 @@ pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
             if members.iter().any(|member| *member != pid) {
                 return Err(unsafe_state("cannot retire live process registration"));
             }
+            remove_registered_socket(&record)?;
             fs::remove_file(path).map_err(|error| unsafe_state(error.to_string()))?;
         }
     }
@@ -947,6 +951,52 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         retire_pid(pid).unwrap();
+        child.0.take().unwrap().wait().unwrap();
+        fs::remove_dir(owner).unwrap();
+    }
+
+    #[test]
+    fn retiring_an_absent_server_removes_its_recorded_socket() {
+        let owner = fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("dolgorae-socket-retire-{}", Uuid::now_v7()));
+        fs::create_dir(&owner).unwrap();
+        let socket = owner.join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut registration = Registration::prepare(
+            "profile_server",
+            &owner,
+            Path::new("/bin/sleep"),
+            "sleep 30".to_owned(),
+            Some(&socket),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut child = ChildCleanup(Some(DarwinSystem.spawn_detached(&mut command).unwrap()));
+        let pid = child.0.as_ref().unwrap().id();
+        registration.activate(pid).unwrap();
+        drop(listener);
+        DarwinSystem
+            .signal_process_group(pid, libc::SIGTERM)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while DarwinSystem
+            .bsd_process_identity(pid)
+            .is_ok_and(|process| !process.zombie)
+        {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        retire_pid(pid).unwrap();
+        assert!(!socket.exists());
+        assert!(!registration.path.exists());
         child.0.take().unwrap().wait().unwrap();
         fs::remove_dir(owner).unwrap();
     }

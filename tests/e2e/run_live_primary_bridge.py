@@ -22,7 +22,7 @@ from typing import Any
 
 
 OPT_IN = "DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE"
-PINNED_CODEX_VERSION = "codex-cli 0.153.4"
+PINNED_CODEX_VERSION = "codex-cli 0.157.1"
 PROFILE = "task047-live"
 POLICY = "task047-live"
 
@@ -104,7 +104,7 @@ def policy_input() -> dict[str, Any]:
                 "max_active_instances": 1,
                 "reuse_policy": "never",
                 "allowed_access": ["read_only"],
-                "activation_policy": "on_mail",
+                "activation_policy": "keep_resident",
                 "primary_may_request": True,
                 "collaboration_source": False,
                 "collaboration_target": False,

@@ -41,7 +41,7 @@ def main() -> int:
         )
         (workspace / "change.txt").write_text("nontrivial working-tree change\n", encoding="utf-8")
         codex = root / "codex"
-        executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.153.4\\n'\n")
+        executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.157.1\\n'\n")
         fake = root / "dolgorae"
         success = {
             "schema_version": 2,

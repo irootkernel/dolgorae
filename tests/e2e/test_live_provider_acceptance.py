@@ -35,7 +35,7 @@ def main() -> int:
     ast.parse(source)
     required = (
         'OPT_IN = "DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE"',
-        'PINNED_CODEX_VERSION = "codex-cli 0.155.1"',
+        'PINNED_CODEX_VERSION = "codex-cli 0.157.1"',
         'CAMPAIGN_TEMP_ROOT = Path("/private/tmp")',
         "GATEWAY_READY_TIMEOUT_SECONDS = 15",
         "GATEWAY_READY_MAXIMUM_BYTES = 65_536",
@@ -55,6 +55,30 @@ def main() -> int:
     missing = [fragment for fragment in required if fragment not in source]
     if missing:
         raise AssertionError(f"live provider driver lost required barriers: {missing!r}")
+    original_campaign_root = driver.CAMPAIGN_TEMP_ROOT
+    with tempfile.TemporaryDirectory() as temporary:
+        driver.CAMPAIGN_TEMP_ROOT = Path(temporary)
+        try:
+            try:
+                with driver.campaign_root("failure") as preserved:
+                    credentials = (
+                        preserved / "codex-home/auth.json",
+                        preserved / "operator.json",
+                        preserved / "home/.dolgorae/controller-carriers/task026/failure/controller.json",
+                    )
+                    for credential in credentials:
+                        credential.parent.mkdir(parents=True, exist_ok=True)
+                        credential.write_text("fixture credential", encoding="utf-8")
+                    raise RuntimeError("fixture failure")
+            except RuntimeError as error:
+                if str(error) != "fixture failure":
+                    raise
+            else:
+                raise AssertionError("failed campaign unexpectedly succeeded")
+            if not preserved.is_dir() or any(path.exists() for path in credentials):
+                raise AssertionError("failed campaign did not preserve only noncredential evidence")
+        finally:
+            driver.CAMPAIGN_TEMP_ROOT = original_campaign_root
     content = "provider-result"
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     page = {
@@ -151,7 +175,7 @@ def main() -> int:
         raise AssertionError("generated client timeout was not redacted")
     original_run = driver.run
     driver.run = lambda *args, **kwargs: subprocess.CompletedProcess(
-        args=args, returncode=7
+        args=args, returncode=7, stdout='{"error":{"code":"PROFILE_SERVER_BUSY"}}'
     )
     try:
         try:
@@ -164,7 +188,7 @@ def main() -> int:
                 env={},
             )
         except RuntimeError as error:
-            if str(error) != "Profile Server cleanup failed":
+            if str(error) != "Profile Server cleanup failed (PROFILE_SERVER_BUSY)":
                 raise
         else:
             raise AssertionError("failed Profile Server cleanup was accepted")

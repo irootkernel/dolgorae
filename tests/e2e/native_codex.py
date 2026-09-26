@@ -11,7 +11,7 @@ The image answers three launches, and nothing else:
 * `--version` reports the pinned Codex release, so profile compatibility is a
   fixed fact rather than whatever the machine happens to have.
 * `app-server generate-json-schema` delegates to the locally installed exact
-  Codex 0.153.4.  There is no checked schema bundle in-tree — only its digest —
+  Codex 0.157.1.  There is no checked schema bundle in-tree — only its digest —
   so the bundle has to come from the real release; this is setup, and it never
   answers a protocol call.
 * `app-server --listen unix://…` runs the shared fake app-server on that
@@ -33,7 +33,7 @@ import subprocess
 import sys
 import sysconfig
 
-PINNED_CODEX_VERSION = "0.153.4"
+PINNED_CODEX_VERSION = "0.157.1"
 PINNED_CODEX_ENV = "DOLGORAE_TEST_CODEX_BIN"
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
@@ -113,7 +113,8 @@ def installed_codex() -> pathlib.Path:
     """The locally installed exact Codex, or a failure that names why not.
 
     Schema generation is the one thing this fixture cannot fake: the profile
-    contract pins the *digest* of the 0.153.4 bundle, not its contents, so a
+    contract pins the *digest* of the 0.157.0 schema baseline, identical to the
+    0.157.1 bundle, not its contents, so a
     bundle from any other release — or a hand-written one — is refused. The
     prerequisite is therefore hard, and absent it the case fails rather than
     quietly proving something weaker.

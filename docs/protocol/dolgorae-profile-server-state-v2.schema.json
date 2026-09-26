@@ -97,10 +97,12 @@
     },
     "socket_device": {
       "type": "integer",
+      "description": "Device of the verified physical Codex Unix socket, following only its deterministic protected rendezvous.",
       "minimum": 0
     },
     "socket_inode": {
       "type": "integer",
+      "description": "Inode of the verified physical Codex Unix socket.",
       "minimum": 0
     },
     "membership_revision": {

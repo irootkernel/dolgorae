@@ -20,7 +20,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
-PINNED_CODEX_VERSION = "codex-cli 0.153.4"
+PINNED_CODEX_VERSION = "codex-cli 0.157.1"
 LIVE_OPT_IN = "DOLGORAE_RUN_LIVE_SPECIALIST_REVIEW"
 MAX_OUTPUT_BYTES = 1_048_576
 ROOT = Path(__file__).resolve().parents[2]

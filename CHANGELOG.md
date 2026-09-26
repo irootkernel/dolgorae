@@ -80,7 +80,8 @@ development commits.
   results, bind terminal facade result construction to the accepted request
   digest, classify corrupt accepted v3 tasks as integrity failures, and
   preserve structured-output validation errors across exact retry.
-- Set the Codex compatibility baseline to 0.153.4 while retaining completed-only forks.
+- Require Codex 0.157.1 or newer, bind endpoint overrides to launch state,
+  verify symlinked sockets, guard Profile reset, and retain completed-only forks.
 - Honor explicit Profile model and reasoning-effort settings for one-shot
   Specialist Review, rejecting unavailable selections without substitution.
 

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-PINNED_VERSION = "codex-cli 0.153.4"
+PINNED_VERSION = "codex-cli 0.157.1"
 TARGET_MODEL = "gpt-5.6-luna"
 TARGET_EFFORT = "low"
 OPT_IN = "DOLGORAE_RUN_LIVE_ACCESS_SAFETY"

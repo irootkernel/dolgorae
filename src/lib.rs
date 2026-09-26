@@ -4,6 +4,7 @@ pub mod app_server;
 pub mod artifact;
 pub mod audit;
 pub mod cli;
+pub(crate) mod codex_socket;
 pub mod conformance;
 pub mod controller;
 pub mod domain;

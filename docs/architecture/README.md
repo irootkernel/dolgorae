@@ -483,8 +483,8 @@ checked model-facing payload contract is
 It implements Specialist request and operation wait, safe listing, bounded task
 assignment, task wait, result collection, private `read_specialist_result`, and
 graceful release. TASK-025 selected native Codex `item/tool/call` on the
-isolated-home campaign pin (locally installed Codex CLI 0.155.1). That campaign
-pin is not a change to the Codex App Server 0.153.4 product compatibility
+isolated-home campaign pin (locally installed Codex CLI 0.155.1). That historical
+campaign did not change the then-current Codex App Server 0.153.4 compatibility
 baseline, and the isolated probe is not the production adapter. Deterministic
 fixtures prove native worker Turn/call binding and show that shared MCP identity
 is ambiguous without a host-controlled carrier; Dedicated Lane isolation does
@@ -1060,6 +1060,18 @@ process, and user waits occur in APPLY with no file lock held.
 The manager launches the validated executable followed by `app-server --listen
 unix://<dedicated-socket>`. It never uses the official daemon or default Codex
 control socket. Shared-read-only workers connect to the shared Profile Server.
+Codex 0.157.1 binds the requested Unix listener in its protected per-user
+socket directory and publishes a deterministic symlink at the requested path.
+Dolgorae verifies that rendezvous and records the physical socket identity;
+the directory name does not make this direct App Server a managed daemon.
+Once the recorded server scope is absent, one shared socket cleanup routine
+checks the deterministic link and recorded physical inode before removing
+either entry. It can clear a dangling exact link or a matching physical socket
+whose link was already removed; a changed entry blocks cleanup.
+A Dedicated Lane Server preflights both socket paths before spawn. Its
+unpublished-start cleanup uses the same deterministic path and owner checks
+only after the spawned group is proven absent; it never treats an unverified
+entry as a socket owned by that start.
 A dedicated Run first owns only a durable logical lane; its first input lazily
 starts that lane's physical App Server with the identical immutable launch
 contract and canonical `CODEX_HOME`, a distinct short socket, UUIDv7 lane ID,
@@ -1243,7 +1255,7 @@ the parent Run's thread tree, policy, and authority, and never become aggregate
 members, Independent Specialist Runs, peer Workers, or Dedicated Lane Servers.
 The selected Codex Profile must explicitly acknowledge
 `native_subagents: enabled`; v1 does not claim disable enforcement for the
-Codex 0.153.4 production pin. The original negative probe remains historical
+Codex 0.157.1 minimum runtime. The original negative probe remains historical
 0.147.0 evidence.
 
 Instruction composition is split into a generation-immutable role and behavior
@@ -1399,6 +1411,10 @@ two-lifetime absence proof; `prepared` and `applying` are never terminalized by
 that recovery while their migration may still be in flight. A concurrent
 duplicate rollover attaches when re-proof finds the requested generation
 already ready.
+An operator reset may target a previous active server key after the current
+Profile contract changes. It binds that key to the same canonical home and
+Profile through the prior state, rechecks the active record under the home and
+server locks, and never clears an unrecorded lifetime.
 Membership mutations take home then server locks. New registration checks the
 exact ready home record and migration fence under those locks, closing the
 quiescence-to-stop admission race; release remains valid for shutdown cleanup.
@@ -2397,10 +2413,10 @@ handshake, paginated models, codexHome, and absent-thread errors. The opt-in
 compatibility, access-safety, and review acceptance gates separately check
 history, sandbox, early-ID, server requests, and review lifecycle behavior.
 
-The tested 0.153.4 manifest is `tested`. A newer compatible version is
-`unverified` and that verdict is written to every run generation. Older or
-otherwise unlisted versions are rejected unless a future SOT revision adds
-them to the tested set.
+The checked 0.157.0 manifest remains the schema comparison baseline. Runtime
+versions below 0.157.1 are rejected; 0.157.1 and newer compatible versions are
+`unverified` until the complete behavioral campaign qualifies one as `tested`.
+The verdict is written to every run generation.
 
 Runtime code tolerates additive data but never infers lifecycle progress from
 uncorrelated or unknown messages. This preserves compatibility without claiming

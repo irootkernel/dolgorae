@@ -19,7 +19,7 @@
     "model": "gpt-5",
     "effort": "high",
     "executable": {
-      "version": "0.153.4",
+      "version": "0.157.1",
       "file_identity": {
         "resolved_path": "/usr/local/bin/codex",
         "device": 1,
@@ -28,7 +28,7 @@
       },
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "capability_result": {
-        "compatibility_verdict": "tested",
+        "compatibility_verdict": "unverified",
         "schema_bundle_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "launch_contract_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
       }

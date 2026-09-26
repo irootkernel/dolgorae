@@ -4174,9 +4174,8 @@ fn start_dedicated_server(
         .parent()
         .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
     prepare_socket_root(DarwinSystem.current_uid(), socket_parent)?;
-    if fs::symlink_metadata(&config.socket_path).is_ok() {
-        return Err(WorkerProtocolError::SocketIdentityMismatch);
-    }
+    crate::codex_socket::require_vacant(&config.socket_path, DarwinSystem.current_uid())
+        .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -4216,22 +4215,35 @@ fn start_dedicated_server(
         .checked_add(Duration::from_secs(10))
         .unwrap_or_else(Instant::now);
     loop {
-        if let Ok(socket_metadata) = fs::symlink_metadata(&config.socket_path) {
+        if fs::symlink_metadata(&config.socket_path).is_ok() {
+            let socket_metadata =
+                match crate::codex_socket::inspect(&config.socket_path, DarwinSystem.current_uid())
+                {
+                    Ok(metadata) => metadata,
+                    Err(_) => {
+                        terminate_unpublished_child(
+                            &mut child,
+                            &mut registration,
+                            &config.socket_path,
+                        );
+                        return Err(WorkerProtocolError::SocketIdentityMismatch);
+                    }
+                };
             if !socket_metadata.file_type().is_socket()
                 || socket_metadata.uid() != DarwinSystem.current_uid()
             {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::SocketIdentityMismatch);
             }
             if fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)).is_err()
             {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::Io);
             }
             let process = match DarwinSystem.bsd_process_identity(child.id()) {
                 Ok(process) => process,
                 Err(_) => {
-                    terminate_unpublished_child(&mut child, &mut registration);
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                     return Err(WorkerProtocolError::InvalidIdentity);
                 }
             };
@@ -4240,18 +4252,18 @@ fn start_dedicated_server(
                 || process.session_id != child.id()
                 || process.uid != DarwinSystem.current_uid()
             {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::InvalidIdentity);
             }
             let executable_path = match DarwinSystem.realpath(executable) {
                 Ok(path) => path,
                 Err(_) => {
-                    terminate_unpublished_child(&mut child, &mut registration);
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                     return Err(WorkerProtocolError::InvalidIdentity);
                 }
             };
             if registration.activate(child.id()).is_err() {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::InvalidIdentity);
             }
             return Ok(OwnedDedicatedServer {
@@ -4277,15 +4289,15 @@ fn start_dedicated_server(
         }
         match child.try_wait() {
             Ok(Some(_)) => {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::WorkerStartFailed);
             }
             Err(_) => {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::Io);
             }
             Ok(None) if Instant::now() >= deadline => {
-                terminate_unpublished_child(&mut child, &mut registration);
+                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                 return Err(WorkerProtocolError::WorkerStartFailed);
             }
             Ok(None) => {}
@@ -4305,10 +4317,14 @@ fn start_dedicated_server(
 fn terminate_unpublished_child(
     child: &mut Child,
     registration: &mut crate::process_inventory::Registration,
+    socket: &Path,
 ) {
-    let _ = registration.abort_spawn();
+    let group_absent = registration.abort_spawn().is_ok();
     let _ = child.kill();
     let _ = child.wait();
+    if group_absent {
+        let _ = crate::codex_socket::remove_unpublished(socket, DarwinSystem.current_uid());
+    }
 }
 
 fn stop_dedicated_server(
@@ -4377,14 +4393,13 @@ fn stop_dedicated_server(
             thread::sleep(Duration::from_millis(100));
         }
     }
-    if let Ok(metadata) = fs::symlink_metadata(&server.socket_path)
-        && metadata.file_type().is_socket()
-        && metadata.uid() == server.identity.uid
-        && metadata.dev() == server.socket_identity.device
-        && metadata.ino() == server.socket_identity.inode
-    {
-        fs::remove_file(&server.socket_path).map_err(|_| WorkerProtocolError::Io)?;
-    }
+    crate::codex_socket::remove_recorded(
+        &server.socket_path,
+        server.identity.uid,
+        server.socket_identity.device,
+        server.socket_identity.inode,
+    )
+    .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
     crate::process_inventory::retire_pid(server.identity.pid)
         .map_err(|_| WorkerProtocolError::Io)?;
     Ok(BackgroundAbsenceEvidence {
@@ -7936,6 +7951,65 @@ mod tests {
         if let Err(error) = checked {
             std::panic::resume_unwind(error);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn killed_unpublished_dedicated_server_releases_its_exact_socket() {
+        let uid = DarwinSystem.current_uid();
+        let owner = fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("dolgorae-unpublished-{}", Uuid::now_v7()));
+        fs::create_dir(&owner).unwrap();
+        let socket_parent = PathBuf::from(format!("/tmp/dolgorae-{uid}/c"));
+        prepare_socket_root(uid, &socket_parent).unwrap();
+        let socket = socket_parent.join(format!("{}.sock", Uuid::now_v7()));
+        crate::codex_socket::require_vacant(&socket, uid).unwrap();
+        let protected = fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("codex-daemon-{uid}"));
+        match fs::DirBuilder::new().mode(0o700).create(&protected) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("protected test directory: {error}"),
+        }
+        let canonical = fs::canonicalize(&socket_parent)
+            .unwrap()
+            .join(socket.file_name().unwrap());
+        let target = protected.join(format!(
+            "{:x}",
+            Sha256::digest(canonical.as_os_str().as_encoded_bytes())
+        ));
+        let mut registration = crate::process_inventory::Registration::prepare(
+            "dedicated_server",
+            &owner,
+            Path::new("/bin/sleep"),
+            format!("unix://{}", socket.display()),
+            Some(&socket),
+            Some("default"),
+            Some(Uuid::now_v7()),
+        )
+        .unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = DarwinSystem.spawn_detached(&mut command).unwrap();
+        registration.mark_spawned(child.id());
+        let listener = UnixListener::bind(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &socket).unwrap();
+        drop(listener);
+        DarwinSystem
+            .signal_process_group(child.id(), libc::SIGKILL)
+            .unwrap();
+        terminate_unpublished_child(&mut child, &mut registration, &socket);
+        assert!(fs::symlink_metadata(&socket).is_err());
+        assert!(fs::symlink_metadata(&target).is_err());
+        crate::codex_socket::require_vacant(&socket, uid).unwrap();
+        fs::remove_dir(owner).unwrap();
     }
 
     #[cfg(target_os = "macos")]
