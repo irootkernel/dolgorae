@@ -275,6 +275,86 @@ pub fn validate_reviewer_output_v3(
     value: Value,
     task: &SpecialistTaskRequest,
 ) -> Result<ReviewerOutputV3, MachineError> {
+    let text = serde_json::to_string(&value).expect("JSON value serializes");
+    validate_output_bytes(&text, value, task)
+}
+
+pub(crate) fn parse_reviewer_response_v3(
+    response: Option<&crate::turn::FinalResponse>,
+    task: &SpecialistTaskRequest,
+) -> Result<ReviewerOutputV3, MachineError> {
+    use crate::turn::FinalResponse;
+    match response {
+        Some(FinalResponse::Inline { text }) => parse_reviewer_output_v3(Some(text), task),
+        Some(
+            FinalResponse::Artifact {
+                byte_length,
+                sha256,
+                ..
+            }
+            | FinalResponse::Unavailable {
+                byte_length,
+                sha256,
+                ..
+            },
+        ) => Err(crate::review_output::oversized_response(
+            *byte_length,
+            sha256,
+        )),
+        None => parse_reviewer_output_v3(None, task),
+    }
+}
+
+pub(crate) fn parse_reviewer_output_v3(
+    text: Option<&str>,
+    task: &SpecialistTaskRequest,
+) -> Result<ReviewerOutputV3, MachineError> {
+    use crate::review_output::{MAX_OUTPUT_BYTES, invalid_output};
+    let text = text.ok_or_else(|| invalid_output(None, None, "output_unavailable", ""))?;
+    if text.len() > MAX_OUTPUT_BYTES {
+        return Err(invalid_output(Some(text), None, "output_too_large", ""));
+    }
+    crate::jcs::parse(text).map_err(|_| invalid_output(Some(text), None, "invalid_json", ""))?;
+    let value = serde_json::from_str(text)
+        .map_err(|_| invalid_output(Some(text), None, "invalid_json", ""))?;
+    validate_output_bytes(text, value, task)
+}
+
+fn validate_output_bytes(
+    text: &str,
+    value: Value,
+    task: &SpecialistTaskRequest,
+) -> Result<ReviewerOutputV3, MachineError> {
+    use crate::review_output::{MAX_OUTPUT_BYTES, check_structure, invalid_output};
+    task.validate_review()?;
+    if text.len() > MAX_OUTPUT_BYTES {
+        return Err(invalid_output(Some(text), None, "output_too_large", ""));
+    }
+    check_structure(&value)
+        .map_err(|(category, path)| invalid_output(Some(text), Some(&value), category, &path))?;
+    validate_reviewer_output_v3_semantics(value.clone(), task).map_err(|error| {
+        invalid_output(
+            Some(text),
+            Some(&value),
+            "semantic_constraint",
+            error
+                .details
+                .get("field_path")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        )
+    })
+}
+
+fn output_at(mut error: MachineError, path: String) -> MachineError {
+    error.details["field_path"] = Value::String(path);
+    error
+}
+
+fn validate_reviewer_output_v3_semantics(
+    value: Value,
+    task: &SpecialistTaskRequest,
+) -> Result<ReviewerOutputV3, MachineError> {
     task.validate_review()?;
     let mut output: ReviewerOutputV3 = serde_json::from_value(value)
         .map_err(|_| output_invalid("output does not match structured_review_v3"))?;
@@ -292,14 +372,23 @@ pub fn validate_reviewer_output_v3(
             "v3 report or collection count is out of bounds",
         ));
     }
-    for finding in &output.findings {
-        validate_finding(finding)?;
+    for (index, finding) in output.findings.iter().enumerate() {
+        validate_finding(finding)
+            .map_err(|error| output_at(error, format!("/findings/{index}")))?;
     }
     output.findings.sort_by_key(|finding| finding.severity);
-    for (criterion, assessment) in task.criteria.iter().zip(&output.criterion_assessments) {
+    for (index, (criterion, assessment)) in task
+        .criteria
+        .iter()
+        .zip(&output.criterion_assessments)
+        .enumerate()
+    {
         if assessment.criterion_id != criterion.id {
-            return Err(output_invalid(
-                "criterion assessments must cover the accepted criteria once in input order",
+            return Err(output_at(
+                output_invalid(
+                    "criterion assessments must cover the accepted criteria once in input order",
+                ),
+                format!("/criterion_assessments/{index}/criterion_id"),
             ));
         }
         if !matches!(
@@ -320,8 +409,13 @@ pub fn validate_reviewer_output_v3(
             .iter()
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>();
-        for evidence in &assessment.evidence {
-            validate_assessment_evidence(evidence, &source_context_ids)?;
+        for (evidence_index, evidence) in assessment.evidence.iter().enumerate() {
+            validate_assessment_evidence(evidence, &source_context_ids).map_err(|error| {
+                output_at(
+                    error,
+                    format!("/criterion_assessments/{index}/evidence/{evidence_index}"),
+                )
+            })?;
         }
     }
     for limit in &output.evidence_limits {
@@ -345,8 +439,9 @@ pub fn validate_reviewer_output_v3(
         || (!has_unmet && has_unverified && output.overall_assessment != "insufficient_evidence")
         || (!has_unmet && !has_unverified && output.overall_assessment != "requirements_met")
     {
-        return Err(output_invalid(
-            "overall assessment conflicts with criterion statuses",
+        return Err(output_at(
+            output_invalid("overall assessment conflicts with criterion statuses"),
+            "/overall_assessment".to_owned(),
         ));
     }
     Ok(output)

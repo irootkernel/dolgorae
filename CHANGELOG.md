@@ -85,6 +85,11 @@ development commits.
 - Honor explicit Profile model and reasoning-effort settings for one-shot
   Specialist Review, rejecting unavailable selections without substitution.
 
+### Fixed
+
+- Deliver the complete v3 review output contract to one-shot and reusable Specialists, preserve safe failure diagnostics
+  across restart and collection, and default omitted one-shot settings to `gpt-6-sol` and `high`.
+
 ## v0.1.2 - 2026-09-08
 
 ### Added

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -131,15 +132,19 @@ def add_profile(
     scenario_name: str,
     terminal_status: str | None = None,
     recursive_adapter: bool = False,
+    output_text: str | None = None,
+    configuration: str | None = None,
+    advertised_models: list[dict[str, object]] | None = None,
 ) -> pathlib.Path:
     codex_home = root / f"codex-home-{name}"
     bin_root = root / f"bin-{name}"
     codex_home.mkdir(mode=0o700)
     bin_root.mkdir(mode=0o700)
-    if recursive_adapter:
+    if recursive_adapter or configuration is not None:
         config = codex_home / "config.toml"
         config.write_text(
-            '[mcp_servers.dolgorae_review]\ncommand = "dolgorae"\n',
+            '[mcp_servers.dolgorae_review]\ncommand = "dolgorae"\n'
+            if recursive_adapter else configuration,
             encoding="utf-8",
         )
         config.chmod(0o600)
@@ -151,6 +156,10 @@ def add_profile(
             "thread-timeout", f"thread-{name}"
         )
     )
+    if advertised_models is not None:
+        for step in scenario_value["steps"]:
+            if step.get("method") == "model/list":
+                step["respond"]["result"]["data"] = advertised_models
     if terminal_status is not None:
         turn_start = next(
             step
@@ -160,6 +169,11 @@ def add_profile(
         terminal = turn_start["emit"][0]["params"]["turn"]
         terminal["status"] = terminal_status
         terminal["items"] = []
+    if output_text is not None:
+        turn_start = next(
+            step for step in scenario_value["steps"] if step.get("method") == "turn/start"
+        )
+        turn_start["emit"][0]["params"]["turn"]["items"][0]["text"] = output_text
     scenario.write_text(
         json.dumps(scenario_value, separators=(",", ":")), encoding="utf-8"
     )
@@ -264,6 +278,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         "#/$defs/error_details",
     )
     machine_schema = validator(protocol_root, "dolgorae-machine-v2.schema.json")
+    diagnostic_schema = validator(protocol_root, "dolgorae-review-output-diagnostic-v1.schema.json")
     schema_source = native_codex.installed_codex()
     with tempfile.TemporaryDirectory(prefix="dolgorae-task015-failures-") as temporary:
         root = pathlib.Path(temporary)
@@ -340,6 +355,49 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 raise AssertionError(
                     f"preflight Reviewer failure used the wrong envelope: {envelope!r}"
                 )
+
+            for name, model_names, efforts, configuration, check, expected, actual in (
+                ("missing-default-model", ["gpt-5.6"], ["medium", "high"], None,
+                 "model", ["gpt-5.6"], "gpt-6-sol"),
+                ("missing-default-effort", ["gpt-6-sol"], ["medium", "low"], None,
+                 "reasoning_effort", ["medium", "low"], "high"),
+                ("numeric-model", ["gpt-5.6", "gpt-6-sol"], ["medium", "high"], 'model = 123\n',
+                 "model", ["gpt-5.6", "gpt-6-sol"], 123),
+            ):
+                models = [{
+                    "model": model,
+                    "isDefault": index == 0,
+                    "supportedReasoningEfforts": [{"reasoningEffort": effort} for effort in efforts],
+                } for index, model in enumerate(model_names)]
+                add_profile(
+                    binary, home, workspace, root, schema_source, name,
+                    "scoped_specialist_review_v3.json",
+                    configuration=configuration, advertised_models=models,
+                )
+                code, envelope = machine_input(
+                    binary, home,
+                    [
+                        "specialist", "review", "--workspace", str(workspace),
+                        "--profile", name, "--request-stdin", "--format", "json",
+                    ],
+                    v3_review_request(),
+                )
+                assert_valid(envelope, machine_schema, f"{name} compatibility failure")
+                error = envelope.get("error", {})
+                if (
+                    code == 0
+                    or error.get("code") != "COMPATIBILITY_REJECTED"
+                    or error.get("details") != {
+                        "profile": name, "check": check, "expected": expected, "actual": actual,
+                    }
+                ):
+                    raise AssertionError(f"Reviewer silently substituted an unavailable setting: {envelope!r}")
+                messages = [
+                    json.loads(line) for line in (root / f"transcript-{name}.jsonl")
+                    .read_text(encoding="utf-8").splitlines()
+                ]
+                if any(message.get("method") in ("thread/start", "turn/start") for message in messages):
+                    raise AssertionError("incompatible Reviewer settings reached thread or Turn creation")
 
             add_profile(
                 binary,
@@ -421,6 +479,115 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 details_schema_v3,
                 machine_schema,
             )
+            failed_details = envelope["error"]["details"]
+            database = targets.parent / "orchestration" / "orchestration.sqlite3"
+            with sqlite3.connect(database) as connection:
+                failed_tasks = connection.execute(
+                    "SELECT specialist_run_id FROM tasks WHERE engagement_id=?",
+                    (failed_details["engagement_id"],),
+                ).fetchall()
+            if len(failed_tasks) != 1 or failed_details.get("execution") != {
+                "model": "gpt-6-sol", "effort": "high",
+                "codex_version": native_codex.PINNED_CODEX_VERSION,
+                "run_id": failed_tasks[0][0],
+            }:
+                raise AssertionError("post-preparation v3 failure lost its allocated Reviewer identity")
+
+            for name, category, path in (
+                ("missing-nullable", "missing_field", "/criterion_assessments/0/remaining_gap"),
+                ("unknown-key", "unknown_field", ""),
+                ("oversized", "output_too_large", ""),
+            ):
+                provider_output = {
+                    "summary": "private-provider-output-가",
+                    "findings": [],
+                    "criterion_assessments": [{
+                        "criterion_id": "C-failure-envelope",
+                        "status": "met",
+                        "explanation": "The captured candidate was checked.",
+                        "evidence": [{
+                            "basis": "candidate", "description": "The captured file.",
+                            "path": None, "line_start": None, "line_end": None, "context_id": None,
+                        }],
+                        "remaining_gap": None,
+                    }],
+                    "evidence_limits": [],
+                    "overall_assessment": "requirements_met",
+                }
+                if name == "missing-nullable":
+                    del provider_output["criterion_assessments"][0]["remaining_gap"]
+                elif name == "unknown-key":
+                    provider_output["private-unknown-key~/credential"] = "private-provider-value"
+                else:
+                    provider_output["summary"] = "private-provider-output" * 50_000
+                raw_output = json.dumps(provider_output, ensure_ascii=False, indent=2) + "\n"
+                profile = f"invalid-v3-{name}"
+                add_profile(
+                    binary, home, workspace, root, schema_source, profile,
+                    "scoped_specialist_review_v3.json", output_text=raw_output,
+                )
+                code, envelope = machine_input(
+                    binary, home,
+                    [
+                        "specialist", "review", "--workspace", str(workspace),
+                        "--profile", profile, "--request-stdin", "--format", "json",
+                    ],
+                    v3_review_request(),
+                )
+                if code == 0:
+                    raise AssertionError("invalid v3 output unexpectedly succeeded")
+                capture_ref = assert_failure(
+                    envelope, "REVIEW_OUTPUT_INVALID", "settled", details_schema_v3, machine_schema,
+                )
+                details = envelope["error"]["details"]
+                diagnostic = details["cause_details"]["diagnostic"]
+                assert_valid(diagnostic, diagnostic_schema, f"{name} persisted diagnostic")
+                if (
+                    diagnostic["category"] != category
+                    or diagnostic["path"] != path
+                    or diagnostic["output_bytes"] != len(raw_output.encode("utf-8"))
+                    or diagnostic["output_sha256"] != "sha256:" + hashlib.sha256(raw_output.encode("utf-8")).hexdigest()
+                    or diagnostic["unknown_top_level_key_count"] != int(name == "unknown-key")
+                    or diagnostic["known_top_level_keys"] != ([] if name == "oversized" else [
+                        "criterion_assessments", "evidence_limits", "findings", "overall_assessment", "summary"
+                    ])
+                ):
+                    raise AssertionError(f"invalid v3 output lost its safe structural identity: {diagnostic!r}")
+                wire = json.dumps(envelope, ensure_ascii=False)
+                if any(canary in wire for canary in ("private-provider", "private-unknown-key")):
+                    raise AssertionError("failure envelope exposed provider content or an arbitrary key")
+                execution = diagnostic["execution"]
+                expected_execution = {
+                    "model": "gpt-6-sol", "effort": "high",
+                    "codex_version": native_codex.PINNED_CODEX_VERSION,
+                    "run_id": execution["run_id"],
+                }
+                if details.get("execution") != expected_execution or execution != {
+                    **expected_execution,
+                    "task_id": execution["task_id"], "turn_id": "turn-1",
+                }:
+                    raise AssertionError("failure envelope and diagnostic lost the actual Reviewer or fixture Turn identity")
+                database = targets.parent / "orchestration" / "orchestration.sqlite3"
+                with sqlite3.connect(database) as connection:
+                    stored = connection.execute(
+                        "SELECT specialist_run_id,state,safe_error_code,diagnostic_json FROM tasks "
+                        "WHERE engagement_id=? AND task_id=?",
+                        (details["engagement_id"], execution["task_id"]),
+                    ).fetchone()
+                if (
+                    stored is None
+                    or stored[:3] != (execution["run_id"], "failed", "REVIEW_OUTPUT_INVALID")
+                    or json.loads(stored[3]) != diagnostic
+                ):
+                    raise AssertionError("terminal storage and first returned diagnostic disagree")
+                messages = [
+                    json.loads(line) for line in (root / f"transcript-{profile}.jsonl")
+                    .read_text(encoding="utf-8").splitlines()
+                ]
+                if sum(message.get("method") == "turn/start" for message in messages) != 1:
+                    raise AssertionError("invalid v3 output triggered an extra repair Turn")
+                if (targets / capture_ref / "source").exists():
+                    raise AssertionError("terminal invalid v3 output retained captured source bytes")
 
             slow_tree = workspace / "post-drift-window"
             slow_tree.mkdir()

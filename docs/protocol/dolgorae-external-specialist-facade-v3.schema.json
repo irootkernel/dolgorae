@@ -4,28 +4,63 @@
   "title": "Dolgorae external Specialist facade v3",
   "description": "Additive accepted-task carrier with inline readable context. Facade v1 and v2 remain accepted unchanged.",
   "oneOf": [
-    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v2" },
-    { "$ref": "#/$defs/assign_request" },
-    { "$ref": "#/$defs/error_result" }
+    {
+      "$ref": "https://dolgorae.local/schema/external-specialist-facade/v2"
+    },
+    {
+      "$ref": "#/$defs/assign_request"
+    },
+    {
+      "$ref": "#/$defs/error_result"
+    },
+    {
+      "$ref": "#/$defs/diagnostic_await_result"
+    },
+    {
+      "$ref": "#/$defs/diagnostic_collect_result"
+    }
   ],
   "$defs": {
     "error_result": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["operation", "code", "message", "retryable"],
+      "required": [
+        "operation",
+        "code",
+        "message",
+        "retryable"
+      ],
       "properties": {
-        "operation": { "const": "external_specialist_error" },
-        "code": { "const": "REVIEW_OUTPUT_INVALID" },
-        "message": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 4096 },
-        "retryable": { "const": false }
+        "operation": {
+          "const": "external_specialist_error"
+        },
+        "code": {
+          "const": "REVIEW_OUTPUT_INVALID"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        },
+        "retryable": {
+          "const": false
+        },
+        "diagnostic": {
+          "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+        }
       }
     },
     "isolated_change": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["format", "patch_base64"],
+      "required": [
+        "format",
+        "patch_base64"
+      ],
       "properties": {
-        "format": { "const": "git_diff_binary_base64" },
+        "format": {
+          "const": "git_diff_binary_base64"
+        },
         "patch_base64": {
           "type": "string",
           "contentEncoding": "base64",
@@ -35,30 +70,52 @@
     },
     "structured_task_result": {
       "oneOf": [
-        { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict" },
+        {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["final_response", "isolated_change"],
+          "required": [
+            "final_response",
+            "isolated_change"
+          ],
           "properties": {
-            "final_response": { "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict" },
-            "isolated_change": { "$ref": "#/$defs/isolated_change" }
+            "final_response": {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict"
+            },
+            "isolated_change": {
+              "$ref": "#/$defs/isolated_change"
+            }
           }
         }
       ]
     },
     "structured_task_summary": {
-      "allOf": [
-        { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/task_summary" },
+      "oneOf": [
         {
-          "properties": {
-            "result": {
-              "oneOf": [
-                { "type": "null" },
-                { "$ref": "#/$defs/structured_task_result" }
-              ]
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/task_summary"
+            },
+            {
+              "properties": {
+                "result": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/structured_task_result"
+                    }
+                  ]
+                }
+              }
             }
-          }
+          ]
+        },
+        {
+          "$ref": "#/$defs/diagnostic_task_summary"
         }
       ]
     },
@@ -66,19 +123,29 @@
       "description": "Strict homogeneous await result for pages containing only structured v3 tasks. Mixed-version pages validate each v3 task with structured_task_summary.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["operation", "tasks", "pending"],
+      "required": [
+        "operation",
+        "tasks",
+        "pending"
+      ],
       "properties": {
-        "operation": { "const": "await_external_specialist_tasks_result" },
+        "operation": {
+          "const": "await_external_specialist_tasks_result"
+        },
         "tasks": {
           "type": "array",
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/structured_task_summary" }
+          "items": {
+            "$ref": "#/$defs/structured_task_summary"
+          }
         },
         "pending": {
           "type": "array",
           "maxItems": 32,
           "uniqueItems": true,
-          "items": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" }
+          "items": {
+            "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+          }
         }
       }
     },
@@ -86,90 +153,195 @@
       "description": "Strict homogeneous collect result for pages containing only structured v3 tasks. Mixed-version pages validate each v3 task with structured_task_summary.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["operation", "tasks", "next_after_sequence"],
+      "required": [
+        "operation",
+        "tasks",
+        "next_after_sequence"
+      ],
       "properties": {
-        "operation": { "const": "collect_external_specialist_results_result" },
+        "operation": {
+          "const": "collect_external_specialist_results_result"
+        },
         "tasks": {
           "type": "array",
           "maxItems": 100,
           "items": {
-            "allOf": [
-              { "$ref": "#/$defs/structured_task_summary" },
+            "oneOf": [
               {
-                "properties": {
-                  "state": { "enum": ["completed_not_delivered", "delivered"] },
-                  "result": { "$ref": "#/$defs/structured_task_result" }
-                }
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/structured_task_summary"
+                  },
+                  {
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "completed_not_delivered",
+                          "delivered"
+                        ]
+                      },
+                      "result": {
+                        "$ref": "#/$defs/structured_task_result"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "$ref": "#/$defs/diagnostic_task_summary"
               }
             ]
           }
         },
-        "next_after_sequence": { "type": "integer", "minimum": 0 }
+        "next_after_sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "context": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "content", "provenance"],
+      "required": [
+        "id",
+        "content",
+        "provenance"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 },
-        "content": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 262144 },
-        "provenance": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 4096 }
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 262144
+        },
+        "provenance": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        }
       }
     },
     "criterion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "statement", "source_context_ids"],
+      "required": [
+        "id",
+        "statement",
+        "source_context_ids"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 },
-        "statement": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 8192 },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
         "source_context_ids": {
           "type": "array",
           "maxItems": 64,
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 }
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 128
+          }
         }
       }
     },
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["purpose", "brief", "contexts", "criteria", "expected_output"],
+      "required": [
+        "purpose",
+        "brief",
+        "contexts",
+        "criteria",
+        "expected_output"
+      ],
       "properties": {
-        "purpose": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 64 },
-        "brief": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 65536 },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 64
+        },
+        "brief": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
         "contexts": {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/context" }
+          "items": {
+            "$ref": "#/$defs/context"
+          }
         },
         "criteria": {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/criterion" }
+          "items": {
+            "$ref": "#/$defs/criterion"
+          }
         },
-        "expected_output": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 }
+        "expected_output": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        }
       },
       "allOf": [
         {
           "if": {
-            "properties": { "expected_output": { "const": "structured_review_v3" } },
-            "required": ["expected_output"]
+            "properties": {
+              "expected_output": {
+                "const": "structured_review_v3"
+              }
+            },
+            "required": [
+              "expected_output"
+            ]
           },
           "then": {
-            "properties": { "purpose": { "enum": ["change", "completion"] } }
+            "properties": {
+              "purpose": {
+                "enum": [
+                  "change",
+                  "completion"
+                ]
+              }
+            }
           }
         },
         {
           "if": {
             "properties": {
-              "expected_output": { "const": "structured_review_v3" },
-              "purpose": { "const": "completion" }
+              "expected_output": {
+                "const": "structured_review_v3"
+              },
+              "purpose": {
+                "const": "completion"
+              }
             },
-            "required": ["expected_output", "purpose"]
+            "required": [
+              "expected_output",
+              "purpose"
+            ]
           },
-          "then": { "properties": { "criteria": { "minItems": 1 } } }
+          "then": {
+            "properties": {
+              "criteria": {
+                "minItems": 1
+              }
+            }
+          }
         }
       ]
     },
@@ -177,20 +349,164 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "operation", "engagement_id", "specialist_run_id",
-        "external_request_ref", "task", "execution_intent", "deadline_seconds",
+        "schema",
+        "operation",
+        "engagement_id",
+        "specialist_run_id",
+        "external_request_ref",
+        "task",
+        "execution_intent",
+        "deadline_seconds",
         "idempotency_key"
       ],
       "properties": {
-        "schema": { "const": "dolgorae-external-specialist-facade/v3" },
-        "operation": { "const": "assign_external_specialist_task" },
-        "engagement_id": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" },
-        "specialist_run_id": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" },
-        "external_request_ref": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/opaque_ref" },
-        "task": { "$ref": "#/$defs/task" },
-        "execution_intent": { "enum": ["read_only", "isolated_write", "canonical_workspace_write"] },
-        "deadline_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
-        "idempotency_key": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 }
+        "schema": {
+          "const": "dolgorae-external-specialist-facade/v3"
+        },
+        "operation": {
+          "const": "assign_external_specialist_task"
+        },
+        "engagement_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "specialist_run_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "external_request_ref": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/opaque_ref"
+        },
+        "task": {
+          "$ref": "#/$defs/task"
+        },
+        "execution_intent": {
+          "enum": [
+            "read_only",
+            "isolated_write",
+            "canonical_workspace_write"
+          ]
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        }
+      }
+    },
+    "diagnostic_task_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "state",
+        "result_artifact_ref",
+        "result",
+        "safe_error_code",
+        "diagnostic"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "state": {
+          "const": "failed"
+        },
+        "result_artifact_ref": {
+          "type": "null"
+        },
+        "result": {
+          "type": "null"
+        },
+        "safe_error_code": {
+          "const": "REVIEW_OUTPUT_INVALID"
+        },
+        "diagnostic": {
+          "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+        }
+      }
+    },
+    "diagnostic_await_result": {
+      "description": "Await result containing at least one diagnostic-bearing v3 failure. Other summaries use the facade v1 task-summary shape; validate structured v3 tasks with structured_task_summary.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "pending"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_external_specialist_tasks_result"
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/task_summary"
+              },
+              {
+                "$ref": "#/$defs/diagnostic_task_summary"
+              }
+            ]
+          },
+          "contains": {
+            "required": [
+              "diagnostic"
+            ]
+          }
+        },
+        "pending": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+          }
+        }
+      }
+    },
+    "diagnostic_collect_result": {
+      "description": "Collect result containing at least one diagnostic-bearing v3 failure. Other summaries use the facade v1 task-summary shape; validate structured v3 tasks with structured_task_summary.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "next_after_sequence"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_external_specialist_results_result"
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/task_summary"
+              },
+              {
+                "$ref": "#/$defs/diagnostic_task_summary"
+              }
+            ]
+          },
+          "contains": {
+            "required": [
+              "diagnostic"
+            ]
+          }
+        },
+        "next_after_sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   },

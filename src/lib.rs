@@ -40,6 +40,7 @@ pub mod projection;
 pub mod protocol;
 pub mod providers;
 pub mod review;
+pub mod review_output;
 pub mod review_target;
 pub mod run;
 pub mod runtime;

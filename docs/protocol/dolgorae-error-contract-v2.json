@@ -601,6 +601,9 @@
                 },
                 "required_action": {
                   "const": "none"
+                },
+                "diagnostic": {
+                  "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
                 }
               }
             },

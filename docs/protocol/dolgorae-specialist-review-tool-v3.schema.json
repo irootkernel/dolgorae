@@ -159,7 +159,8 @@
         "engagement_state": { "type": ["string", "null"] },
         "settlement_state": { "enum": ["settled", "preserved"] },
         "required_action": { "enum": ["none", "inspect_authority"] },
-        "cause_details": {}
+        "cause_details": {},
+        "execution": { "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1#/properties/execution" }
       }
     }
   },

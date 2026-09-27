@@ -22,7 +22,8 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
-`EPIC-016` and `TASK-057` through `TASK-060` are `PLANNED` after EPIC-008
+`EPIC-016` is `ACTIVE` and `TASK-057` is `COMPLETE`; `TASK-058` through `TASK-060` remain
+`PLANNED` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -1955,7 +1956,7 @@ or actual Gul campaign is part of this completion.
 
 ## EPIC-016: Reliable Independent Specialist Review
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [independent review readiness dossier](../todo/TODO-independent-review-readiness.md)
 
@@ -1984,7 +1985,7 @@ do not replace those reviews.
 
 ### TASK-057: Make Structured Review Output Reliable
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 After EPIC-008, implement complete v3 output-contract delivery for both one-shot
 and reusable structured reviews. Resolve omitted one-shot Reviewer settings to

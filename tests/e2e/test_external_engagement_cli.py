@@ -703,21 +703,8 @@ def validate(binary: pathlib.Path) -> None:
             }, structured_task_ids={v3_task_id})
             if v3_waited["tasks"][0]["state"] != "completed_not_delivered":
                 raise AssertionError(f"v3 task did not become collectable: {v3_waited!r}")
-            v3_collected = call(binary, home, workspace, owner, {
-                "operation": "collect_external_specialist_results",
-                "engagement_id": engagement_id,
-                "after_sequence": cursor,
-                "limit": 8,
-            }, structured_task_ids={v3_task_id})
-            v3_result = v3_collected["tasks"][0]["result"]
-            if (
-                v3_result["overall_assessment"] != "requirements_met"
-                or v3_result["criterion_assessments"][0]["criterion_id"] != "C-reusable"
-            ):
-                raise AssertionError(
-                    f"v3 report was not preserved through collection: {v3_result!r}"
-                )
-            cursor = int(v3_collected["next_after_sequence"])
+            # Keep this completed task pending delivery so the next collection
+            # proves successful results and failed diagnostics share one page.
             with sqlite3.connect(database) as connection:
                 row = connection.execute(
                     "SELECT request_json FROM tasks WHERE task_id=?", (v3_task_id,)
@@ -745,6 +732,33 @@ def validate(binary: pathlib.Path) -> None:
                 for line in transcript_text.splitlines()
                 if line.strip()
             ]
+            turns = [
+                message for message in reusable_messages
+                if message.get("method") == "turn/start"
+            ]
+            prompt = "\n".join(
+                item["text"] for item in turns[-1]["params"]["input"]
+                if item.get("type") == "text"
+            )
+            contracts = [
+                json.loads(line) for line in prompt.splitlines()
+                if line.startswith('{"additionalProperties":')
+            ]
+            v1_schema = json.loads(
+                (PROTOCOL_ROOT / "dolgorae-specialist-review-tool-v1.schema.json").read_text()
+            )
+            v3_schema = json.loads(
+                (PROTOCOL_ROOT / "dolgorae-specialist-review-tool-v3.schema.json").read_text()
+            )
+            expected_contract = v3_schema["$defs"]["verdict"]
+            expected_contract["properties"]["findings"]["items"] = v1_schema["$defs"]["finding"]
+            assessment = v3_schema["$defs"]["criterion_assessment"]
+            assessment["properties"]["evidence"]["items"] = v3_schema["$defs"]["assessment_evidence"]
+            expected_contract["properties"]["criterion_assessments"]["items"] = assessment
+            if contracts != [expected_contract] or '"$ref"' in json.dumps(contracts):
+                raise AssertionError(
+                    "v3 reusable prompt must contain exactly one complete expanded output contract"
+                )
             thread_starts = [
                 message
                 for message in reusable_messages
@@ -785,7 +799,7 @@ def validate(binary: pathlib.Path) -> None:
                 owner,
                 invalid_v3,
             )
-            call(
+            first_invalid_error = call(
                 binary,
                 home,
                 workspace,
@@ -809,6 +823,60 @@ def validate(binary: pathlib.Path) -> None:
                 raise AssertionError(
                     f"invalid v3 output reached durable result storage: {invalid_state!r}"
                 )
+            diagnostic = first_invalid_error["details"]["diagnostic"]
+            if diagnostic["category"] != "semantic_constraint":
+                raise AssertionError(f"wrong invalid-output category: {diagnostic!r}")
+            if diagnostic["execution"] != {
+                "model": hire_request["agent_configuration"]["model"],
+                "effort": hire_request["agent_configuration"]["default_effort"],
+                "codex_version": native_codex.PINNED_CODEX_VERSION,
+                "run_id": run_id,
+                "task_id": invalid_assigned["task_id"],
+                "turn_id": "turn-invalid-v3",
+            }:
+                raise AssertionError("diagnostic lost the hired configuration or original task and Turn identity")
+            # Every call is a fresh CLI process; discard the initial response
+            # and retrieve the original failure without dispatching another Turn.
+            recovered_invalid = call(binary, home, workspace, owner, {
+                "operation": "await_external_specialist_tasks",
+                "engagement_id": engagement_id,
+                "task_ids": [invalid_assigned["task_id"]],
+                "return_when": "all",
+                "transport_wait_seconds": 1,
+            }, v3_contract=True, structured_task_ids={str(invalid_assigned["task_id"])})
+            if recovered_invalid["tasks"][0]["diagnostic"] != diagnostic:
+                raise AssertionError("restart changed the stored diagnostic")
+            mixed_collect_request = {
+                "operation": "collect_external_specialist_results",
+                "engagement_id": engagement_id,
+                "after_sequence": cursor,
+                "limit": 100,
+            }
+            mixed_task_ids = {v3_task_id, str(invalid_assigned["task_id"])}
+            mixed_page = call(binary, home, workspace, owner, mixed_collect_request,
+                              v3_contract=True, structured_task_ids=mixed_task_ids)
+            mixed_tasks = {task["task_id"]: task for task in mixed_page["tasks"]}
+            if len(mixed_page["tasks"]) != 2 or mixed_tasks.keys() != mixed_task_ids:
+                raise AssertionError("mixed collection lost a success or diagnostic task")
+            if mixed_tasks[invalid_assigned["task_id"]] != recovered_invalid["tasks"][0]:
+                raise AssertionError("collect changed the terminal failure projection")
+            success = mixed_tasks[v3_task_id]
+            v3_result = success["result"]
+            if (
+                success["state"] != "delivered"
+                or success["safe_error_code"] is not None
+                or success["result_artifact_ref"] is None
+                or v3_result["overall_assessment"] != "requirements_met"
+                or v3_result["criterion_assessments"][0]["criterion_id"] != "C-reusable"
+            ):
+                raise AssertionError(f"mixed collection changed the successful v3 result: {success!r}")
+            if int(mixed_page["next_after_sequence"]) != cursor + 2:
+                raise AssertionError("mixed collection did not allocate one receipt per terminal task")
+            replayed_page = call(binary, home, workspace, owner, mixed_collect_request,
+                                 v3_contract=True, structured_task_ids=mixed_task_ids)
+            if replayed_page != mixed_page:
+                raise AssertionError("mixed receipt replay changed results, diagnostics, or cursor after restart")
+            cursor = int(mixed_page["next_after_sequence"])
 
             snapshot = call(binary, home, workspace, owner, {
                 "operation": "get_external_engagement",

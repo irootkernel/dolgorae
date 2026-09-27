@@ -1,0 +1,18 @@
+{
+  "code": "REVIEW_OUTPUT_INVALID",
+  "message": "Reviewer output does not match the checked v3 contract",
+  "retryable": false,
+  "details": {
+    "reason": "missing_field",
+    "required_action": "none",
+    "diagnostic": {
+      "schema": "dolgorae-review-output-diagnostic/v1",
+      "category": "missing_field",
+      "path": "/summary",
+      "output_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "output_bytes": 2,
+      "known_top_level_keys": [],
+      "unknown_top_level_key_count": 0
+    }
+  }
+}

@@ -31,6 +31,16 @@ fn direct_crate_dependencies(source: &str) -> BTreeSet<String> {
 }
 
 #[test]
+fn review_output_production_dependencies_exclude_its_callers() {
+    let source = fs::read_to_string(repository_root().join("src/review_output.rs")).unwrap();
+    let (production, _) = source.split_once("#[cfg(test)]\nmod tests {").unwrap();
+    assert_eq!(
+        direct_crate_dependencies(production),
+        BTreeSet::from(["jcs".to_owned(), "machine".to_owned()])
+    );
+}
+
+#[test]
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
         ("app_server", &["jcs"][..]),
@@ -81,6 +91,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "jcs",
                 "machine",
+                "review_output",
                 "run",
                 "specialist",
                 "task_request",
@@ -97,6 +108,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "engagement",
                 "jcs",
                 "machine",
+                "review_output",
                 "paths",
                 "run",
                 "semantic",
@@ -211,6 +223,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "engagement",
                 "machine",
+                "review_output",
                 "profile",
                 "review_target",
                 "run",
@@ -294,13 +307,18 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "jcs",
                 "machine",
+                "review_output",
                 "run",
                 "task_request",
                 "turn",
                 "workspace",
             ][..],
         ),
-        ("task_request", &["machine"][..]),
+        ("task_request", &["machine", "review_output"][..]),
+        (
+            "review_output",
+            &["jcs", "machine", "specialist", "task_request"][..],
+        ),
         (
             "specialist_policy",
             &[

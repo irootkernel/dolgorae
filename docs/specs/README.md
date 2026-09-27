@@ -358,9 +358,11 @@ Dolgorae depends on user-prepared Codex Profiles. The compatibility validation
 target is `gpt-5.6-luna` with reasoning effort `low`. One-shot Specialist
 Review selects the Profile configuration's explicit `model` and
 `model_reasoning_effort`, validates both against `model/list`, and rejects an
-unavailable selection without substitution. If either setting is absent,
-its existing server-default model or first-advertised-effort rule applies.
-The planned Reviewer-specific defaults are defined under
+unavailable selection without substitution. An absent model resolves to
+`gpt-6-sol`; an absent reasoning effort resolves to `high`. An unavailable
+default is rejected without substitution. Model rejection identifies the
+requested model and the advertised alternatives. The Reviewer-specific rules
+are defined under
 [independent review readiness](#independent-review-readiness-planned);
 ordinary Run defaults keep their existing meaning.
 
@@ -4027,6 +4029,35 @@ persisted diagnostic contract, terminal-commit consistency, and legacy-reader
 compatibility. Historical records without diagnostics MUST remain readable
 without inventing missing details. TASK-058 exposes the stored one-shot failure
 through its public lookup contract.
+
+The checked diagnostic is `dolgorae-review-output-diagnostic/v1`. It contains
+`category`, a JSON Pointer `path`, `output_sha256`, `output_bytes`, a sorted
+allowlisted `known_top_level_keys` array and `unknown_top_level_key_count`.
+Categories are `missing_field`, `unknown_field`, `wrong_type`, `invalid_enum`,
+`semantic_constraint`, `invalid_json`, `output_too_large`, and `output_unavailable`.
+Paths contain only checked contract property names and numeric array indices;
+an unknown field reports its containing object, never the provider's key.
+When neither inline output nor trusted terminal digest metadata is available,
+the digest and byte length are null. A terminal artifact or unavailable-response
+record for an oversized answer supplies its recorded byte length and digest
+without loading the artifact. The digest covers the original UTF-8 output bytes.
+The optional `execution` object contains only known resolved model, effort,
+Codex version, Run, task, and Turn identity. Metadata outside its checked length
+bound or containing control characters is omitted, never truncated into a
+different identity. No provider error text is copied.
+Post-preparation v3 scoped errors also carry `execution` with the resolved
+model, effort, and Codex version and the Reviewer Run when allocated. This
+does not invent an execution identity for a failure before preparation.
+
+New v3 invalid-output errors carry this object as `diagnostic` beside the fixed
+safe reason and required action. Authorized v3 await and collect summaries
+carry the same stored object. Collection assigns a stable delivery sequence to
+a diagnostic-bearing failure, preserves its `failed` state and null result and
+artifact, and returns the same diagnostic on cursor replay. Old failures with
+no diagnostic keep their existing projection and collection behavior.
+Orchestration schema v4 adds nullable diagnostic storage and nullable-artifact
+failure delivery receipts transactionally; migration preserves existing receipt
+sequences, artifacts, accepted requests, and operation responses.
 
 One-shot review MUST provide a stable lookup reference that the caller retains
 before the first server, capture, or Reviewer effect. A reference available

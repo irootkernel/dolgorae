@@ -361,6 +361,22 @@ project the same stored facts. TASK-057 owns the persisted contract and legacy
 record handling; raw provider output stays outside diagnostic storage and
 projection.
 
+The production `review_output` module depends on `jcs` and `machine`. Its tests
+also reference `specialist` and `task_request`; the existing full-source
+dependency scan includes those test-only edges. The module expands the checked
+v3 verdict schema and its finding dependency for prompt construction and
+structural validation. Semantic validation binds the accepted criteria and
+evidence. Diagnostics contain contract-owned paths and categories, original-output
+digests, and allowlisted key metadata. The runtime attaches known execution
+identity before the engagement terminal transaction. The one-shot coordinator
+reads the Machine response projection and the reusable facade reads the typed
+Turn response. Both retain oversized responses' terminal byte length and digest
+without artifact reads.
+Orchestration schema v4 stores the diagnostic in the task and terminal operation
+response atomically. Failure delivery receipts have no artifact and retain the
+failed task state. Existing successful receipts and legacy records keep their
+meaning; absent historical diagnostics remain absent.
+
 Temporary-server cleanup belongs to the Profile lifecycle service. The review
 coordinator records durable launch intent and cleanup responsibility at the
 server-creation boundary, before model/effort and Reviewer validation can fail.
@@ -452,12 +468,13 @@ The Coordinator keeps source-workspace authority and Codex Profile ownership
 on the engagement while overriding only the managed Reviewer's launch working
 directory with the immutable capture root. It verifies the pinned executable
 identity immediately before that source-bearing launch. Engagement storage
-schema v3 retains the v2 removal of incorrect global result-content uniqueness
+schema v4 retains the v2 removal of incorrect global result-content uniqueness
 and normalizes members, tasks, scoped operations, artifacts, and delivery
 receipts for reusable engagements. The v2-to-v3 migration maps uncertain
 executing or accepted work to `interrupted_unknown` and preserves a ready
-result as `completed_not_delivered`; both migration steps rebuild their tables
-transactionally without losing rows.
+result as `completed_not_delivered`. The v3-to-v4 migration adds task diagnostics
+and rebuilds delivery receipts with nullable artifact references. These
+migrations preserve existing rows transactionally.
 
 ### Role Source and Policy Resolver
 

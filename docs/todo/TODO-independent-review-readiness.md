@@ -9,7 +9,7 @@ ownership by the [architecture](../architecture/README.md#one-shot-specialist-re
 and the adoption rationale by
 [ADR-040](../architecture-decision-records/README.md#adr-040-qualify-structured-independent-review-through-a-corrective-epic).
 
-## Current source boundary
+## Source boundary at adoption
 
 Inspection at commit `2885a33` established the following gaps. These are source
 findings; they do not establish the outcome of a new live review.
@@ -32,6 +32,25 @@ subset. Older campaign versions are historical evidence, not acceptance inputs
 for this Epic. Existing completed Epic and Task records remain intact.
 
 ## TASK-057 verification detail
+
+The TASK-057 implementation uses one expanded checked verdict schema in both
+production prompts and the structural validator. It adds
+`dolgorae-review-output-diagnostic/v1` and orchestration SQLite schema v4;
+TASK-058 must project the stored one-shot diagnostic without rebuilding it.
+Failure receipts in the reusable facade keep the task failed and carry no
+artifact. TASK-059 must include the diagnostic schema in its installed resource
+closure. TASK-060 still owns the live defect-detection campaign: the checked
+selected protocol has no native structured-output carrier, so this change uses
+the complete schema in the existing prompt transport.
+
+The deterministic attack budget covers deletion of every required output field,
+including nullable members at each nesting level; malformed, duplicate-key,
+fenced, oversized, unknown-field, type, enum, and semantic violations; and
+failure injection immediately before and after each path's terminal commit.
+Each restart reuses the original task and must not dispatch a repair Turn.
+Historical v1 and v3 stores exercise migration, while fresh CLI processes
+exercise diagnostic retrieval and receipt replay through the public facade.
+This Task introduces no new native Codex protocol field or OS process primitive.
 
 Apply fixed defaults only to omitted one-shot Reviewer settings. Check model
 and effort independently: neither missing setting may inherit server ordering,

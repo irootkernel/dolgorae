@@ -16,7 +16,6 @@ use crate::semantic::{
     durable_terminal_turn, ensure_external_specialist_worker, prepare_external_specialist,
     release_external_writer, start_external_specialist_run,
 };
-use crate::specialist::validate_reviewer_output_v3;
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use crate::turn::FinalResponse;
 use crate::worker::{ControlRequestV1, ControlResponseV1, TurnControlRequest, call_run_worker};
@@ -2327,10 +2326,39 @@ fn finish_completed_output(
                 .map_err(CompletionError::Failure)?;
             return Err(CompletionError::ResultConstructionPending(error));
         }
-        Err(error) => {
-            store
-                .finish_external_task(engagement_id, task_id, None, "failed", Some(&error.code))
+        Err(mut error) => {
+            let task = store
+                .external_task(engagement_id, task_id)
                 .map_err(CompletionError::Failure)?;
+            crate::review_output::attach_execution(
+                &mut error,
+                crate::review_output::ReviewExecution {
+                    run_id: Some(task.specialist_run_id),
+                    task_id: Some(task_id),
+                    turn_id: task.turn_id,
+                    ..Default::default()
+                },
+            );
+            let diagnostic = crate::review_output::diagnostic(&error);
+            let stored = store
+                .finish_external_task_with_diagnostic(
+                    engagement_id,
+                    task_id,
+                    None,
+                    "failed",
+                    Some(&error.code),
+                    diagnostic.as_ref(),
+                )
+                .map_err(CompletionError::Failure)?;
+            if diagnostic.is_some() {
+                let Some(stored_diagnostic) = stored.diagnostic.as_ref() else {
+                    // A concurrent terminal transition won; expose its durable
+                    // outcome rather than an invalid-output error we did not store.
+                    return Ok(stored);
+                };
+                error.details["reason"] = json!(stored_diagnostic.category);
+                error.details["diagnostic"] = json!(stored_diagnostic);
+            }
             return Err(CompletionError::Failure(error));
         }
     };
@@ -2354,7 +2382,30 @@ fn terminal_output(
     response: &Option<FinalResponse>,
 ) -> Result<Value, MachineError> {
     let accepted_request = store.external_task_request(engagement_id, task_id)?;
-    let final_response = match structured_task_output(&accepted_request, response)? {
+    let structured = structured_task_output(&accepted_request, response).map_err(|mut error| {
+        if crate::review_output::diagnostic(&error).is_some()
+            && let Ok((configuration, _, _)) =
+                store.external_member_configuration(engagement_id, run_id)
+        {
+            let codex_version = RunStore::new(SystemWorkspacePlatform, state_root)
+                .load_manifest(run_id)
+                .ok()
+                .map(|manifest| manifest.profile.codex_version);
+            crate::review_output::attach_execution(
+                &mut error,
+                crate::review_output::ReviewExecution {
+                    model: Some(configuration.model),
+                    effort: Some(configuration.default_effort),
+                    codex_version,
+                    run_id: Some(run_id),
+                    task_id: Some(task_id),
+                    turn_id: None,
+                },
+            );
+        }
+        error
+    })?;
+    let final_response = match structured {
         Some(output) => output,
         None => serde_json::to_value(response).map_err(internal)?,
     };
@@ -2382,34 +2433,9 @@ fn structured_task_output(
         )
         .map_err(|_| integrity("v3 task record no longer matches its accepted shape"))?;
         if task.expected_output == "structured_review_v3" {
-            let text = match response {
-                Some(FinalResponse::Inline { text }) => text,
-                _ => {
-                    return Err(MachineError::new(
-                        "REVIEW_OUTPUT_INVALID",
-                        "structured review output must be one inline JSON object",
-                        false,
-                        json!({
-                            "reason":"structured review output must be one inline JSON object",
-                            "required_action":"none"
-                        }),
-                    ));
-                }
-            };
-            let value = serde_json::from_str(text).map_err(|_| {
-                MachineError::new(
-                    "REVIEW_OUTPUT_INVALID",
-                    "structured review output is not JSON",
-                    false,
-                    json!({
-                        "reason":"structured review output is not JSON",
-                        "required_action":"none"
-                    }),
-                )
-            })?;
             task.validate_review()
                 .map_err(|_| integrity("v3 task record no longer passes accepted validation"))?;
-            let output = validate_reviewer_output_v3(value, &task)?;
+            let output = crate::specialist::parse_reviewer_response_v3(response.as_ref(), &task)?;
             return serde_json::to_value(output).map(Some).map_err(internal);
         }
     }
@@ -2462,7 +2488,11 @@ fn should_release_writer_after_completion_failure(canonical_write: bool, task_st
     canonical_write && (terminal_state(task_state) || task_state == "dispatching")
 }
 fn task_values(tasks: Vec<ExternalTaskSnapshot>) -> Vec<Value> {
-    tasks.into_iter().map(|task| json!({"task_id":task.task_id,"state":task.state,"result_artifact_ref":task.result_artifact_ref,"result":task.result,"safe_error_code":task.safe_error_code})).collect()
+    tasks.into_iter().map(|task| {
+        let mut value = json!({"task_id":task.task_id,"state":task.state,"result_artifact_ref":task.result_artifact_ref,"result":task.result,"safe_error_code":task.safe_error_code});
+        if let Some(diagnostic) = task.diagnostic { value["diagnostic"] = json!(diagnostic); }
+        value
+    }).collect()
 }
 fn assign_result(task: &ExternalTaskSnapshot) -> Result<Value, MachineError> {
     Ok(
@@ -3034,12 +3064,10 @@ mod tests {
         );
         let non_inline = structured_task_output(&accepted, &None).unwrap_err();
         assert_eq!(
-            non_inline.details,
-            json!({
-                "reason":"structured review output must be one inline JSON object",
-                "required_action":"none"
-            })
+            non_inline.details["diagnostic"]["category"],
+            "output_unavailable"
         );
+        assert!(non_inline.details["diagnostic"]["output_sha256"].is_null());
         let malformed = structured_task_output(
             &accepted,
             &Some(FinalResponse::Inline {
@@ -3047,13 +3075,37 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert_eq!(
-            malformed.details,
-            json!({
-                "reason":"structured review output is not JSON",
-                "required_action":"none"
-            })
-        );
+        assert_eq!(malformed.details["diagnostic"]["category"], "invalid_json");
+        assert_eq!(malformed.details["diagnostic"]["output_bytes"], 8);
+
+        let oversized = "private-provider-output".repeat(50_000);
+        let byte_length = oversized.len() as u64;
+        let sha256 = crate::jcs::sha256_hex(oversized.as_bytes());
+        for response in [
+            FinalResponse::Artifact {
+                artifact_id: Uuid::now_v7(),
+                byte_length,
+                sha256: sha256.clone(),
+                created_at: "2026-09-27T00:00:00Z".to_owned(),
+            },
+            FinalResponse::Unavailable {
+                byte_length,
+                sha256: sha256.clone(),
+                reason: "quota_exceeded".to_owned(),
+            },
+        ] {
+            let error = structured_task_output(&accepted, &Some(response)).unwrap_err();
+            let diagnostic = &error.details["diagnostic"];
+            assert_eq!(diagnostic["category"], "output_too_large");
+            assert_eq!(diagnostic["output_bytes"], byte_length);
+            assert_eq!(diagnostic["output_sha256"], format!("sha256:{sha256}"));
+            assert_eq!(diagnostic["known_top_level_keys"], json!([]));
+            assert!(
+                !serde_json::to_string(&error)
+                    .unwrap()
+                    .contains("private-provider")
+            );
+        }
 
         let mut corrupted = accepted.clone();
         corrupted["task"]["brief"] = json!("");
@@ -3421,6 +3473,21 @@ mod tests {
         );
         assert_eq!(expired.result_artifact_ref, None);
         assert_eq!(expired.result, None);
+        assert_eq!(
+            finish_completed_output(
+                &mut store,
+                opened.engagement_id,
+                expiring.task_id,
+                Err(crate::review_output::invalid_output(
+                    Some("late-invalid"),
+                    None,
+                    "invalid_json",
+                    ""
+                )),
+            )
+            .unwrap(),
+            expired
+        );
         assert_eq!(
             finish_completed_output(
                 &mut store,
@@ -3915,6 +3982,7 @@ mod tests {
             result_artifact_ref: None,
             result: None,
             safe_error_code: None,
+            diagnostic: None,
         };
         let previous: crate::turn::TerminalTurn = serde_json::from_value(json!({
             "thread_id":"thread-1",
@@ -4001,6 +4069,7 @@ mod tests {
             result_artifact_ref: Some(artifact_id),
             result: Some(json!({"kind":"inline","text":"done"})),
             safe_error_code: None,
+            diagnostic: None,
         }]);
         assert_eq!(values[0]["result_artifact_ref"], artifact_id.to_string());
         assert_eq!(values[0]["result"]["text"], "done");

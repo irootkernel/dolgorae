@@ -78,6 +78,12 @@
                 },
                 {
                   "$ref": "#/$defs/global_profile_server_restarted_result"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_await_result"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_collect_result"
                 }
               ]
             }
@@ -189,7 +195,17 @@
           "then": {
             "properties": {
               "data": {
-                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/external_specialist_facade_result"
+                "anyOf": [
+                  {
+                    "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/external_specialist_facade_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_await_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_collect_result"
+                  }
+                ]
               }
             }
           }

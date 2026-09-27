@@ -1,0 +1,22 @@
+{
+  "operation": "await_external_specialist_tasks_result",
+  "tasks": [
+    {
+      "task_id": "018f0000-0000-7000-8000-000000000101",
+      "state": "failed",
+      "result_artifact_ref": null,
+      "result": null,
+      "safe_error_code": "REVIEW_OUTPUT_INVALID",
+      "diagnostic": {
+        "schema": "dolgorae-review-output-diagnostic/v1",
+        "category": "missing_field",
+        "path": "/summary",
+        "output_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "output_bytes": 2,
+        "known_top_level_keys": [],
+        "unknown_top_level_key_count": 0
+      }
+    }
+  ],
+  "pending": []
+}

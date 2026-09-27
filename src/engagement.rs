@@ -3,11 +3,12 @@
 use crate::controller::{CredentialCarrier, authorize_controller};
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
+use crate::review_output::{ReviewExecution, ReviewOutputDiagnostic, attach_execution, diagnostic};
 use crate::run::{
     AgentConfigurationSnapshot, AggregateBinding, ControllerBinding, agent_configuration_digest,
 };
 use crate::specialist::{
-    ReviewerRuntimePlan, output_invalid, validate_reviewer_output, validate_reviewer_output_v3,
+    ReviewerRuntimePlan, validate_reviewer_output, validate_reviewer_output_v3,
 };
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -20,7 +21,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EngagementBarrier {
@@ -138,6 +139,7 @@ struct TaskExecution {
 struct OperationCompletion<'a, T> {
     task_id: Option<Uuid>,
     safe_error_code: Option<&'a str>,
+    diagnostic: Option<&'a ReviewOutputDiagnostic>,
     response: &'a T,
 }
 
@@ -197,6 +199,8 @@ pub struct ExternalTaskSnapshot {
     pub result_artifact_ref: Option<Uuid>,
     pub result: Option<Value>,
     pub safe_error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ReviewOutputDiagnostic>,
 }
 
 pub struct ExternalTaskRequest<'a> {
@@ -322,6 +326,7 @@ impl EngagementStore {
                    safe_error_code TEXT,
                    created_at_ms INTEGER,
                    updated_at_ms INTEGER,
+                   diagnostic_json TEXT,
                    FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id),
                    FOREIGN KEY(specialist_run_id) REFERENCES members(specialist_run_id)
                  ) STRICT;
@@ -339,7 +344,7 @@ impl EngagementStore {
                  CREATE TABLE IF NOT EXISTS delivery_receipts(
                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                    task_id TEXT NOT NULL UNIQUE,
-                   artifact_id TEXT NOT NULL,
+                   artifact_id TEXT,
                    delivered_at_ms INTEGER NOT NULL,
                    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
                    FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
@@ -428,7 +433,7 @@ impl EngagementStore {
                         "orchestration v1 migration violated a foreign key",
                     ));
                 }
-            } else if locked_observed != SCHEMA_VERSION.to_string() {
+            } else if !["2", "3", "4"].contains(&locked_observed.as_str()) {
                 return Err(MachineError::new(
                     "ORCHESTRATION_SCHEMA_UNSUPPORTED",
                     "orchestration schema is not supported",
@@ -440,7 +445,7 @@ impl EngagementStore {
             connection
                 .execute_batch("PRAGMA foreign_keys=ON;")
                 .map_err(internal)?;
-        } else if observed != "2" && observed != SCHEMA_VERSION.to_string() {
+        } else if observed != "2" && observed != "3" && observed != SCHEMA_VERSION.to_string() {
             return Err(MachineError::new(
                 "ORCHESTRATION_SCHEMA_UNSUPPORTED",
                 "orchestration schema is not supported",
@@ -458,6 +463,7 @@ impl EngagementStore {
         if observed == "2" {
             migrate_v2_to_v3(&mut connection)?;
         }
+        migrate_v3_to_v4(&mut connection)?;
         connection
             .execute_batch(
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_active_external_task_per_member
@@ -575,6 +581,7 @@ impl EngagementStore {
                         task_id: None,
                         safe_error_code: None,
                         response: &replay,
+                        diagnostic: None,
                     },
                 )?;
             }
@@ -651,6 +658,7 @@ impl EngagementStore {
                 task_id: None,
                 safe_error_code: None,
                 response: &final_result,
+                diagnostic: None,
             },
         )?;
         Ok(final_result)
@@ -747,7 +755,14 @@ impl EngagementStore {
                     && task.expected_output == STRUCTURED_REVIEW_OUTPUT
                 {
                     let checked = value
-                        .ok_or_else(|| output_invalid("Reviewer returned no structured output"))
+                        .ok_or_else(|| {
+                            crate::review_output::invalid_output(
+                                None,
+                                None,
+                                "output_unavailable",
+                                "",
+                            )
+                        })
                         .and_then(|value| validate_reviewer_output_v3(value, task))
                         .and_then(|output| serde_json::to_value(output).map_err(internal));
                     match checked {
@@ -816,6 +831,7 @@ impl EngagementStore {
                         task_id: Some(replay.task_id),
                         safe_error_code: None,
                         response: &replay,
+                        diagnostic: None,
                     },
                 )?;
             }
@@ -944,15 +960,27 @@ impl EngagementStore {
                 Ok(final_result)
             }
             RuntimeOutcome::Rejected => {
+                let mut terminal_error = execution.terminal_error;
+                if let Some(error) = terminal_error.as_mut() {
+                    attach_execution(
+                        error,
+                        ReviewExecution {
+                            run_id: Some(specialist_run_id),
+                            task_id: Some(reserved.task_id),
+                            ..Default::default()
+                        },
+                    );
+                }
                 let final_result = TaskReservation {
                     state: "failed".to_owned(),
-                    terminal_error: execution.terminal_error,
+                    terminal_error,
                     ..reserved
                 };
                 let safe_error_code = final_result
                     .terminal_error
                     .as_ref()
                     .map(|error| error.code.as_str());
+                let stored_diagnostic = final_result.terminal_error.as_ref().and_then(diagnostic);
                 self.finish_operation(
                     engagement_id,
                     "failed",
@@ -963,6 +991,7 @@ impl EngagementStore {
                         task_id: Some(final_result.task_id),
                         safe_error_code,
                         response: &final_result,
+                        diagnostic: stored_diagnostic.as_ref(),
                     },
                 )?;
                 Ok(final_result)
@@ -982,6 +1011,7 @@ impl EngagementStore {
                         task_id: Some(final_result.task_id),
                         safe_error_code: None,
                         response: &final_result,
+                        diagnostic: None,
                     },
                 )?;
                 Ok(final_result)
@@ -1938,6 +1968,7 @@ impl EngagementStore {
             result_artifact_ref: None,
             result: None,
             safe_error_code: None,
+            diagnostic: None,
         };
         transaction.execute(
             "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
@@ -2134,6 +2165,33 @@ impl EngagementStore {
         state: &str,
         safe_error_code: Option<&str>,
     ) -> Result<ExternalTaskSnapshot, MachineError> {
+        self.finish_external_task_with_diagnostic(
+            engagement_id,
+            task_id,
+            output,
+            state,
+            safe_error_code,
+            None,
+        )
+    }
+
+    pub fn finish_external_task_with_diagnostic(
+        &mut self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+        output: Option<&Value>,
+        state: &str,
+        safe_error_code: Option<&str>,
+        diagnostic: Option<&ReviewOutputDiagnostic>,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        if diagnostic.is_some()
+            && (state != "failed" || safe_error_code != Some("REVIEW_OUTPUT_INVALID"))
+        {
+            return Err(invalid(
+                "diagnostic",
+                "diagnostics require terminal invalid review output",
+            ));
+        }
         if !matches!(
             state,
             "completed_not_delivered" | "failed" | "interrupted_unknown" | "cancelled" | "expired"
@@ -2172,10 +2230,11 @@ impl EngagementStore {
             (None, None)
         };
         let changed = transaction.execute(
-            "UPDATE tasks SET state=?3,result_sha256=?4,artifact_id=?5,safe_error_code=?6,updated_at_ms=?7
+            "UPDATE tasks SET state=?3,result_sha256=?4,artifact_id=?5,safe_error_code=?6,updated_at_ms=?7,diagnostic_json=?8
              WHERE engagement_id=?1 AND task_id=?2 AND state IN ('accepted','queued','claimed','dispatching','running')",
             params![engagement_id.to_string(),task_id.to_string(),state,result_sha256,
-                artifact_id.map(|value| value.to_string()),safe_error_code,now],
+                artifact_id.map(|value| value.to_string()),safe_error_code,now,
+                diagnostic.map(serde_json::to_string).transpose().map_err(internal)?],
         ).map_err(internal)?;
         if changed != 1 {
             return external_task_in(&transaction, engagement_id, task_id);
@@ -2484,12 +2543,14 @@ impl EngagementStore {
         let mut pending = transaction
             .prepare(
                 "SELECT task_id,artifact_id FROM tasks WHERE engagement_id=?1
-             AND state='completed_not_delivered' ORDER BY created_at_ms,task_id LIMIT ?2",
+             AND (state='completed_not_delivered' OR (state='failed' AND diagnostic_json IS NOT NULL))
+             AND NOT EXISTS (SELECT 1 FROM delivery_receipts d WHERE d.task_id=tasks.task_id)
+             ORDER BY created_at_ms,task_id LIMIT ?2",
             )
             .map_err(internal)?;
         let rows = pending
             .query_map(params![engagement_id.to_string(), remaining], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
             .map_err(internal)?
             .collect::<Result<Vec<_>, _>>()
@@ -2502,7 +2563,7 @@ impl EngagementStore {
             ).map_err(internal)?;
             transaction
                 .execute(
-                    "UPDATE tasks SET state='delivered' WHERE task_id=?1",
+                    "UPDATE tasks SET state='delivered' WHERE task_id=?1 AND state='completed_not_delivered'",
                     [&task_id],
                 )
                 .map_err(internal)?;
@@ -2854,12 +2915,13 @@ impl EngagementStore {
                     .ok_or_else(|| internal("assign completion lost its task identity"))?;
                 let changed = transaction
                     .execute(
-                        "UPDATE tasks SET state=?3,safe_error_code=?4 WHERE engagement_id=?1 AND task_id=?2",
+                        "UPDATE tasks SET state=?3,safe_error_code=?4,diagnostic_json=?5 WHERE engagement_id=?1 AND task_id=?2",
                         params![
                             engagement_id.to_string(),
                             task_id.to_string(),
                             state,
-                            completion.safe_error_code
+                            completion.safe_error_code,
+                            completion.diagnostic.map(serde_json::to_string).transpose().map_err(internal)?
                         ],
                     )
                     .map_err(internal)?;
@@ -3027,7 +3089,7 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
                 "orchestration v2 migration violated a foreign key",
             ));
         }
-    } else if observed != SCHEMA_VERSION.to_string() {
+    } else if observed != "3" && observed != SCHEMA_VERSION.to_string() {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -3039,6 +3101,44 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
     connection
         .execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(internal)
+}
+
+fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let observed: String = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if observed == "3" {
+        transaction
+            .execute_batch(
+                "ALTER TABLE tasks ADD COLUMN diagnostic_json TEXT;
+             ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v3;
+             CREATE TABLE delivery_receipts(
+               sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+               task_id TEXT NOT NULL UNIQUE, artifact_id TEXT, delivered_at_ms INTEGER NOT NULL,
+               FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+               FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+             ) STRICT;
+             INSERT INTO delivery_receipts SELECT * FROM delivery_receipts_v3;
+             DROP TABLE delivery_receipts_v3;
+             UPDATE metadata SET value='4' WHERE key='schema_version';",
+            )
+            .map_err(internal)?;
+    } else if observed != SCHEMA_VERSION.to_string() {
+        return Err(MachineError::new(
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+            "orchestration schema is not supported",
+            false,
+            serde_json::json!({"observed":observed}),
+        ));
+    }
+    transaction.commit().map_err(internal)
 }
 
 fn commit_with(
@@ -3278,7 +3378,7 @@ fn external_task_in(
     connection
         .query_row(
             "SELECT t.specialist_run_id,t.state,t.turn_id,t.artifact_id,
-                    t.safe_error_code,a.canonical_json
+                    t.safe_error_code,a.canonical_json,t.diagnostic_json
              FROM tasks t LEFT JOIN artifacts a ON a.artifact_id=t.artifact_id
              WHERE t.engagement_id=?1 AND t.task_id=?2",
             params![engagement_id.to_string(), task_id.to_string()],
@@ -3305,6 +3405,17 @@ fn external_task_in(
                             )
                         })?,
                     safe_error_code: row.get(4)?,
+                    diagnostic: row
+                        .get::<_, Option<String>>(6)?
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                 })
             },
         )
@@ -5555,7 +5666,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         let artifact: (String, String, String, String) = migrated
             .connection
             .query_row(
@@ -5644,7 +5755,7 @@ mod tests {
             assert_eq!(
                 table_shape(&migrated.connection, table),
                 table_shape(&fresh.connection, table),
-                "migrated {table} schema diverges from a fresh v3 store"
+                "migrated {table} schema diverges from a fresh v4 store"
             );
         }
         drop(fresh);
@@ -5957,6 +6068,402 @@ mod tests {
         let collected = store.collect_review(opened.engagement_id).unwrap().output;
         assert_eq!(collected, expected_report);
         assert_eq!(collected["findings"][0]["severity"], "P1");
+        let delivered_state: String = store
+            .connection
+            .query_row(
+                "SELECT state FROM tasks WHERE task_id=?1",
+                [reserved.task_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delivered_state, "delivered");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v3_migration_preserves_legacy_failures_without_inventing_diagnostics() {
+        let (mut store, root) = store();
+        let opened = external_open(&mut store);
+        let member = external_ready_member(&mut store, opened.engagement_id);
+        let task =
+            external_task_reservation(&mut store, opened.engagement_id, member.specialist_run_id);
+        store
+            .finish_external_task(
+                opened.engagement_id,
+                task.task_id,
+                None,
+                "failed",
+                Some("REVIEW_OUTPUT_INVALID"),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE tasks DROP COLUMN diagnostic_json;
+             UPDATE metadata SET value='3' WHERE key='schema_version';",
+            )
+            .unwrap();
+        drop(store);
+        let mut migrated = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let historical = migrated
+            .external_task(opened.engagement_id, task.task_id)
+            .unwrap();
+        assert_eq!(historical.state, "failed");
+        assert_eq!(
+            historical.safe_error_code.as_deref(),
+            Some("REVIEW_OUTPUT_INVALID")
+        );
+        assert!(historical.diagnostic.is_none());
+        assert!(
+            serde_json::to_value(&historical)
+                .unwrap()
+                .get("diagnostic")
+                .is_none()
+        );
+        assert!(
+            migrated
+                .collect_external_results(opened.engagement_id, 0, 16)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_shot_invalid_output_commit_never_replays_a_turn_after_response_loss() {
+        for barrier in [
+            EngagementBarrier::BeforeTaskOutcomeCommit,
+            EngagementBarrier::AfterTaskOutcomeCommit,
+        ] {
+            let (mut store, root) = store();
+            let opened = store
+                .open_engagement("workspace", &"a".repeat(64), "open-failure")
+                .unwrap();
+            let hired = store
+                .hire_reviewer(
+                    opened.engagement_id,
+                    &reviewer_plan("review"),
+                    "hire-failure",
+                    |_, _, _| RuntimeOutcome::Accepted,
+                )
+                .unwrap();
+            let task = SpecialistTaskRequest {
+                purpose: "change".to_owned(),
+                brief: "Review the candidate.".to_owned(),
+                contexts: vec![],
+                criteria: vec![],
+                expected_output: STRUCTURED_REVIEW_OUTPUT.to_owned(),
+            };
+            let accepted =
+                serde_json::json!({"schema":"dolgorae-specialist-review-request/v3", "task":task});
+            drop(store);
+            let mut faulted = store_with_fault(&root, barrier);
+            let error = faulted
+                .assign_task_v3(
+                    opened.engagement_id,
+                    hired.specialist_run_id,
+                    &accepted,
+                    &task,
+                    "assign-failure",
+                    |_, _, _| {
+                        Err(crate::review_output::invalid_output(
+                            Some("provider-secret"),
+                            None,
+                            "invalid_json",
+                            "",
+                        ))
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "INTERNAL_ERROR");
+            drop(faulted);
+            let mut restarted = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+            let (state, diagnostic_json): (String, Option<String>) = restarted
+                .connection
+                .query_row(
+                    "SELECT state,diagnostic_json FROM tasks WHERE engagement_id=?1",
+                    [opened.engagement_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            let replay = restarted.assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "assign-failure",
+                |_, _, _| panic!("response loss must not dispatch another Turn"),
+            );
+            if barrier == EngagementBarrier::BeforeTaskOutcomeCommit {
+                assert_eq!(state, "accepted");
+                assert!(diagnostic_json.is_none());
+                assert_eq!(replay.unwrap().state, "interrupted_unknown");
+            } else {
+                assert_eq!(state, "failed");
+                let diagnostic_json = diagnostic_json.unwrap();
+                assert!(!diagnostic_json.contains("provider-secret"));
+                assert_eq!(
+                    replay.unwrap_err().details["diagnostic"],
+                    serde_json::from_str::<Value>(&diagnostic_json).unwrap()
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_output_failure_and_diagnostic_commit_together_and_redeliver_after_restart() {
+        for barrier in [
+            EngagementBarrier::BeforeExternalTaskTerminalCommit,
+            EngagementBarrier::AfterExternalTaskTerminalCommit,
+        ] {
+            let (mut store, root) = store();
+            let opened = external_open(&mut store);
+            let member = external_ready_member(&mut store, opened.engagement_id);
+            let task = external_task_reservation(
+                &mut store,
+                opened.engagement_id,
+                member.specialist_run_id,
+            );
+            let mut error = crate::review_output::invalid_output(
+                Some("provider-secret"),
+                None,
+                "invalid_json",
+                "",
+            );
+            attach_execution(
+                &mut error,
+                ReviewExecution {
+                    run_id: Some(member.specialist_run_id),
+                    task_id: Some(task.task_id),
+                    model: Some("gpt-6-sol".to_owned()),
+                    effort: Some("high".to_owned()),
+                    turn_id: Some("turn-original".to_owned()),
+                    ..Default::default()
+                },
+            );
+            let expected = diagnostic(&error).unwrap();
+            drop(store);
+            let mut faulted = store_with_fault(&root, barrier);
+            assert_eq!(
+                faulted
+                    .finish_external_task_with_diagnostic(
+                        opened.engagement_id,
+                        task.task_id,
+                        None,
+                        "failed",
+                        Some("REVIEW_OUTPUT_INVALID"),
+                        Some(&expected)
+                    )
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            drop(faulted);
+            let mut reopened = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+            let observed = reopened
+                .external_task(opened.engagement_id, task.task_id)
+                .unwrap();
+            if barrier == EngagementBarrier::BeforeExternalTaskTerminalCommit {
+                assert_eq!(observed.state, task.state);
+                assert!(observed.diagnostic.is_none());
+                reopened
+                    .finish_external_task_with_diagnostic(
+                        opened.engagement_id,
+                        task.task_id,
+                        None,
+                        "failed",
+                        Some("REVIEW_OUTPUT_INVALID"),
+                        Some(&expected),
+                    )
+                    .unwrap();
+            } else {
+                assert_eq!(observed.state, "failed");
+                assert_eq!(observed.diagnostic.as_ref(), Some(&expected));
+            }
+            let (first, sequence) = reopened
+                .collect_external_results(opened.engagement_id, 0, 16)
+                .unwrap();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].state, "failed");
+            assert_eq!(first[0].diagnostic.as_ref(), Some(&expected));
+            assert!(first[0].result.is_none());
+            assert!(first[0].result_artifact_ref.is_none());
+            assert!(
+                !serde_json::to_string(&first)
+                    .unwrap()
+                    .contains("provider-secret")
+            );
+            drop(reopened);
+            let mut restarted = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+            let (replayed, replay_sequence) = restarted
+                .collect_external_results(opened.engagement_id, 0, 16)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(first).unwrap()
+            );
+            assert_eq!(sequence, replay_sequence);
+            assert!(
+                restarted
+                    .collect_external_results(opened.engagement_id, sequence, 16)
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
+            let artifact_count: i64 = restarted
+                .connection
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(artifact_count, 0);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn diagnostic_rejects_incompatible_terminal_outcomes_without_mutation() {
+        let (mut store, root) = store();
+        let opened = external_open(&mut store);
+        let member = external_ready_member(&mut store, opened.engagement_id);
+        let task =
+            external_task_reservation(&mut store, opened.engagement_id, member.specialist_run_id);
+        let expected = diagnostic(&crate::review_output::invalid_output(
+            Some("not-json"),
+            None,
+            "invalid_json",
+            "",
+        ))
+        .unwrap();
+        let before = serde_json::to_value(&task).unwrap();
+        for (state, code) in [
+            ("completed_not_delivered", "REVIEW_OUTPUT_INVALID"),
+            ("failed", "OTHER_CODE"),
+        ] {
+            let error = store
+                .finish_external_task_with_diagnostic(
+                    opened.engagement_id,
+                    task.task_id,
+                    Some(&serde_json::json!({"summary":"must not be stored"})),
+                    state,
+                    Some(code),
+                    Some(&expected),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT");
+            assert_eq!(error.details["argument"], "diagnostic");
+            assert_eq!(
+                serde_json::to_value(
+                    store
+                        .external_task(opened.engagement_id, task.task_id)
+                        .unwrap()
+                )
+                .unwrap(),
+                before
+            );
+            let artifact_count: i64 = store
+                .connection
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(artifact_count, 0);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mixed_success_and_diagnostic_receipts_preserve_order_and_restart_replay() {
+        use serde_json::json;
+
+        let (mut store, root) = store();
+        let opened = external_open(&mut store);
+        let member = external_ready_member(&mut store, opened.engagement_id);
+        let expected = diagnostic(&crate::review_output::invalid_output(
+            Some("not-json"),
+            None,
+            "invalid_json",
+            "",
+        ))
+        .unwrap();
+        let mut task_ids = Vec::new();
+        for number in 0..2 {
+            let task = store
+                .reserve_external_task(
+                    opened.engagement_id,
+                    member.specialist_run_id,
+                    ExternalTaskRequest {
+                        request_value: &json!({"task":number}),
+                        objective: "exercise mixed collection",
+                        external_request_ref: &json!({"kind":"mixed","id":number}),
+                        execution_intent: "read_only",
+                        deadline_seconds: 60,
+                        idempotency_key: &format!("mixed-{number}"),
+                    },
+                )
+                .unwrap();
+            if number == 0 {
+                store
+                    .finish_external_task(
+                        opened.engagement_id,
+                        task.task_id,
+                        Some(&json!({"summary":"valid result"})),
+                        "completed_not_delivered",
+                        None,
+                    )
+                    .unwrap();
+            } else {
+                store
+                    .finish_external_task_with_diagnostic(
+                        opened.engagement_id,
+                        task.task_id,
+                        None,
+                        "failed",
+                        Some("REVIEW_OUTPUT_INVALID"),
+                        Some(&expected),
+                    )
+                    .unwrap();
+            }
+            store
+                .connection
+                .execute(
+                    "UPDATE tasks SET created_at_ms=?1 WHERE task_id=?2",
+                    params![number + 1, task.task_id.to_string()],
+                )
+                .unwrap();
+            task_ids.push(task.task_id);
+        }
+        let (page, cursor) = store
+            .collect_external_results(opened.engagement_id, 0, 100)
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|task| task.task_id).collect::<Vec<_>>(),
+            task_ids
+        );
+        assert_eq!(page[0].state, "delivered");
+        assert_eq!(page[0].result, Some(json!({"summary":"valid result"})));
+        assert!(page[0].result_artifact_ref.is_some());
+        assert!(page[0].diagnostic.is_none());
+        assert_eq!(page[1].state, "failed");
+        assert_eq!(page[1].diagnostic.as_ref(), Some(&expected));
+        assert!(page[1].result.is_none());
+        assert!(page[1].result_artifact_ref.is_none());
+        assert_eq!(cursor, 2);
+        drop(store);
+        let mut restarted = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let (replayed, replay_cursor) = restarted
+            .collect_external_results(opened.engagement_id, 0, 100)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed).unwrap(),
+            serde_json::to_value(page).unwrap()
+        );
+        assert_eq!(replay_cursor, cursor);
+        assert!(
+            restarted
+                .collect_external_results(opened.engagement_id, cursor, 100)
+                .unwrap()
+                .0
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6022,6 +6529,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(durable_error.as_deref(), Some("REVIEW_OUTPUT_INVALID"));
+        let stored_diagnostic: String = store
+            .connection
+            .query_row(
+                "SELECT diagnostic_json FROM tasks WHERE engagement_id=?1",
+                [opened.engagement_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored_diagnostic).unwrap(),
+            error.details["diagnostic"]
+        );
         drop(store);
 
         let mut reopened = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();

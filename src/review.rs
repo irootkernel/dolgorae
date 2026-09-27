@@ -795,7 +795,7 @@ fn execute_scoped_common(
                 &accepted_request,
                 task_request,
                 &key("assign"),
-                |reservation, _accepted_task, accepted_prompt| {
+                |reservation, accepted_task, accepted_prompt| {
                     task_started = Some(Instant::now());
                     let prompt = scoped_review_prompt_v3(accepted_prompt, target);
                     let turn_timeout = Duration::from_secs(deadline_seconds)
@@ -812,8 +812,25 @@ fn execute_scoped_common(
                         reservation.task_id,
                         turn_timeout,
                         &prompt,
+                        accepted_task,
                         &mut task_error,
                     )
+                    .map_err(|mut error| {
+                        crate::review_output::attach_execution(
+                            &mut error,
+                            crate::review_output::ReviewExecution {
+                                model: Some(prepared.model.clone()),
+                                effort: Some(prepared.effort.clone()),
+                                codex_version: Some(
+                                    prepared.profile_snapshot.codex_version.clone(),
+                                ),
+                                run_id: Some(hired.specialist_run_id),
+                                task_id: Some(reservation.task_id),
+                                turn_id: None,
+                            },
+                        );
+                        error
+                    })
                 },
             )
         } else {
@@ -1013,6 +1030,20 @@ fn execute_scoped_common(
                     "required_action": if settlement_state == "preserved" {"inspect_authority"} else {"none"},
                     "cause_details":cause_details
                 });
+                if v3.is_some() {
+                    let execution = crate::review_output::execution_fields(
+                        crate::review_output::ReviewExecution {
+                            model: Some(prepared.model.clone()),
+                            effort: Some(prepared.effort.clone()),
+                            codex_version: Some(prepared.profile_snapshot.codex_version.clone()),
+                            run_id: reviewer_run_id,
+                            ..Default::default()
+                        },
+                    );
+                    if !execution.is_empty() {
+                        error.details["execution"] = json!(execution);
+                    }
+                }
             }
             Err(error)
         }
@@ -1518,6 +1549,32 @@ fn execute_reviewer_turn(
     }
 }
 
+fn parse_reviewer_final_response_v3(
+    response: &Value,
+    task: &SpecialistTaskRequest,
+) -> Result<ReviewerOutputV3, MachineError> {
+    let metadata = match response["kind"].as_str() {
+        Some("artifact") => Some((
+            response
+                .pointer("/artifact/byte_length")
+                .and_then(Value::as_u64),
+            response.pointer("/artifact/sha256").and_then(Value::as_str),
+        )),
+        Some("unavailable") => Some((
+            response["observed_byte_length"].as_u64(),
+            response["sha256"].as_str(),
+        )),
+        _ => None,
+    };
+    if let Some((Some(byte_length), Some(sha256))) = metadata {
+        return Err(crate::review_output::oversized_response(
+            byte_length,
+            sha256,
+        ));
+    }
+    crate::specialist::parse_reviewer_output_v3(response["text"].as_str(), task)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_reviewer_turn_v3(
     workspace: &Path,
@@ -1526,6 +1583,7 @@ fn execute_reviewer_turn_v3(
     task_id: Uuid,
     timeout: Duration,
     prompt: &str,
+    task: &SpecialistTaskRequest,
     task_error: &mut Option<MachineError>,
 ) -> Result<(RuntimeOutcome, Option<Value>), MachineError> {
     let arguments = reviewer_send_arguments(
@@ -1537,7 +1595,26 @@ fn execute_reviewer_turn_v3(
         prompt,
     );
     match control_reviewer_run(RunVerb::Send, &arguments) {
-        Ok(turn) => match reviewer_turn_output_value(&turn) {
+        Ok(turn) => match if turn.get("status").and_then(Value::as_str) == Some("completed") {
+            parse_reviewer_final_response_v3(&turn["final_response"], task)
+                .map(|output| serde_json::to_value(output).expect("checked report serializes"))
+                .map_err(|mut error| {
+                    crate::review_output::attach_execution(
+                        &mut error,
+                        crate::review_output::ReviewExecution {
+                            turn_id: turn
+                                .get("turn_id")
+                                .and_then(Value::as_str)
+                                .filter(|id| id.len() <= 128)
+                                .map(str::to_owned),
+                            ..Default::default()
+                        },
+                    );
+                    error
+                })
+        } else {
+            reviewer_turn_output_value(&turn)
+        } {
             Ok(output) => Ok((RuntimeOutcome::Accepted, Some(output))),
             Err(error) if error.code == "REVIEW_TIMEOUT" => {
                 *task_error = Some(error);
@@ -2139,11 +2216,26 @@ mod tests {
                 "overall_assessment":"requirements_met"
             })).unwrap()}
         });
-        let value = reviewer_turn_output_value(&turn).unwrap();
-        let output =
-            serde_json::to_value(validate_reviewer_output_v3(value, &task).unwrap()).unwrap();
+        let output = serde_json::to_value(
+            parse_reviewer_final_response_v3(&turn["final_response"], &task).unwrap(),
+        )
+        .unwrap();
         assert_eq!(output["findings"][0]["severity"], "P1");
         assert_eq!(output["findings"][1]["severity"], "P3");
+
+        let digest = "a".repeat(64);
+        for response in [
+            json!({"kind":"artifact","artifact":{"byte_length":1_048_577,"sha256":digest}}),
+            json!({"kind":"unavailable","observed_byte_length":1_048_577,"sha256":digest,"reason":"quota_exceeded"}),
+        ] {
+            let error = parse_reviewer_final_response_v3(&response, &task).unwrap_err();
+            assert_eq!(error.details["diagnostic"]["category"], "output_too_large");
+            assert_eq!(error.details["diagnostic"]["output_bytes"], 1_048_577);
+            assert_eq!(
+                error.details["diagnostic"]["output_sha256"],
+                format!("sha256:{digest}")
+            );
+        }
     }
 
     #[test]

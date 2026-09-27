@@ -743,11 +743,7 @@ pub(crate) fn prepare_reviewer(
     let configuration = &global_profile_binding
         .launch_snapshot
         .process_static_configuration;
-    let model = configuration
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.default_model)
-        .to_owned();
+    let model = reviewer_model(profile_name, configuration.get("model"), &state.models)?;
     let efforts = advertised_efforts(&state, profile_name, &model)?;
     let effort = reviewer_effort(
         profile_name,
@@ -6701,13 +6697,52 @@ fn advertised_effort_names(profile: &str, item: &Value) -> Result<Vec<String>, M
     Ok(efforts)
 }
 
+fn reviewer_model(
+    profile: &str,
+    configured: Option<&Value>,
+    models: &[String],
+) -> Result<String, MachineError> {
+    let model = match configured {
+        None | Some(Value::Null) => "gpt-6-sol",
+        Some(Value::String(model)) => model,
+        Some(value) => {
+            return Err(compatibility_rejected(
+                profile,
+                "model",
+                json!(models),
+                value.clone(),
+                "configured Reviewer model must be a string",
+            ));
+        }
+    };
+    if !models.iter().any(|advertised| advertised == model) {
+        return Err(compatibility_rejected(
+            profile,
+            "model",
+            json!(models),
+            json!(model),
+            "requested model is not advertised by the profile server",
+        ));
+    }
+    Ok(model.to_owned())
+}
+
 fn reviewer_effort(
     profile: &str,
     configured: Option<&Value>,
     efforts: &[String],
 ) -> Result<String, MachineError> {
     match configured {
-        None | Some(Value::Null) => Ok(default_effort(efforts)),
+        None | Some(Value::Null) if efforts.iter().any(|effort| effort == "high") => {
+            Ok("high".to_owned())
+        }
+        None | Some(Value::Null) => Err(compatibility_rejected(
+            profile,
+            "reasoning_effort",
+            json!(efforts),
+            json!("high"),
+            "default Reviewer effort is not advertised by the selected model",
+        )),
         Some(Value::String(effort)) if efforts.contains(effort) => Ok(effort.clone()),
         Some(value) => Err(compatibility_rejected(
             profile,
@@ -8086,22 +8121,69 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_rejects_an_unavailable_model_with_actionable_selection_details() {
+        let models = vec!["other-model".to_owned(), "gpt-6-sol".to_owned()];
+        assert_eq!(
+            reviewer_model("reviewer", None, &models).unwrap(),
+            "gpt-6-sol"
+        );
+        assert_eq!(
+            reviewer_model("reviewer", Some(&json!("other-model")), &models).unwrap(),
+            "other-model"
+        );
+        for (configured, requested, advertised) in [
+            (None, "gpt-6-sol", &models[..1]),
+            (
+                Some(json!("unavailable-model")),
+                "unavailable-model",
+                &models[..],
+            ),
+        ] {
+            let error = reviewer_model("reviewer", configured.as_ref(), advertised).unwrap_err();
+            assert_eq!(error.code, "COMPATIBILITY_REJECTED");
+            assert_eq!(error.details["check"], "model");
+            assert_eq!(error.details["expected"], json!(advertised));
+            assert_eq!(error.details["actual"], requested);
+        }
+    }
+
+    #[test]
+    fn reviewer_rejects_malformed_models_without_substituting_the_default() {
+        for models in [vec!["gpt-6-sol".to_owned()], vec!["other-model".to_owned()]] {
+            for configured in [json!(123), json!(false), json!([]), json!({})] {
+                let error = reviewer_model("reviewer", Some(&configured), &models).unwrap_err();
+                assert_eq!(error.code, "COMPATIBILITY_REJECTED");
+                assert_eq!(error.details["check"], "model");
+                assert_eq!(error.details["expected"], json!(models));
+                assert_eq!(error.details["actual"], configured);
+            }
+        }
+        assert_eq!(
+            reviewer_model("reviewer", Some(&Value::Null), &["gpt-6-sol".to_owned()]).unwrap(),
+            "gpt-6-sol"
+        );
+    }
+
+    #[test]
     fn reviewer_honors_explicit_effort_without_substitution() {
-        let efforts = vec!["medium".to_owned(), "low".to_owned()];
+        let efforts = vec!["medium".to_owned(), "low".to_owned(), "high".to_owned()];
         assert_eq!(
             reviewer_effort("reviewer", Some(&json!("low")), &efforts).unwrap(),
             "low"
         );
-        assert_eq!(
-            reviewer_effort("reviewer", None, &efforts).unwrap(),
-            "medium"
-        );
+        assert_eq!(reviewer_effort("reviewer", None, &efforts).unwrap(), "high");
         assert_eq!(
             reviewer_effort("reviewer", Some(&Value::Null), &efforts).unwrap(),
-            "medium"
+            "high"
         );
         assert_eq!(
-            reviewer_effort("reviewer", Some(&json!("high")), &efforts)
+            reviewer_effort("reviewer", Some(&json!("xhigh")), &efforts)
+                .unwrap_err()
+                .code,
+            "COMPATIBILITY_REJECTED"
+        );
+        assert_eq!(
+            reviewer_effort("reviewer", None, &efforts[..2])
                 .unwrap_err()
                 .code,
             "COMPATIBILITY_REJECTED"

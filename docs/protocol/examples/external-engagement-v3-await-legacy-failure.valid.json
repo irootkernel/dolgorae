@@ -1,0 +1,13 @@
+{
+  "operation": "await_external_specialist_tasks_result",
+  "tasks": [
+    {
+      "task_id": "018f0000-0000-7000-8000-000000000101",
+      "state": "failed",
+      "result_artifact_ref": null,
+      "result": null,
+      "safe_error_code": "REVIEW_OUTPUT_INVALID"
+    }
+  ],
+  "pending": []
+}

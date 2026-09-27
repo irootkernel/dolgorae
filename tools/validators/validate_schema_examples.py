@@ -82,6 +82,8 @@ def repaired_negative_example(
     repaired = copy.deepcopy(instance)
     if example_name == "error-contract-v2-review-output-legacy.invalid-missing-reason.json":
         repaired["details"]["reason"] = "Reviewer output did not match the contract"
+    elif example_name == "error-contract-v2-review-output-diagnostic.invalid-extra-details.json":
+        del repaired["details"]["diagnostic"]["private_provider_key"]
     elif example_name == "error-contract-v2-review-task.invalid-extra-details.json":
         del repaired["details"]["profile"]
     elif example_name == "external-engagement-v3-assign.invalid-structured-purpose.json":

@@ -117,25 +117,39 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     .replace("thread-scope-1", f"thread-case-{index}"),
                     encoding="utf-8",
                 )
-                if index == 0:
+                if index < 3:
                     configuration = case_home / "config.toml"
-                    configuration.write_text(
+                    settings = [
                         'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n',
+                        'model = "gpt-5.6-luna"\n',
+                        'model_reasoning_effort = "low"\n',
+                    ]
+                    configuration.write_text(
+                        settings[index],
                         encoding="utf-8",
                     )
                     configuration.chmod(0o600)
-                    fixture = json.loads(scenario.read_text(encoding="utf-8"))
-                    for step in fixture["steps"]:
-                        if step.get("method") == "model/list":
-                            step["respond"]["result"]["data"].append({
+                fixture = json.loads(scenario.read_text(encoding="utf-8"))
+                for step in fixture["steps"]:
+                    if step.get("method") == "model/list":
+                        models = step["respond"]["result"]["data"]
+                        if index < 2:
+                            models.append({
                                 "model": "gpt-5.6-luna",
                                 "isDefault": False,
                                 "supportedReasoningEfforts": [
                                     {"reasoningEffort": "medium"},
                                     {"reasoningEffort": "low"},
+                                    {"reasoningEffort": "high"},
                                 ],
                             })
-                    scenario.write_text(json.dumps(fixture), encoding="utf-8")
+                        if index % 2:
+                            models.reverse()
+                        for model in models:
+                            efforts = model["supportedReasoningEfforts"]
+                            offset = index % len(efforts)
+                            model["supportedReasoningEfforts"] = efforts[offset:] + efforts[:offset]
+                scenario.write_text(json.dumps(fixture), encoding="utf-8")
                 transcript = root / f"app-server-transcript-{index}.jsonl"
                 transcripts.append(transcript)
                 codex = case_bin / "codex"
@@ -242,16 +256,17 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 if len(starts) != 1:
                     raise AssertionError("Reviewer did not start exactly one thread")
                 start_params = starts[0]["params"]
-                if index == 0:
-                    turns = [message for message in messages if message.get("method") == "turn/start"]
-                    if (
-                        result["reviewer"]["model"] != "gpt-5.6-luna"
-                        or result["reviewer"]["effort"] != "low"
-                        or start_params["model"] != "gpt-5.6-luna"
-                        or not turns
-                        or any(turn["params"]["effort"] != "low" for turn in turns)
-                    ):
-                        raise AssertionError("Reviewer substituted the default model or effort")
+                expected_model = "gpt-5.6-luna" if index < 2 else "gpt-6-sol"
+                expected_effort = "low" if index in (0, 2) else "high"
+                turns = [message for message in messages if message.get("method") == "turn/start"]
+                if (
+                    result["reviewer"]["model"] != expected_model
+                    or result["reviewer"]["effort"] != expected_effort
+                    or start_params["model"] != expected_model
+                    or len(turns) != 1
+                    or turns[0]["params"]["effort"] != expected_effort
+                ):
+                    raise AssertionError("Reviewer changed an explicit setting or used provider ordering for an omitted default")
                 if (
                     pathlib.Path(start_params["cwd"]) != capture_root / "source"
                     or start_params["sandbox"] != "read-only"
@@ -369,6 +384,35 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 turns = [message for message in messages if message.get("method") == "turn/start"]
                 if len(starts) != 1 or len(turns) != 1:
                     raise AssertionError("v3 review did not use exactly one fresh Reviewer Turn")
+                if (
+                    result["reviewer"]["model"] != "gpt-6-sol"
+                    or result["reviewer"]["effort"] != "high"
+                    or starts[0]["params"]["model"] != "gpt-6-sol"
+                    or turns[0]["params"]["effort"] != "high"
+                ):
+                    raise AssertionError("v3 review did not use the independent one-shot defaults")
+                prompt = "\n".join(
+                    item["text"] for item in turns[0]["params"]["input"]
+                    if item.get("type") == "text"
+                )
+                schemas = [
+                    json.loads(line) for line in prompt.splitlines()
+                    if line.startswith('{"additionalProperties":')
+                ]
+                if len(schemas) != 1:
+                    raise AssertionError("v3 provider prompt omitted its complete output schema")
+                contract = schemas[0]
+                v1_contract = json.loads((protocol_root / "dolgorae-specialist-review-tool-v1.schema.json").read_text())
+                v3_contract = json.loads((protocol_root / "dolgorae-specialist-review-tool-v3.schema.json").read_text())
+                assessment = contract["properties"]["criterion_assessments"]["items"]
+                if (
+                    contract["required"] != v3_contract["$defs"]["verdict"]["required"]
+                    or contract["properties"]["findings"]["items"] != v1_contract["$defs"]["finding"]
+                    or assessment["required"] != v3_contract["$defs"]["criterion_assessment"]["required"]
+                    or assessment["properties"]["evidence"]["items"] != v3_contract["$defs"]["assessment_evidence"]
+                    or '"$ref"' in json.dumps(contract)
+                ):
+                    raise AssertionError("v3 provider prompt lost nested fields or retained unresolved schema dependencies")
                 role_text = starts[0]["params"]["developerInstructions"]
                 turn_text = json.dumps(turns[0]["params"]["input"], ensure_ascii=False)
                 if any(marker in role_text for marker in (brief, context_content, "C-korean")):
