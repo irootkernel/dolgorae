@@ -41,7 +41,8 @@
     "REVIEW_TARGET_TERMINAL_EVIDENCE_INVALID": 4,
     "REVIEW_TARGET_TIMEOUT": 4,
     "REVIEW_TARGET_UNSAFE_FILE": 4,
-    "REVIEW_TARGET_UNSAFE_PATH": 4
+    "REVIEW_TARGET_UNSAFE_PATH": 4,
+    "REVIEW_RECOVERY_BLOCKED": 4
   },
   "oneOf": [
     {
@@ -186,6 +187,54 @@
           "properties": {
             "invariant": {
               "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "REVIEW_RECOVERY_BLOCKED"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_ref",
+            "reason",
+            "required_action"
+          ],
+          "properties": {
+            "request_ref": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "reason": {
+              "enum": [
+                "already_started",
+                "operation_active",
+                "operation_unknown",
+                "authority_unavailable",
+                "cleanup_blocked"
+              ]
+            },
+            "required_action": {
+              "const": "inspect_original_operation"
             }
           }
         }

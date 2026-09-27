@@ -1,0 +1,52 @@
+{
+  "schema": "dolgorae-one-shot-review-observation/v1",
+  "request_ref": "018f0000-0000-7000-8000-000000058001",
+  "request_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile": "reviewer",
+  "observation": "known",
+  "outcome": "failed",
+  "result": null,
+  "report": null,
+  "safe_error_code": "REVIEW_OUTPUT_INVALID",
+  "diagnostic": {
+    "schema": "dolgorae-review-output-diagnostic/v1",
+    "category": "missing_field",
+    "path": "/summary",
+    "output_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "output_bytes": 2,
+    "known_top_level_keys": [],
+    "unknown_top_level_key_count": 0,
+    "private_provider_key": "rejected"
+  },
+  "engagement": {
+    "engagement_id": "018f0000-0000-7000-8000-000000000010",
+    "state": "closed"
+  },
+  "reviewer": {
+    "run_id": "018f0000-0000-7000-8000-000000000012",
+    "state": "closed"
+  },
+  "task": {
+    "task_id": "018f0000-0000-7000-8000-000000058002",
+    "state": "failed"
+  },
+  "capture": {
+    "capture_ref": "018f0000-0000-7000-8000-000000000011",
+    "revision": 2,
+    "state": "settled",
+    "cleanup_pending": false
+  },
+  "server": {
+    "status": "recovery_blocked",
+    "server_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "server_epoch": 1,
+    "epoch_id": "018f0000-0000-7000-8000-000000058003",
+    "reason": "generation_changed"
+  },
+  "recovery": {
+    "status": "blocked",
+    "blocked_reasons": [
+      "server_unknown"
+    ]
+  }
+}

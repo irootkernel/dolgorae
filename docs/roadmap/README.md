@@ -22,8 +22,8 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
-`EPIC-016` is `ACTIVE` and `TASK-057` is `COMPLETE`; `TASK-058` through `TASK-060` remain
-`PLANNED` after EPIC-008
+`EPIC-016` is `ACTIVE`; `TASK-057` and `TASK-058` are `COMPLETE`, and
+`TASK-059` through `TASK-060` remain `PLANNED` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -2011,7 +2011,7 @@ external structured-output behavior empirically with separate live authority.
 
 ### TASK-058: Recover One-Shot Reviews and Retire Temporary Servers
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on TASK-057. Define and implement the public one-shot lookup/recovery
 contract: a stable reference retained by the caller before effects, durable

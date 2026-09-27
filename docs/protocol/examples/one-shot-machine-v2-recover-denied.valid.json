@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "ok": false,
+  "command": "specialist.review-recover",
+  "invocation_id": "018f0000-0000-7000-8000-000000058004",
+  "error": {
+    "code": "REVIEW_RECOVERY_BLOCKED",
+    "message": "the original review requires inspection before further recovery",
+    "retryable": false,
+    "details": {
+      "request_ref": "018f0000-0000-7000-8000-000000058001",
+      "reason": "authority_unavailable",
+      "required_action": "inspect_original_operation"
+    }
+  }
+}

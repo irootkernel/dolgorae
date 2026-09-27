@@ -27,7 +27,17 @@
           "type": "boolean"
         },
         "command": {
-          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+            },
+            {
+              "enum": [
+                "specialist.review-inspect",
+                "specialist.review-recover"
+              ]
+            }
+          ]
         },
         "invocation_id": {
           "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
@@ -57,7 +67,17 @@
               "const": true
             },
             "command": {
-              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+              "anyOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+                },
+                {
+                  "enum": [
+                    "specialist.review-inspect",
+                    "specialist.review-recover"
+                  ]
+                }
+              ]
             },
             "invocation_id": {
               "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
@@ -84,6 +104,9 @@
                 },
                 {
                   "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_collect_result"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/one-shot-review-observation/v1"
                 }
               ]
             }
@@ -979,6 +1002,25 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "specialist.review-inspect",
+                  "specialist.review-recover"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/one-shot-review-observation/v1"
+              }
+            }
+          }
         }
       ]
     },
@@ -1074,7 +1116,17 @@
               "const": false
             },
             "command": {
-              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+              "anyOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+                },
+                {
+                  "enum": [
+                    "specialist.review-inspect",
+                    "specialist.review-recover"
+                  ]
+                }
+              ]
             },
             "invocation_id": {
               "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"

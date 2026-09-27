@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "owner": {
+    "workspace_id": "workspace-example",
+    "request_ref": "018f0000-0000-7000-8000-000000058001"
+  },
+  "server_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "server_epoch": 1,
+  "launch_token": null,
+  "phase": "reserved",
+  "state": null
+}

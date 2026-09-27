@@ -1,6 +1,7 @@
 //! Durable External Specialist Engagement authority.
 
 use crate::controller::{CredentialCarrier, authorize_controller};
+use crate::global_runtime::GlobalProfileBinding;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
 use crate::review_output::{ReviewExecution, ReviewOutputDiagnostic, attach_execution, diagnostic};
@@ -11,7 +12,9 @@ use crate::specialist::{
     ReviewerRuntimePlan, validate_reviewer_output, validate_reviewer_output_v3,
 };
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt as _;
@@ -21,7 +24,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EngagementBarrier {
@@ -158,6 +161,58 @@ impl From<(RuntimeOutcome, Option<Value>)> for TaskExecution {
 pub struct CollectedReview {
     pub artifact_id: Uuid,
     pub output: Value,
+}
+
+/// Private coordinator input. This is never a public inspection projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OneShotOperationInput {
+    pub request_ref: Uuid,
+    pub workspace_id: String,
+    pub request: Value,
+    pub profile: String,
+    pub recovery_controller: ControllerBinding,
+    pub carrier_root: PathBuf,
+    pub temporary_server: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum OneShotTerminal {
+    Succeeded { result: Value },
+    Failed { safe_error_code: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OneShotOperation {
+    pub schema: String,
+    pub input: OneShotOperationInput,
+    pub request_sha256: String,
+    pub input_sha256: String,
+    pub global_profile_binding: Option<GlobalProfileBinding>,
+    pub capture_ref: Option<Uuid>,
+    pub engagement_id: Option<Uuid>,
+    pub terminal: Option<OneShotTerminal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OneShotTaskSnapshot {
+    pub task_id: Uuid,
+    pub specialist_run_id: Uuid,
+    pub state: String,
+    pub safe_error_code: Option<String>,
+    pub diagnostic: Option<ReviewOutputDiagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OneShotObservation {
+    /// Private receipt from the same SQLite snapshot as the relational facts.
+    pub operation: OneShotOperation,
+    pub engagement: Option<EngagementSnapshot>,
+    pub task: Option<OneShotTaskSnapshot>,
+    pub artifact: Option<CollectedReview>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -433,7 +488,7 @@ impl EngagementStore {
                         "orchestration v1 migration violated a foreign key",
                     ));
                 }
-            } else if !["2", "3", "4"].contains(&locked_observed.as_str()) {
+            } else if !["2", "3", "4", "5"].contains(&locked_observed.as_str()) {
                 return Err(MachineError::new(
                     "ORCHESTRATION_SCHEMA_UNSUPPORTED",
                     "orchestration schema is not supported",
@@ -445,7 +500,7 @@ impl EngagementStore {
             connection
                 .execute_batch("PRAGMA foreign_keys=ON;")
                 .map_err(internal)?;
-        } else if observed != "2" && observed != "3" && observed != SCHEMA_VERSION.to_string() {
+        } else if !["2", "3", "4", "5"].contains(&observed.as_str()) {
             return Err(MachineError::new(
                 "ORCHESTRATION_SCHEMA_UNSUPPORTED",
                 "orchestration schema is not supported",
@@ -464,6 +519,7 @@ impl EngagementStore {
             migrate_v2_to_v3(&mut connection)?;
         }
         migrate_v3_to_v4(&mut connection)?;
+        migrate_v4_to_v5(&mut connection)?;
         connection
             .execute_batch(
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_active_external_task_per_member
@@ -474,11 +530,239 @@ impl EngagementStore {
         Ok(Self { connection, faults })
     }
 
+    /// Observation never creates storage, runs a migration, or replays an operation.
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self, MachineError> {
+        if !path.is_absolute() {
+            return Err(invalid(
+                "database",
+                "orchestration database path must be absolute",
+            ));
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(internal)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(internal)?;
+        let observed: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if !["1", "2", "3", "4", "5"].contains(&observed.as_str()) {
+            return Err(MachineError::new(
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "orchestration schema is not supported",
+                false,
+                serde_json::json!({"observed":observed}),
+            ));
+        }
+        Ok(Self {
+            connection,
+            faults: Arc::new(NoEngagementFaults),
+        })
+    }
+
+    pub(crate) fn reserve_one_shot(
+        &mut self,
+        input: &OneShotOperationInput,
+    ) -> Result<(OneShotOperation, bool), MachineError> {
+        validate_one_shot_input(input)?;
+        let input_sha256 = digest_value(&serde_json::to_value(input).map_err(internal)?)?;
+        let transaction = self.transaction()?;
+        if let Some(existing) = one_shot_in(&transaction, input.request_ref)? {
+            if existing.input != *input || existing.input_sha256 != input_sha256 {
+                return Err(one_shot_conflict());
+            }
+            return Ok((existing, false));
+        }
+        let operation = OneShotOperation {
+            schema: "dolgorae-one-shot-operation/v1".to_owned(),
+            input: input.clone(),
+            request_sha256: digest_value(&input.request)?,
+            input_sha256,
+            global_profile_binding: None,
+            capture_ref: None,
+            engagement_id: None,
+            terminal: None,
+        };
+        let value = canonical_string(&serde_json::to_value(&operation).map_err(internal)?)?;
+        transaction.execute(
+            "INSERT INTO one_shot_operations(request_ref,receipt_json,receipt_sha256,engagement_id) VALUES(?1,?2,?3,NULL)",
+            params![input.request_ref.to_string(), value, sha256_hex(value.as_bytes())],
+        ).map_err(internal)?;
+        transaction.commit().map_err(internal)?;
+        Ok((operation, true))
+    }
+
+    pub(crate) fn one_shot(
+        &self,
+        request_ref: Uuid,
+    ) -> Result<Option<OneShotOperation>, MachineError> {
+        one_shot_in(&self.connection, request_ref)
+    }
+
+    pub(crate) fn bind_one_shot_profile(
+        &mut self,
+        request_ref: Uuid,
+        binding: &GlobalProfileBinding,
+    ) -> Result<(), MachineError> {
+        binding.validate_for_recovery()?;
+        self.update_one_shot(request_ref, |operation| {
+            if operation.input.profile != binding.selected_name {
+                return Err(one_shot_conflict());
+            }
+            bind_once(&mut operation.global_profile_binding, binding.clone())
+        })
+    }
+
+    /// Reservation is not proof that a capture was published.
+    pub(crate) fn reserve_one_shot_capture(
+        &mut self,
+        request_ref: Uuid,
+        capture_ref: Uuid,
+    ) -> Result<(), MachineError> {
+        if capture_ref.get_version_num() != 7 {
+            return Err(invalid("capture_ref", "capture reference must be UUIDv7"));
+        }
+        self.update_one_shot(request_ref, |operation| {
+            bind_once(&mut operation.capture_ref, capture_ref)
+        })
+    }
+
+    pub(crate) fn finish_one_shot(
+        &mut self,
+        request_ref: Uuid,
+        terminal: &OneShotTerminal,
+    ) -> Result<(), MachineError> {
+        match terminal {
+            OneShotTerminal::Succeeded { result } if !result.is_object() => {
+                return Err(invalid("result", "one-shot result must be an object"));
+            }
+            OneShotTerminal::Failed { safe_error_code }
+                if !crate::machine::registered_errors().contains_key(safe_error_code.as_str()) =>
+            {
+                return Err(invalid(
+                    "safe_error_code",
+                    "one-shot error code must be registered",
+                ));
+            }
+            _ => {}
+        }
+        self.update_one_shot(request_ref, |operation| {
+            bind_once(&mut operation.terminal, terminal.clone())
+        })
+    }
+
+    fn update_one_shot(
+        &mut self,
+        request_ref: Uuid,
+        update: impl FnOnce(&mut OneShotOperation) -> Result<(), MachineError>,
+    ) -> Result<(), MachineError> {
+        let transaction = self.transaction()?;
+        let mut operation = one_shot_in(&transaction, request_ref)?.ok_or_else(not_found)?;
+        update(&mut operation)?;
+        write_one_shot(&transaction, &operation)?;
+        transaction.commit().map_err(internal)
+    }
+
+    pub(crate) fn observe_one_shot(
+        &self,
+        request_ref: Uuid,
+    ) -> Result<Option<OneShotObservation>, MachineError> {
+        let transaction = self.connection.unchecked_transaction().map_err(internal)?;
+        let Some(operation) = one_shot_in(&transaction, request_ref)? else {
+            return Ok(None);
+        };
+        let mut observation = OneShotObservation {
+            operation: operation.clone(),
+            engagement: None,
+            task: None,
+            artifact: None,
+        };
+        if let Some(engagement_id) = operation.engagement_id {
+            let (workspace, kind): (String, String) = transaction
+                .query_row(
+                    "SELECT workspace_id,authority_kind FROM engagements WHERE engagement_id=?1",
+                    [engagement_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(internal)?;
+            if workspace != operation.input.workspace_id || kind != "legacy_one_shot" {
+                return Err(integrity("one-shot engagement binding does not match"));
+            }
+            let engagement = snapshot_in(&transaction, engagement_id)?;
+            if let Some(task_id) = engagement.task_id {
+                let (run_id, state, safe_error_code, diagnostic_json): (String, String, Option<String>, Option<String>) = transaction.query_row(
+                    "SELECT specialist_run_id,state,safe_error_code,diagnostic_json FROM tasks WHERE task_id=?1 AND engagement_id=?2",
+                    params![task_id.to_string(), engagement_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).map_err(internal)?;
+                let specialist_run_id = run_id.parse().map_err(internal)?;
+                if engagement.specialist_run_id != Some(specialist_run_id) {
+                    return Err(integrity("one-shot task binding does not match"));
+                }
+                observation.task = Some(OneShotTaskSnapshot {
+                    task_id,
+                    specialist_run_id,
+                    state,
+                    safe_error_code,
+                    diagnostic: diagnostic_json
+                        .map(|value| serde_json::from_str(&value).map_err(internal))
+                        .transpose()?,
+                });
+                // Legacy one-shot publication binds its sole artifact to the
+                // engagement; task_id is populated by the reusable facade.
+                let artifact: Option<(String, String)> = transaction.query_row(
+                    "SELECT artifact_id,canonical_json FROM artifacts WHERE engagement_id=?2 AND (task_id=?1 OR task_id IS NULL)",
+                    params![task_id.to_string(), engagement_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional().map_err(internal)?;
+                observation.artifact = artifact
+                    .map(|(id, output)| -> Result<CollectedReview, MachineError> {
+                        Ok(CollectedReview {
+                            artifact_id: id.parse().map_err(internal)?,
+                            output: serde_json::from_str(&output).map_err(internal)?,
+                        })
+                    })
+                    .transpose()?;
+            }
+            observation.engagement = Some(engagement);
+        }
+        Ok(Some(observation))
+    }
+
+    pub(crate) fn open_one_shot_engagement(
+        &mut self,
+        request_ref: Uuid,
+        controller_sha256: &str,
+        idempotency_key: &str,
+    ) -> Result<EngagementSnapshot, MachineError> {
+        let operation = self.one_shot(request_ref)?.ok_or_else(not_found)?;
+        self.open_engagement_bound(
+            &operation.input.workspace_id,
+            controller_sha256,
+            idempotency_key,
+            Some(request_ref),
+        )
+    }
+
     pub fn open_engagement(
         &mut self,
         workspace_id: &str,
         controller_sha256: &str,
         idempotency_key: &str,
+    ) -> Result<EngagementSnapshot, MachineError> {
+        self.open_engagement_bound(workspace_id, controller_sha256, idempotency_key, None)
+    }
+
+    fn open_engagement_bound(
+        &mut self,
+        workspace_id: &str,
+        controller_sha256: &str,
+        idempotency_key: &str,
+        request_ref: Option<Uuid>,
     ) -> Result<EngagementSnapshot, MachineError> {
         checked(workspace_id, 256, "workspace_id")?;
         digest(controller_sha256, "controller_sha256")?;
@@ -490,6 +774,12 @@ impl EngagementStore {
         if let Some(replay) =
             replay::<EngagementSnapshot>(&self.connection, "open", idempotency_key, &request)?
         {
+            if let Some(reference) = request_ref {
+                let operation = self.one_shot(reference)?.ok_or_else(not_found)?;
+                if operation.engagement_id != Some(replay.engagement_id) {
+                    return Err(one_shot_conflict());
+                }
+            }
             return Ok(replay);
         }
         let engagement_id = Uuid::now_v7();
@@ -515,6 +805,14 @@ impl EngagementStore {
             .map_err(internal)?;
         append_event(&transaction, engagement_id, "opened", &request)?;
         record(&transaction, "open", idempotency_key, &request, &result)?;
+        if let Some(reference) = request_ref {
+            let mut operation = one_shot_in(&transaction, reference)?.ok_or_else(not_found)?;
+            if operation.terminal.is_some() {
+                return Err(one_shot_conflict());
+            }
+            bind_once(&mut operation.engagement_id, engagement_id)?;
+            write_one_shot(&transaction, &operation)?;
+        }
         commit_with(
             &faults,
             transaction,
@@ -3089,7 +3387,7 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
                 "orchestration v2 migration violated a foreign key",
             ));
         }
-    } else if observed != "3" && observed != SCHEMA_VERSION.to_string() {
+    } else if !["3", "4", "5"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -3130,7 +3428,7 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
              UPDATE metadata SET value='4' WHERE key='schema_version';",
             )
             .map_err(internal)?;
-    } else if observed != SCHEMA_VERSION.to_string() {
+    } else if !["4", "5"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -3139,6 +3437,136 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
         ));
     }
     transaction.commit().map_err(internal)
+}
+
+fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), MachineError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let observed: String = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if !["4", "5"].contains(&observed.as_str()) {
+        return Err(MachineError::new(
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+            "orchestration schema is not supported",
+            false,
+            serde_json::json!({"observed":observed}),
+        ));
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS one_shot_operations(
+           request_ref TEXT PRIMARY KEY,
+           receipt_json TEXT NOT NULL,
+           receipt_sha256 TEXT NOT NULL,
+           engagement_id TEXT UNIQUE,
+           FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+         ) STRICT;
+         UPDATE metadata SET value='5' WHERE key='schema_version';",
+        )
+        .map_err(internal)?;
+    transaction.commit().map_err(internal)
+}
+
+fn validate_one_shot_input(input: &OneShotOperationInput) -> Result<(), MachineError> {
+    if input.request_ref.get_version_num() != 7 {
+        return Err(invalid("request_ref", "one-shot reference must be UUIDv7"));
+    }
+    checked(&input.workspace_id, 256, "workspace_id")?;
+    checked(&input.profile, 128, "profile")?;
+    digest(
+        &input.recovery_controller.capability_sha256,
+        "capability_sha256",
+    )?;
+    if !input.carrier_root.is_absolute() || input.carrier_root.to_str().is_none() {
+        return Err(invalid(
+            "carrier_root",
+            "one-shot carrier root must be an absolute UTF-8 path",
+        ));
+    }
+    if !input.request.is_object() || canonical_json(&input.request)?.len() > 1_048_576 {
+        return Err(invalid(
+            "request",
+            "one-shot request must be an object of at most 1048576 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn one_shot_conflict() -> MachineError {
+    MachineError::new(
+        "IDEMPOTENCY_CONFLICT",
+        "one-shot reference or binding was already used with different input",
+        false,
+        serde_json::json!({"required_action":"use_original_input_or_new_key"}),
+    )
+}
+
+fn bind_once<T: PartialEq>(slot: &mut Option<T>, value: T) -> Result<(), MachineError> {
+    match slot {
+        Some(existing) if *existing != value => Err(one_shot_conflict()),
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(value);
+            Ok(())
+        }
+    }
+}
+
+fn one_shot_in(
+    connection: &Connection,
+    request_ref: Uuid,
+) -> Result<Option<OneShotOperation>, MachineError> {
+    let table_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='one_shot_operations')",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    if !table_exists {
+        return Ok(None);
+    }
+    let row: Option<(String, String, Option<String>)> = connection.query_row(
+        "SELECT receipt_json,receipt_sha256,engagement_id FROM one_shot_operations WHERE request_ref=?1",
+        [request_ref.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(internal)?;
+    let Some((json, digest, engagement_id)) = row else {
+        return Ok(None);
+    };
+    if sha256_hex(json.as_bytes()) != digest {
+        return Err(integrity("one-shot receipt digest does not match"));
+    }
+    let operation: OneShotOperation =
+        serde_json::from_str(&json).map_err(|_| integrity("one-shot receipt is invalid"))?;
+    validate_one_shot_input(&operation.input)?;
+    if operation.schema != "dolgorae-one-shot-operation/v1"
+        || operation.input.request_ref != request_ref
+        || operation.request_sha256 != digest_value(&operation.input.request)?
+        || operation.input_sha256
+            != digest_value(&serde_json::to_value(&operation.input).map_err(internal)?)?
+        || operation.engagement_id.map(|id| id.to_string()) != engagement_id
+    {
+        return Err(integrity("one-shot receipt binding does not match"));
+    }
+    Ok(Some(operation))
+}
+
+fn write_one_shot(
+    connection: &Connection,
+    operation: &OneShotOperation,
+) -> Result<(), MachineError> {
+    let json = canonical_string(&serde_json::to_value(operation).map_err(internal)?)?;
+    let changed = connection.execute(
+        "UPDATE one_shot_operations SET receipt_json=?2,receipt_sha256=?3,engagement_id=?4 WHERE request_ref=?1",
+        params![operation.input.request_ref.to_string(), json, sha256_hex(json.as_bytes()), operation.engagement_id.map(|id| id.to_string())],
+    ).map_err(internal)?;
+    if changed != 1 {
+        return Err(not_found());
+    }
+    Ok(())
 }
 
 fn commit_with(
@@ -3679,6 +4107,400 @@ mod tests {
             },
             capability_sha256: "e".repeat(64),
         }
+    }
+
+    fn one_shot_input(root: &Path) -> OneShotOperationInput {
+        OneShotOperationInput {
+            request_ref: Uuid::now_v7(),
+            workspace_id: "workspace".to_owned(),
+            request: serde_json::json!({"version":3,"target":{"kind":"head"},"brief":"Check completion"}),
+            profile: "reviewer".to_owned(),
+            recovery_controller: owner_binding(),
+            carrier_root: root.join("private-carriers"),
+            temporary_server: true,
+        }
+    }
+
+    #[test]
+    fn one_shot_reservation_preserves_every_immutable_input_and_rejects_drift() {
+        let (mut store, root) = store();
+        let input = one_shot_input(&root);
+        let (reserved, created) = store.reserve_one_shot(&input).unwrap();
+        assert!(created);
+        assert_eq!(
+            store.reserve_one_shot(&input).unwrap(),
+            (reserved.clone(), false)
+        );
+        let mut changes = Vec::new();
+        let mut changed = input.clone();
+        changed.workspace_id.push('x');
+        changes.push(changed);
+        let mut changed = input.clone();
+        changed.request["brief"] = Value::String("different".to_owned());
+        changes.push(changed);
+        let mut changed = input.clone();
+        changed.profile.push('x');
+        changes.push(changed);
+        let mut changed = input.clone();
+        changed.recovery_controller.identity.instance_id.push('x');
+        changes.push(changed);
+        let mut changed = input.clone();
+        changed.recovery_controller.capability_sha256 = "f".repeat(64);
+        changes.push(changed);
+        let mut changed = input.clone();
+        changed.carrier_root.push("other");
+        changes.push(changed);
+        let mut changed = input.clone();
+        changed.temporary_server = false;
+        changes.push(changed);
+        for changed in changes {
+            assert_eq!(
+                store.reserve_one_shot(&changed).unwrap_err().code,
+                "IDEMPOTENCY_CONFLICT"
+            );
+            assert_eq!(
+                store.one_shot(input.request_ref).unwrap(),
+                Some(reserved.clone())
+            );
+        }
+        let capture = Uuid::now_v7();
+        store
+            .reserve_one_shot_capture(input.request_ref, capture)
+            .unwrap();
+        store
+            .reserve_one_shot_capture(input.request_ref, capture)
+            .unwrap();
+        assert_eq!(
+            store
+                .reserve_one_shot_capture(input.request_ref, Uuid::now_v7())
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let terminal = OneShotTerminal::Failed {
+            safe_error_code: "REVIEW_OUTPUT_INVALID".to_owned(),
+        };
+        store.finish_one_shot(input.request_ref, &terminal).unwrap();
+        store.finish_one_shot(input.request_ref, &terminal).unwrap();
+        assert_eq!(
+            store
+                .finish_one_shot(
+                    input.request_ref,
+                    &OneShotTerminal::Succeeded {
+                        result: serde_json::json!({})
+                    }
+                )
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        assert!(
+            store
+                .finish_one_shot(
+                    input.request_ref,
+                    &OneShotTerminal::Failed {
+                        safe_error_code: "private provider prose".to_owned()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.one_shot(input.request_ref).unwrap().unwrap().terminal,
+            Some(terminal)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_shot_engagement_binding_is_atomic_across_open_commit_faults() {
+        for barrier in [
+            EngagementBarrier::BeforeOpenCommit,
+            EngagementBarrier::AfterOpenCommit,
+        ] {
+            let (mut initial, root) = store();
+            let input = one_shot_input(&root);
+            initial.reserve_one_shot(&input).unwrap();
+            drop(initial);
+            let mut failed = store_with_fault(&root, barrier);
+            assert!(
+                failed
+                    .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "one-shot-open")
+                    .is_err()
+            );
+            drop(failed);
+            let mut restarted = reopen(&root);
+            let observed = restarted.one_shot(input.request_ref).unwrap().unwrap();
+            let count: i64 = restarted
+                .connection
+                .query_row("SELECT COUNT(*) FROM engagements", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                count,
+                i64::from(barrier == EngagementBarrier::AfterOpenCommit)
+            );
+            assert_eq!(
+                observed.engagement_id.is_some(),
+                barrier == EngagementBarrier::AfterOpenCommit
+            );
+            let opened = restarted
+                .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "one-shot-open")
+                .unwrap();
+            assert_eq!(
+                restarted
+                    .one_shot(input.request_ref)
+                    .unwrap()
+                    .unwrap()
+                    .engagement_id,
+                Some(opened.engagement_id)
+            );
+            if let Some(id) = observed.engagement_id {
+                assert_eq!(id, opened.engagement_id);
+            }
+            assert_eq!(
+                restarted
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM engagements", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert!(
+                restarted
+                    .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "another-open")
+                    .is_err()
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn one_shot_inspection_retains_diagnostic_and_artifact_without_delivering_or_replaying() {
+        for invalid_output in [false, true] {
+            let (mut store, root) = store();
+            let input = one_shot_input(&root);
+            store.reserve_one_shot(&input).unwrap();
+            let opened = store
+                .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "open")
+                .unwrap();
+            let hired = store
+                .hire_reviewer(
+                    opened.engagement_id,
+                    &reviewer_plan("review"),
+                    "hire",
+                    |_, _, _| RuntimeOutcome::Accepted,
+                )
+                .unwrap();
+            let error =
+                crate::review_output::invalid_output(Some("not-json"), None, "invalid_json", "");
+            let task = store
+                .assign(
+                    opened.engagement_id,
+                    hired.specialist_run_id,
+                    &"b".repeat(64),
+                    None,
+                    "assign",
+                    |_| {
+                        if invalid_output {
+                            TaskExecution {
+                                outcome: RuntimeOutcome::Rejected,
+                                value: None,
+                                terminal_error: Some(error),
+                            }
+                        } else {
+                            TaskExecution {
+                                outcome: RuntimeOutcome::Accepted,
+                                value: Some(serde_json::json!({"summary":"original result"})),
+                                terminal_error: None,
+                            }
+                        }
+                    },
+                )
+                .unwrap();
+            let expected = task.terminal_error.as_ref().and_then(diagnostic);
+            let before = store.snapshot(opened.engagement_id).unwrap();
+            let event_count: i64 = store
+                .connection
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            drop(store);
+            let observer =
+                EngagementStore::open_read_only(&root.join("orchestration.sqlite3")).unwrap();
+            for _ in 0..2 {
+                let view = observer
+                    .observe_one_shot(input.request_ref)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(view.operation.input, input);
+                assert_eq!(view.operation.engagement_id, Some(opened.engagement_id));
+                assert_eq!(view.engagement.as_ref(), Some(&before));
+                let observed_task = view.task.unwrap();
+                assert_eq!(observed_task.task_id, task.task_id);
+                if invalid_output {
+                    assert_eq!(observed_task.diagnostic, expected.clone());
+                    assert_eq!(
+                        observed_task.safe_error_code.as_deref(),
+                        Some("REVIEW_OUTPUT_INVALID")
+                    );
+                    assert!(view.artifact.is_none());
+                } else {
+                    assert_eq!(
+                        view.artifact.unwrap().output,
+                        serde_json::json!({"summary":"original result"})
+                    );
+                    assert!(observed_task.diagnostic.is_none());
+                }
+                assert_eq!(
+                    observer
+                        .connection
+                        .query_row("SELECT COUNT(*) FROM delivery_receipts", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    observer
+                        .connection
+                        .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    event_count
+                );
+            }
+            assert!(
+                observer
+                    .connection
+                    .execute("UPDATE metadata SET value='0'", [])
+                    .is_err()
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn one_shot_observation_preserves_unknown_dispatch_without_reconciliation() {
+        let (mut store, root) = store();
+        let input = one_shot_input(&root);
+        store.reserve_one_shot(&input).unwrap();
+        let opened = store
+            .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "open")
+            .unwrap();
+        let hired = store
+            .hire_reviewer(
+                opened.engagement_id,
+                &reviewer_plan("review"),
+                "hire",
+                |_, _, _| RuntimeOutcome::Accepted,
+            )
+            .unwrap();
+        drop(store);
+        let mut interrupted =
+            store_with_fault(&root, EngagementBarrier::AfterTaskReservationCommit);
+        assert!(
+            interrupted
+                .assign(
+                    opened.engagement_id,
+                    hired.specialist_run_id,
+                    &"b".repeat(64),
+                    None,
+                    "assign",
+                    |_| -> TaskExecution { panic!("fault must precede dispatch") },
+                )
+                .is_err()
+        );
+        drop(interrupted);
+        let observer =
+            EngagementStore::open_read_only(&root.join("orchestration.sqlite3")).unwrap();
+        let first = observer
+            .observe_one_shot(input.request_ref)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.engagement.as_ref().unwrap().state, "executing");
+        assert_eq!(first.task.as_ref().unwrap().state, "accepted");
+        assert!(first.artifact.is_none());
+        assert_eq!(
+            observer.observe_one_shot(input.request_ref).unwrap(),
+            Some(first)
+        );
+        assert!(
+            observer
+                .one_shot(input.request_ref)
+                .unwrap()
+                .unwrap()
+                .terminal
+                .is_none()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_shot_read_only_legacy_observation_does_not_migrate_or_create_storage() {
+        let (mut store, root) = store();
+        let existing = store
+            .open_engagement("workspace", &"a".repeat(64), "legacy")
+            .unwrap();
+        store.connection.execute_batch("DROP TABLE one_shot_operations; UPDATE metadata SET value='4' WHERE key='schema_version';").unwrap();
+        drop(store);
+        let database = root.join("orchestration.sqlite3");
+        let observer = EngagementStore::open_read_only(&database).unwrap();
+        assert!(observer.one_shot(Uuid::now_v7()).unwrap().is_none());
+        assert_eq!(observer.snapshot(existing.engagement_id).unwrap(), existing);
+        assert_eq!(
+            observer
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "4"
+        );
+        drop(observer);
+        let migrated = EngagementStore::open(&database).unwrap();
+        assert_eq!(migrated.snapshot(existing.engagement_id).unwrap(), existing);
+        assert!(migrated.one_shot(Uuid::now_v7()).unwrap().is_none());
+        assert_eq!(
+            migrated
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "5"
+        );
+        let missing = root.join("does-not-exist").join("orchestration.sqlite3");
+        assert!(EngagementStore::open_read_only(&missing).is_err());
+        assert!(!missing.parent().unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_shot_receipt_integrity_and_foreign_authority_fail_closed() {
+        let (mut store, root) = store();
+        let input = one_shot_input(&root);
+        store.reserve_one_shot(&input).unwrap();
+        let opened = store
+            .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "open")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE engagements SET authority_kind='external_v1' WHERE engagement_id=?1",
+                [opened.engagement_id.to_string()],
+            )
+            .unwrap();
+        assert!(store.observe_one_shot(input.request_ref).is_err());
+        store
+            .connection
+            .execute(
+                "UPDATE one_shot_operations SET receipt_sha256=?1",
+                ["0".repeat(64)],
+            )
+            .unwrap();
+        assert!(store.one_shot(input.request_ref).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn external_open(store: &mut EngagementStore) -> ExternalEngagementSnapshot {
@@ -5666,7 +6488,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         let artifact: (String, String, String, String) = migrated
             .connection
             .query_row(

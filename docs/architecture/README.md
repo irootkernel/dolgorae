@@ -320,6 +320,29 @@ brief and context. The result projection and immutable artifact preserve the
 same criterion assessments, evidence limits, and overall assessment. v1/v2
 coordinator state and result artifacts keep their prior interpretation.
 
+The recoverable CLI carrier retains a caller-supplied request reference and
+Controller binding in an orchestration one-shot operation receipt before Profile
+preparation. This receipt connects existing engagement, Run/task, capture, and
+Profile lifecycle authorities. An operation lock
+serializes the original coordinator and explicit cleanup. Internal aggregate,
+Reviewer and capture-settlement carriers outlive the CLI, while only their
+outer recovery Controller authorizes their use by a fresh process. Inspection
+uses existing-only read-only storage and never invokes collection or replay.
+Engagement allocation and its receipt binding share one transaction; capture
+reservation precedes materialization and does not imply capture publication.
+Recoverable Reviewer starts carry the prepared server state into Run admission;
+they cannot launch a replacement generation before membership registration.
+The existing admission lock checks that the selected generation is still current.
+
+Temporary-server ownership belongs to the Profile lifecycle service. Its
+checked ownership record is written during the existing locked launch PREPARE
+and connects the workspace/request identity to the launch reservation and exact
+generation. Shared-server attachment does not acquire ownership. The stop
+PREPARE validates that ownership under the same locks as generation selection
+and membership admission, then uses the existing verified shutdown path without
+implicit interruption. Unknown pre-publication process identity remains blocked;
+the coordinator must not add a raw PID signalling or independent cleanup path.
+
 The external MCP adapter is intentionally distinct from the later run-bound
 Primary and collaboration bridges. It does not need to prove a Dolgorae source
 Run or source Turn, but it still needs an explicit per-request retry identity.

@@ -135,14 +135,30 @@ completion-aware substitute.
 Keep the native CLI process/result handle while waiting and collect its exit
 and complete envelope. A transport wait ending does not itself cancel accepted
 work, but a host timeout that interrupts or terminates the provider-backed CLI
-can cancel the review or leave its outcome unknown. The current one-shot CLI
-does not provide the public lookup/authority contract needed when both its
-process handle and final response are lost. An engagement ID alone does not
-make the external facade available to that one-shot operation. Preserve known
-evidence and report the recovery gap; do not query private databases or start
-another review as a recovery action. TASK-058 owns the missing public contract.
-Ordinary shared Profile Servers remain alive after review; an idle server is
-not evidence that this invocation owns shutdown authority.
+can cancel the review or leave its outcome unknown. Before starting a recoverable
+review, retain a UUIDv7 reference and a private Controller credential, then pass
+`--request-ref` and `--recovery-controller-file` together. If the process handle
+or response is lost, use `specialist review-inspect --workspace <path>
+--request-ref <saved-reference> --format json` from a new process. An engagement
+ID alone does not grant access through the external facade.
+
+Inspection returns the original result or diagnostic and separate Reviewer,
+engagement, capture, and server states. Check these states even when the initial
+command reports a review error: that error takes precedence over a later cleanup
+failure. An `unknown` observation means the evidence cannot establish the original
+operation; it does not prove that no review ran. Preserve known evidence without
+querying private databases or starting a replacement review as recovery.
+
+For authorized cleanup, use `specialist review-recover` with the same selectors,
+the original `--recovery-controller-file`, and `--action cleanup`. Cleanup closes
+proven terminal members and settles their capture. With the original invocation's
+`--temporary-server` opt-in, it can retire only that invocation's verified server
+generation. Active or uncertain states remain blocked; cleanup never implicitly
+interrupts a Turn. An interrupted stop can also remain blocked when its generation
+or process evidence is incomplete. Missing server state alone does not prove
+retirement. Preserve the observation for diagnosis through the existing lifecycle
+interfaces; do not infer signalling authority from a PID or an idle server.
+Pre-existing shared Profile Servers remain alive.
 
 The current live review drivers do not establish dependable v3 completion
 review with the planned default configuration. Source-tree skill validation
@@ -152,8 +168,8 @@ package. If a required version-matched contract is unavailable, report the gap
 instead of inventing a request shape. Follow
 [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
 for output, recovery, cleanup, installed-package, and live acceptance work.
-Its planned defaults, durable diagnostics, and lookup/cleanup commands become
-operating instructions only after their owning Tasks implement and verify them.
+TASK-059 owns installed-package completeness, and TASK-060 owns the required live
+acceptance campaign; the recovery commands above do not establish either outcome.
 
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,

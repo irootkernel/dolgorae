@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/one-shot-review-observation/v1",
+  "title": "Read-only one-shot review observation and authorized cleanup result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_ref",
+    "request_sha256",
+    "profile",
+    "observation",
+    "outcome",
+    "result",
+    "safe_error_code",
+    "diagnostic",
+    "engagement",
+    "reviewer",
+    "task",
+    "capture",
+    "server",
+    "recovery",
+    "report"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dolgorae-one-shot-review-observation/v1"
+    },
+    "request_ref": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_sha256": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "profile": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "maxLength": 128
+        }
+      ]
+    },
+    "observation": {
+      "enum": [
+        "known",
+        "unknown"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "pending",
+        "succeeded",
+        "failed",
+        "unknown"
+      ]
+    },
+    "result": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/review_result"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/review_result"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/review_result"
+            }
+          ]
+        }
+      ]
+    },
+    "safe_error_code": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+        }
+      ]
+    },
+    "diagnostic": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+        }
+      ]
+    },
+    "engagement": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "engagement_id",
+            "state"
+          ],
+          "properties": {
+            "engagement_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "state": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        }
+      ]
+    },
+    "reviewer": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "state"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "state": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        }
+      ]
+    },
+    "task": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task_id",
+            "state"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "state": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        }
+      ]
+    },
+    "capture": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capture_ref",
+            "revision",
+            "state",
+            "cleanup_pending"
+          ],
+          "properties": {
+            "capture_ref": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "revision": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "state": {
+              "enum": [
+                "active",
+                "settled",
+                "reserved"
+              ]
+            },
+            "cleanup_pending": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "server": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/profile-review-ownership/v1#/$defs/observation"
+        }
+      ]
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "blocked_reasons"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_needed",
+            "available",
+            "blocked"
+          ]
+        },
+        "blocked_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 16,
+          "items": {
+            "enum": [
+              "operation_unknown",
+              "operation_active",
+              "outcome_unknown",
+              "authority_unavailable",
+              "reviewer_active",
+              "reviewer_unknown",
+              "engagement_unknown",
+              "capture_unpublished",
+              "capture_invalid",
+              "server_unknown"
+            ]
+          }
+        }
+      }
+    },
+    "report": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact_id",
+            "verdict"
+          ],
+          "properties": {
+            "artifact_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "verdict": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/verdict"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

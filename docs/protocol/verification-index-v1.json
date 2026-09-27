@@ -85,8 +85,8 @@
         "inactive immutable global Profile Run binding and cross-workspace membership",
         "post-cut workspace-free Profile command contract",
         "Reviewer Runtime Profile excludes recursive external review adapter",
-        "planned explicit Reviewer configuration precedence and invocation-owned Profile Server cleanup",
-        "planned temporary-server ownership from creation through pre-Reviewer preparation failures"
+        "explicit Reviewer configuration precedence and invocation-owned Profile Server cleanup",
+        "temporary-server ownership from creation through pre-Reviewer preparation failures"
       ]
     },
     "SPEC-004": {
@@ -109,7 +109,7 @@
         "on-demand recovery",
         "runtime locator authority outside workspace",
         "independent Reviewer Run and thread identity",
-        "planned caller-retained pre-effect review reference and durable one-shot object correlation"
+        "caller-retained pre-effect review reference and durable one-shot object correlation"
       ]
     },
     "SPEC-005": {
@@ -174,8 +174,8 @@
         "protected settlement owner and terminal receipt carriers",
         "task-aware Specialist Review request on non-TTY stdin",
         "inventory-backed orphan inspect and confirmed cleanup CLI",
-        "planned temporary-review cleanup opt-in and installed skill CLI wait/recovery guidance",
-        "planned public one-shot lookup and explicitly authorized recovery commands"
+        "temporary-review cleanup opt-in; planned installed skill CLI wait/recovery guidance",
+        "public one-shot lookup and explicitly authorized recovery commands"
       ]
     },
     "SPEC-006": {
@@ -250,9 +250,9 @@
         "additive v3 accepted task and criterion-complete result envelopes",
         "orphan-only machine and error v3 envelopes",
         "planned bounded review validation diagnostics and known execution metadata",
-        "planned checked temporary-server cleanup and uncertain outcomes",
+        "checked temporary-server cleanup and uncertain outcomes",
         "planned terminal failure and sanitized diagnostic persistence with identical post-restart projections",
-        "planned checked unknown and recovery-blocked outcomes without fabricated object identity"
+        "checked unknown and recovery-blocked outcomes without fabricated object identity"
       ]
     },
     "SPEC-007": {
@@ -328,7 +328,7 @@
         "external Controller-principal mismatch rejection",
         "one-shot review cancellation and interrupted-unknown no-replay",
         "reusable external engagement recovery after preview hardening",
-        "planned public one-shot recovery after loss of the original CLI and response without a new review or Turn"
+        "public one-shot recovery after loss of the original CLI and response without a new review or Turn"
       ]
     },
     "SPEC-009": {
@@ -546,7 +546,7 @@
         "planned strict structural diagnostics without raw provider output or implicit repair Turns",
         "planned installed schema dependency closure and live defect-detection acceptance",
         "planned failure diagnostic redelivery after first-response loss and restart",
-        "planned one-shot authority boundary for read-only lookup and authorized recovery",
+        "one-shot authority boundary for read-only lookup and authorized recovery",
         "planned integrated response-loss and pre-Reviewer failure acceptance"
       ]
     },
@@ -652,8 +652,8 @@
         "external review facade compiles to a read-only managed-agent Run",
         "external review MCP is distinct from run-bound internal tool transport",
         "Reviewer Agent Configuration identity excludes assigned task content",
-        "planned generation-bound temporary-review server retirement with shared-server preservation",
-        "planned durable launch intent and guarded cleanup for failures before Reviewer allocation"
+        "generation-bound temporary-review server retirement with shared-server preservation",
+        "durable launch intent and guarded cleanup for failures before Reviewer allocation"
       ]
     },
     "SPEC-015": {

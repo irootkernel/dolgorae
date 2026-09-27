@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Add caller-retained one-shot review references, read-only inspection and authorized
+  recovery after CLI loss, with guarded retirement of explicitly owned temporary servers.
+
 - Add a generated-client provider conformance campaign for the frozen 27-method
   public profile, with production-gateway deterministic coverage and verified
   pinned-live Codex Primary/Specialist execution in both approval modes. The

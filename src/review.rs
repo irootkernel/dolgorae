@@ -211,12 +211,19 @@ impl ReviewRequest {
     }
 }
 
-struct EphemeralCarriers {
+pub(crate) struct EphemeralCarriers {
     root: PathBuf,
-    aggregate: PathBuf,
-    reviewer: PathBuf,
-    settlement_owner: PathBuf,
-    terminal_receipt: PathBuf,
+    pub(crate) aggregate: PathBuf,
+    pub(crate) reviewer: PathBuf,
+    pub(crate) settlement_owner: PathBuf,
+    pub(crate) terminal_receipt: PathBuf,
+    retained: bool,
+}
+
+pub(crate) struct DurableReviewContext {
+    pub prepared: crate::semantic::PreparedReviewer,
+    pub carriers: EphemeralCarriers,
+    pub capture_ref: Option<Uuid>,
 }
 
 struct InterruptWatcher {
@@ -299,12 +306,58 @@ impl EphemeralCarriers {
             reviewer,
             settlement_owner,
             terminal_receipt,
+            retained: false,
         })
+    }
+
+    pub(crate) fn retained(root: PathBuf) -> Self {
+        Self {
+            aggregate: root.join("aggregate.json"),
+            reviewer: root.join("reviewer.json"),
+            settlement_owner: root.join("settlement-owner"),
+            terminal_receipt: root.join("terminal-receipt.json"),
+            root,
+            retained: true,
+        }
+    }
+
+    pub(crate) fn create_retained(root: PathBuf) -> Result<Self, MachineError> {
+        fs::create_dir(&root).map_err(internal)?;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(internal)?;
+        let carriers = Self::retained(root);
+        for (path, kind, name) in [
+            (
+                &carriers.aggregate,
+                ControllerKind::WorkflowOrchestrator,
+                "specialist-review",
+            ),
+            (&carriers.reviewer, ControllerKind::Automation, "reviewer"),
+        ] {
+            create_controller_credential(
+                path,
+                kind,
+                format!("{name}-{}", new_uuid_v7()),
+                None,
+                None,
+            )?;
+        }
+        File::open(&carriers.root)
+            .and_then(|file| file.sync_all())
+            .map_err(internal)?;
+        if let Some(parent) = carriers.root.parent() {
+            File::open(parent)
+                .and_then(|file| file.sync_all())
+                .map_err(internal)?;
+        }
+        Ok(carriers)
     }
 }
 
 impl Drop for EphemeralCarriers {
     fn drop(&mut self) {
+        if self.retained {
+            return;
+        }
         let _ = fs::remove_file(&self.aggregate);
         let _ = fs::remove_file(&self.reviewer);
         let _ = fs::remove_file(&self.settlement_owner);
@@ -317,6 +370,31 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
     let workspace = crate::cli::option_path(arguments, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
     let profile = required(arguments, "--profile")?;
+    let recovery = optional_value(arguments, "--request-ref")?
+        .map(|reference| {
+            let reference = crate::review_recovery::parse_reference(&reference)?;
+            let path = crate::cli::option_path(arguments, "--recovery-controller-file")
+                .map_err(|reason| {
+                    MachineError::invalid_argument("--recovery-controller-file", reason)
+                })?
+                .ok_or_else(|| {
+                    MachineError::invalid_argument(
+                        "--recovery-controller-file",
+                        "recovery credential is required",
+                    )
+                })?;
+            if !path.is_absolute() {
+                return Err(MachineError::invalid_argument(
+                    "--recovery-controller-file",
+                    "credential path must be absolute",
+                ));
+            }
+            Ok((reference, path))
+        })
+        .transpose()?;
+    let temporary = arguments
+        .iter()
+        .any(|argument| argument == "--temporary-server");
     if required(arguments, "--format")? != "json" {
         return Err(MachineError::invalid_argument(
             "--format",
@@ -352,18 +430,38 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                 "stdin does not match the checked v3 review request",
             )
         })?;
-        return execute_v3(workspace.as_deref(), &profile, &request, new_uuid_v7());
+        return match recovery {
+            Some((reference, credential)) => crate::review_recovery::execute(
+                workspace.as_deref(),
+                &profile,
+                crate::review_recovery::Invocation::Task(request),
+                reference,
+                &credential,
+                temporary,
+            ),
+            None => execute_v3(workspace.as_deref(), &profile, &request, new_uuid_v7()),
+        };
     }
     match (
         optional_value(arguments, "--scope")?,
         optional_value(arguments, "--target-kind")?,
     ) {
-        (Some(scope), None) if scope == "working-tree" => execute(
-            workspace.as_deref(),
-            &profile,
-            &ReviewRequest::fixed(),
-            new_uuid_v7(),
-        ),
+        (Some(scope), None) if scope == "working-tree" => match recovery {
+            Some((reference, credential)) => crate::review_recovery::execute(
+                workspace.as_deref(),
+                &profile,
+                crate::review_recovery::Invocation::Legacy(ReviewRequest::fixed()),
+                reference,
+                &credential,
+                temporary,
+            ),
+            None => execute(
+                workspace.as_deref(),
+                &profile,
+                &ReviewRequest::fixed(),
+                new_uuid_v7(),
+            ),
+        },
         (None, Some(kind)) => {
             let target = ReviewTargetRequest {
                 kind,
@@ -380,13 +478,23 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                 })
                 .transpose()?
                 .unwrap_or(DEFAULT_REVIEW_DEADLINE_SECONDS);
-            execute_scoped(
-                workspace.as_deref(),
-                &profile,
-                &target,
-                deadline_seconds,
-                new_uuid_v7(),
-            )
+            match recovery {
+                Some((reference, credential)) => crate::review_recovery::execute(
+                    workspace.as_deref(),
+                    &profile,
+                    crate::review_recovery::Invocation::Scoped(target, deadline_seconds),
+                    reference,
+                    &credential,
+                    temporary,
+                ),
+                None => execute_scoped(
+                    workspace.as_deref(),
+                    &profile,
+                    &target,
+                    deadline_seconds,
+                    new_uuid_v7(),
+                ),
+            }
         }
         (Some(_), Some(_)) => Err(MachineError::invalid_argument(
             "argv",
@@ -405,6 +513,16 @@ pub fn execute(
     request: &ReviewRequest,
     request_ref: Uuid,
 ) -> Result<Value, MachineError> {
+    execute_legacy_with_context(workspace, profile, request, request_ref, None)
+}
+
+pub(crate) fn execute_legacy_with_context(
+    workspace: Option<&Path>,
+    profile: &str,
+    request: &ReviewRequest,
+    request_ref: Uuid,
+    context: Option<DurableReviewContext>,
+) -> Result<Value, MachineError> {
     install_interrupt_handler()?;
     let interrupt_epoch = INTERRUPT_EPOCH.load(Ordering::SeqCst);
     request.validate()?;
@@ -414,22 +532,37 @@ pub fn execute(
             "external request reference must be UUIDv7",
         ));
     }
-    let prepared = prepare_reviewer(workspace, profile)?;
+    let durable = context.is_some();
+    let (prepared, retained_carriers) = match context {
+        Some(context) => (context.prepared, Some(context.carriers)),
+        None => (prepare_reviewer(workspace, profile)?, None),
+    };
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
     let before = workspace_fingerprint(&prepared.view, &canonical_workspace)?;
-    let carriers = EphemeralCarriers::create(&prepared.state_root)?;
+    let carriers = match retained_carriers {
+        Some(carriers) => carriers,
+        None => EphemeralCarriers::create(&prepared.state_root)?,
+    };
     let aggregate_carrier = CredentialCarrier::open_path(&carriers.aggregate)?;
     let aggregate_binding = binding_from_carrier(&aggregate_carrier, 1)?;
     drop(aggregate_carrier);
     let database = EngagementStore::workspace_database_path(&prepared.state_root);
     let mut store = EngagementStore::open(&database)?;
     let key = |operation: &str| format!("specialist-review:{request_ref}:{operation}");
-    let opened = store.open_engagement(
-        &prepared.view.workspace_id,
-        &aggregate_binding.capability_sha256,
-        &key("open"),
-    )?;
+    let opened = if durable {
+        store.open_one_shot_engagement(
+            request_ref,
+            &aggregate_binding.capability_sha256,
+            &key("open"),
+        )?
+    } else {
+        store.open_engagement(
+            &prepared.view.workspace_id,
+            &aggregate_binding.capability_sha256,
+            &key("open"),
+        )?
+    };
     let review_id = opened.engagement_id;
     let mut reviewer_run_id = None;
     let result = (|| {
@@ -453,6 +586,7 @@ pub fn execute(
                 match start_reviewer_run(
                     &arguments,
                     ReviewerStartContext {
+                        pinned_server: prepared.pinned_server.as_ref(),
                         reserved_run_id: reservation.specialist_run_id,
                         aggregate_binding: binding,
                         plan,
@@ -605,9 +739,9 @@ pub fn execute_scoped(
         workspace,
         profile,
         target,
-        deadline_seconds,
         request_ref,
         &request,
+        None,
         None,
     )
 }
@@ -625,22 +759,23 @@ pub fn execute_v3(
         workspace,
         profile,
         &request.target,
-        request.deadline_seconds,
         request_ref,
         &legacy_shape,
         Some((request, &task)),
+        None,
     )
 }
 
-fn execute_scoped_common(
+pub(crate) fn execute_scoped_common(
     workspace: Option<&Path>,
     profile: &str,
     target: &ReviewTargetRequest,
-    deadline_seconds: u64,
     request_ref: Uuid,
     request: &ReviewRequest,
     v3: Option<(&ReviewRequestV3, &SpecialistTaskRequest)>,
+    context: Option<DurableReviewContext>,
 ) -> Result<Value, MachineError> {
+    let deadline_seconds = request.deadline_seconds;
     install_interrupt_handler()?;
     let interrupt_epoch = INTERRUPT_EPOCH.load(Ordering::SeqCst);
     target.validate()?;
@@ -656,10 +791,21 @@ fn execute_scoped_common(
             "deadline must be between 1 and 3600 seconds",
         ));
     }
-    let prepared = prepare_reviewer(workspace, profile)?;
+    let durable = context.is_some();
+    let (prepared, retained_carriers, reserved_capture) = match context {
+        Some(context) => (
+            context.prepared,
+            Some(context.carriers),
+            context.capture_ref,
+        ),
+        None => (prepare_reviewer(workspace, profile)?, None, None),
+    };
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
-    let carriers = EphemeralCarriers::create(&prepared.state_root)?;
+    let carriers = match retained_carriers {
+        Some(carriers) => carriers,
+        None => EphemeralCarriers::create(&prepared.state_root)?,
+    };
     let aggregate_carrier = CredentialCarrier::open_path(&carriers.aggregate)?;
     let aggregate_binding = binding_from_carrier(&aggregate_carrier, 1)?;
     drop(aggregate_carrier);
@@ -675,17 +821,26 @@ fn execute_scoped_common(
             }
         )
     };
-    let opened = store.open_engagement(
-        &prepared.view.workspace_id,
-        &aggregate_binding.capability_sha256,
-        &key("open"),
-    )?;
+    let opened = if durable {
+        store.open_one_shot_engagement(
+            request_ref,
+            &aggregate_binding.capability_sha256,
+            &key("open"),
+        )?
+    } else {
+        store.open_engagement(
+            &prepared.view.workspace_id,
+            &aggregate_binding.capability_sha256,
+            &key("open"),
+        )?
+    };
     let review_id = opened.engagement_id;
     let capture = capture_review_target(
         &canonical_workspace,
         target,
         review_id,
         &carriers.settlement_owner,
+        reserved_capture,
     );
     let capture = match capture {
         Ok(value) => value,
@@ -752,6 +907,7 @@ fn execute_scoped_common(
                 match start_reviewer_run(
                     &arguments,
                     ReviewerStartContext {
+                        pinned_server: prepared.pinned_server.as_ref(),
                         reserved_run_id: reservation.specialist_run_id,
                         aggregate_binding: binding,
                         plan,
@@ -1055,6 +1211,7 @@ fn capture_review_target(
     target: &ReviewTargetRequest,
     review_id: Uuid,
     owner_file: &Path,
+    reservation: Option<Uuid>,
 ) -> Result<Value, MachineError> {
     let mut arguments = pairs(&[
         ("--workspace", workspace.as_os_str()),
@@ -1066,10 +1223,13 @@ fn capture_review_target(
     if let Some(revision) = &target.revision {
         arguments.extend(pairs(&[("--revision", revision.as_ref())]));
     }
-    crate::review_target::execute(crate::review_target::Operation::Capture, &arguments)
+    match reservation {
+        Some(capture_ref) => crate::review_target::capture_reserved(&arguments, capture_ref),
+        None => crate::review_target::execute(crate::review_target::Operation::Capture, &arguments),
+    }
 }
 
-fn settle_review_target(
+pub(crate) fn settle_review_target(
     workspace_state_root: &Path,
     capture_ref: Uuid,
     review_id: Uuid,
@@ -1077,6 +1237,21 @@ fn settle_review_target(
     evidence_digest: &str,
     carriers: &EphemeralCarriers,
 ) -> Result<Value, MachineError> {
+    if crate::review_target::observe_capture_in_state_root(
+        workspace_state_root,
+        capture_ref,
+        review_id,
+    )?
+    .is_some_and(|capture| capture["state"] == "settled")
+    {
+        return crate::review_target::settle_capture_in_state_root(
+            workspace_state_root,
+            capture_ref,
+            1,
+            &carriers.settlement_owner,
+            &carriers.terminal_receipt,
+        );
+    }
     let receipt = json!({
         "schema":"dolgorae-review-target-terminal-receipt/v1",
         "backend_kind":"dolgorae_specialist_review",
@@ -1091,6 +1266,7 @@ fn settle_review_target(
         .create(true)
         .truncate(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&carriers.terminal_receipt)
         .map_err(internal)?;
     file.write_all(&bytes).map_err(internal)?;
@@ -1469,7 +1645,7 @@ fn reviewer_send_arguments(
     values
 }
 
-fn close_reviewer(
+pub(crate) fn close_reviewer(
     workspace: &Path,
     controller: &Path,
     run_id: Uuid,
@@ -1975,6 +2151,140 @@ fn internal(error: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_observes_partial_publication_and_replays_interrupted_settlement() {
+        fn write_private_fixture(path: &Path, bytes: &[u8]) {
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fn digest(bytes: &[u8]) -> String {
+            format!("{:x}", Sha256::digest(bytes))
+        }
+        let root = std::env::temp_dir().join(format!("dolgorae-target-recovery-{}", new_uuid_v7()));
+        let capture_ref = new_uuid_v7();
+        let engagement = new_uuid_v7();
+        let targets = root.join("review-targets");
+        fs::create_dir_all(&targets).unwrap();
+        let partial = targets.join(format!(".capture-{capture_ref}"));
+        fs::create_dir(&partial).unwrap();
+        assert!(
+            crate::review_target::observe_capture_in_state_root(&root, capture_ref, engagement)
+                .is_err()
+        );
+        assert!(partial.exists());
+        fs::remove_dir(&partial).unwrap();
+        assert!(
+            crate::review_target::observe_capture_in_state_root(&root, capture_ref, engagement)
+                .unwrap()
+                .is_none()
+        );
+        let published = targets.join(capture_ref.to_string());
+        fs::create_dir(&published).unwrap();
+        let carriers = EphemeralCarriers::retained(root.clone());
+        let owner = carriers.settlement_owner.clone();
+        let receipt_path = carriers.terminal_receipt.clone();
+        write_private_fixture(&owner, b"owner-secret");
+        let receipt = serde_json::to_vec(&json!({
+            "schema": "dolgorae-review-target-terminal-receipt/v1",
+            "backend_kind": "dolgorae_specialist_review",
+            "backend_lifecycle_id": engagement,
+            "terminal_state": "completed",
+            "state_revision": 1,
+            "evidence_digest": "a".repeat(64),
+        }))
+        .unwrap();
+        write_private_fixture(&receipt_path, &receipt);
+        let record = json!({
+            "schema": "dolgorae-review-target-capture-record/v1",
+            "capture_ref": capture_ref,
+            "revision": 2,
+            "backend_kind": "dolgorae_specialist_review",
+            "backend_lifecycle_id": engagement,
+            "owner_digest": digest(b"owner-secret"),
+            "manifest_digest": "b".repeat(64),
+            "whole_target_digest": "c".repeat(64),
+            "settled": true,
+            "accepted_receipt_digest": digest(&receipt),
+        });
+        write_private_fixture(
+            &published.join("record.json"),
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        let pending = published.join(".settlement-source");
+        // A committed settlement can still fail to remove its source. The
+        // coordinator's failure path must not replace the accepted receipt.
+        fs::write(&pending, b"cleanup obstruction").unwrap();
+        assert!(
+            settle_review_target(
+                &root,
+                capture_ref,
+                engagement,
+                "failed",
+                &"d".repeat(64),
+                &carriers,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&receipt_path).unwrap(), receipt);
+        fs::remove_file(&pending).unwrap();
+        fs::create_dir(&pending).unwrap();
+        fs::write(pending.join("retained"), b"captured bytes").unwrap();
+        let observed =
+            crate::review_target::observe_capture_in_state_root(&root, capture_ref, engagement)
+                .unwrap()
+                .unwrap();
+        assert_eq!(observed["state"], "settled");
+        assert_eq!(observed["cleanup_pending"], true);
+        assert!(pending.exists());
+        assert!(
+            crate::review_target::observe_capture_in_state_root(&root, capture_ref, new_uuid_v7())
+                .is_err()
+        );
+        let replay = settle_review_target(
+            &root,
+            capture_ref,
+            engagement,
+            "failed",
+            &"d".repeat(64),
+            &carriers,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&receipt_path).unwrap(), receipt);
+        assert_eq!(replay["replay"], true);
+        assert!(!pending.exists());
+        assert_eq!(
+            crate::review_target::observe_capture_in_state_root(&root, capture_ref, engagement)
+                .unwrap()
+                .unwrap()["cleanup_pending"],
+            false
+        );
+        let mut active_record = record;
+        active_record["settled"] = json!(false);
+        active_record["revision"] = json!(1);
+        active_record["accepted_receipt_digest"] = Value::Null;
+        write_private_fixture(
+            &published.join("record.json"),
+            &serde_json::to_vec(&active_record).unwrap(),
+        );
+        fs::remove_file(&receipt_path).unwrap();
+        let unrelated = root.join("unrelated");
+        fs::write(&unrelated, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&unrelated, &receipt_path).unwrap();
+        assert!(
+            settle_review_target(
+                &root,
+                capture_ref,
+                engagement,
+                "failed",
+                &"d".repeat(64),
+                &carriers,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(unrelated).unwrap(), b"unchanged");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn scoped_review_error_codes_match_the_checked_contract() {

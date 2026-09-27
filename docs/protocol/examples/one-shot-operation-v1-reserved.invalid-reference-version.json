@@ -1,0 +1,53 @@
+{
+  "schema": "dolgorae-one-shot-operation/v1",
+  "input": {
+    "request_ref": "018f0000-0000-4000-8000-000000058001",
+    "workspace_id": "workspace-example",
+    "request": {
+      "schema": "dolgorae-specialist-review-request/v3",
+      "operation": "review_target",
+      "target": {
+        "kind": "staged"
+      },
+      "purpose": "completion",
+      "brief": "Verify the approved completion criterion.",
+      "contexts": [
+        {
+          "id": "requirements",
+          "content": "C-1: task content is absent from stable Role instructions.",
+          "provenance": "approved specification revision abc123"
+        }
+      ],
+      "criteria": [
+        {
+          "id": "C-1",
+          "statement": "Task content is absent from stable Role instructions.",
+          "source_context_ids": [
+            "requirements"
+          ]
+        }
+      ],
+      "expected_output": "structured_review_v3",
+      "deadline_seconds": 600
+    },
+    "profile": "reviewer",
+    "recovery_controller": {
+      "identity": {
+        "controller_id": "018f0000-0000-7000-8000-000000058005",
+        "kind": "workflow_orchestrator",
+        "instance_id": "review-workflow",
+        "subject_id": "review-owner",
+        "generation": 1
+      },
+      "capability_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "carrier_root": "/example/state/orchestration/one-shot-018f0000-0000-7000-8000-000000058001",
+    "temporary_server": true
+  },
+  "request_sha256": "f56c7e7dc2f67f3ee5f27ea1123f7bae3c094cb67c7dc30696be8d0973f3f583",
+  "input_sha256": "d6e9805c2030be03943b071ca48d9619e641679f0ee11e3e5fcb2b165988a8db",
+  "global_profile_binding": null,
+  "capture_ref": null,
+  "engagement_id": null,
+  "terminal": null
+}

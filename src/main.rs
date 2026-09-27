@@ -568,6 +568,25 @@ fn execute(cli: Cli) -> ExitCode {
         };
     }
     if let Command::Specialist {
+        command: SpecialistCommand::ReviewInspect(args) | SpecialistCommand::ReviewRecover(args),
+    } = &cli.command
+    {
+        return match dolgorae::review_recovery::execute_cli(command_name, &args.args) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed review observation")
+                    );
+                } else {
+                    render_json(&SuccessEnvelope::new(command_name, data));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
+    if let Command::Specialist {
         command: SpecialistCommand::Policy { command },
     } = &cli.command
     {

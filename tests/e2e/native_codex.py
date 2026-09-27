@@ -72,6 +72,7 @@ FAKE_APP_SERVER = {fake_app_server}
 SCENARIO = {scenario}
 CODEX_HOME = {codex_home}
 TRANSCRIPT = {transcript}
+TURN_GATE = {turn_gate}
 LISTEN_PREFIX = "unix://"
 
 arguments = sys.argv[1:]
@@ -79,7 +80,7 @@ if arguments == ["--version"]:
     print("codex-cli {version}")
     raise SystemExit(0)
 if "generate-json-schema" in arguments:
-    raise SystemExit(subprocess.run([SCHEMA_SOURCE, *arguments], check=False).returncode)
+    raise SystemExit(subprocess.run([SCHEMA_SOURCE, *arguments], check=False, timeout=60).returncode)
 if "app-server" in arguments and "--listen" in arguments:
     target = arguments[arguments.index("--listen") + 1]
     if not target.startswith(LISTEN_PREFIX):
@@ -87,6 +88,23 @@ if "app-server" in arguments and "--listen" in arguments:
     sys.path.insert(0, FAKE_APP_SERVER)
     import scenario as scenario_module
     import server as server_module
+
+    if TURN_GATE is not None:
+        import time
+        original_dispatch = server_module.FakeAppServer.dispatch
+
+        def gated_dispatch(server, connection, message):
+            if message.get("method") == "turn/start":
+                reached, release = map(pathlib.Path, TURN_GATE)
+                reached.write_text("turn/start received\\n", encoding="utf-8")
+                deadline = time.monotonic() + 60
+                while not release.exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("fixture Turn gate was not released")
+                    time.sleep(0.01)
+            return original_dispatch(server, connection, message)
+
+        server_module.FakeAppServer.dispatch = gated_dispatch
 
     fake = server_module.FakeAppServer(
         pathlib.Path(target[len(LISTEN_PREFIX) :]),
@@ -133,7 +151,7 @@ def installed_codex() -> pathlib.Path:
         if not candidate.is_file():
             return "missing"
         completed = subprocess.run(
-            [str(candidate), "--version"], check=False, capture_output=True, text=True
+            [str(candidate), "--version"], check=False, capture_output=True, text=True, timeout=10
         )
         if completed.returncode != 0:
             return f"exit {completed.returncode}"
@@ -182,6 +200,7 @@ def create_native_codex(
     codex_home: pathlib.Path,
     schema_source: pathlib.Path,
     transcript: pathlib.Path | None = None,
+    turn_gate: tuple[pathlib.Path, pathlib.Path] | None = None,
 ) -> None:
     """Compile a native `codex` at `path` that serves `scenario` when listening.
 
@@ -189,6 +208,9 @@ def create_native_codex(
     received, one JSON line each. That is what lets a case assert which
     conversation actually reached the fixture rather than inferring it from the
     answers alone.
+
+    `turn_gate` optionally names reached/release files for a bounded test barrier
+    immediately before the fake answers `turn/start`.
     """
     driver = path.with_name(f"{path.name}-driver.py")
     driver.write_text(
@@ -202,6 +224,7 @@ def create_native_codex(
             # as a different account home.
             codex_home=_quoted(codex_home.resolve()),
             transcript="None" if transcript is None else _quoted(transcript),
+            turn_gate="None" if turn_gate is None else f"({_quoted(turn_gate[0])}, {_quoted(turn_gate[1])})",
             version=PINNED_CODEX_VERSION,
         ),
         encoding="utf-8",
@@ -225,7 +248,7 @@ def compile_native_driver(path: pathlib.Path, driver: pathlib.Path) -> None:
     )
     embedding_flags = shlex.split(
         subprocess.check_output(
-            [str(python_config), "--embed", "--cflags", "--ldflags"], text=True
+            [str(python_config), "--embed", "--cflags", "--ldflags"], text=True, timeout=10
         )
     )
     compiled = subprocess.run(
@@ -242,6 +265,7 @@ def compile_native_driver(path: pathlib.Path, driver: pathlib.Path) -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     if compiled.returncode != 0:
         raise AssertionError(f"fixture Codex shim failed to compile: {compiled.stderr}")

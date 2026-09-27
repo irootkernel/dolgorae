@@ -1,0 +1,23 @@
+{
+  "schema": "dolgorae-one-shot-review-observation/v1",
+  "request_ref": "018f0000-0000-7000-8000-000000058001",
+  "request_sha256": null,
+  "profile": null,
+  "observation": "unknown",
+  "outcome": "unknown",
+  "result": null,
+  "report": null,
+  "safe_error_code": null,
+  "diagnostic": null,
+  "engagement": null,
+  "reviewer": null,
+  "task": null,
+  "capture": null,
+  "server": null,
+  "recovery": {
+    "status": "blocked",
+    "blocked_reasons": [
+      "operation_unknown"
+    ]
+  }
+}

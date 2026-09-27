@@ -152,6 +152,69 @@ pub struct ServerState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ReviewServerOwner {
+    pub workspace_id: String,
+    pub request_ref: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewServerStatus {
+    NotStarted,
+    Preexisting,
+    Owned,
+    RecoveryBlocked,
+    Retired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ReviewServerObservation {
+    pub status: ReviewServerStatus,
+    pub server_key: String,
+    pub server_epoch: Option<u64>,
+    pub epoch_id: Option<Uuid>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReviewOwnershipPhase {
+    Preexisting,
+    Reserved,
+    Ready,
+    Retired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewServerOwnership {
+    schema_version: u32,
+    owner: ReviewServerOwner,
+    server_key: String,
+    server_epoch: u64,
+    launch_token: Option<Uuid>,
+    phase: ReviewOwnershipPhase,
+    state: Option<ServerState>,
+}
+
+impl ReviewServerOwnership {
+    fn observation(
+        &self,
+        status: ReviewServerStatus,
+        reason: Option<&str>,
+    ) -> ReviewServerObservation {
+        ReviewServerObservation {
+            status,
+            server_key: self.server_key.clone(),
+            server_epoch: Some(self.server_epoch),
+            epoch_id: self.state.as_ref().map(|state| state.epoch_id),
+            reason: reason.map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HomeActive {
     schema_version: u32,
     canonical_codex_home: String,
@@ -313,6 +376,260 @@ pub fn ensure_global_server(
         &mut OperatorHandoff::none(),
     )?;
     Ok(state)
+}
+
+pub(crate) fn ensure_global_server_for_review(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    owner: &ReviewServerOwner,
+) -> Result<ServerState, MachineError> {
+    binding.validate_for_recovery()?;
+    validate_review_server_owner(owner)?;
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    start_snapshot_inner(
+        &context,
+        &binding.launch_snapshot,
+        None,
+        QuiescentRolloverPolicy::Deny,
+        Some(owner),
+        &mut OperatorHandoff::none(),
+    )
+}
+
+/// Observe only existing ownership and lifecycle files. This deliberately does
+/// not open LifecyclePaths, acquire create-if-missing locks, or repair state.
+pub(crate) fn inspect_review_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    owner: &ReviewServerOwner,
+) -> Result<ReviewServerObservation, MachineError> {
+    binding.validate_for_recovery()?;
+    validate_review_server_owner(owner)?;
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    inspect_review_server_in(&context, &binding.launch_snapshot, owner)
+}
+
+fn inspect_review_server_in(
+    context: &Context,
+    snapshot: &ProfileSnapshot,
+    owner: &ReviewServerOwner,
+) -> Result<ReviewServerObservation, MachineError> {
+    let root = profile_root(context, snapshot);
+    let Some(record) = read_review_ownership(&root, &snapshot.server_key, owner)? else {
+        return Ok(ReviewServerObservation {
+            status: ReviewServerStatus::NotStarted,
+            server_key: snapshot.server_key.clone(),
+            server_epoch: None,
+            epoch_id: None,
+            reason: None,
+        });
+    };
+    match record.phase {
+        ReviewOwnershipPhase::Preexisting => {
+            Ok(record.observation(ReviewServerStatus::Preexisting, None))
+        }
+        ReviewOwnershipPhase::Reserved => Ok(record.observation(
+            ReviewServerStatus::RecoveryBlocked,
+            Some("launch_identity_incomplete"),
+        )),
+        ReviewOwnershipPhase::Retired => Ok(record.observation(ReviewServerStatus::Retired, None)),
+        ReviewOwnershipPhase::Ready => {
+            let current = read_state(&root.join("state.json"))?;
+            let Some(current) = current.as_ref() else {
+                return Ok(record.observation(
+                    ReviewServerStatus::RecoveryBlocked,
+                    Some("generation_unavailable"),
+                ));
+            };
+            if !review_generation_matches(&record, current) {
+                return Ok(record.observation(
+                    ReviewServerStatus::RecoveryBlocked,
+                    Some("generation_changed"),
+                ));
+            }
+            if verify_live_process_identity(current).is_err() {
+                return Ok(record.observation(
+                    ReviewServerStatus::RecoveryBlocked,
+                    Some("process_identity_unverified"),
+                ));
+            }
+            let active = read_home_active(
+                &home_root(context, &snapshot.canonical_codex_home)?.join("active.json"),
+            )?;
+            if verify_stop_home_active(snapshot, current, active.as_ref()).is_err() {
+                return Ok(record.observation(
+                    ReviewServerStatus::RecoveryBlocked,
+                    Some("lifecycle_transition_incomplete"),
+                ));
+            }
+            Ok(record.observation(ReviewServerStatus::Owned, None))
+        }
+    }
+}
+
+/// The coordinator has already verified the operation's recovery capability.
+/// Only an exact owned ready generation can enter the ordinary non-interrupting
+/// Profile stop. A partial launch or interrupted stop remains explicitly blocked.
+pub(crate) fn retire_review_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    owner: &ReviewServerOwner,
+) -> Result<ReviewServerObservation, MachineError> {
+    binding.validate_for_recovery()?;
+    validate_review_server_owner(owner)?;
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let observed = inspect_review_server_in(&context, &binding.launch_snapshot, owner)?;
+    if observed.status != ReviewServerStatus::Owned {
+        return Ok(observed);
+    }
+    let snapshot = &binding.launch_snapshot;
+    let paths = LifecyclePaths::open(&context, snapshot)?;
+    let result = (|| {
+        let reservation = prepare_stop_with_review_owner(
+            &paths,
+            snapshot,
+            None,
+            false,
+            Some(owner),
+            &mut OperatorHandoff::none(),
+        )?
+        .ok_or_else(|| internal("owned review generation disappeared before stop"))?;
+        prepare_shutdown_or_restore(&paths, snapshot, &reservation, &mut || {
+            Ok(OperatorHandoff::none())
+        })?;
+        if let Err(error) = apply_stop(&reservation.state) {
+            restore_stopping_reservation(&paths, snapshot, &reservation);
+            return Err(error);
+        }
+        commit_stop(&paths, snapshot, &reservation, &mut OperatorHandoff::none())?;
+        let (_home_lock, _server_lock) = paths.lock()?;
+        let mut record = read_review_ownership(&paths.root, &snapshot.server_key, owner)?
+            .ok_or_else(|| internal("review server ownership disappeared"))?;
+        if !review_generation_matches(&record, &reservation.state) {
+            return Err(internal(
+                "review server ownership changed during retirement",
+            ));
+        }
+        record.phase = ReviewOwnershipPhase::Retired;
+        write_review_ownership(&paths.root, &record)?;
+        Ok(record.observation(ReviewServerStatus::Retired, None))
+    })();
+    match result {
+        Ok(observation) => Ok(observation),
+        Err(_) => Ok(ReviewServerObservation {
+            status: ReviewServerStatus::RecoveryBlocked,
+            reason: Some("cleanup_preconditions_failed".to_owned()),
+            ..observed
+        }),
+    }
+}
+
+fn validate_review_server_owner(owner: &ReviewServerOwner) -> Result<(), MachineError> {
+    if owner.workspace_id.is_empty() || owner.request_ref.get_version_num() != 7 {
+        return Err(internal(
+            "review server owner is not a workspace and UUIDv7 request",
+        ));
+    }
+    Ok(())
+}
+
+fn review_ownership_path(root: &Path, owner: &ReviewServerOwner) -> Result<PathBuf, MachineError> {
+    validate_review_server_owner(owner)?;
+    let bytes = serde_json::to_vec(owner).map_err(internal)?;
+    Ok(root
+        .join("review-owners")
+        .join(format!("{:x}.json", Sha256::digest(bytes))))
+}
+
+fn write_review_ownership(root: &Path, record: &ReviewServerOwnership) -> Result<(), MachineError> {
+    atomic_replace(
+        &review_ownership_path(root, &record.owner)?,
+        &serde_json::to_vec_pretty(record).map_err(internal)?,
+    )
+}
+
+fn read_review_ownership(
+    root: &Path,
+    server_key: &str,
+    owner: &ReviewServerOwner,
+) -> Result<Option<ReviewServerOwnership>, MachineError> {
+    let path = review_ownership_path(root, owner)?;
+    for directory in [root, path.parent().expect("ownership parent")] {
+        match fs::symlink_metadata(directory) {
+            Ok(_) => {
+                crate::workspace::verify_secure_directory(directory, DarwinSystem.current_uid())?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    let Some(mut file) =
+        crate::workspace::open_secure_file_if_present(&path, DarwinSystem.current_uid())?
+    else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(io_error)?;
+    let record: ReviewServerOwnership = serde_json::from_slice(&bytes).map_err(|_| {
+        MachineError::profile_config_invalid(&path, "review server ownership is invalid")
+    })?;
+    let shape_valid = match record.phase {
+        ReviewOwnershipPhase::Reserved => record.launch_token.is_some() && record.state.is_none(),
+        ReviewOwnershipPhase::Preexisting => {
+            record.launch_token.is_none() && record.state.is_some()
+        }
+        ReviewOwnershipPhase::Ready | ReviewOwnershipPhase::Retired => {
+            record.launch_token.is_some() && record.state.is_some()
+        }
+    };
+    if record.schema_version != 1
+        || record.owner != *owner
+        || record.server_key != server_key
+        || record.server_epoch == 0
+        || !shape_valid
+        || record.state.as_ref().is_some_and(|state| {
+            state.schema_version != 2
+                || state.server_key != record.server_key
+                || state.snapshot.server_key != record.server_key
+                || state.server_epoch != record.server_epoch
+        })
+    {
+        return Err(MachineError::profile_config_invalid(
+            &path,
+            "review server ownership is inconsistent",
+        ));
+    }
+    Ok(Some(record))
+}
+
+fn review_generation_matches(record: &ReviewServerOwnership, current: &ServerState) -> bool {
+    record.phase == ReviewOwnershipPhase::Ready
+        && record.server_key == current.server_key
+        && record.server_epoch == current.server_epoch
+        && record.state.as_ref().is_some_and(|expected| {
+            expected.epoch_id == current.epoch_id
+                && expected.boot_session_uuid == current.boot_session_uuid
+                && expected.pid == current.pid
+                && expected.pgid == current.pgid
+                && expected.uid == current.uid
+                && expected.process_fingerprint == current.process_fingerprint
+                && expected.drainer_pid == current.drainer_pid
+                && expected.drainer_pgid == current.drainer_pgid
+                && expected.drainer_uid == current.drainer_uid
+                && expected.drainer_fingerprint == current.drainer_fingerprint
+                && expected.socket_path == current.socket_path
+                && expected.socket_device == current.socket_device
+                && expected.socket_inode == current.socket_inode
+        })
 }
 
 /// Admit the first fail-closed Run membership while holding the same home and
@@ -3160,6 +3477,7 @@ fn start_snapshot(
         snapshot,
         None,
         QuiescentRolloverPolicy::Allow,
+        None,
         operator,
     )
 }
@@ -3174,6 +3492,7 @@ fn start_snapshot_for_probe(
         snapshot,
         None,
         QuiescentRolloverPolicy::Deny,
+        None,
         operator,
     )
 }
@@ -3189,6 +3508,7 @@ fn start_snapshot_for_migration(
         snapshot,
         Some(migration_id),
         QuiescentRolloverPolicy::Deny,
+        None,
         operator,
     )
 }
@@ -3221,6 +3541,7 @@ fn start_snapshot_inner(
     snapshot: &ProfileSnapshot,
     migration_id: Option<Uuid>,
     rollover_policy: QuiescentRolloverPolicy,
+    review_owner: Option<&ReviewServerOwner>,
     operator: &mut OperatorHandoff,
 ) -> Result<ServerState, MachineError> {
     if snapshot.compatibility_verdict == CompatibilityVerdict::Rejected {
@@ -3231,7 +3552,7 @@ fn start_snapshot_inner(
         ));
     }
     let paths = LifecyclePaths::open(context, snapshot)?;
-    let reservation = match prepare_start(&paths, snapshot, migration_id, operator)? {
+    let reservation = match prepare_start(&paths, snapshot, migration_id, review_owner, operator)? {
         StartPrepared::Attached(state) => return Ok(*state),
         StartPrepared::QuiescentRollover(old_server_key) => {
             if rollover_policy == QuiescentRolloverPolicy::Deny {
@@ -3308,6 +3629,7 @@ struct StartReservation {
     epoch: u64,
     token: Uuid,
     socket: PathBuf,
+    review_owner: Option<ReviewServerOwner>,
 }
 
 /// What APPLY produced, all of it re-proved by COMMIT before publication.
@@ -3329,6 +3651,7 @@ fn prepare_start(
     paths: &LifecyclePaths,
     snapshot: &ProfileSnapshot,
     migration_id: Option<Uuid>,
+    review_owner: Option<&ReviewServerOwner>,
     operator: &mut OperatorHandoff,
 ) -> Result<StartPrepared, MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
@@ -3351,9 +3674,32 @@ fn prepare_start(
         &snapshot.profile_name,
         &snapshot.server_key,
     )?;
+    if let Some(owner) = review_owner
+        && read_review_ownership(&paths.root, &snapshot.server_key, owner)?.is_some()
+    {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &snapshot.server_key,
+            "this review already has a durable server preparation record",
+        ));
+    }
     let active = read_home_active(&paths.active_path)?;
     if let Some(state) = read_state_if_running(&paths.state_path)? {
         let attached = attach_running(snapshot, &state, active.as_ref())?;
+        if let Some(owner) = review_owner {
+            write_review_ownership(
+                &paths.root,
+                &ReviewServerOwnership {
+                    schema_version: 1,
+                    owner: owner.clone(),
+                    server_key: snapshot.server_key.clone(),
+                    server_epoch: attached.server_epoch,
+                    launch_token: None,
+                    phase: ReviewOwnershipPhase::Preexisting,
+                    state: Some(attached.clone()),
+                },
+            )?;
+        }
         drop(server_lock);
         drop(home_lock);
         return Ok(StartPrepared::Attached(Box::new(attached)));
@@ -3445,6 +3791,20 @@ fn prepare_start(
     }
     let epoch = reserve_epoch(&paths.root.join("epoch"))?;
     let token = Uuid::now_v7();
+    if let Some(owner) = review_owner {
+        write_review_ownership(
+            &paths.root,
+            &ReviewServerOwnership {
+                schema_version: 1,
+                owner: owner.clone(),
+                server_key: snapshot.server_key.clone(),
+                server_epoch: epoch,
+                launch_token: Some(token),
+                phase: ReviewOwnershipPhase::Reserved,
+                state: None,
+            },
+        )?;
+    }
     write_home_active(
         &paths.active_path,
         &HomeActive {
@@ -3463,6 +3823,7 @@ fn prepare_start(
         epoch,
         token,
         socket,
+        review_owner: review_owner.cloned(),
     }))
 }
 
@@ -3903,6 +4264,19 @@ fn commit_start(
         capabilities: applied.probe.capabilities.clone(),
         snapshot: snapshot.clone(),
     };
+    if let Some(owner) = reservation.review_owner.as_ref() {
+        let mut record = read_review_ownership(&paths.root, &snapshot.server_key, owner)?
+            .ok_or_else(|| internal("review server launch ownership disappeared"))?;
+        if record.phase != ReviewOwnershipPhase::Reserved
+            || record.server_epoch != reservation.epoch
+            || record.launch_token != Some(reservation.token)
+        {
+            return Err(internal("review server launch ownership changed"));
+        }
+        record.phase = ReviewOwnershipPhase::Ready;
+        record.state = Some(state.clone());
+        write_review_ownership(&paths.root, &record)?;
+    }
     atomic_replace(
         &paths.state_path,
         &serde_json::to_vec_pretty(&state).map_err(internal)?,
@@ -4261,6 +4635,17 @@ fn prepare_stop(
     interrupt: bool,
     operator: &mut OperatorHandoff,
 ) -> Result<Option<StopReservation>, MachineError> {
+    prepare_stop_with_review_owner(paths, snapshot, migration_id, interrupt, None, operator)
+}
+
+fn prepare_stop_with_review_owner(
+    paths: &LifecyclePaths,
+    snapshot: &ProfileSnapshot,
+    migration_id: Option<Uuid>,
+    interrupt: bool,
+    review_owner: Option<&ReviewServerOwner>,
+    operator: &mut OperatorHandoff,
+) -> Result<Option<StopReservation>, MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
     // The operator-authorized prefix is now complete, so the hold that
     // authorized this stop can retire into the locks that replace it. Waiting
@@ -4272,7 +4657,30 @@ fn prepare_stop(
         &snapshot.profile_name,
         &snapshot.server_key,
     )?;
+    if let Some(owner) = review_owner {
+        let record = read_review_ownership(&paths.root, &snapshot.server_key, owner)?;
+        let current = read_state(&paths.state_path)?;
+        if interrupt
+            || !record
+                .as_ref()
+                .zip(current.as_ref())
+                .is_some_and(|(record, current)| review_generation_matches(record, current))
+        {
+            return Err(profile_server_busy(
+                &snapshot.profile_name,
+                &snapshot.server_key,
+                "temporary review ownership does not prove this exact server generation",
+            ));
+        }
+    }
     let Some(state) = read_state_if_running(&paths.state_path)? else {
+        if review_owner.is_some() {
+            return Err(profile_server_busy(
+                &snapshot.profile_name,
+                &snapshot.server_key,
+                "temporary review process identity is not verified",
+            ));
+        }
         return Ok(None);
     };
     if state.server_key != snapshot.server_key
@@ -7204,6 +7612,393 @@ mod tests {
             capabilities: capability_snapshot(None),
             snapshot: stopped_snapshot(),
         }
+    }
+
+    fn review_ownership_fixture() -> (PathBuf, Context, LifecyclePaths, ReviewServerOwnership) {
+        let support =
+            std::env::temp_dir().join(format!("dolgorae-review-owner-{}", Uuid::now_v7()));
+        let context = Context {
+            registry_path: support.join("profiles.yaml"),
+            dolgorae_home_root: support.clone(),
+        };
+        let state = stopped_state();
+        let paths = LifecyclePaths::open(&context, &state.snapshot).unwrap();
+        let record = ReviewServerOwnership {
+            schema_version: 1,
+            owner: ReviewServerOwner {
+                workspace_id: "1".repeat(64),
+                request_ref: Uuid::now_v7(),
+            },
+            server_key: state.server_key.clone(),
+            server_epoch: state.server_epoch,
+            launch_token: Some(Uuid::now_v7()),
+            phase: ReviewOwnershipPhase::Ready,
+            state: Some(state),
+        };
+        (support, context, paths, record)
+    }
+
+    #[test]
+    fn review_ownership_prepare_persists_intent_before_any_process_is_created() {
+        let (support, context, _, record) = review_ownership_fixture();
+        let mut snapshot = stopped_snapshot();
+        snapshot.server_key = format!("{:x}", Sha256::digest(record.owner.request_ref.as_bytes()));
+        let paths = LifecyclePaths::open(&context, &snapshot).unwrap();
+        atomic_replace(
+            &support.join("profile-bindings.json"),
+            &serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "bindings": {
+                    (format!("{}:{}", snapshot.profile_name, snapshot.server_key)): {
+                        "selected_name": snapshot.profile_name,
+                        "definition_sha256": "0".repeat(64),
+                        "server_key": snapshot.server_key,
+                        "launch_snapshot_sha256": "0".repeat(64)
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let StartPrepared::Reserved(reservation) = prepare_start(
+            &paths,
+            &snapshot,
+            None,
+            Some(&record.owner),
+            &mut OperatorHandoff::none(),
+        )
+        .unwrap() else {
+            panic!("fresh review must reserve a new lifetime");
+        };
+        let saved = read_review_ownership(&paths.root, &snapshot.server_key, &record.owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.phase, ReviewOwnershipPhase::Reserved);
+        assert_eq!(saved.server_epoch, reservation.epoch);
+        assert_eq!(saved.launch_token, Some(reservation.token));
+        assert!(saved.state.is_none());
+        let active = read_home_active(&paths.active_path).unwrap().unwrap();
+        assert_eq!(active.transition_token, saved.launch_token);
+        assert_eq!(active.pid, None);
+        assert!(!paths.state_path.exists());
+        assert!(!reservation.socket.exists());
+        assert!(
+            prepare_start(
+                &paths,
+                &snapshot,
+                None,
+                Some(&record.owner),
+                &mut OperatorHandoff::none(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            read_home_active(&paths.active_path).unwrap().unwrap(),
+            active
+        );
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn review_ownership_inspection_preserves_missing_and_partial_state() {
+        let (support, context, paths, mut record) = review_ownership_fixture();
+        fs::remove_dir_all(&support).unwrap();
+        let snapshot = stopped_snapshot();
+        let missing = inspect_review_server_in(&context, &snapshot, &record.owner).unwrap();
+        assert_eq!(missing.status, ReviewServerStatus::NotStarted);
+        assert_eq!(missing.server_epoch, None);
+        assert!(!support.exists());
+
+        record.phase = ReviewOwnershipPhase::Reserved;
+        record.state = None;
+        write_review_ownership(&paths.root, &record).unwrap();
+        let before = fs::read(review_ownership_path(&paths.root, &record.owner).unwrap()).unwrap();
+        let partial = inspect_review_server_in(&context, &snapshot, &record.owner).unwrap();
+        assert_eq!(partial.status, ReviewServerStatus::RecoveryBlocked);
+        assert_eq!(partial.server_epoch, Some(record.server_epoch));
+        assert_eq!(partial.epoch_id, None);
+        assert_eq!(
+            partial.reason.as_deref(),
+            Some("launch_identity_incomplete")
+        );
+        assert!(!paths.state_path.exists());
+        assert!(!paths.active_path.exists());
+        assert!(!paths.root.join("server.lock").exists());
+        assert_eq!(
+            before,
+            fs::read(review_ownership_path(&paths.root, &record.owner).unwrap()).unwrap()
+        );
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn review_ownership_ready_inspection_preserves_uncertain_generation_evidence() {
+        for reason in [
+            "generation_unavailable",
+            "generation_changed",
+            "process_identity_unverified",
+        ] {
+            let (support, context, paths, mut record) = review_ownership_fixture();
+            if reason == "process_identity_unverified" {
+                let identity = DarwinSystem
+                    .live_process_identity(std::process::id())
+                    .unwrap();
+                let recorded = record.state.as_mut().unwrap();
+                recorded.pid = std::process::id();
+                recorded.pgid = identity.process_group_id;
+                recorded.uid = identity.uid;
+                recorded.process_fingerprint = format!("{}-unexpected", identity.fingerprint);
+            }
+            let recorded = record.state.as_ref().unwrap();
+            if reason != "generation_unavailable" {
+                let mut current = recorded.clone();
+                if reason == "generation_changed" {
+                    current.server_epoch += 1;
+                    current.epoch_id = Uuid::now_v7();
+                }
+                atomic_replace(&paths.state_path, &serde_json::to_vec(&current).unwrap()).unwrap();
+            }
+            write_review_ownership(&paths.root, &record).unwrap();
+            let ownership_path = review_ownership_path(&paths.root, &record.owner).unwrap();
+            let ownership_before = fs::read(&ownership_path).unwrap();
+            let state_before = fs::read(&paths.state_path).ok();
+            let expected = record.observation(ReviewServerStatus::RecoveryBlocked, Some(reason));
+            for _ in 0..2 {
+                assert_eq!(
+                    inspect_review_server_in(&context, &recorded.snapshot, &record.owner).unwrap(),
+                    expected,
+                    "{reason} must retain the originally owned generation",
+                );
+                assert_eq!(fs::read(&ownership_path).unwrap(), ownership_before);
+                assert_eq!(fs::read(&paths.state_path).ok(), state_before);
+                assert!(!paths.active_path.exists());
+                assert!(!paths.root.join("server.lock").exists());
+            }
+            fs::remove_dir_all(support).unwrap();
+        }
+    }
+
+    #[test]
+    fn review_ownership_rejects_changed_owner_or_inconsistent_generation() {
+        let (support, _, paths, record) = review_ownership_fixture();
+        write_review_ownership(&paths.root, &record).unwrap();
+        let path = review_ownership_path(&paths.root, &record.owner).unwrap();
+        for mutate in [0, 1, 2] {
+            let mut changed = record.clone();
+            match mutate {
+                0 => changed.owner.workspace_id = "2".repeat(64),
+                1 => changed.server_epoch += 1,
+                _ => changed.phase = ReviewOwnershipPhase::Reserved,
+            }
+            atomic_replace(&path, &serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(read_review_ownership(&paths.root, &record.server_key, &record.owner).is_err());
+        }
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn review_ownership_stop_guard_preserves_preexisting_and_replacement_generations() {
+        let (support, _, paths, record) = review_ownership_fixture();
+        let original = record.state.as_ref().unwrap();
+        for case in 0..4 {
+            let mut claim = record.clone();
+            let mut current = original.clone();
+            match case {
+                0 => {
+                    claim.phase = ReviewOwnershipPhase::Preexisting;
+                    claim.launch_token = None;
+                }
+                1 => current.server_epoch += 1,
+                2 => current.epoch_id = Uuid::now_v7(),
+                _ => current.process_fingerprint.push_str("-reused"),
+            }
+            write_review_ownership(&paths.root, &claim).unwrap();
+            let bytes = serde_json::to_vec(&current).unwrap();
+            atomic_replace(&paths.state_path, &bytes).unwrap();
+            let result = prepare_stop_with_review_owner(
+                &paths,
+                &original.snapshot,
+                None,
+                false,
+                Some(&record.owner),
+                &mut OperatorHandoff::none(),
+            );
+            assert!(matches!(result, Err(error) if error.code == "PROFILE_SERVER_BUSY"));
+            assert_eq!(fs::read(&paths.state_path).unwrap(), bytes);
+            assert!(!paths.active_path.exists());
+        }
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn review_ownership_stop_fence_blocks_admission_without_signalling() {
+        use std::os::unix::process::CommandExt as _;
+
+        let (support, context, paths, mut record) = review_ownership_fixture();
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let identity = DarwinSystem.live_process_identity(child.id()).unwrap();
+        let state = record.state.as_mut().unwrap();
+        state.pid = child.id();
+        state.pgid = identity.process_group_id;
+        state.uid = identity.uid;
+        state.process_fingerprint = identity.fingerprint.clone();
+        state.drainer_pid = state.pid;
+        state.drainer_pgid = state.pgid;
+        state.drainer_uid = state.uid;
+        state.drainer_fingerprint = identity.fingerprint;
+        state.membership_revision = 0;
+        let state = state.clone();
+        write_review_ownership(&paths.root, &record).unwrap();
+        atomic_replace(&paths.state_path, &serde_json::to_vec(&state).unwrap()).unwrap();
+        write_home_active(
+            &paths.active_path,
+            &HomeActive {
+                schema_version: 1,
+                canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
+                server_key: state.server_key.clone(),
+                server_epoch: state.server_epoch,
+                lifecycle: "ready".to_owned(),
+                pid: Some(state.pid),
+                transition_token: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_review_server_in(&context, &state.snapshot, &record.owner).unwrap(),
+            record.observation(ReviewServerStatus::Owned, None),
+        );
+        let membership = crate::global_runtime::GlobalMembershipStore::from_root(
+            &support,
+            &state.snapshot.profile_name,
+            &state.server_key,
+        )
+        .unwrap();
+        let competing_run = Uuid::now_v7();
+        membership
+            .record(
+                &"2".repeat(64),
+                competing_run,
+                crate::global_runtime::MembershipDisposition::Unknown,
+            )
+            .unwrap();
+        assert!(
+            prepare_stop_with_review_owner(
+                &paths,
+                &state.snapshot,
+                None,
+                false,
+                Some(&record.owner),
+                &mut OperatorHandoff::none(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            read_home_active(&paths.active_path)
+                .unwrap()
+                .unwrap()
+                .lifecycle,
+            "ready"
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        membership
+            .record(
+                &"2".repeat(64),
+                competing_run,
+                crate::global_runtime::MembershipDisposition::Released,
+            )
+            .unwrap();
+        let reservation = prepare_stop_with_review_owner(
+            &paths,
+            &state.snapshot,
+            None,
+            false,
+            Some(&record.owner),
+            &mut OperatorHandoff::none(),
+        )
+        .unwrap()
+        .unwrap();
+        let stopping = read_home_active(&paths.active_path).unwrap();
+        assert_eq!(
+            stopping.as_ref().unwrap().transition_token,
+            Some(reservation.token)
+        );
+        assert!(
+            validate_admission_lifetime(
+                &state.snapshot.profile_name,
+                &state.snapshot,
+                &state,
+                &state,
+                stopping.as_ref(),
+            )
+            .is_err()
+        );
+        let ownership_path = review_ownership_path(&paths.root, &record.owner).unwrap();
+        let ownership_before = fs::read(&ownership_path).unwrap();
+        let active_before = fs::read(&paths.active_path).unwrap();
+        let state_before = fs::read(&paths.state_path).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                inspect_review_server_in(&context, &state.snapshot, &record.owner).unwrap(),
+                record.observation(
+                    ReviewServerStatus::RecoveryBlocked,
+                    Some("lifecycle_transition_incomplete"),
+                ),
+            );
+            assert_eq!(fs::read(&ownership_path).unwrap(), ownership_before);
+            assert_eq!(fs::read(&paths.active_path).unwrap(), active_before);
+            assert_eq!(fs::read(&paths.state_path).unwrap(), state_before);
+            assert!(child.try_wait().unwrap().is_none());
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn review_ownership_admission_rejects_a_pinned_generation_replaced_before_admission() {
+        let expected = stopped_state();
+        let mut replacement = expected.clone();
+        replacement.server_epoch += 1;
+        replacement.epoch_id = Uuid::now_v7();
+        let ready = HomeActive {
+            schema_version: 1,
+            canonical_codex_home: replacement.snapshot.canonical_codex_home.clone(),
+            server_key: replacement.server_key.clone(),
+            server_epoch: replacement.server_epoch,
+            lifecycle: "ready".to_owned(),
+            pid: Some(replacement.pid),
+            transition_token: None,
+        };
+        let error = validate_admission_lifetime(
+            &expected.snapshot.profile_name,
+            &expected.snapshot,
+            &expected,
+            &replacement,
+            Some(&ready),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "PROFILE_MISMATCH");
+        assert_eq!(error.details["field"], "server_epoch_identity");
+        assert_eq!(
+            error.details["expected"],
+            json!({"server_key":expected.server_key,"epoch_id":expected.epoch_id}),
+        );
+        assert_eq!(
+            error.details["actual"],
+            json!({"server_key":replacement.server_key,"epoch_id":replacement.epoch_id}),
+        );
+        validate_admission_lifetime(
+            &replacement.snapshot.profile_name,
+            &replacement.snapshot,
+            &replacement,
+            &replacement,
+            Some(&ready),
+        )
+        .unwrap();
     }
 
     #[test]

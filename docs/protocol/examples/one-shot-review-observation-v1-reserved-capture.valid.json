@@ -1,0 +1,37 @@
+{
+  "schema": "dolgorae-one-shot-review-observation/v1",
+  "request_ref": "018f0000-0000-7000-8000-000000058001",
+  "request_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile": "reviewer",
+  "observation": "known",
+  "outcome": "unknown",
+  "result": null,
+  "report": null,
+  "safe_error_code": null,
+  "diagnostic": null,
+  "engagement": {
+    "engagement_id": "018f0000-0000-7000-8000-000000000010",
+    "state": "open"
+  },
+  "reviewer": null,
+  "task": null,
+  "capture": {
+    "capture_ref": "018f0000-0000-7000-8000-000000000011",
+    "revision": null,
+    "state": "reserved",
+    "cleanup_pending": false
+  },
+  "server": {
+    "status": "owned",
+    "server_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "server_epoch": 1,
+    "epoch_id": "018f0000-0000-7000-8000-000000058003",
+    "reason": null
+  },
+  "recovery": {
+    "status": "blocked",
+    "blocked_reasons": [
+      "capture_unpublished"
+    ]
+  }
+}

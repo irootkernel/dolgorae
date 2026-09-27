@@ -99,6 +99,24 @@ campaign remains with TASK-060.
 
 ## TASK-058 verification detail
 
+The implemented public carrier pairs a caller-retained UUIDv7 reference with a
+private recovery Controller. `specialist review-inspect` reads the original
+receipt and relational state in one database transaction; `review-recover
+--action cleanup` requires that Controller and the preserved object capabilities.
+The checked observation distinguishes reserved capture identity, publication,
+settlement and pending source cleanup. TASK-059 must package these commands and
+schemas; TASK-060 must exercise this carrier against its exact live candidate.
+
+The deterministic attack budget covers six preparation failures (model, effort,
+Reviewer policy, credential creation, engagement insertion and capture creation)
+on both a new owned server and a pre-existing shared server. It also covers
+response loss, malformed output, timeout, SIGINT, SIGKILL, reference/input drift,
+wrong recovery authority, immutable receipt tampering, interrupted publication
+and settlement, generation replacement, membership admission, and uncertain
+process identity. Native checks exercise actual process identity and lock
+exclusion; fault fixtures stay in isolated homes. These checks do not establish
+live-provider compatibility, which remains TASK-060 work.
+
 Define the public one-shot lookup and recovery contract before runtime edits.
 The caller must retain a stable reference before server, capture, or Reviewer
 effects; a reference delivered only by an initial or final response that can

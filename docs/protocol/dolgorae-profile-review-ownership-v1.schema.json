@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/profile-review-ownership/v1",
+  "title": "Dolgorae temporary review Profile Server ownership v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "owner", "server_key", "server_epoch", "launch_token", "phase", "state"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "request_ref"],
+      "properties": {
+        "workspace_id": {"type": "string", "minLength": 1},
+        "request_ref": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+      }
+    },
+    "server_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "server_epoch": {"type": "integer", "minimum": 1},
+    "launch_token": {"type": ["string", "null"], "format": "uuid"},
+    "phase": {"enum": ["preexisting", "reserved", "ready", "retired"]},
+    "state": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "https://dolgorae.local/schema/profile-server-state/v2"}
+      ]
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"phase": {"const": "reserved"}}}, "then": {"properties": {"launch_token": {"type": "string"}, "state": {"type": "null"}}}},
+    {"if": {"properties": {"phase": {"const": "preexisting"}}}, "then": {"properties": {"launch_token": {"type": "null"}, "state": {"type": "object"}}}},
+    {"if": {"properties": {"phase": {"enum": ["ready", "retired"]}}}, "then": {"properties": {"launch_token": {"type": "string"}, "state": {"type": "object"}}}}
+  ],
+  "$defs": {
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "server_key", "server_epoch", "epoch_id", "reason"],
+      "properties": {
+        "status": {"enum": ["not_started", "preexisting", "owned", "recovery_blocked", "retired"]},
+        "server_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "server_epoch": {"type": ["integer", "null"], "minimum": 1},
+        "epoch_id": {"type": ["string", "null"], "format": "uuid"},
+        "reason": {"enum": [null, "launch_identity_incomplete", "generation_unavailable", "generation_changed", "process_identity_unverified", "lifecycle_transition_incomplete", "cleanup_preconditions_failed"]}
+      }
+    }
+  },
+  "x-invariants": [
+    "The record is Profile-owned evidence; it does not replace state.json as lifecycle authority.",
+    "Owner identity and launch reservation are persisted under home.lock and server.lock before spawning.",
+    "Attached preexisting generations never confer retirement authority.",
+    "When present, state.server_key and state.server_epoch equal the enclosing fields.",
+    "Reserved or inconsistent evidence blocks retirement; a PID alone never authorizes signalling.",
+    "Retirement requires separately authorized review recovery plus exact owner and generation checks under the Profile lifecycle locks."
+  ]
+}

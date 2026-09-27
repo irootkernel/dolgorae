@@ -144,6 +144,26 @@ automatic business approval. See the checked
 and [protocol](docs/protocol/dolgorae-specialist-review-tool-v3.schema.json).
 Legacy v1/v2 review commands and results retain their existing meaning.
 
+To retain access after CLI or response loss, create a private Controller credential
+and retain a UUIDv7 reference before starting the review. Pass both
+`--request-ref <UUIDv7>` and `--recovery-controller-file <absolute-path>` to
+`specialist review`. Add `--temporary-server` to retire a server created exclusively
+for this invocation once its members are terminal. A pre-existing server is preserved.
+
+From a new process, inspect the original operation with:
+
+```sh
+dolgorae specialist review-inspect --workspace /absolute/project \
+  --request-ref "<retained-UUIDv7>" --format json
+```
+
+Authorized cleanup uses `specialist review-recover` with the same selectors,
+`--recovery-controller-file <original-absolute-path>` and `--action cleanup`.
+Inspection returns saved results and diagnostics without dispatching another Turn.
+Cleanup requires the original credential and does not interrupt an active Turn;
+unknown or unsafe states remain blocked. See the
+[one-shot recovery contract](docs/specs/README.md#one-shot-specialist-review-adapter).
+
 ## Agent skill
 
 The source tree distributes the optional complete

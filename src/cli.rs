@@ -397,6 +397,8 @@ impl ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum SpecialistCommand {
     Review(LeafArgs),
+    ReviewInspect(LeafArgs),
+    ReviewRecover(LeafArgs),
     Policy {
         #[command(subcommand)]
         command: SpecialistPolicyCommand,
@@ -414,6 +416,8 @@ impl SpecialistCommand {
     const fn machine_name(&self) -> &'static str {
         match self {
             Self::Review(_) => "specialist.review",
+            Self::ReviewInspect(_) => "specialist.review-inspect",
+            Self::ReviewRecover(_) => "specialist.review-recover",
             Self::Policy { command } => match command {
                 SpecialistPolicyCommand::Add(_) => "specialist.policy.add",
                 SpecialistPolicyCommand::List(_) => "specialist.policy.list",
@@ -425,7 +429,7 @@ impl SpecialistCommand {
     }
     fn leaf_args(&self) -> Option<&LeafArgs> {
         Some(match self {
-            Self::Review(a) => a,
+            Self::Review(a) | Self::ReviewInspect(a) | Self::ReviewRecover(a) => a,
             Self::Policy { command } => match command {
                 SpecialistPolicyCommand::Add(a)
                 | SpecialistPolicyCommand::List(a)
@@ -635,6 +639,14 @@ pub fn validate_argument_contract(command: &Command) -> Result<(), String> {
     let spec = leaf_spec(command.machine_name());
     validate_leaf_tokens(command.machine_name(), args, &spec)?;
     if command.machine_name() == "specialist.review" {
+        if has(args, "--request-ref") != has(args, "--recovery-controller-file") {
+            return Err(
+                "--request-ref and --recovery-controller-file must be provided together".to_owned(),
+            );
+        }
+        if has(args, "--temporary-server") && !has(args, "--request-ref") {
+            return Err("--temporary-server requires the recoverable review carrier".to_owned());
+        }
         let legacy = has(args, "--scope");
         let scoped = has(args, "--target-kind");
         let v3 = has(args, "--request-stdin");
@@ -966,9 +978,36 @@ fn leaf_spec(command: &str) -> LeafSpec {
                 "--revision",
                 "--deadline-seconds",
                 "--format",
+                "--request-ref",
+                "--recovery-controller-file",
             ],
-            &["--request-stdin"],
+            &["--request-stdin", "--temporary-server"],
             &["--profile", "--format"],
+            0,
+            0,
+        ),
+        "specialist.review-inspect" => spec(
+            &["--workspace", "--request-ref", "--format"],
+            &[],
+            &["--request-ref", "--format"],
+            0,
+            0,
+        ),
+        "specialist.review-recover" => spec(
+            &[
+                "--workspace",
+                "--request-ref",
+                "--format",
+                "--recovery-controller-file",
+                "--action",
+            ],
+            &[],
+            &[
+                "--request-ref",
+                "--format",
+                "--recovery-controller-file",
+                "--action",
+            ],
             0,
             0,
         ),
@@ -1400,7 +1439,15 @@ fn validate_option_value(command: &str, flag: &str, value: &str) -> Result<(), S
             Some(&["workspace", "staged", "dirty", "head", "commit", "range"])
         }
         "--scope" if command == "specialist.review" => Some(&["working-tree"]),
-        "--format" if command == "specialist.review" => Some(&["json"]),
+        "--format"
+            if matches!(
+                command,
+                "specialist.review" | "specialist.review-inspect" | "specialist.review-recover"
+            ) =>
+        {
+            Some(&["json"])
+        }
+        "--action" if command == "specialist.review-recover" => Some(&["cleanup"]),
         "--kind" => Some(&[
             "human-cli",
             "interactive-client",
@@ -1573,6 +1620,71 @@ mod tests {
         args.extend(["--profile", "explicit"]);
         let cli = Cli::try_parse_from(args).unwrap();
         validate_argument_contract(&cli.command).unwrap();
+    }
+
+    #[test]
+    fn recoverable_review_requires_paired_authority_and_closed_inspection_options() {
+        let review = [
+            "dolgorae",
+            "specialist",
+            "review",
+            "--profile",
+            "reviewer",
+            "--request-stdin",
+            "--format",
+            "json",
+        ];
+        for extra in [
+            vec!["--request-ref", "01900000-0000-7000-8000-000000000001"],
+            vec!["--recovery-controller-file", "/private/controller"],
+            vec!["--temporary-server"],
+        ] {
+            let cli = Cli::try_parse_from(review.into_iter().chain(extra)).unwrap();
+            assert!(validate_argument_contract(&cli.command).is_err());
+        }
+        let cli = Cli::try_parse_from(review.into_iter().chain([
+            "--request-ref",
+            "01900000-0000-7000-8000-000000000001",
+            "--recovery-controller-file",
+            "/private/controller",
+            "--temporary-server",
+        ]))
+        .unwrap();
+        assert!(validate_argument_contract(&cli.command).is_ok());
+        let inspect = [
+            "dolgorae",
+            "specialist",
+            "review-inspect",
+            "--request-ref",
+            "01900000-0000-7000-8000-000000000001",
+            "--format",
+            "json",
+        ];
+        let cli = Cli::try_parse_from(inspect).unwrap();
+        assert!(validate_argument_contract(&cli.command).is_ok());
+        for extra in [
+            vec!["--action", "cleanup"],
+            vec!["--temporary-server"],
+            vec!["--profile", "replacement"],
+        ] {
+            let cli = Cli::try_parse_from(inspect.into_iter().chain(extra)).unwrap();
+            assert!(validate_argument_contract(&cli.command).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "dolgorae",
+            "specialist",
+            "review-recover",
+            "--request-ref",
+            "01900000-0000-7000-8000-000000000001",
+            "--format",
+            "json",
+            "--recovery-controller-file",
+            "/private/controller",
+            "--action",
+            "interrupt",
+        ])
+        .unwrap();
+        assert!(validate_argument_contract(&cli.command).is_err());
     }
 
     #[test]

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/one-shot-operation/v1",
+  "title": "Private durable one-shot review operation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "input", "request_sha256", "input_sha256", "global_profile_binding", "capture_ref", "engagement_id", "terminal"],
+  "properties": {
+    "schema": { "const": "dolgorae-one-shot-operation/v1" },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_ref", "workspace_id", "request", "profile", "recovery_controller", "carrier_root", "temporary_server"],
+      "properties": {
+        "request_ref": { "$ref": "#/$defs/uuid7" },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "request": { "type": "object" },
+        "profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "recovery_controller": { "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/controller_binding" },
+        "carrier_root": { "type": "string", "pattern": "^/" },
+        "temporary_server": { "type": "boolean" }
+      }
+    },
+    "request_sha256": { "$ref": "#/$defs/sha256" },
+    "input_sha256": { "$ref": "#/$defs/sha256" },
+    "global_profile_binding": { "oneOf": [{ "$ref": "https://dolgorae.local/schema/global-profile-binding/v2" }, { "type": "null" }] },
+    "capture_ref": { "oneOf": [{ "$ref": "#/$defs/uuid7" }, { "type": "null" }] },
+    "engagement_id": { "oneOf": [{ "$ref": "#/$defs/uuid7" }, { "type": "null" }] },
+    "terminal": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": false, "required": ["outcome", "result"], "properties": { "outcome": { "const": "succeeded" }, "result": { "type": "object" } } },
+        { "type": "object", "additionalProperties": false, "required": ["outcome", "safe_error_code"], "properties": { "outcome": { "const": "failed" }, "safe_error_code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$" } } }
+      ]
+    }
+  },
+  "$defs": {
+    "uuid7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "x-invariants": [
+    "The orchestration schema v5 stores this private receipt and its SHA-256 digest atomically; no private input is a public inspection projection.",
+    "request_sha256 hashes the JCS-normalized full request; input_sha256 hashes the JCS-normalized complete immutable input.",
+    "A capture_ref reserves an identity before effects and does not prove publication or settlement.",
+    "engagement_id is bound in the engagement allocation transaction; existing member and task reservations own subsequent identities.",
+    "Known bindings and terminal outcome are immutable; exact repetition is allowed, while drift is rejected.",
+    "Historical records acquire no invented operation receipt, diagnostic, or authority during migration."
+  ]
+}

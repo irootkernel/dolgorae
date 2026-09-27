@@ -139,6 +139,21 @@ pub fn inspect_capture_in_state_root(
 }
 
 fn capture(arguments: &[OsString]) -> Result<Value, MachineError> {
+    capture_reserved(arguments, new_uuid_v7())
+}
+
+/// The one-shot coordinator commits this reservation before materialization.
+/// A reservation is not a published capture and cannot authorize settlement.
+pub(crate) fn capture_reserved(
+    arguments: &[OsString],
+    capture_ref: Uuid,
+) -> Result<Value, MachineError> {
+    if capture_ref.get_version_num() != 7 {
+        return Err(MachineError::invalid_argument(
+            "capture_ref",
+            "capture reservation must be UUIDv7",
+        ));
+    }
     let workspace = option_path(arguments, "--workspace")?;
     let kind = parse_kind(&required(arguments, "--kind")?)?;
     let revision = optional(arguments, "--revision")?;
@@ -156,7 +171,6 @@ fn capture(arguments: &[OsString]) -> Result<Value, MachineError> {
     require_outside_workspace(&owner_file, &root, "--settlement-owner-file", false)?;
     let targets = state_root(&root)?.join("review-targets");
     secure_directory(&targets)?;
-    let capture_ref = new_uuid_v7();
     let temporary = targets.join(format!(".capture-{capture_ref}"));
     let verify = targets.join(format!(".verify-{capture_ref}"));
     let final_root = targets.join(capture_ref.to_string());
@@ -194,6 +208,9 @@ fn capture(arguments: &[OsString]) -> Result<Value, MachineError> {
         };
         write_record(&temporary.join("record.json"), &record)?;
         fs::rename(&temporary, &final_root).map_err(io_error)?;
+        File::open(&targets)
+            .and_then(|file| file.sync_all())
+            .map_err(io_error)?;
         Ok(json!({
             "schema":"dolgorae-review-target-capture-result/v1",
             "capture_ref":capture_ref,
@@ -214,11 +231,52 @@ fn capture(arguments: &[OsString]) -> Result<Value, MachineError> {
     let _ = remove_tree(&verify);
     if result.is_err() {
         let _ = remove_tree(&temporary);
-        if owner_created {
+        if owner_created && !final_root.exists() {
             let _ = fs::remove_file(&owner_file);
         }
     }
     result
+}
+
+/// Observe publication and settlement without materializing or deleting files.
+pub(crate) fn observe_capture_in_state_root(
+    workspace_state_root: &Path,
+    capture_ref: Uuid,
+    engagement_id: Uuid,
+) -> Result<Option<Value>, MachineError> {
+    let targets = workspace_state_root.join("review-targets");
+    for prefix in [".capture-", ".verify-"] {
+        if targets
+            .join(format!("{prefix}{capture_ref}"))
+            .try_exists()
+            .map_err(io_error)?
+        {
+            return Err(target_error(
+                "REVIEW_TARGET_STATE_INVALID",
+                "capture publication is incomplete",
+            ));
+        }
+    }
+    let root = targets.join(capture_ref.to_string());
+    if !root.try_exists().map_err(io_error)? {
+        return Ok(None);
+    }
+    let record: CaptureRecord = read_json(&root.join("record.json"), 64 * 1024)?;
+    if record.capture_ref != capture_ref
+        || record.backend_kind != "dolgorae_specialist_review"
+        || record.backend_lifecycle_id != engagement_id.to_string()
+    {
+        return Err(target_error(
+            "REVIEW_TARGET_STATE_INVALID",
+            "capture does not belong to the original review",
+        ));
+    }
+    Ok(Some(json!({
+        "capture_ref":record.capture_ref,
+        "revision":record.revision,
+        "state":if record.settled {"settled"} else {"active"},
+        "cleanup_pending":record.settled && root.join(".settlement-source").try_exists().map_err(io_error)?
+    })))
 }
 
 fn settle(arguments: &[OsString]) -> Result<Value, MachineError> {

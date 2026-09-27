@@ -4059,24 +4059,64 @@ Orchestration schema v4 adds nullable diagnostic storage and nullable-artifact
 failure delivery receipts transactionally; migration preserves existing receipt
 sequences, artifacts, accepted requests, and operation responses.
 
-One-shot review MUST provide a stable lookup reference that the caller retains
-before the first server, capture, or Reviewer effect. A reference available
-only in an initial or final response the caller may never receive is insufficient.
+Recoverable one-shot review MUST bind a caller-retained lookup reference
+before the first server, capture, or Reviewer effect.
 Durable state MUST bind that reference to the original request and each
 engagement, Reviewer, capture, and server generation as they become known.
-TASK-058 MUST define the public lookup and recovery commands, their checked
-outcomes, and how authority survives interruption or is explicitly reauthorized.
-The lookup reference alone MUST NOT grant mutation authority.
+The recoverable Machine CLI carrier adds paired `--request-ref <UUIDv7>` and
+`--recovery-controller-file <absolute-path>` options to `specialist review`.
+The caller generates and retains the reference and creates the private Controller
+credential before invoking the review. `--temporary-server` additionally opts
+that operation into guarded retirement. It requires the recoverable carrier.
+Existing invocations without these options keep their prior result and lifetime
+contracts. The lookup reference alone MUST NOT grant mutation authority.
+
+`specialist review-inspect --workspace <path> --request-ref <UUIDv7> --format json`
+reads the original operation using local workspace observation authority.
+`specialist review-recover` accepts the same selectors plus
+`--recovery-controller-file <absolute-path> --action cleanup`. Cleanup requires
+the exact Controller identity and capability bound at initial acceptance.
+These commands neither resolve a replacement Profile nor allocate a new review.
+Lost credentials block mutation; reference knowledge does not reauthorize it.
+Same-reference execution with different request, Profile, cleanup policy, or
+authority is an idempotency conflict. An already accepted reference MUST NOT
+re-enter preparation or dispatch, even when no terminal result was published.
+
+Orchestration schema v5 adds a one-shot operation receipt, committed
+before Profile preparation. It binds the complete normalized request, workspace,
+Profile selection, recovery Controller, cleanup policy, and preserved private
+carriers. Engagement allocation binds its identity in the same transaction;
+Reviewer and task identities remain owned by their existing reservations.
+Capture identity is reserved before materialization and distinguished from a
+published capture (`state: reserved`, null revision). A settled capture also
+reports whether source cleanup remains pending; recovery replays the preserved
+accepted receipt to finish that cleanup. Receipt and engagement/task observations
+share one database read transaction. Inspection opens existing storage read-only without schema
+migration, delivery collection, reconciliation, or capability creation. It
+projects the stored task diagnostic unchanged and reports missing identities
+as absent. Original result, terminal error, Reviewer closure, engagement closure,
+capture settlement, and server retirement are separate facts. Private carrier
+paths, capabilities, and arbitrary preparation-error text are never projected.
+Migration preserves existing engagements, tasks, diagnostics and delivery receipts.
+
+An operation lock serializes execution and authorized cleanup. Acquiring it
+does not prove that the Reviewer Turn ended. Cleanup may close a proven terminal
+Reviewer, release and close its original engagement, settle the original capture
+with its preserved owner and checked receipt, and finally retire an owned server.
+It does not interrupt an active Turn implicitly. Unknown acceptance or completion,
+unresolved provisioning, missing authority, and active or uncertain members
+produce a checked `recovery_blocked` outcome. Terminal response loss does not
+change the stored outcome or permit a replacement Turn.
 
 A fresh CLI process MUST be able to inspect the original operation using only
 the public interface after the first process and its responses are lost.
 Observation MUST NOT dispatch another Turn, allocate another review, or
 implicitly settle a capture or stop a server. Insufficient evidence or authority
 MUST produce an explicit unknown or recovery-blocked outcome. Recovery mutations
-require their separately defined authority and preconditions. The current
-`legacy_one_shot` engagement and ephemeral credentials cannot be assumed to
-support the existing `external_v1` facade lookup. TASK-058 must bridge that
-boundary without exposing credentials or authorizing direct database access.
+require their separately defined authority and preconditions. The recoverable carrier
+projects `legacy_one_shot` engagements through these dedicated commands; it does
+not grant access through the `external_v1` facade or expose credentials and
+private database access.
 
 An explicit temporary-review cleanup mode MUST restrict shutdown authority to
 the exact Profile Server key and generation created exclusively for that
@@ -4094,7 +4134,22 @@ server, a replacement generation, another member, or uncertain ownership MUST
 prevent automatic shutdown. Ordinary shared-server lifetime remains unchanged.
 Successful cleanup MUST have terminal evidence; timeout, cancellation, and
 unknown outcomes MUST preserve the identities needed for supported recovery.
-TASK-058 owns the opt-in carrier and checked cleanup outcomes.
+Profile lifecycle PREPARE records review ownership under the existing home and
+server locks before spawning. The ownership record binds workspace and request
+reference to the immutable Profile binding, reserved epoch and launch token;
+verified generation identity is added when available. It is ownership evidence,
+not a replacement for authoritative Profile Server state. Attaching to a prior
+server records `preexisting` and grants no retirement authority. The recoverable carrier
+must not automatically roll over a different pre-existing launch contract.
+Reviewer admission uses the prepared server generation without starting a
+replacement between preparation and membership registration. Generation changes
+are rejected under the existing membership locks. Server identity is observable
+for every recoverable operation, while retirement still requires the explicit
+`--temporary-server` choice.
+Retirement compares ownership and the exact expected generation inside the
+existing stop reservation lock, then reuses normal process, socket and membership
+proofs. A pre-publication crash with insufficient process evidence remains
+blocked. A generation replacement cannot inherit the old operation's authority.
 
 The installed review skill MUST provide its required schemas, examples, and
 transitive local references through supported package paths matching its source

@@ -31,9 +31,13 @@ def schema_name(example_name: str) -> str:
         "external-engagement-": "dolgorae-external-specialist-facade-v1.schema.json",
         "idempotency-intent.": "dolgorae-idempotency-intent-v1.schema.json",
         "ledger-state.": "dolgorae-ledger-state-v1.schema.json",
+        "one-shot-machine-v2-": "dolgorae-machine-v2.schema.json",
+        "one-shot-operation-v1-": "dolgorae-one-shot-operation-v1.schema.json",
+        "one-shot-review-observation-v1-": "dolgorae-one-shot-review-observation-v1.schema.json",
         "orchestration-state-v2.": "dolgorae-orchestration-state-v2.schema.json",
         "orchestration-state.": "dolgorae-orchestration-state-v1.schema.json",
         "orchestration-": "dolgorae-orchestration-tool-v1.schema.json",
+        "profile-review-ownership-v1-": "dolgorae-profile-review-ownership-v1.schema.json",
         "role-source.": "dolgorae-role-source-v1.schema.json",
         "review-target-": "dolgorae-review-target-v1.schema.json",
         "specialist-policy-input-v2.": "dolgorae-specialist-policy-input-v2.schema.json",
@@ -86,6 +90,14 @@ def repaired_negative_example(
         del repaired["details"]["diagnostic"]["private_provider_key"]
     elif example_name == "error-contract-v2-review-task.invalid-extra-details.json":
         del repaired["details"]["profile"]
+    elif example_name == "error-contract-v2-review-recovery-blocked.invalid-capability.json":
+        del repaired["details"]["capability"]
+    elif example_name == "one-shot-review-observation-v1-blocked.invalid-private-diagnostic.json":
+        del repaired["diagnostic"]["private_provider_key"]
+    elif example_name == "one-shot-operation-v1-reserved.invalid-reference-version.json":
+        repaired["input"]["request_ref"] = "018f0000-0000-7000-8000-000000058001"
+    elif example_name == "profile-review-ownership-v1-reserved.invalid-launch-token.json":
+        repaired["launch_token"] = "018f0000-0000-7000-8000-000000058006"
     elif example_name == "external-engagement-v3-assign.invalid-structured-purpose.json":
         repaired["task"]["purpose"] = "change"
     elif example_name in {
@@ -138,6 +150,8 @@ def main() -> int:
             *EXAMPLES.glob("error-contract-v2-*.invalid-*.json"),
             *EXAMPLES.glob("external-engagement-v3-*.invalid-*.json"),
             *EXAMPLES.glob("specialist-review-v3-*.invalid-*.json"),
+            *EXAMPLES.glob("one-shot-*.invalid-*.json"),
+            *EXAMPLES.glob("profile-review-ownership-v1-*.invalid-*.json"),
         ]
     )
     recognized_examples = {

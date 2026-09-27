@@ -375,6 +375,7 @@ pub trait SemanticService: Send + Sync {
 }
 
 pub(crate) struct PreparedReviewer {
+    pub pinned_server: Option<ServerState>,
     pub view: WorkspaceView,
     pub state_root: PathBuf,
     pub plan: ReviewerRuntimePlan,
@@ -739,7 +740,23 @@ pub(crate) fn prepare_reviewer(
     let home = DolgoraeHome::system()?;
     let global_profile_binding =
         ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare(&home)?;
-    let state = crate::profile::ensure_global_server(&global_profile_binding)?;
+    let state_root = workspace_state_root(&view)?;
+    prepare_reviewer_with_binding(view, state_root, global_profile_binding, None)
+}
+
+pub(crate) fn prepare_reviewer_with_binding(
+    view: WorkspaceView,
+    state_root: PathBuf,
+    global_profile_binding: GlobalProfileBinding,
+    review_owner: Option<&crate::profile::ReviewServerOwner>,
+) -> Result<PreparedReviewer, MachineError> {
+    let profile_name = &global_profile_binding.selected_name;
+    let state = match review_owner {
+        Some(owner) => {
+            crate::profile::ensure_global_server_for_review(&global_profile_binding, owner)?
+        }
+        None => crate::profile::ensure_global_server(&global_profile_binding)?,
+    };
     let configuration = &global_profile_binding
         .launch_snapshot
         .process_static_configuration;
@@ -763,8 +780,8 @@ pub(crate) fn prepare_reviewer(
     )?;
     plan.agent_configuration.schema_version = 2;
     plan.agent_configuration.runtime_profile_snapshot_sha256 = global_profile_binding.digest()?;
-    let state_root = workspace_state_root(&view)?;
     Ok(PreparedReviewer {
+        pinned_server: review_owner.map(|_| state),
         view,
         state_root,
         plan,
@@ -1694,11 +1711,22 @@ fn read_optional_text_fd(
 }
 
 pub(crate) struct ReviewerStartContext<'a> {
+    pub pinned_server: Option<&'a ServerState>,
     pub reserved_run_id: Uuid,
     pub aggregate_binding: &'a AggregateBinding,
     pub plan: &'a ReviewerRuntimePlan,
     pub review_cwd: Option<&'a Path>,
     pub global_profile_binding: &'a GlobalProfileBinding,
+}
+
+fn select_start_server(
+    reviewer: Option<&ReviewerStartContext<'_>>,
+    ensure_server: impl FnOnce() -> Result<ServerState, MachineError>,
+) -> Result<ServerState, MachineError> {
+    match reviewer.and_then(|context| context.pinned_server) {
+        Some(state) => Ok(state.clone()),
+        None => ensure_server(),
+    }
 }
 
 pub(crate) fn start_reviewer_run(
@@ -2726,7 +2754,9 @@ fn start_run_typed(
             "the selected global Profile differs from the prepared consumer binding",
         ));
     }
-    let state = crate::profile::ensure_global_server(&global_profile_binding)?;
+    let state = select_start_server(reviewer, || {
+        crate::profile::ensure_global_server(&global_profile_binding)
+    })?;
     let model = model.unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
         return Err(compatibility_rejected(
@@ -7984,6 +8014,125 @@ impl RunMutationLock for RunStartupLock {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn reviewer_start_keeps_prepared_generation_without_ensuring_a_replacement() {
+        let definition = crate::workspace::RuntimeProfile {
+            argv: vec!["/fixture/codex".to_owned()],
+            codex_home: "/fixture/codex-home".to_owned(),
+            environment: BTreeMap::new(),
+            native_subagents: crate::workspace::NativeSubagents::Enabled,
+        };
+        let snapshot = crate::profile::ProfileSnapshot {
+            schema_version: 1,
+            profile_name: "reviewer".to_owned(),
+            canonical_codex_home: definition.codex_home.clone(),
+            normalized_argv: vec![
+                definition.argv[0].clone(),
+                "--strict-config".to_owned(),
+                "--enable".to_owned(),
+                "multi_agent".to_owned(),
+            ],
+            launch_cwd_policy: "profile_state_directory_v1".to_owned(),
+            derived_launch_cwd: "/fixture/profile".to_owned(),
+            sanitized_environment: BTreeMap::new(),
+            enabled_features: vec!["multi_agent".to_owned()],
+            disabled_features: Vec::new(),
+            process_static_configuration: BTreeMap::new(),
+            initial_configuration_observation: BTreeMap::new(),
+            executable_identity: crate::profile::ExecutableIdentity {
+                resolved_path: definition.argv[0].clone(),
+                device: 1,
+                inode: 2,
+                sha256: "a".repeat(64),
+            },
+            codex_version: "0.157.1".to_owned(),
+            schema_bundle_sha256: "b".repeat(64),
+            compatibility_manifest_sha256: "c".repeat(64),
+            launch_contract_sha256: "d".repeat(64),
+            compatibility_verdict: crate::profile::CompatibilityVerdict::Tested,
+            server_key: "e".repeat(64),
+        };
+        let binding = ResolvedGlobalProfile::from_definition("reviewer", definition)
+            .unwrap()
+            .bind(snapshot.clone())
+            .unwrap();
+        let plan = ReviewerRuntimePlan::resolve(
+            &run_profile_snapshot(&snapshot).unwrap(),
+            ReviewerRuntimeRequest {
+                runtime_profile: "reviewer".to_owned(),
+                model: "gpt-6-sol".to_owned(),
+                effort: "high".to_owned(),
+                required_capabilities: Vec::new(),
+            },
+        )
+        .unwrap();
+        let aggregate = plan
+            .aggregate_binding(Uuid::now_v7(), Uuid::now_v7())
+            .unwrap();
+        let prepared = ServerState {
+            schema_version: 2,
+            server_key: snapshot.server_key.clone(),
+            lifecycle: "ready".to_owned(),
+            server_epoch: 7,
+            epoch_id: Uuid::now_v7(),
+            boot_session_uuid: Uuid::now_v7(),
+            pid: 10,
+            pgid: 10,
+            uid: 501,
+            process_fingerprint: "prepared-server".to_owned(),
+            drainer_pid: 11,
+            drainer_pgid: 11,
+            drainer_uid: 501,
+            drainer_fingerprint: "prepared-drainer".to_owned(),
+            socket_path: "/fixture/profile.sock".to_owned(),
+            socket_device: 1,
+            socket_inode: 3,
+            membership_revision: 0,
+            default_model: "gpt-6-sol".to_owned(),
+            models: vec!["gpt-6-sol".to_owned()],
+            capabilities: BTreeMap::new(),
+            snapshot,
+        };
+        let replacement = ServerState {
+            server_epoch: 8,
+            epoch_id: Uuid::now_v7(),
+            pid: 20,
+            pgid: 20,
+            process_fingerprint: "replacement-server".to_owned(),
+            ..prepared.clone()
+        };
+        let mut context = ReviewerStartContext {
+            pinned_server: Some(&prepared),
+            reserved_run_id: Uuid::now_v7(),
+            aggregate_binding: &aggregate,
+            plan: &plan,
+            review_cwd: None,
+            global_profile_binding: &binding,
+        };
+        let calls = std::cell::Cell::new(0);
+        let ensure_replacement = || {
+            calls.set(calls.get() + 1);
+            Ok(replacement.clone())
+        };
+        assert_eq!(
+            select_start_server(Some(&context), ensure_replacement).unwrap(),
+            prepared
+        );
+        assert_eq!(calls.get(), 0, "a prepared review must not ensure a server");
+
+        context.pinned_server = None;
+        assert_eq!(
+            select_start_server(Some(&context), ensure_replacement).unwrap(),
+            replacement
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            select_start_server(None, ensure_replacement).unwrap(),
+            replacement
+        );
+        assert_eq!(calls.get(), 2);
+    }
 
     #[test]
     fn durable_terminal_recovery_returns_only_the_latest_turn() {
