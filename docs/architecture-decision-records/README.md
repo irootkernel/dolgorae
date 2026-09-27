@@ -2562,3 +2562,89 @@ credential use, staging, commit or push is implied by the planning amendment.
 - Give Gul child credentials or a direct Podway control path.
 - Require real Gul before releasing its independently verifiable provider.
 - Reopen completed Tasks or rewrite earlier evidence to conceal new scope.
+
+## ADR-040: Qualify Structured Independent Review Through a Corrective Epic
+
+Status: Accepted, 2026-09-27
+
+### Context
+
+Source inspection at commit `2885a33` found that the v3 review prompt omits
+nested output details, deserialization failures lose their field diagnostics,
+and omitted Reviewer configuration still follows server model/effort defaults.
+The live review drivers cover earlier result contracts. The source skill asks
+for protocol resources that its documented installer does not package, and
+its wait guidance does not explain the effect of terminating the provider CLI.
+Reusable task failure storage retains the error code but loses the detailed
+diagnostic. One-shot CLI requests use an internally generated reference and
+ephemeral credentials, while public engagement lookup requires `external_v1`
+authority. Server preparation can fail after starting the server and before
+allocating a Reviewer. These boundaries require runtime work before a skill
+can promise recovery from a lost process and response.
+
+EPIC-014 established the task-aware contract and deterministic validation.
+EPIC-015 established verified orphan cleanup while retaining ordinary shared
+Profile Server lifetime. Neither completion establishes the live v3 and
+installed-skill acceptance needed here. Later Brokered Session cancellation
+and close improvements do not supply those missing checks.
+
+### Decision
+
+Adopt [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
+with separate Tasks for output reliability, one-shot recovery and temporary
+server cleanup, installed skill usability, and live acceptance. Preserve
+completed Epic and Task history.
+The roadmap places this work after EPIC-008 and before EPIC-009 and requires
+its completion for v0.1.3. EPIC-009 and TASK-027 are `PLANNED` for v0.1.4.
+The [dossier](../todo/TODO-independent-review-readiness.md) holds the task-level
+verification detail until closeout.
+
+Keep strict output validation and deliver the complete contract to the model.
+Use `gpt-6-sol` and `high` only as omitted one-shot Reviewer defaults;
+explicit compatible Profile settings still win. Provide bounded structural
+failure diagnostics without retaining raw model output in error evidence.
+Persist the sanitized diagnostic consistently with the terminal failure so
+response loss and restart do not reduce it to an error code. Preserve old
+records without manufacturing diagnostics they never contained.
+Do not add automatic repair Turns or silently substitute another model.
+
+Choose explicit temporary-review cleanup with generation-bound ownership and
+quiescence checks from the server-creation boundary, including preparation
+errors before Reviewer allocation. Shared servers keep their existing lifetime.
+TASK-058 defines a caller-retained pre-effect lookup reference, durable object
+correlation, public observation and recovery, and preserved or explicitly
+reauthorized capabilities. Reuse lower-level services without assuming the
+external facade already admits one-shot authority. Observation cannot restart
+work, and uncertain authority remains an explicit recovery block.
+
+Package the skill's required protocol dependencies and verify them outside the
+checkout. TASK-059 documents the implemented TASK-058 commands, including the
+limits of recovery after the original process/result handle is lost. TASK-060
+checks that boundary from a new process through public interfaces only.
+
+Keep Codex `0.157.1` as the minimum and the checked `0.157.0` schema baseline.
+The live campaign covers the minimum and a recorded newer compatible version.
+Unqualified newer versions retain `unverified` metadata and existing admission
+checks; the historical `0.153.4` and `0.155.1` targets are not restored.
+
+### Consequences
+
+Deterministic tests can complete their own checks while readiness remains
+unproven until the authorized live campaign and installed-package checks pass.
+Each Task must synchronize its owning documents, checked contracts, runtime,
+and tests before completion. This adoption changes documentation and delivery
+ownership; installation, external account use, release, and publication retain
+their separate authorization boundaries.
+
+### Rejected alternatives
+
+- Reopen EPIC-014 and extend its historical completion to cover new live and
+  server-lifecycle work: this obscures what its original checks established.
+- Combine all fixes into one Task: output, process ownership, and packaging
+  need distinct acceptance evidence and review boundaries.
+- Relax validation or retry invalid output automatically: this hides failures
+  and changes the accepted-task execution contract.
+- Stop any idle Profile Server after review: idle state alone does not prove
+  that this invocation owns the server.
+- Treat process-handle preservation or an engagement ID as sufficient recovery:
+  neither provides the missing one-shot lookup and authorization contract.

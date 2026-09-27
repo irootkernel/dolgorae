@@ -344,6 +344,53 @@ workspace-change claims, non-terminal cancellation cleanup, credential or
 private-endpoint disclosure, and any MCP advertisement under the selected
 `mcp_unavailable` disposition. Raw model output is not retained.
 
+#### Planned independent review readiness
+
+[EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
+implements the adopted
+[readiness requirements](../specs/README.md#independent-review-readiness-planned).
+Reviewer preparation owns explicit Profile overrides and default resolution.
+The shared task prompt and output-contract code supplies the
+complete v3 contract to both the one-shot coordinator and reusable facade;
+the strict validator remains the authority before immutable result publication.
+The validator produces bounded structural diagnostics, while the coordinator
+or facade attaches known execution identity. The engagement store binds that
+sanitized diagnostic to the original task and its terminal failure before
+response publication. Initial errors and authorized await/collect after restart
+project the same stored facts. TASK-057 owns the persisted contract and legacy
+record handling; raw provider output stays outside diagnostic storage and
+projection.
+
+Temporary-server cleanup belongs to the Profile lifecycle service. The review
+coordinator records durable launch intent and cleanup responsibility at the
+server-creation boundary, before model/effort and Reviewer validation can fail.
+It carries authority only for a verified generation it created exclusively.
+Both preparation errors and later completion use the same guarded cleanup
+path, after resolving the lifecycle obligations of any engagement, Reviewer,
+or capture already created. Absent objects require no fabricated identity or
+closure receipt. The lifecycle service revalidates generation, process
+identity, and membership under its existing serialization before signalling.
+Concurrent admission or uncertain state cannot grant cleanup authority.
+Forced termination cannot rely on process-local destructors for cleanup.
+
+TASK-058 adds the missing public one-shot lookup and recovery boundary over the
+existing state and lifecycle services. A caller-retained reference established
+before effects maps durably to the request and known owned objects. The current
+`legacy_one_shot` authority and ephemeral carriers do not satisfy the
+`external_v1` facade's owner checks; a new process needs a defined inspection
+authority and a preserved or explicitly reauthorized mutation capability.
+The reference itself grants no mutation authority. Read-only lookup cannot
+start a replacement review or repair state; ambiguous evidence produces a
+checked unknown or blocked outcome. Recovery mutations use the checked
+one-shot authority and existing lower-level services, with no new job framework
+or skill-owned supervisor.
+
+Skill packaging derives its schema dependency closure from checked protocol
+artifacts. Installed copies carry the same contract bytes and resolve local
+references without the source tree. TASK-057 and TASK-058 own the corresponding
+wire and CLI amendments; this architecture adoption adds no runtime capability
+or public-v1 gRPC change.
+
 ### Immutable Review Target Coordinator
 
 The Immutable Review Target Coordinator introduced by EPIC-004 is a shared

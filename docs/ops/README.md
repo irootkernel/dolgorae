@@ -132,6 +132,29 @@ does not authorize replay; preserve the returned engagement, capture, and
 settlement identities for diagnosis. Legacy v1/v2 output is not a
 completion-aware substitute.
 
+Keep the native CLI process/result handle while waiting and collect its exit
+and complete envelope. A transport wait ending does not itself cancel accepted
+work, but a host timeout that interrupts or terminates the provider-backed CLI
+can cancel the review or leave its outcome unknown. The current one-shot CLI
+does not provide the public lookup/authority contract needed when both its
+process handle and final response are lost. An engagement ID alone does not
+make the external facade available to that one-shot operation. Preserve known
+evidence and report the recovery gap; do not query private databases or start
+another review as a recovery action. TASK-058 owns the missing public contract.
+Ordinary shared Profile Servers remain alive after review; an idle server is
+not evidence that this invocation owns shutdown authority.
+
+The current live review drivers do not establish dependable v3 completion
+review with the planned default configuration. Source-tree skill validation
+also does not prove installed schema access: the documented installer currently
+copies Markdown while the skill refers to protocol resources outside that
+package. If a required version-matched contract is unavailable, report the gap
+instead of inventing a request shape. Follow
+[EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
+for output, recovery, cleanup, installed-package, and live acceptance work.
+Its planned defaults, durable diagnostics, and lookup/cleanup commands become
+operating instructions only after their owning Tasks implement and verify them.
+
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,
 configuration, immutable-target, one-shot review, public-provider, and

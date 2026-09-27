@@ -360,6 +360,9 @@ Review selects the Profile configuration's explicit `model` and
 `model_reasoning_effort`, validates both against `model/list`, and rejects an
 unavailable selection without substitution. If either setting is absent,
 its existing server-default model or first-advertised-effort rule applies.
+The planned Reviewer-specific defaults are defined under
+[independent review readiness](#independent-review-readiness-planned);
+ordinary Run defaults keep their existing meaning.
 
 Codex App Server 0.157.1 is the minimum runtime version. The checked 0.157.0
 schema bundle remains the required-subset comparison baseline; it is byte-for-
@@ -3981,6 +3984,116 @@ reusable member after the adapter closes the engagement, or enable lateral
 Specialist collaboration. Later durable External Specialist Engagement features
 extend the same aggregate and Run contracts rather than replacing this adapter.
 
+### Independent Review Readiness (Planned)
+
+The following requirements are adopted for
+[EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review).
+They describe the acceptance boundary for dependable v3 independent review;
+the roadmap owns their implementation status. Existing CLI and checked wire
+contracts remain current until the owning Tasks synchronize their successors.
+
+For one-shot Reviewer creation, an absent Profile model or reasoning-effort
+setting MUST resolve to `gpt-6-sol` or `high`, respectively. An explicit
+setting takes precedence and MUST pass the existing model/effort compatibility
+checks without substitution. Success and failure evidence MUST record the
+resolved model, effort, Codex version, and Reviewer Run identity when those facts
+exist. General Run defaults and explicitly configured reusable Specialists keep
+their existing semantics.
+
+Both one-shot and reusable `structured_review_v3` assignments MUST deliver the
+complete checked output contract to the Reviewer, including nested fields,
+types, enums, required nullable members, and evidence constraints. Use native
+structured output when the selected protocol supports the required contract;
+otherwise supply a complete canonical JSON skeleton and its constraints.
+Validation MUST still reject malformed reports, prose, Markdown fences, missing
+required fields, and incompatible values before result publication. Terminal
+invalid output MUST NOT trigger an automatic retry or implicit format-repair
+Turn.
+
+Validation failures MUST expose a bounded JSON path and error category, safe
+top-level key metadata, and the output digest. Diagnostics MUST distinguish
+missing fields, unknown fields, wrong types, invalid enums, and semantic
+constraint failures without exposing raw output, arbitrary model-supplied
+values, credentials, or hidden reasoning. Missing execution metadata before
+Reviewer allocation MUST remain absent rather than fabricated. TASK-057 owns
+the checked error projection and compatibility fixtures.
+
+The sanitized bounded diagnostic MUST be durably bound to its original review
+or task together with the terminal failure. The first error response and later
+authorized await/collect projections MUST preserve the same diagnostic facts,
+including after response loss and process restart. Diagnostic storage MUST NOT
+retain raw provider output or arbitrary provider strings. TASK-057 owns the
+persisted diagnostic contract, terminal-commit consistency, and legacy-reader
+compatibility. Historical records without diagnostics MUST remain readable
+without inventing missing details. TASK-058 exposes the stored one-shot failure
+through its public lookup contract.
+
+One-shot review MUST provide a stable lookup reference that the caller retains
+before the first server, capture, or Reviewer effect. A reference available
+only in an initial or final response the caller may never receive is insufficient.
+Durable state MUST bind that reference to the original request and each
+engagement, Reviewer, capture, and server generation as they become known.
+TASK-058 MUST define the public lookup and recovery commands, their checked
+outcomes, and how authority survives interruption or is explicitly reauthorized.
+The lookup reference alone MUST NOT grant mutation authority.
+
+A fresh CLI process MUST be able to inspect the original operation using only
+the public interface after the first process and its responses are lost.
+Observation MUST NOT dispatch another Turn, allocate another review, or
+implicitly settle a capture or stop a server. Insufficient evidence or authority
+MUST produce an explicit unknown or recovery-blocked outcome. Recovery mutations
+require their separately defined authority and preconditions. The current
+`legacy_one_shot` engagement and ephemeral credentials cannot be assumed to
+support the existing `external_v1` facade lookup. TASK-058 must bridge that
+boundary without exposing credentials or authorizing direct database access.
+
+An explicit temporary-review cleanup mode MUST restrict shutdown authority to
+the exact Profile Server key and generation created exclusively for that
+invocation. Durable launch intent and cleanup responsibility MUST cover the
+server-creation boundary, including interruption before member registration.
+Bind cleanup authority to the verified generation actually created; incomplete
+identity remains uncertain. Errors during model/effort checks, Reviewer policy
+validation, credential or engagement creation, and capture creation MUST use
+the same guarded cleanup/recovery path. A process-local destructor alone is
+insufficient after forced termination. Report known server identity even when
+no Reviewer exists, without fabricating Reviewer or capture identifiers.
+Shutdown requires verified process identity and quiescent membership through
+the existing Profile lifecycle service. An existing shared
+server, a replacement generation, another member, or uncertain ownership MUST
+prevent automatic shutdown. Ordinary shared-server lifetime remains unchanged.
+Successful cleanup MUST have terminal evidence; timeout, cancellation, and
+unknown outcomes MUST preserve the identities needed for supported recovery.
+TASK-058 owns the opt-in carrier and checked cleanup outcomes.
+
+The installed review skill MUST provide its required schemas, examples, and
+transitive local references through supported package paths matching its source
+version. Verification MUST exercise the installed layout without relying on a
+repository checkout. Guidance MUST distinguish a transport wait ending from
+termination of the provider-backed CLI, which can cancel the operation or leave
+its outcome unknown. Hosts MUST preserve the native process/result identity
+while waiting and use the TASK-058 public lookup/authorized recovery contract
+when that handle is lost. An unsupported or blocked recovery MUST be reported
+as such rather than replaced with a new review invocation.
+
+Live acceptance MUST use a committed Hello World fixture that prints
+`Hello world!` while criterion `C-1` requires `Hello, world!`. A passing review
+has a valid v3 report, `C-1` assessed as `unmet`, candidate evidence locating the
+defective source line, and `overall_assessment: requirements_not_met`.
+The campaign MUST verify source and Git integrity, result collection, Reviewer
+and engagement closure, capture settlement, and authorized temporary-server
+cleanup. Integrated failure checks MUST discard the initial response, terminate
+the original CLI, and use a new process and only public interfaces to inspect
+the same operation, retrieve any committed diagnostic, and exercise authorized
+recovery or a checked blocked outcome without a new review or Turn. TASK-058
+also requires native failure injection before Reviewer allocation, for both
+new and pre-existing servers. Run the live fixture with the required defaults
+at Codex `0.157.1` and a recorded representative newer compatible version.
+A newer version's lack of behavioral qualification alone MUST NOT block
+admission; report `unverified` once as
+concise compatibility metadata and retain existing schema and capability checks.
+Live use requires separate explicit authorization. Missing live evidence
+prevents the readiness acceptance from passing.
+
 ### Immutable Review Targets and Scoped Specialist Review
 
 EPIC-004 MUST add a versioned immutable review-target contract without changing
@@ -5159,10 +5272,12 @@ socket.
 
 This normative runtime inventory covers the complete target. Release requirements
 are profile-specific: v0.1.3 requires applicable TASK-023 cases, TASK-026 provider
-acceptance and the consumer-contract cases. TASK-032 full-surface non-UTF8
-acceptance remains a later Personal Alpha requirement. TASK-053/056 synchronize
-these boundaries in the checked registry; future-owner tests must not silently
-block the preview. Each applicable black-box test must exist and pass against
+acceptance and the consumer-contract cases. The roadmap also requires EPIC-016
+independent review readiness for v0.1.3. TASK-032 full-surface non-UTF8
+acceptance remains a later Personal Alpha requirement. TASK-053/056 freeze the
+provider boundary in the checked registry; the roadmap owns current release
+eligibility. Future-owner tests must not silently block the preview. Each
+applicable black-box test must exist and pass against
 the exact release candidate; planned paths are not passing evidence.
 
 | Runtime case ID | Owner | Required test | Test path |

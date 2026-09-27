@@ -60,6 +60,58 @@ count and byte boundary. Fake-runtime E2E must assert that task bytes appear in
 the Turn input but not `developerInstructions`, and must not be described as a
 live-provider acceptance result.
 
+## Independent review readiness verification
+
+[EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
+and its [dossier](../todo/TODO-independent-review-readiness.md) define the
+remaining review checks. Implement the adopted
+[requirements](../specs/README.md#independent-review-readiness-planned) in the
+owning Task before claiming a new default, diagnostic field, cleanup option,
+or installed resource. Synchronize the private checked contracts and examples
+before runtime changes; preserve the public-v1 descriptor and legacy results.
+
+Test the full contract through both one-shot and reusable production paths.
+Model/effort tests must vary advertised ordering and explicit overrides.
+Malformed-output tests must exercise safe structural diagnostics and secret
+canaries as well as rejection. Lose the first validation-error response, restart
+the process, and assert identical sanitized diagnostics from authorized
+await/collect. Cover the terminal/diagnostic commit boundaries and historical
+records with no diagnostic payload; never reconstruct missing detail from raw
+model output.
+
+TASK-058 must establish a reference the caller retains before effects and a
+public one-shot lookup/recovery authority contract. Terminate the original CLI
+and discard its responses, then use a new process and public commands only to
+inspect the same operation. Check read-only observation, authorized recovery,
+unknown/blocked outcomes, and rejection of mutation without authority. An
+engagement ID alone cannot bypass the current `legacy_one_shot`/`external_v1`
+boundary. No private database query or replacement review may count as recovery.
+
+Native cleanup tests must start at server creation, before model/effort checks
+or `PreparedReviewer` publication. Inject Reviewer policy, credential,
+engagement, and capture failures and interruption before member registration
+with both newly created and pre-existing servers. Cover concurrent membership,
+server replacement, and uncertain process identity under a stated adversarial
+attack budget. Durable ownership must survive forced termination; destructors
+alone do not prove that property.
+
+Install the skill into an isolated temporary root and validate its required
+schemas, examples, and local reference closure without a checkout. Compare
+packaged contract bytes with their canonical sources. Test wait, interruption,
+and unknown-outcome guidance against the production CLI and a controlled fake
+provider, using TASK-058's implemented commands after process-handle loss.
+Prose assertions alone cannot establish the behavior.
+
+The live v3 campaign uses the required defaults, the defective Hello World
+fixture, Codex `0.157.1`, and a recorded newer compatible runtime. Run it only
+with explicit live authority. The existing v1/v2 drivers and a passing default
+gate do not supply this evidence. Complete each Task's designated checks and
+independent review, then run the full repository gate and live acceptance for
+TASK-060. Its integrated checks must retain the diagnostic-loss/restart and
+preparation-failure scenarios, and its authorized live campaign must include
+new-process lookup after CLI and response loss. Keep raw logs and runtime
+identities local under the repository's evidence-retention policy.
+
 ## Orchestration core verification
 
 Keep Role and policy semantics in `src/specialist_policy.rs` and durable
@@ -209,7 +261,7 @@ identifiers, and model output out of tracked documentation.
 
 Use non-writing Markdown/schema/example/descriptor/skill checks for plan changes.
 Implementation completion still requires the full deterministic gate and
-applicable live evidence. Epic completion gives release eligibility only:
-exact-candidate build/installation QA, tag, publication, and runtime installation
-retain separate authority. v0.1.3 remains a Milestone Preview, not Personal Alpha
-or proof of actual Gul integration.
+applicable live evidence. v0.1.3 requires both EPIC-008 and EPIC-016 completion
+under the roadmap release boundary. Exact-candidate build/installation QA,
+tag, publication, and runtime installation retain separate authority. v0.1.3
+remains a Milestone Preview, not Personal Alpha or proof of actual Gul integration.

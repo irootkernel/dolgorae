@@ -21,7 +21,10 @@ claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
 boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
-integration. `EPIC-009` and `TASK-027` are now `ACTIVE`.
+integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
+`EPIC-016` and `TASK-057` through `TASK-060` are `PLANNED` after EPIC-008
+and before EPIC-009. They own reliable v3 independent review and installed-skill
+acceptance required for v0.1.3 without reopening completed Epics.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -36,17 +39,18 @@ Dolgorae as Aquarium independent-review's Codex backend. After the `v0.1.0`
 Integration Preview, the implementation roadmap proceeds through access and
 recovery safety, external Specialist hardening, the global Codex Profile
 cutover, the supervised Gul Run gateway and Brokered Hierarchy core, live
-Primary control-plane integration, the durable Collaboration Plane, operator
-and audit interfaces, and final conformance and Personal Alpha acceptance.
+Primary control-plane integration, independent review readiness, the durable
+Collaboration Plane, operator and audit interfaces, and final conformance and
+Personal Alpha acceptance.
 `TASK-025` remains the live run-bound transport probe and occurs only after the
 Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
 EPIC-008 delivers the live provider boundary `MILESTONE-BH1-P` through twelve
 Tasks, including the Gul consumer contract, complete prompt history, read-only
 aggregate/result queries, and frozen-consumer regression. TASK-025, TASK-053,
 TASK-047, TASK-048, TASK-049, TASK-050, TASK-051, TASK-054, TASK-055,
-TASK-052, TASK-056, and TASK-026 are complete. `v0.1.3` is eligible for its
-separate release-candidate lifecycle; actual Gul acceptance is tracked
-separately and MUST NOT be inferred from provider QA.
+TASK-052, TASK-056, and TASK-026 are complete. `v0.1.3` also requires EPIC-016
+completion before its separate release-candidate lifecycle; actual Gul
+acceptance is tracked separately and MUST NOT be inferred from provider QA.
 `TASK-000-G` remains superseded because its terminology-only boundary no longer
 matches the accepted product contract. `TASK-003-C` completed the lifecycle-seal
 and ledger-conformance contract after TASK-003-B's durable ledger, repair,
@@ -84,9 +88,9 @@ stated in its owning Epic.
 | `v0.1.0` | Integration Preview | `EPIC-004` complete; completed `EPIC-012` development producer included without extending product scope | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
-| `v0.1.3` | Milestone Preview | All twelve revised `EPIC-008` Tasks complete, including `dolgorae.gul-consumer/v1`; preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` included; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
+| `v0.1.3` | Milestone Preview | `EPIC-008` and `EPIC-016` complete, including all twelve provider Tasks, all four independent review Tasks, and both Epic acceptance gates; preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` and `dolgorae.gul-consumer/v1` included; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
 | `v0.1.4` | Milestone Preview | `EPIC-009` complete on the verified provider boundary | v0.1.3 provider capabilities plus `MILESTONE-BC1`; no automatic Gul acceptance claim |
-| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
+| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013` and `EPIC-016` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
 readiness, the complete target specification, or customer support. Read-only
@@ -95,6 +99,10 @@ of v0.1.4 or v0.2.0. A completion boundary makes a version eligible for release;
 release, change the changelog, authorize a tag or publication, or prove an
 installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
+EPIC-016 is required for v0.1.3; EPIC-009 remains assigned to v0.1.4.
+The TASK-053 frozen conformance registry retains its original provider-only
+release metadata. This table owns current release eligibility, including
+EPIC-016 completion.
 
 ## Status Model
 
@@ -139,8 +147,8 @@ A Task is `COMPLETE` only when all of the following are true:
 7. One or more task-scoped Git commits contain the completed change.
 
 This general gate does not prescribe how an implementer divides commits or
-stages files. EPIC-008 additionally requires one initial completion commit per
-Task as described in its adopted execution rules below. Push always requires
+stages files. EPIC-008 and EPIC-016 additionally require one initial completion
+commit per Task as described in their execution rules below. Push always requires
 separate explicit user authorization.
 
 ## EPIC-000: Pre-Implementation Stabilization
@@ -1925,10 +1933,10 @@ Epic acceptance: all twelve Tasks and their completion gates pass; the actual
 provider and pinned Codex operate a durable live hierarchy; existing features
 remain compatible; public Protobuf matches the TASK-053 frozen additive contract;
 no unsupported
-capability is advertised; and `MILESTONE-BH1-P` is complete. v0.1.3 becomes
-eligible for separate release-candidate QA and authorized publication as a
-Milestone Preview, not Personal Alpha. Actual-Gul `MILESTONE-BH1` remains
-unclaimed until its deferred consumer campaign passes.
+capability is advertised; and `MILESTONE-BH1-P` is complete. v0.1.3 also requires
+EPIC-016 completion before separate release-candidate QA and authorized
+publication as a Milestone Preview, not Personal Alpha. Actual-Gul
+`MILESTONE-BH1` remains unclaimed until its deferred consumer campaign passes.
 
 Completion evidence includes the generated public-v1 client exercising the
 exact 27-method profile through an isolated production gateway and semantic
@@ -1945,21 +1953,165 @@ does not block this provider milestone. Independent review and the task-scoped
 completion commit close this Task. No release, tag, publication, installation,
 or actual Gul campaign is part of this completion.
 
+## EPIC-016: Reliable Independent Specialist Review
+
+Status: `PLANNED`
+
+Detailed SOT: [independent review readiness dossier](../todo/TODO-independent-review-readiness.md)
+
+Goal: Let an external host use the installed skill to obtain a valid v3
+independent review with actionable failure diagnostics, preserved source
+integrity, durable failure diagnostics, and verified result, recovery, and
+cleanup states. The adopted requirements are owned by
+[SPEC-012](../specs/README.md#independent-review-readiness-planned)
+and [ADR-040](../architecture-decision-records/README.md#adr-040-qualify-structured-independent-review-through-a-corrective-epic).
+
+Delivery order: after EPIC-008 and before EPIC-009. Assigned release: v0.1.3.
+The technical foundation is completed EPIC-004, EPIC-006, EPIC-013, EPIC-014,
+and EPIC-015; current provider and recovery contracts remain in force.
+Completed Epics retain their status. EPIC-009 and TASK-027 remain `PLANNED`
+until this Epic completes. All four Tasks and Epic acceptance are required
+before v0.1.3 release-candidate QA. Completion does not claim installed
+Aquarium activation.
+
+Execute TASK-057, TASK-058, TASK-059, then TASK-060. Each Task uses the ordinary
+completion gate and one initial task-scoped completion commit after its checks
+and independent review pass. Later corrective commits retain their owning Task.
+Commit, live account use, installation, and publication require their own
+authorization. Use an already qualified backend for the independent read-only
+code reviews. Candidate Dolgorae runs are the subjects of live acceptance and
+do not replace those reviews.
+
+### TASK-057: Make Structured Review Output Reliable
+
+Status: `PLANNED`
+
+After EPIC-008, implement complete v3 output-contract delivery for both one-shot
+and reusable structured reviews. Resolve omitted one-shot Reviewer settings to
+`gpt-6-sol` and `high`, preserve explicit compatible Profile overrides, and
+record the actual selection on success and failure. Keep strict validation and
+terminal invalid-output behavior. Add bounded field paths and error categories,
+safe top-level key metadata, output digest, and known execution identity without
+raw model output. Persist sanitized diagnostics with the original task's
+terminal failure and preserve the same facts in the first error and subsequent
+authorized await/collect after restart. TASK-058 exposes those facts through
+one-shot lookup. Freeze affected error projections, persistence/migration
+contracts, and examples before implementation; preserve legacy reports,
+historical records without diagnostics, and the public-v1 descriptor.
+
+Verification: model/effort order permutations and explicit overrides; complete
+nested contract delivery through both production paths; missing, unknown,
+wrong-type, invalid-enum, and semantic failures; diagnostic secret canaries;
+artifact/redelivery parity; invalid output followed by lost first error and
+process restart, then identical diagnostic retrieval; crash consistency of
+failure and diagnostic storage; legacy carrier/result and persisted-state
+compatibility without invented historical metadata. Verify newly introduced
+external structured-output behavior empirically with separate live authority.
+
+### TASK-058: Recover One-Shot Reviews and Retire Temporary Servers
+
+Status: `PLANNED`
+
+Depends on TASK-057. Define and implement the public one-shot lookup/recovery
+contract: a stable reference retained by the caller before effects, durable
+binding to the original request and known engagement/Reviewer/capture/server
+generation, and preserved or explicitly reauthorized capabilities. Bridge the
+current `legacy_one_shot`/`external_v1` authority boundary without assuming an
+engagement ID grants access. A fresh process must inspect the original operation
+without replay, private database access, or implicit mutation; insufficient
+evidence or authority yields a checked unknown or blocked outcome.
+
+Add explicit temporary-review cleanup through the existing coordinator and
+Profile lifecycle service. Establish durable launch intent and cleanup
+responsibility at server creation, covering preparation errors before Reviewer
+allocation. Limit shutdown authority to the verified server key and generation
+created exclusively for the invocation. Recheck process identity and quiescent
+membership before signalling; preserve pre-existing servers and ambiguous
+states. Freeze public commands, authority and persistence contracts, and checked
+outcomes before implementation. Keep Reviewer/engagement closure and capture
+settlement separately observable; never fabricate identities for absent objects.
+
+Verification: lose initial/final responses and terminate the original CLI, then
+inspect the same operation from a new process through public commands only;
+verify saved diagnostics, authorization, known and blocked recovery, and no new
+review or Turn. Inject unsupported model/effort, Reviewer policy rejection,
+credential/engagement/capture failures, and interruption between server launch
+and member registration with both new and pre-existing servers. Cover normal
+completion, invalid output, cancellation, timeout, concurrent admission,
+generation replacement, and identity uncertainty. State the adversarial attack
+budget and prove each new OS/process assumption and no unrelated signalling.
+
+### TASK-059: Make the Installed Review Skill Self-Contained
+
+Status: `PLANNED`
+
+Depends on TASK-058. Correct source skill guidance for host waits, provider CLI
+termination, result collection, and uncertain outcomes. Preserve native process
+and result identity across waits; never imply that killing the CLI merely ends
+observation. When that handle is lost, document the actual TASK-058 lookup and
+authorized recovery commands, including unknown/blocked outcomes and the
+distinction between identity and authority. Package the required version-matched
+schemas, examples, and local reference dependencies, synchronize the documented
+installer and validator, and retain explicit lifecycle authorization boundaries.
+
+Verification: install to an isolated temporary skill root with no source-tree
+fallback; resolve every required schema/example and transitive reference;
+check byte equality with canonical sources and validate representative v2/v3
+requests. Exercise the documented wait/cancel/recovery behavior through the
+production CLI with a controlled fake provider and native process supervision,
+including loss of the original handle and use of TASK-058 from a new process. Static
+prose matching or source-tree link success alone cannot complete this Task.
+
+### TASK-060: Prove Live Independent Review Readiness
+
+Status: `PLANNED`
+
+Depends on TASK-059 and the completed TASK-057/TASK-058 behavior. Add and run an
+opt-in live v3 acceptance campaign with the defective committed Hello World
+fixture and the required default configuration. Cover Codex `0.157.1` and one
+recorded newer compatible version without restoring older runtime support.
+Exercise the installed skill/package against the exact candidate build. Keep
+unverified-version metadata separate from admission and campaign success.
+
+Verification: schema-valid report, `C-1: unmet`, defective source-line evidence,
+`overall_assessment: requirements_not_met`, unchanged source/Git fingerprints,
+result collection, closed Reviewer and engagement, settled capture, and verified
+temporary-server cleanup. Verify the installed workflow after response loss
+and original CLI termination using a new process and public interfaces only;
+retrieve persisted failures unchanged, preserve unknown/blocked outcomes, and
+prove no replacement review or Turn. Retain the preparation-failure cleanup
+matrix for new and pre-existing servers in the integrated checks. Run the full
+repository gate and an independent read-only review; resolve all blocking
+findings. Missing authorized live evidence prevents completion. Evidence
+handling follows the dossier and repository retention policy.
+
+Epic acceptance: all four Tasks pass their completion gates. The minimum and
+newer-version live campaigns pass, malformed outputs have safe actionable
+diagnostics that survive response loss and restart, installed-package checks
+pass without a checkout, and public one-shot lookup and authorized recovery
+work after loss of the original CLI. Lifecycle checks cover preparation failures
+and preserve source integrity and shared-server safety. At closeout, promote
+durable dossier content to its canonical owners, remove the dossier and TODO
+index entry, and replace `Detailed SOT` with `Canonical Outcomes`.
+
 ## EPIC-009: Brokered Specialist Collaboration
 
-Status: `ACTIVE`
+Status: `PLANNED`
 
 Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
 Brokered Hierarchy without making the Primary Agent a message relay.
 
+Delivery order: after EPIC-016 and before EPIC-010. Assigned release: v0.1.4.
+
 ### TASK-027: Durable Mailbox, Virtual Actor, and Collaboration Plane
 
-Status: `ACTIVE`
+Status: `PLANNED`
 
 Depends on completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
 foundations, including selected transport TASK-025 and provider acceptance
-TASK-026. It does not depend on actual Gul acceptance. Integrate the checked
-Specialist collaboration tool through the selected run-bound transport. Enable
+TASK-026. Execute after EPIC-016 under the roadmap delivery order. It does not
+depend on actual Gul acceptance. Integrate the checked Specialist collaboration
+tool through the selected run-bound transport. Enable
 the deferred busy-target queue, reuse-any and activation policies only with their
 checked implementation and compatibility tests. Add the
 Collaboration Service, SQLite Collaboration Exchange and mailbox tables,
