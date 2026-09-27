@@ -426,7 +426,13 @@ or skill-owned supervisor.
 
 Skill packaging derives its schema dependency closure from checked protocol
 artifacts. Installed copies carry the same contract bytes and resolve local
-references without the source tree. TASK-057 and TASK-058 own the corresponding
+references without the source tree. The source-owned package utility derives
+`resources/protocol/` and its inventory from canonical schema IDs and reference
+closure. The inventory records roots, examples, and byte digests; it grants no
+runtime authority. Installation checks canonical equality and copies only the
+declared package files to a new destination. Installed-resource validation uses
+only the package's local registry and rejects remote retrieval.
+TASK-057 and TASK-058 own the corresponding
 wire and CLI amendments; this architecture adoption adds no runtime capability
 or public-v1 gRPC change.
 

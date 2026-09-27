@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/agent-configuration/v2",
+  "title": "Dolgorae immutable Agent Configuration snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "selected_profile",
+    "global_profile_binding_sha256",
+    "model",
+    "default_effort",
+    "purpose",
+    "required_capabilities",
+    "role_reference",
+    "normalized_instructions",
+    "instructions",
+    "execution_lane",
+    "required_assurance",
+    "native_subagent_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "selected_profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "global_profile_binding_sha256": {
+      "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/sha256"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "default_effort": {
+      "type": "string",
+      "minLength": 1
+    },
+    "purpose": {
+      "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose"
+    },
+    "required_capabilities": {
+      "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/sorted_unique_strings"
+    },
+    "role_reference": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "normalized_instructions": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 65536
+    },
+    "instructions": {
+      "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/instructions"
+    },
+    "execution_lane": {
+      "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane"
+    },
+    "required_assurance": {
+      "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance"
+    },
+    "native_subagent_policy": {
+      "const": "enabled"
+    }
+  },
+  "x-invariants": [
+    "the snapshot binds one immutable global Profile Run binding",
+    "normalized_instructions and instructions digest fields agree"
+  ]
+}

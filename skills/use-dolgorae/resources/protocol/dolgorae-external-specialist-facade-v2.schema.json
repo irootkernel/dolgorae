@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/external-specialist-facade/v2",
+  "title": "Dolgorae External Specialist Engagement facade v2",
+  "oneOf": [
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/open_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/open_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/get_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/get_result" },
+    { "$ref": "#/$defs/hire_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/hire_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/assign_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/assign_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/await_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/await_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/collect_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/collect_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/cancel_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/cancel_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/release_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/release_result" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/close_request" },
+    { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/close_result" },
+    { "$ref": "#/$defs/error_result" }
+  ],
+  "$defs": {
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "operation": {
+          "const": "external_specialist_error"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/error_code"
+            },
+            {
+              "const": "LEGACY_STATE_UNSUPPORTED"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/error_result/properties/code"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "hire_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "engagement_id", "role_ref", "agent_configuration", "objective", "requested_access", "idempotency_key"],
+      "properties": {
+        "operation": { "const": "hire_external_specialist" },
+        "engagement_id": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7" },
+        "role_ref": { "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/role_ref" },
+        "agent_configuration": { "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2" },
+        "objective": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 65536 },
+        "requested_access": { "enum": ["read_only", "isolated_write", "canonical_workspace_write"] },
+        "idempotency_key": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 }
+      }
+    }
+  }
+}

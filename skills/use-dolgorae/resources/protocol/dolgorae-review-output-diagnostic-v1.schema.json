@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/review-output-diagnostic/v1",
+  "title": "Sanitized structured review failure diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "category",
+    "path",
+    "output_sha256",
+    "output_bytes",
+    "known_top_level_keys",
+    "unknown_top_level_key_count"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dolgorae-review-output-diagnostic/v1"
+    },
+    "category": {
+      "enum": [
+        "missing_field",
+        "unknown_field",
+        "wrong_type",
+        "invalid_enum",
+        "semantic_constraint",
+        "invalid_json",
+        "output_too_large",
+        "output_unavailable"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(|(/[a-z_]+|/[0-9]+)+)$"
+    },
+    "output_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "output_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "known_top_level_keys": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "summary",
+          "findings",
+          "criterion_assessments",
+          "evidence_limits",
+          "overall_assessment"
+        ]
+      }
+    },
+    "unknown_top_level_key_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1048576
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "codex_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 36
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 36
+        },
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "output_unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "output_sha256": {
+            "type": "null"
+          },
+          "output_bytes": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "output_sha256": {
+            "type": "string"
+          },
+          "output_bytes": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  ]
+}

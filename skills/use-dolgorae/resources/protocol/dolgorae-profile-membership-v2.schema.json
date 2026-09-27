@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/profile-membership/v2",
+  "title": "Dolgorae global Profile membership index v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "server_key", "revision", "journal_sha256", "members"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "server_key": { "$ref": "#/$defs/sha256" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "journal_sha256": { "$ref": "#/$defs/sha256" },
+    "members": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[0-9a-f]{64}:[0-9a-f-]{36}$" },
+      "additionalProperties": { "$ref": "#/$defs/record" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "uuid_v7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "revision", "workspace_id", "run_id", "disposition",
+        "controller_id", "worker_generation", "thread_id", "connection_id", "lifecycle",
+        "writer", "observed_epoch", "runtime_locator", "previous_sha256", "record_sha256"
+      ],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "workspace_id": { "$ref": "#/$defs/sha256" },
+        "run_id": { "$ref": "#/$defs/uuid_v7" },
+        "disposition": { "enum": ["active", "released", "unknown"] },
+        "controller_id": { "oneOf": [{ "$ref": "#/$defs/uuid_v7" }, { "type": "null" }] },
+        "worker_generation": { "type": ["integer", "null"], "minimum": 1 },
+        "thread_id": { "type": ["string", "null"], "minLength": 1 },
+        "connection_id": { "oneOf": [{ "$ref": "#/$defs/uuid_v7" }, { "type": "null" }] },
+        "lifecycle": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "writer": { "type": "boolean" },
+        "observed_epoch": { "type": ["integer", "null"], "minimum": 1 },
+        "runtime_locator": { "type": ["string", "null"], "pattern": "^/" },
+        "previous_sha256": { "$ref": "#/$defs/sha256" },
+        "record_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "x-invariants": [
+    "membership is keyed by workspace_id and run_id across every workspace using the server_key",
+    "active and unknown members block removal, replacement, migration, stop, restart, and generation change",
+    "the journal is authoritative and the index must match its revision and digest"
+  ]
+}

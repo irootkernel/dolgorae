@@ -1,0 +1,89 @@
+{
+  "schema": "dolgorae-agent-skill-resources/v1",
+  "roots": [
+    "protocol/dolgorae-specialist-review-tool-v3.schema.json",
+    "protocol/dolgorae-external-specialist-facade-v3.schema.json",
+    "protocol/dolgorae-one-shot-review-observation-v1.schema.json",
+    "protocol/dolgorae-machine-v2.schema.json"
+  ],
+  "examples": [
+    {
+      "path": "protocol/examples/external-engagement-v2-hire.valid.json",
+      "schema": "protocol/dolgorae-external-specialist-facade-v2.schema.json",
+      "fragment": "#/$defs/hire_request"
+    },
+    {
+      "path": "protocol/examples/external-engagement-v3-assign.valid.json",
+      "schema": "protocol/dolgorae-external-specialist-facade-v3.schema.json",
+      "fragment": "#/$defs/assign_request"
+    },
+    {
+      "path": "protocol/examples/specialist-review-v3-request.valid.json",
+      "schema": "protocol/dolgorae-specialist-review-tool-v3.schema.json",
+      "fragment": "#/$defs/review_request"
+    },
+    {
+      "path": "protocol/examples/one-shot-review-observation-v1-known.valid.json",
+      "schema": "protocol/dolgorae-one-shot-review-observation-v1.schema.json",
+      "fragment": ""
+    },
+    {
+      "path": "protocol/examples/one-shot-review-observation-v1-unknown.valid.json",
+      "schema": "protocol/dolgorae-one-shot-review-observation-v1.schema.json",
+      "fragment": ""
+    },
+    {
+      "path": "protocol/examples/one-shot-review-observation-v1-blocked.valid.json",
+      "schema": "protocol/dolgorae-one-shot-review-observation-v1.schema.json",
+      "fragment": ""
+    },
+    {
+      "path": "protocol/examples/one-shot-review-observation-v1-response-lost.valid.json",
+      "schema": "protocol/dolgorae-one-shot-review-observation-v1.schema.json",
+      "fragment": ""
+    }
+  ],
+  "files": {
+    "protocol/dolgorae-agent-configuration-input-v2.schema.json": "695d54c5e1cc6e0df926c90908b9539661cf8be26c5df1e27aa3eb0c171a82b5",
+    "protocol/dolgorae-agent-configuration-v1.schema.json": "40f0b82ad03b8b11b0b0b35fe0e4e2f9c45548a56416c9810f741ed42888226e",
+    "protocol/dolgorae-agent-configuration-v2.schema.json": "0c12cbd954eab5c4c08ea0211be3f3b314fe64fc3f273241716f7b3b17158e50",
+    "protocol/dolgorae-artifact-v1.schema.json": "319111668259e41dfaa19725c98f704d0098399051346268946eceaa2c93a67b",
+    "protocol/dolgorae-capabilities-v1.schema.json": "bdcb76265d6508f73b791e5f289e09f28fda9a6dcc67a5ca03c2a425e8ea9b79",
+    "protocol/dolgorae-error-contract-v1.json": "cabe4bb7f237933d16778e1658c4ca812b732cd89dcbd7a06d0c1457dbf3f2cd",
+    "protocol/dolgorae-error-contract-v2.json": "9b48b4dc9cf05483c9f4ad342d9fcd201796d61b1c289ec6c159f7e56545b450",
+    "protocol/dolgorae-event-delivery-v1.schema.json": "ede6538acf16895092f2ec9f68b194da15e93f5985ec87d32e9d449ff18c4dc1",
+    "protocol/dolgorae-event-record-v1.schema.json": "ee57cbf80be94eecbe858a93228626fd623cb9b503480095eeb5388c57ef6f27",
+    "protocol/dolgorae-external-specialist-facade-v1.schema.json": "7427285884a82e2ed29ffd7316ea71495de2405bd975385be8d91b4b05ffcacf",
+    "protocol/dolgorae-external-specialist-facade-v2.schema.json": "d54cfde00614a72aa54c7f46418a2129fe0eb5c4157602d02abffa8f6cc50c17",
+    "protocol/dolgorae-external-specialist-facade-v3.schema.json": "9edbd4e86f14802b181bc7f23e1c7751dffd53a702b42cbd49f34926a3be8cc8",
+    "protocol/dolgorae-interaction-summary-v1.schema.json": "dd337129090c61682767944c342a3ce9e3d8cef07b82337b83f8a91a292fd0ef",
+    "protocol/dolgorae-interaction-v1.schema.json": "83f942021f61b422ae077ae677b54eec5dc7c1a6e4e8c09921dc8968d2c29894",
+    "protocol/dolgorae-machine-v1.schema.json": "19b97f95a5ea1d5e25d10662d476fb9cefb5c98358c0de5f51b583d7a7a6a630",
+    "protocol/dolgorae-machine-v2.schema.json": "2d2e690861b6db1fcff9f1686a933ddcba17c744c44f7a1c12c891b62d653e47",
+    "protocol/dolgorae-one-shot-review-observation-v1.schema.json": "2a63736d976b2a3d6f947dcede40fd1021fae3e801f8683143f6bfd9db136adc",
+    "protocol/dolgorae-profile-event-v1.schema.json": "e796df62c171c18d2cf035d7875868bf11310d6ccfd665fa39e320d4becb3443",
+    "protocol/dolgorae-profile-membership-v2.schema.json": "5f24e1f5d4c2099844b0e4ca1285b94254d3daf4d25cfaa55d04fced1096a666",
+    "protocol/dolgorae-profile-review-ownership-v1.schema.json": "5dd3fc227eeb7c4d93df4844166188f06b5038384198765ac14880e15df29eb7",
+    "protocol/dolgorae-profile-server-state-v1.schema.json": "25634f96c4e07b6eaff4a039b30f98449afe16f97951f95208acbaa434e915c2",
+    "protocol/dolgorae-profile-server-state-v2.schema.json": "1ec5ac94920ae6203ce59d02ae035e713f6c6a577c5deeb844abd906fa245e41",
+    "protocol/dolgorae-review-output-diagnostic-v1.schema.json": "57c896efb8e85fc82b154dc49d081ff1dc2c605e559d3f5aa6d7695b2922a300",
+    "protocol/dolgorae-review-target-v1.schema.json": "bbd9fbba03630dd279319e43b3e66950165bc7d81da12e099b7d66dde9fefbcf",
+    "protocol/dolgorae-role-source-v1.schema.json": "09194cfb55d807083c5dac6b6d04b17dc7495de28980dec9cd42b79f5edd6fba",
+    "protocol/dolgorae-run-manifest-v1.schema.json": "50e968da7336fe6a109c70312f69f07927cddbfaf3126f1dac9f4955534d087a",
+    "protocol/dolgorae-run-state-v1.schema.json": "27c88dfd5231104d91c38d66d2cccc7bf3747380fdd5fe04f9cf7c264039e018",
+    "protocol/dolgorae-specialist-policy-v1.schema.json": "a7fe102e33c5fbff5f87111e862478402989636fe5cb4631bf92adabe6e0158c",
+    "protocol/dolgorae-specialist-policy-v2.schema.json": "fc722d6a61c20202ef6aa56ee8f76c1bdf3d070138223a9f832dfe7bb83fdd5b",
+    "protocol/dolgorae-specialist-review-tool-v1.schema.json": "fd5f5dda6920f35399b8deebbf858d66d370d34aa425021471bbdd1c6c9cbd63",
+    "protocol/dolgorae-specialist-review-tool-v2.schema.json": "fc273fd6488ac0d2bd56b03db0a33032b22e1fc21d873722a18afabcfa3a51f0",
+    "protocol/dolgorae-specialist-review-tool-v3.schema.json": "124f39341770fbe092c224d8e237ca877b48f955547798f504cb7e9c729ac405",
+    "protocol/dolgorae-timeline-v1.schema.json": "cabf2c2411197d4cc5d1e903f0016a5d6b975dd11eefce2d4809bf1526d0af50",
+    "protocol/dolgorae-workspace-record-v1.schema.json": "937b7dfc73457f39757554f0865e4a02a9943743b1dc30ec20713b3a1671945f",
+    "protocol/examples/external-engagement-v2-hire.valid.json": "0e781db66cb004eb2fbbe28fca80321c3b39dad99d25a7824c727129c8ccd000",
+    "protocol/examples/external-engagement-v3-assign.valid.json": "8fda7ae9b5514943657f6926964a7ae257acb0f619f37da37b850f0fe9d51ca9",
+    "protocol/examples/one-shot-review-observation-v1-blocked.valid.json": "a114c0b85b5c49800bd4f263cbfff892e83fd70075dc910f50dd5e54b74b09ac",
+    "protocol/examples/one-shot-review-observation-v1-known.valid.json": "ee6e3fb49256ce5b2c8b947ecc2e648fda12f6df6049514c9397f281546f0e8c",
+    "protocol/examples/one-shot-review-observation-v1-response-lost.valid.json": "2ff23616369b985d0e6addded44970c75245ecfffec99b1041d7e4b3d39d9c7c",
+    "protocol/examples/one-shot-review-observation-v1-unknown.valid.json": "8de3fca54b6ae2316780d80265927aef4c113e62d2fd7eb2b010b4188fe66844",
+    "protocol/examples/specialist-review-v3-request.valid.json": "2e354430a10c9ddb55b4c3cbc21ffd3c8d13cbac1658079580b7f09a9818884c"
+  }
+}

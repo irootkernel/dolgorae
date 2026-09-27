@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/controller-timeline/v1",
+  "title": "Dolgorae controller-safe Run timeline v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "captured_head_cursor", "next_after_cursor", "items"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "$ref": "#/$defs/uuid7" },
+    "captured_head_cursor": { "$ref": "#/$defs/cursor" },
+    "next_after_cursor": { "oneOf": [{ "$ref": "#/$defs/cursor" }, { "type": "null" }] },
+    "items": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/item" } }
+  },
+  "$defs": {
+    "uuid7": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "cursor": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "image_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "detail", "media_type", "byte_length", "sha256"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 0 },
+        "detail": { "enum": ["auto", "low", "high"] },
+        "media_type": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 128 },
+        "byte_length": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "content": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": { "kind": { "const": "inline" }, "text": { "type": "string", "x-maxUtf8Bytes": 1048576 } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "artifact"],
+          "properties": {
+            "kind": { "const": "artifact" },
+            "artifact": {
+              "allOf": [
+                { "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata" },
+                { "properties": { "visibility": { "const": "controller_only" } } }
+              ]
+            }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "cursor", "run_id", "turn_id", "occurred_at", "provider_item_id", "provider_order", "content", "images", "interaction_id", "status", "interaction_kind", "interaction_status", "interaction_safe_title"],
+      "properties": {
+        "type": { "enum": ["user_input.accepted", "assistant_response.final", "interaction.opened", "interaction.resolved", "turn.terminal"] },
+        "cursor": { "$ref": "#/$defs/cursor" },
+        "run_id": { "$ref": "#/$defs/uuid7" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "provider_item_id": { "type": ["string", "null"] },
+        "provider_order": { "type": ["integer", "null"], "minimum": 0 },
+        "content": { "$ref": "#/$defs/content" },
+        "images": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/image_metadata" } },
+        "interaction_id": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"], "enum": ["accepted", "final", "opened", "resolved", "completed", "failed", "interrupted", "outcome_unknown", null] },
+        "interaction_kind": { "type": ["string", "null"], "enum": ["command_execution_approval", "file_change_approval", "permission_request", "user_input", "mcp_elicitation", "connector_approval", "unsupported_request", null] },
+        "interaction_status": { "type": ["string", "null"], "enum": ["pending", "resolved", "stale", null] },
+        "interaction_safe_title": { "type": ["string", "null"], "x-maxUtf8Bytes": 512 }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "user_input.accepted" } } }, "then": { "properties": { "content": { "not": { "type": "null" } } } } },
+        { "if": { "properties": { "type": { "const": "assistant_response.final" } } }, "then": { "properties": { "content": { "not": { "type": "null" } }, "images": { "maxItems": 0 } } } },
+        { "if": { "properties": { "type": { "enum": ["interaction.opened", "interaction.resolved"] } } }, "then": { "properties": { "interaction_id": { "type": "string", "minLength": 1 }, "interaction_kind": { "type": "string" }, "interaction_status": { "type": "string" }, "interaction_safe_title": { "type": "string", "minLength": 1 }, "content": { "type": "null" }, "images": { "maxItems": 0 } } }, "else": { "properties": { "interaction_id": { "type": "null" }, "interaction_kind": { "type": "null" }, "interaction_status": { "type": "null" }, "interaction_safe_title": { "type": "null" } } } },
+        { "if": { "properties": { "type": { "const": "interaction.opened" } } }, "then": { "properties": { "status": { "const": "opened" }, "interaction_status": { "const": "pending" } } } },
+        { "if": { "properties": { "type": { "const": "interaction.resolved" } } }, "then": { "properties": { "status": { "const": "resolved" }, "interaction_status": { "enum": ["resolved", "stale"] } } } },
+        { "if": { "properties": { "type": { "const": "turn.terminal" } } }, "then": { "properties": { "status": { "type": "string", "minLength": 1 }, "content": { "type": "null" }, "images": { "maxItems": 0 } } } }
+      ]
+    }
+  }
+}

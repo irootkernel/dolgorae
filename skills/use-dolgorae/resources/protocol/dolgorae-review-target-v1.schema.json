@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/review-target/v1",
+  "title": "Dolgorae immutable review target v1",
+  "oneOf": [
+    { "$ref": "#/$defs/capture_request" },
+    { "$ref": "#/$defs/capture_result" },
+    { "$ref": "#/$defs/terminal_receipt" },
+    { "$ref": "#/$defs/settlement_request" },
+    { "$ref": "#/$defs/settlement_result" },
+    { "$ref": "#/$defs/manifest" }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        { "type": "null" }
+      ]
+    },
+    "target_kind": {
+      "enum": ["workspace", "staged", "dirty", "head", "commit", "range"]
+    },
+    "excluded_disposition": {
+      "enum": ["ignored_files", "git_metadata", "private_tool_state"]
+    },
+    "manifest_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "mode", "size", "sha256", "classification"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "mode": { "enum": [292, 365] },
+        "size": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "classification": { "enum": ["source_text", "source_binary"] }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "target_kind", "requested_revision", "resolved_base",
+        "resolved_head", "layout", "entries", "excluded", "whole_target_digest"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-review-target-manifest/v1" },
+        "target_kind": { "$ref": "#/$defs/target_kind" },
+        "requested_revision": {
+          "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 4096 }, { "type": "null" }]
+        },
+        "resolved_base": { "$ref": "#/$defs/commit" },
+        "resolved_head": { "$ref": "#/$defs/commit" },
+        "layout": { "enum": ["current", "transition"] },
+        "entries": {
+          "type": "array", "maxItems": 20000,
+          "items": { "$ref": "#/$defs/manifest_entry" }
+        },
+        "excluded": {
+          "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/excluded_disposition" }
+        },
+        "whole_target_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "capture_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "workspace", "kind", "backend_kind", "backend_lifecycle_id",
+        "settlement_owner_file"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-review-target-capture-request/v1" },
+        "workspace": { "type": ["string", "null"], "maxLength": 8192 },
+        "kind": { "$ref": "#/$defs/target_kind" },
+        "revision": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "backend_kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "backend_lifecycle_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "settlement_owner_file": { "type": "string", "pattern": "^/", "minLength": 2 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["commit", "range"] } }, "required": ["kind"] },
+          "then": { "required": ["revision"] },
+          "else": { "not": { "required": ["revision"] } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "range" } }, "required": ["kind"] },
+          "then": { "properties": { "revision": { "pattern": "^[^.\\s]+(?:\\.\\.|\\.\\.\\.)[^.\\s]+$" } } }
+        }
+      ]
+    },
+    "capture_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "capture_ref", "capture_revision", "target_kind", "resolved_base",
+        "resolved_head", "manifest_digest", "whole_target_digest", "included_file_count",
+        "excluded", "backend_kind", "backend_lifecycle_id", "owner_binding_digest",
+        "immutable_root"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-review-target-capture-result/v1" },
+        "capture_ref": { "$ref": "#/$defs/uuid7" },
+        "capture_revision": { "const": 1 },
+        "target_kind": { "$ref": "#/$defs/target_kind" },
+        "resolved_base": { "$ref": "#/$defs/commit" },
+        "resolved_head": { "$ref": "#/$defs/commit" },
+        "manifest_digest": { "$ref": "#/$defs/sha256" },
+        "whole_target_digest": { "$ref": "#/$defs/sha256" },
+        "included_file_count": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "excluded": {
+          "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/excluded_disposition" }
+        },
+        "backend_kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "backend_lifecycle_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "owner_binding_digest": { "$ref": "#/$defs/sha256" },
+        "immutable_root": { "type": "string", "minLength": 1 }
+      }
+    },
+    "terminal_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "backend_kind", "backend_lifecycle_id", "terminal_state",
+        "state_revision", "evidence_digest"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-review-target-terminal-receipt/v1" },
+        "backend_kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "backend_lifecycle_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "terminal_state": { "enum": ["completed", "failed", "cancelled", "timed_out"] },
+        "state_revision": { "type": "integer", "minimum": 1 },
+        "evidence_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "settlement_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "workspace", "capture_ref", "expected_revision",
+        "settlement_owner_file", "terminal_receipt_file"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-review-target-settlement-request/v1" },
+        "workspace": { "type": ["string", "null"], "maxLength": 8192 },
+        "capture_ref": { "$ref": "#/$defs/uuid7" },
+        "expected_revision": { "type": "integer", "minimum": 1 },
+        "settlement_owner_file": { "type": "string", "pattern": "^/", "minLength": 2 },
+        "terminal_receipt_file": { "type": "string", "pattern": "^/", "minLength": 2 }
+      }
+    },
+    "settlement_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "capture_ref", "capture_revision", "state", "source_bytes_removed",
+        "replay", "receipt_digest"
+      ],
+      "properties": {
+        "schema": { "const": "dolgorae-review-target-settlement-result/v1" },
+        "capture_ref": { "$ref": "#/$defs/uuid7" },
+        "capture_revision": { "const": 2 },
+        "state": { "const": "settled" },
+        "source_bytes_removed": { "const": true },
+        "replay": { "type": "boolean" },
+        "receipt_digest": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

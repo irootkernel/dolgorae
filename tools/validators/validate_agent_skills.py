@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
-"""Validate source-distributed agent skill structure and basic metadata."""
+"""Validate source skill metadata and independently installed contract resources."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+from referencing import Registry, Resource
+from referencing.exceptions import NoSuchResource, Unresolvable
+
+from validate_markdown import LINK_RE
 
 
 ROOT = Path(__file__).resolve().parents[2]
+from package_agent_skill import (
+    MARKDOWN_FILES,
+    checked_package,
+    references,
+    regular_files,
+    resource_bundle,
+    schema_index,
+)
+
 SKILL_ROOT = ROOT / "skills" / "use-dolgorae"
-EXPECTED_FILES = {
-    "SKILL.md",
-    "references/configuration.md",
-    "references/lifecycle.md",
-    "references/provider.md",
-    "references/recovery.md",
-}
 HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]")
 
 
@@ -98,35 +110,99 @@ def source_files() -> set[str]:
     return actual_files
 
 
+def validate_installed_resources(package: Path) -> None:
+    """Resolve only installed resources; the registry cannot fetch missing IDs."""
+    resources = package / "resources"
+    manifest = json.loads((resources / "manifest.json").read_bytes())
+    if manifest["schema"] != "dolgorae-agent-skill-resources/v1":
+        fail("unsupported installed resource manifest")
+    expected = set(manifest["files"]) | {"manifest.json"}
+    for name in expected:
+        path = PurePosixPath(name)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != name:
+            fail(f"resource path must stay inside the package: {name}")
+    if regular_files(resources) != expected:
+        fail("installed resource inventory is incomplete or contains extra files")
+    for name, digest in manifest["files"].items():
+        if hashlib.sha256((resources / name).read_bytes()).hexdigest() != digest:
+            fail(f"installed resource digest differs: {name}")
+
+    def deny_remote(uri: str):
+        raise NoSuchResource(ref=uri)
+
+    indexed = schema_index(resources / "protocol")
+    registry = Registry(retrieve=deny_remote)
+    for identifier, (_, document) in indexed.items():
+        registry = registry.with_resource(identifier, Resource.from_contents(document))
+    for identifier, (_, document) in indexed.items():
+        for uri in references(document, identifier):
+            registry.resolver().lookup(uri)
+        Draft202012Validator.check_schema(document)
+    for name in manifest["roots"]:
+        if name not in manifest["files"]:
+            fail(f"schema root is outside the installed inventory: {name}")
+        document = json.loads((resources / name).read_bytes())
+        if document["$id"] not in indexed:
+            fail(f"installed schema root is missing: {name}")
+    for example in manifest["examples"]:
+        if any(example[key] not in manifest["files"] for key in ("path", "schema")):
+            fail("example references a file outside the installed inventory")
+        document = json.loads((resources / example["schema"]).read_bytes())
+        checked = Draft202012Validator(
+            {"$ref": document["$id"] + example["fragment"]}, registry=registry
+        )
+        checked.validate(json.loads((resources / example["path"]).read_bytes()))
+
+    for name in MARKDOWN_FILES:
+        path = package / name
+        for match in LINK_RE.finditer(path.read_text(encoding="utf-8")):
+            target = match.group(1).split("#", 1)[0]
+            if not target or target.startswith(("https://", "http://", "mailto:")):
+                continue
+            resolved = (path.parent / unquote(target)).resolve()
+            if not resolved.is_relative_to(package.resolve()) or not resolved.is_file():
+                fail(f"installed guidance link is outside or absent from package: {name}: {target}")
+
+
 def main() -> int:
     try:
         if not SKILL_ROOT.is_dir():
             fail("skills/use-dolgorae: missing skill directory")
         validate_path(SKILL_ROOT)
 
+        expected_files = MARKDOWN_FILES | {f"resources/{name}" for name in resource_bundle()}
         actual_files = source_files()
-        if actual_files != EXPECTED_FILES:
+        if actual_files != expected_files:
             fail(
                 "skills/use-dolgorae: file set differs from the contract: "
-                f"expected {sorted(EXPECTED_FILES)}, got {sorted(actual_files)}"
+                f"expected {sorted(expected_files)}, got {sorted(actual_files)}"
             )
+        checked_package()
 
         entrypoint = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         validate_frontmatter(entrypoint)
-        for reference in sorted(EXPECTED_FILES - {"SKILL.md"}):
+        for reference in sorted(MARKDOWN_FILES - {"SKILL.md"}):
             target = reference.removeprefix("references/")
             if f"](references/{target})" not in entrypoint:
                 fail(f"skills/use-dolgorae/SKILL.md: unlinked reference {reference}")
 
-        for relative in sorted(EXPECTED_FILES):
+        for relative in sorted(MARKDOWN_FILES):
             content = (SKILL_ROOT / relative).read_text(encoding="utf-8")
             if HANGUL_RE.search(content):
                 fail(f"skills/use-dolgorae/{relative}: repository guidance must be English")
-    except (OSError, UnicodeError, SkillValidationError) as error:
+        with tempfile.TemporaryDirectory(prefix="dolgorae-installed-skill-") as temporary:
+            installed = Path(temporary) / "use-dolgorae"
+            subprocess.run(
+                [sys.executable, str(ROOT / "tools/validators/package_agent_skill.py"), "install", "--destination", str(installed)],
+                cwd=temporary, check=True, capture_output=True,
+            )
+            validate_installed_resources(installed)
+    except (OSError, UnicodeError, ValueError, SkillValidationError,
+            SchemaError, ValidationError, Unresolvable, subprocess.CalledProcessError) as error:
         print(f"Agent skill validation failed: {error}", file=sys.stderr)
         return 1
 
-    print(f"Agent skill validation passed: {len(EXPECTED_FILES)} files")
+    print(f"Agent skill validation passed: {len(expected_files)} files; isolated installed resources resolved")
     return 0
 
 

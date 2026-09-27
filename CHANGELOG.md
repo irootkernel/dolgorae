@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Package the review skill's checked schemas and examples for independent installation,
+  with guidance for native waits, interrupted clients, and authorized recovery.
+
 - Add caller-retained one-shot review references, read-only inspection and authorized
   recovery after CLI loss, with guarded retirement of explicitly owned temporary servers.
 

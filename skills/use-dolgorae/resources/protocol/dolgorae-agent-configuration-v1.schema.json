@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/agent-configuration/v1",
+  "title": "Dolgorae immutable Agent Configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runtime_profile",
+    "model",
+    "default_effort",
+    "purpose",
+    "purpose_label",
+    "required_capabilities",
+    "instructions",
+    "execution_lane",
+    "required_assurance",
+    "native_subagent_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "runtime_profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "x-maxUtf8Bytes": 128
+    },
+    "default_effort": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 64
+    },
+    "purpose": {
+      "enum": [
+        "planning",
+        "implementation",
+        "review",
+        "research",
+        "discussion",
+        "workflow_stage",
+        "other"
+      ]
+    },
+    "purpose_label": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-maxUtf8Bytes": 256
+    },
+    "required_capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "x-maxUtf8Bytes": 128
+      }
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 65536
+    },
+    "execution_lane": {
+      "enum": [
+        "shared_readonly",
+        "dedicated"
+      ]
+    },
+    "required_assurance": {
+      "const": "best_effort_personal_alpha"
+    },
+    "native_subagent_policy": {
+      "const": "enabled"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "other"
+          }
+        },
+        "required": [
+          "purpose"
+        ]
+      },
+      "then": {
+        "properties": {
+          "purpose_label": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 256
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "not": {
+              "const": "other"
+            }
+          }
+        },
+        "required": [
+          "purpose"
+        ]
+      },
+      "then": {
+        "properties": {
+          "purpose_label": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "x-invariants": [
+    "the complete object is snapshotted into the Run manifest before process creation",
+    "runtime_profile selects execution and account configuration, not role identity",
+    "model null resolves the single advertised default before Run allocation",
+    "instructions are the explicit Dolgorae-owned role contract"
+  ]
+}

@@ -1,0 +1,1225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/machine-output/v2",
+  "title": "Dolgorae machine output v2",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/success"
+    },
+    {
+      "$ref": "#/$defs/failure"
+    }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "ok",
+        "command",
+        "invocation_id"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+            },
+            {
+              "enum": [
+                "specialist.review-inspect",
+                "specialist.review-recover"
+              ]
+            }
+          ]
+        },
+        "invocation_id": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+        }
+      }
+    },
+    "success": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "ok",
+            "command",
+            "invocation_id",
+            "data"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 2
+            },
+            "ok": {
+              "const": true
+            },
+            "command": {
+              "anyOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+                },
+                {
+                  "enum": [
+                    "specialist.review-inspect",
+                    "specialist.review-recover"
+                  ]
+                }
+              ]
+            },
+            "invocation_id": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+            },
+            "data": {
+              "anyOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/data"
+                },
+                {
+                  "$ref": "#/$defs/global_membership_verification"
+                },
+                {
+                  "$ref": "#/$defs/global_profile_server_status_result"
+                },
+                {
+                  "$ref": "#/$defs/global_profile_server_started_result"
+                },
+                {
+                  "$ref": "#/$defs/global_profile_server_restarted_result"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_await_result"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_collect_result"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/one-shot-review-observation/v1"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "command": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "help",
+                  "version"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/meta"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "review-target.capture"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/capture_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "review-target.settle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/settlement_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "serve"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/rpc_server_ready"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "runtime.capabilities"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/capabilities/v1"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "engagement.call"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "anyOf": [
+                  {
+                    "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/external_specialist_facade_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_await_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/diagnostic_collect_result"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "specialist.review"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "oneOf": [
+                  {
+                    "$ref": "https://dolgorae.local/schema/specialist-review-tool/v1#/$defs/review_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/review_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/review_result"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "controller.credential.create"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/controller_credential_created"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "operator.credential.initialize",
+                  "operator.credential.rotate"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/operator_credential_created"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "init"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/workspace"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "workspace.inspect"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/workspace"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "workspace.writer.status",
+                  "workspace.writer.reset"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/writer_status"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "workspace.writer.handoff_prepare",
+                  "workspace.writer.handoff_commit",
+                  "workspace.writer.handoff_cancel"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/handoff"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.add"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_view"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.show"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_show_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.doctor"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_doctor_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.server.status"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/global_profile_server_status_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.server.start"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/global_profile_server_started_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.server.stop"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_server_stopped_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.server.restart"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/global_profile_server_restarted_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.server.migrate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_server_migrated_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "profile.remove",
+                  "profile.state.reset"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_simple_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "profile.membership.verify"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/global_membership_verification"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.membership.tombstone_orphan"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_simple_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.list"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "profiles"
+                ],
+                "properties": {
+                  "profiles": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_view"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.diagnostics.list"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_diagnostic_page"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "profile.events"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/profile_event_data"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "specialist.policy.add",
+                  "specialist.policy.show",
+                  "specialist.policy.validate"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "specialist.policy.list"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "specialist.policy.remove"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "deleted"
+                ],
+                "properties": {
+                  "deleted": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.delete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "deleted"
+                ],
+                "properties": {
+                  "deleted": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "run.start",
+                  "run.status",
+                  "run.respond",
+                  "run.interrupt",
+                  "run.set_effort",
+                  "run.acquire_write",
+                  "run.release_write",
+                  "run.pause",
+                  "run.resume",
+                  "run.recover",
+                  "run.reconcile",
+                  "run.fork",
+                  "run.create_write_continuation",
+                  "run.close",
+                  "run.controller.reset"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/run"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.create_write_continuation"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "lineage": {
+                    "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/write_continuation_lineage"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.list"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/run"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "run.send",
+                  "run.submit",
+                  "run.wait"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/turn"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.events"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/event_data"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.timeline"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/controller-timeline/v1"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.pending"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/interaction_summary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.interaction.get"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/interaction"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.verify"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/verification"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.controller.verify"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/controller_verification"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.export"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "output_path",
+                  "bundle_schema_version",
+                  "files",
+                  "verification"
+                ],
+                "properties": {
+                  "output_path": {
+                    "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/path"
+                  },
+                  "bundle_schema_version": {
+                    "const": 1
+                  },
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "verification": {
+                    "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/verification"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.artifact.show"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/metadata"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.artifact.export"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/export"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.artifact.read"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/read"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "specialist.review-inspect",
+                  "specialist.review-recover"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/one-shot-review-observation/v1"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "global_membership_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "server_key",
+        "complete",
+        "revision",
+        "records",
+        "members",
+        "orphans"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "server_key": {
+          "$ref": "https://dolgorae.local/schema/profile-membership/v2#/$defs/sha256"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/profile-membership/v2#/$defs/record"
+          }
+        },
+        "orphans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "workspace_id",
+              "run_id",
+              "reason"
+            ],
+            "properties": {
+              "workspace_id": {
+                "$ref": "https://dolgorae.local/schema/profile-membership/v2#/$defs/sha256"
+              },
+              "run_id": {
+                "$ref": "https://dolgorae.local/schema/profile-membership/v2#/$defs/uuid_v7"
+              },
+              "reason": {
+                "enum": [
+                  "manifest_missing",
+                  "manifest_unreadable",
+                  "manifest_malformed",
+                  "manifest_identity_mismatch",
+                  "profile_binding_missing",
+                  "profile_binding_mismatch"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "failure": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "ok",
+            "command",
+            "invocation_id",
+            "error"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 2
+            },
+            "ok": {
+              "const": false
+            },
+            "command": {
+              "anyOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/command"
+                },
+                {
+                  "enum": [
+                    "specialist.review-inspect",
+                    "specialist.review-recover"
+                  ]
+                }
+              ]
+            },
+            "invocation_id": {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+            },
+            "error": {
+              "$ref": "https://dolgorae.local/schema/error-contract/v2"
+            }
+          }
+        }
+      ]
+    },
+    "global_profile_server_status_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "server_key",
+        "lifecycle",
+        "state"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "server_key": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/sha256"
+        },
+        "lifecycle": {
+          "enum": [
+            "stopped",
+            "starting",
+            "ready",
+            "degraded",
+            "stopping",
+            "restarting",
+            "migrating",
+            "migration_blocked"
+          ]
+        },
+        "state": {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/profile-server-state/v2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "global_profile_server_started_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "started",
+        "state"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "started": {
+          "const": true
+        },
+        "state": {
+          "$ref": "https://dolgorae.local/schema/profile-server-state/v2"
+        }
+      }
+    },
+    "global_profile_server_restarted_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "restarted",
+        "state"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "restarted": {
+          "const": true
+        },
+        "state": {
+          "$ref": "https://dolgorae.local/schema/profile-server-state/v2"
+        }
+      }
+    }
+  }
+}

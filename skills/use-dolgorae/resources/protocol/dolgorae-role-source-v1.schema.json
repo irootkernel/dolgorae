@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/role-source/v1",
+  "title": "Dolgorae Specialist Role source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "display_name",
+    "description",
+    "instructions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 128
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 1024
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1,
+      "x-maxUtf8Bytes": 65536
+    }
+  },
+  "x-invariants": [
+    "the name equals the source filename stem",
+    "the file contains no execution, authority, credential, include, or Profile selection fields"
+  ]
+}

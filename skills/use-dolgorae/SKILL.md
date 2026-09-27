@@ -10,6 +10,18 @@ skill covers workspace and profile readiness, immutable review targets, and
 Specialist Policy operations, one-shot Specialist Review, the v0.1.3 public
 provider profile, and externally planned reusable Specialist Engagements.
 
+## Resolve packaged contracts
+
+Resolve relative links from the installed file that contains them, regardless
+of the caller's working directory. This entrypoint's `resources/` and
+`references/` directories belong to the installed skill. The
+[resource inventory](resources/manifest.json) lists the version-matched schemas,
+examples, and their byte digests. Schema `$id` URLs are registry identifiers:
+resolve `$ref` through the files in `resources/protocol/`, including transitive
+dependencies. Do not fetch a missing schema from the network or a repository
+checkout. A missing or mismatched resource means the package is incomplete;
+report it and require an explicitly authorized installation correction.
+
 ## Establish current authority
 
 1. Confirm that the user explicitly asked to use, inspect, configure, diagnose,
@@ -105,8 +117,9 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
      --format json < review-request-v3.json
    ```
 
-   Follow `docs/protocol/examples/specialist-review-v3-request.valid.json` from
-   the exact version-matched source or package. The request must carry
+   Follow the packaged [v3 request example](resources/protocol/examples/specialist-review-v3-request.valid.json)
+   and [review contract](resources/protocol/dolgorae-specialist-review-tool-v3.schema.json).
+   The request must carry
    `purpose` (`change` or `completion`) alongside the brief, contexts, criteria,
    expected output, and deadline. Keep workspace, Profile, credentials, and
    arbitrary host paths outside the request. Preserve exact brief and
@@ -127,6 +140,42 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    retain each status, evidence basis, remaining gap, and `evidence_limits`, and
    report `overall_assessment` as Reviewer evidence rather than business
    approval. `REVIEW_OUTPUT_INVALID` is terminal and never a clean result.
+
+## Wait and recover a one-shot review
+
+Before starting a recoverable review, retain a caller-created UUIDv7 request
+reference and an already authorized Controller credential in a protected regular
+file. Creating a credential requires its own authorization; see
+[lifecycle.md](references/lifecycle.md). Pass both `--request-ref <UUIDv7>` and
+`--recovery-controller-file <absolute-path>` to the original `specialist review`
+command, alongside either its v3 stdin request or supported source flags.
+Keep the exact reference, workspace, executable, and original credential file
+across disconnects. The reference identifies the operation; it grants no cleanup
+authority. An invocation without this pair cannot gain recoverability afterward.
+
+Add `--temporary-server` only when retirement of a server created exclusively
+for this invocation is authorized. It does not permit stopping an existing
+shared server or a replacement generation. Ordinary review preserves server
+lifetime. Successful cleanup proves Reviewer closure, engagement closure,
+capture settlement, and server retirement separately.
+
+Start the CLI once and retain the host's original native process/result handle.
+Wait on that same handle until its authoritative exit and complete JSON envelope
+are available. A bounded observation wait may expire while the process continues;
+resume waiting on the same handle. Do not restart the command to obtain a fresh
+handle. A host timeout that terminates the CLI can cancel the provider operation
+or lose its outcome. Only send an interrupt or cancel when separately authorized;
+termination does not prove rollback or cleanup.
+
+If the handle or response is lost, follow
+[one-shot recovery](references/recovery.md#one-shot-review-inspection-and-cleanup)
+from a fresh process. Use `specialist review-inspect` for read-only observation
+and `specialist review-recover --action cleanup` only with explicit cleanup
+authority and the original credential. These public commands retain the original
+review identity and do not start a review or Turn. Do not use external-facade
+calls for a one-shot engagement: their authority contracts differ. An unknown or
+blocked result requires reporting the remaining uncertainty, never a replacement
+review, private storage inspection, or manual lifecycle repair.
 
 The optional attached tool named `dolgorae_review` may be used only when the
 host actually exposes it. Its registration is the adapter's checked disposition;
@@ -172,13 +221,11 @@ abort, or recover one engagement. The external host remains the semantic
 planner; do not infer a task graph, retry unknown work, attach an existing Run,
 or let a Specialist hire or contact another Specialist.
 
-1. Read the checked
-   `docs/protocol/dolgorae-external-specialist-facade-v2.schema.json` contract
-   from the exact version-matched source or package. For a v3 accepted-task
-   assignment, also read
-   `docs/protocol/dolgorae-external-specialist-facade-v3.schema.json` and its
-   `docs/protocol/examples/external-engagement-v3-assign.valid.json` example. For hire requests, follow
-   `docs/protocol/examples/external-engagement-v2-hire.valid.json`: use
+1. Read the packaged [facade v2 contract](resources/protocol/dolgorae-external-specialist-facade-v2.schema.json).
+   For a v3 accepted-task assignment, also read the
+   [facade v3 contract](resources/protocol/dolgorae-external-specialist-facade-v3.schema.json)
+   and [assignment example](resources/protocol/examples/external-engagement-v3-assign.valid.json).
+   For hire requests, follow the [hire example](resources/protocol/examples/external-engagement-v2-hire.valid.json): use
    `agent_configuration.schema_version: 2` and `selected_profile`. Supply the
    optional optimistic `global_profile_binding_sha256` only from the actual
    selected Profile binding; never invent a digest. Construct exactly one
@@ -204,7 +251,8 @@ or let a Specialist hire or contact another Specialist.
    `automation` Controller. Preserve its carrier across reconnects; an
    engagement ID or opaque external reference is never authority. Add one
    distinct `--new-controller-fd <member-controller-fd>` only for
-   `hire_external_specialist`. Never persist or expose either credential.
+   `hire_external_specialist`. Retain authorized carriers in protected files or
+   inherited descriptors; never expose their bytes in logs, prompts, or argv.
 3. Reuse the exact operation-scoped idempotency key only with byte-equivalent
    semantic input. A host disconnect or transport wait expiry does not cancel
    accepted work. Reconnect with `get_external_engagement`, then wait or collect;

@@ -24,12 +24,68 @@ Recovery starts with current public evidence and never with direct state edits.
    3 not found, 4 conflict or recovery precondition, 5 compatibility or protocol,
    6 runtime or transport, 7 failed or interrupted Turn, and 8 integrity. Exit
    130 and exits outside the documented set have no semantic machine envelope.
-4. Retry an unchanged invocation only when `error.retryable` is true and current
-   evidence still supports the exact same target and request. Retryability does
+4. Where the public contract permits replay, retry an unchanged invocation only
+   when `error.retryable` is true and current evidence still supports the exact
+   same target and request. Retryability does
    not promise progress or absence of prior effects. Never weaken an identity,
    revision, digest, or credential fence to make a retry succeed.
 
-## Review and capture uncertainty
+## One-shot review inspection and cleanup
+
+Use the reference saved before the original invocation. From a fresh process,
+read the original operation through the same executable and workspace:
+
+```sh
+dolgorae specialist review-inspect --workspace <absolute-workspace> \
+  --request-ref <retained-UUIDv7> --format json
+```
+
+Validate the complete [machine envelope](../resources/protocol/dolgorae-machine-v2.schema.json)
+and its [one-shot observation](../resources/protocol/dolgorae-one-shot-review-observation-v1.schema.json)
+using the installed local resource registry. Inspection neither migrates storage
+nor collects a result, signals a process, settles a capture, or grants mutation
+authority. Keep `observation`, `outcome`, `result`, `report`, `diagnostic`, and
+each object's lifecycle state distinct:
+
+- A [known result](../resources/protocol/examples/one-shot-review-observation-v1-known.valid.json)
+  preserves the original checked result and identities. A stored failure keeps
+  its original sanitized diagnostic; do not rebuild or repair provider output.
+- An [unknown reference](../resources/protocol/examples/one-shot-review-observation-v1-unknown.valid.json)
+  establishes no acceptance or completion. Do not retry the review.
+- [Response loss](../resources/protocol/examples/one-shot-review-observation-v1-response-lost.valid.json)
+  may leave `outcome: unknown` and `result: null` while a stored report proves
+  that work finished. Cleanup can resolve object obligations without inventing
+  the lost final response or changing that outcome to success.
+- A [blocked operation](../resources/protocol/examples/one-shot-review-observation-v1-blocked.valid.json)
+  retains known identities and explicit blocked reasons. Neither an empty
+  findings list nor a saved diagnostic proves lifecycle cleanup completed.
+
+When cleanup is explicitly authorized and the original protected Controller
+credential remains available, use:
+
+```sh
+dolgorae specialist review-recover --workspace <absolute-workspace> \
+  --request-ref <retained-UUIDv7> \
+  --recovery-controller-file <original-absolute-credential-path> \
+  --action cleanup --format json
+```
+
+The original Controller identity and capability must match. A replacement
+credential, request reference, engagement ID, or Profile name grants no authority.
+Cleanup may close proven terminal objects, settle the original capture, and
+retire the exact owned generation only if the original review opted into
+`--temporary-server`. It never interrupts an active Turn or starts a replacement
+review. Parse `REVIEW_RECOVERY_BLOCKED` (exit 4, non-retryable) and its checked
+reason, then inspect and report the unresolved obligation. Re-read public
+inspection after cleanup and verify each relevant object separately. Repeating
+an authorized completed cleanup preserves the original receipts and report.
+
+If the original review had no caller-retained recovery pair, or its credential
+is lost, report the missing recovery basis. Do not read SQLite, carrier files,
+or a private ledger to manufacture authority, and do not route the operation
+through the external engagement facade.
+
+## Capture uncertainty
 
 A one-shot review creates a fresh Reviewer. Do not rerun after response loss,
 timeout, interruption, malformed output, unknown engagement state, incomplete

@@ -187,6 +187,22 @@ Update the source guidance, README installation procedure, and validator
 together. Installation must resolve resources from a temporary package root
 without repository-relative or network fallback.
 
+The source package derives `resources/protocol/` and `resources/manifest.json`
+through `tools/validators/package_agent_skill.py sync`. Its installer validates the exact
+source inventory and canonical bytes before creating a destination. The
+`validate-agent-skills` Make target exercises a temporary installation and the
+missing, stale, extra-resource, and existing-destination refusals. The default
+E2E gate uses `test_installed_review_skill.py` to run native observation waits
+and the public recovery and partial-cleanup matrices with installed schemas.
+
+The adversarial budget covers missing transitive dependencies with and without
+their inventory entry, stale bytes with and without a matching inventory digest,
+extra resources, and existing directories or symlinks. Native process checks
+cover an observation wait expiring without an interrupt or second Turn, then
+reuse the interruption, response-loss, and partial-cleanup matrices. These
+checks establish the new installer and host-wait assumptions; the live provider
+assumptions remain TASK-060's responsibility.
+
 Validate representative v2 hire and v3 assignment/review examples through the
 installed resources. Exercise a missing dependency and a stale copied schema
 as failures. Source structure and Markdown checks remain useful, but neither

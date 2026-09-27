@@ -31,6 +31,7 @@ aquarium-dev-build:
 
 validate-agent-skills:
 	$(PYTHON_BIN) tools/validators/validate_agent_skills.py
+	$(PYTHON_BIN) tests/e2e/test_agent_skill_package.py
 
 test-aquarium-dev-producer:
 	@$(PYTHON_BIN) tests/e2e/test_dev_aquarium_producer.py
@@ -137,8 +138,7 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_review_target_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_one_shot_recovery_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_one_shot_partial_cleanup.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_installed_review_skill.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \

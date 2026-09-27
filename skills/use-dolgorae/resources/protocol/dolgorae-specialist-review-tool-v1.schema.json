@@ -1,0 +1,329 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-review-tool/v1",
+  "title": "Dolgorae one-shot Specialist Review tool v1",
+  "description": "Checked request, success, and error payloads for the one-shot read-only working-tree review adapter used by the CLI and external Codex CLI integration. Workspace, Runtime Profile, Controller credentials, external provenance, and idempotency are trusted-adapter state. Replay-safe MCP operation additionally requires an explicit host-controlled per-request external_request_ref in params._meta; connection or process identity is never continuity.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/review_request"
+    },
+    {
+      "$ref": "#/$defs/review_result"
+    },
+    {
+      "$ref": "#/$defs/error_result"
+    }
+  ],
+  "$defs": {
+    "uuid7": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "bounded_text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "x-maxUtf8Bytes": 65536
+    },
+    "focus": {
+      "enum": [
+        "correctness",
+        "regressions",
+        "concurrency",
+        "error_handling",
+        "security",
+        "test_coverage",
+        "maintainability"
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "title",
+        "description",
+        "path",
+        "line_start",
+        "line_end",
+        "recommendation",
+        "confidence"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 512
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "path": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line_start": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line_end": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recommendation": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      }
+    },
+    "review_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "scope",
+        "objective",
+        "focus",
+        "expected_output",
+        "deadline_seconds"
+      ],
+      "properties": {
+        "operation": {
+          "const": "review_working_tree"
+        },
+        "scope": {
+          "const": "working_tree"
+        },
+        "objective": {
+          "$ref": "#/$defs/bounded_text"
+        },
+        "focus": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/focus"
+          }
+        },
+        "expected_output": {
+          "const": "structured_findings_v1"
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      },
+      "x-adapterBoundFields": [
+        "canonical_workspace_id",
+        "runtime_profile_name",
+        "aggregate_owner_controller_credential",
+        "specialist_run_controller_credential",
+        "external_controller_ref",
+        "external_request_ref",
+        "idempotency_key"
+      ]
+    },
+    "review_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "review_id",
+        "reviewer_run_id",
+        "state",
+        "summary",
+        "findings",
+        "result_artifact_ref",
+        "workspace_write_observed"
+      ],
+      "properties": {
+        "operation": {
+          "const": "review_working_tree_result"
+        },
+        "review_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "reviewer_run_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "state": {
+          "const": "completed"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "result_artifact_ref": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "workspace_write_observed": {
+          "const": false
+        }
+      }
+    },
+    "error_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "review_id",
+        "code",
+        "message",
+        "retryable",
+        "required_action",
+        "external_request_ref"
+      ],
+      "properties": {
+        "operation": {
+          "const": "specialist_review_error"
+        },
+        "review_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "enum": [
+            "REVIEW_PROFILE_UNAVAILABLE",
+            "REVIEW_AUTHORIZATION_FAILED",
+            "REVIEWER_START_FAILED",
+            "REVIEW_TASK_FAILED",
+            "REVIEW_INTERRUPTED_UNKNOWN",
+            "REVIEW_TIMEOUT",
+            "REVIEW_CANCELLED",
+            "REVIEW_WORKSPACE_MUTATION_DETECTED",
+            "REVIEW_OUTPUT_INVALID",
+            "REVIEW_REQUEST_IDENTITY_UNAVAILABLE",
+            "IDEMPOTENCY_CONFLICT"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "required_action": {
+          "enum": [
+            "none",
+            "retry_same_external_request_ref",
+            "fix_host_request_carrier"
+          ]
+        },
+        "external_request_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "IDEMPOTENCY_CONFLICT"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retryable": {
+                "const": false
+              },
+              "required_action": {
+                "const": "fix_host_request_carrier"
+              },
+              "external_request_ref": {
+                "$ref": "#/$defs/uuid7"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-invariants": [
+    "the adapter composes one explicit External Specialist Engagement and closes it after one review",
+    "the Reviewer is an independent managed-agent Run with read-only workspace access",
+    "the model cannot choose workspace, Runtime Profile, Controller credentials, source identity, or idempotency",
+    "successful output contains no hidden reasoning and is ordered by severity P0 through P3 with stable input order within one severity",
+    "unknown Turn acceptance or outcome is returned as REVIEW_INTERRUPTED_UNKNOWN and is not replayed automatically",
+    "any observed canonical workspace mutation makes the operation fail",
+    "MCP connection identity, JSON-RPC request ID, and stdio process lifetime are not durable request identity",
+    "when the pinned host cannot prove preservation of the checked per-request metadata across retry and reconnect boundaries, the MCP tool is not advertised",
+    "same external_request_ref with different normalized input returns IDEMPOTENCY_CONFLICT, retryable false, and fix_host_request_carrier without allocating another Reviewer Run"
+  ],
+  "x-mcpRequestMetadata": {
+    "location": "tools/call params._meta",
+    "schema": "https://dolgorae.local/schema/specialist-review-mcp-meta/v1",
+    "key": "xyz.rootkernel.dolgorae/externalRequestRef",
+    "requiredForReplaySafeMode": true,
+    "modelVisible": false
+  }
+}

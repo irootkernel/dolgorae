@@ -1,0 +1,69 @@
+{
+  "schema": "dolgorae-one-shot-review-observation/v1",
+  "request_ref": "018f0000-0000-7000-8000-000000058001",
+  "request_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile": "reviewer",
+  "observation": "known",
+  "outcome": "unknown",
+  "result": null,
+  "report": {
+    "artifact_id": "018f0000-0000-7000-8000-000000000013",
+    "verdict": {
+      "summary": "The criterion is satisfied by the captured candidate.",
+      "findings": [],
+      "criterion_assessments": [
+        {
+          "criterion_id": "C-1",
+          "status": "met",
+          "explanation": "Stable instructions contain Role behavior only.",
+          "evidence": [
+            {
+              "basis": "candidate",
+              "description": "The runtime plan uses the fixed Role snapshot.",
+              "path": "src/specialist.rs",
+              "line_start": 100,
+              "line_end": 110,
+              "context_id": null
+            }
+          ],
+          "remaining_gap": null
+        }
+      ],
+      "evidence_limits": [
+        "Static inspection did not execute live Codex."
+      ],
+      "overall_assessment": "requirements_met"
+    }
+  },
+  "safe_error_code": null,
+  "diagnostic": null,
+  "engagement": {
+    "engagement_id": "018f0000-0000-7000-8000-000000000010",
+    "state": "closed"
+  },
+  "reviewer": {
+    "run_id": "018f0000-0000-7000-8000-000000000012",
+    "state": "closed"
+  },
+  "task": {
+    "task_id": "018f0000-0000-7000-8000-000000058002",
+    "state": "delivered"
+  },
+  "capture": {
+    "capture_ref": "018f0000-0000-7000-8000-000000000011",
+    "revision": 1,
+    "state": "active",
+    "cleanup_pending": false
+  },
+  "server": {
+    "status": "owned",
+    "server_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "server_epoch": 1,
+    "epoch_id": "018f0000-0000-7000-8000-000000058003",
+    "reason": null
+  },
+  "recovery": {
+    "status": "available",
+    "blocked_reasons": []
+  }
+}

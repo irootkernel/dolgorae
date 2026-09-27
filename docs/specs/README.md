@@ -4154,8 +4154,12 @@ blocked. A generation replacement cannot inherit the old operation's authority.
 The installed review skill MUST provide its required schemas, examples, and
 transitive local references through supported package paths matching its source
 version. Verification MUST exercise the installed layout without relying on a
-repository checkout. Guidance MUST distinguish a transport wait ending from
-termination of the provider-backed CLI, which can cancel the operation or leave
+repository checkout. The package carries derived protocol bytes under
+`resources/protocol/`; `resources/manifest.json` lists its schema roots,
+examples, and file digests. Installation MUST reject missing, stale, or extra
+package resources and an existing destination. Canonical `docs/protocol/`
+files remain the sole contract owner. Guidance MUST distinguish a transport
+wait ending from termination of the provider-backed CLI, which can cancel the operation or leave
 its outcome unknown. Hosts MUST preserve the native process/result identity
 while waiting and use the TASK-058 public lookup/authorized recovery contract
 when that handle is lost. An unsupported or blocked recovery MUST be reported

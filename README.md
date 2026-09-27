@@ -178,36 +178,23 @@ the exact stable tag that contains the skill. It installs the directory under
 `$HOME/.agents/skills`. Other agents may use a different discovery root.
 
 ```sh
-(
-  set -eu
-  dolgorae_skill_parent="${HOME}/.agents/skills"
-  dolgorae_skill_source="$PWD/skills/use-dolgorae"
-  dolgorae_skill_target="$dolgorae_skill_parent/use-dolgorae"
-  if [ ! -f "$dolgorae_skill_source/SKILL.md" ]; then
-    echo "use-dolgorae source not found; run this command from the repository root" >&2
-    exit 1
-  fi
-  mkdir -p "$dolgorae_skill_parent"
-  if [ -e "$dolgorae_skill_target" ] || [ -L "$dolgorae_skill_target" ]; then
-    echo "refusing to replace existing skill: $dolgorae_skill_target" >&2
-    exit 1
-  fi
-  dolgorae_skill_tmp="$(mktemp -d "$dolgorae_skill_parent/.use-dolgorae.XXXXXX")"
-  trap 'rm -rf -- "$dolgorae_skill_tmp"' EXIT
-  mkdir -p "$dolgorae_skill_tmp/use-dolgorae/references"
-  cp "$dolgorae_skill_source/SKILL.md" "$dolgorae_skill_tmp/use-dolgorae/SKILL.md"
-  for dolgorae_skill_reference in configuration lifecycle provider recovery; do
-    cp "$dolgorae_skill_source/references/$dolgorae_skill_reference.md" \
-      "$dolgorae_skill_tmp/use-dolgorae/references/$dolgorae_skill_reference.md"
-  done
-  mv "$dolgorae_skill_tmp/use-dolgorae" "$dolgorae_skill_target"
-)
+python3 tools/validators/package_agent_skill.py install \
+  --destination "$HOME/.agents/skills/use-dolgorae"
 ```
 
-The installer copies only the validated skill contract files and never
-overwrites an existing target. For an upgrade, first verify and explicitly
-remove or relocate the exact installed `use-dolgorae` directory, then rerun the
+The installer requires Python 3 without additional packages. It checks the
+resource inventory and canonical byte equality before copying the guidance,
+schemas, examples, and local schema dependencies. The installed skill resolves
+contracts under its own `resources/protocol/` directory; schema URLs identify
+local resources and do not require network access or a checkout.
+The installer refuses an existing target, including an empty directory or symlink.
+For an upgrade, first verify and explicitly remove or relocate the exact
+installed `use-dolgorae` directory, then rerun the
 installer from the intended stable tag.
+
+After changing canonical protocol files, maintainers regenerate the derived
+resources with `python3 tools/validators/package_agent_skill.py sync` and run
+`make validate-agent-skills`. Edit canonical files, never their packaged copies.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and validation guidance.
 Maintainers should start with the [documentation index](docs/README.md) before
