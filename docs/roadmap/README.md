@@ -22,7 +22,7 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
-`EPIC-016` is `ACTIVE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
+`EPIC-016` is `COMPLETE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
@@ -1956,15 +1956,20 @@ or actual Gul campaign is part of this completion.
 
 ## EPIC-016: Reliable Independent Specialist Review
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [independent review readiness dossier](../todo/TODO-independent-review-readiness.md)
+Canonical Outcomes: [specification](../specs/README.md#independent-review-readiness),
+[architecture](../architecture/README.md#independent-review-readiness),
+[checked review output](../protocol/dolgorae-specialist-review-tool-v3.schema.json),
+[one-shot observation](../protocol/dolgorae-one-shot-review-observation-v1.schema.json),
+[operator guidance](../ops/README.md), and
+[installed skill](../../skills/use-dolgorae/SKILL.md).
 
 Goal: Let an external host use the installed skill to obtain a valid v3
 independent review with actionable failure diagnostics, preserved source
 integrity, durable failure diagnostics, and verified result, recovery, and
 cleanup states. The adopted requirements are owned by
-[SPEC-012](../specs/README.md#independent-review-readiness-planned)
+[SPEC-012](../specs/README.md#independent-review-readiness)
 and [ADR-040](../architecture-decision-records/README.md#adr-040-qualify-structured-independent-review-through-a-corrective-epic).
 
 Delivery order: after EPIC-008 and before EPIC-009. Assigned release: v0.1.3.
@@ -2084,7 +2089,7 @@ prove no replacement review or Turn. Retain the preparation-failure cleanup
 matrix for new and pre-existing servers in the integrated checks. Run the full
 repository gate and an independent read-only review; resolve all blocking
 findings. Missing authorized live evidence prevents completion. Evidence
-handling follows the dossier and repository retention policy.
+handling follows the repository retention policy.
 
 Epic acceptance: all four Tasks pass their completion gates. The Codex
 `0.157.1` live campaign passes, malformed outputs have safe actionable
@@ -2094,6 +2099,12 @@ work after loss of the original CLI. Lifecycle checks cover preparation failures
 and preserve source integrity and shared-server safety. At closeout, promote
 durable dossier content to its canonical owners, remove the dossier and TODO
 index entry, and replace `Detailed SOT` with `Canonical Outcomes`.
+
+Completion evidence: the complete repository gate and the separately authorized
+Codex `0.157.1` live campaign passed on the final candidate. The installed skill
+and one-shot recovery passed native E2E checks. Independent read-only review
+covered the closeout changes, and its one low-severity finding was resolved in
+follow-up. No stable release, installation, or external publication is claimed.
 
 ## EPIC-009: Brokered Specialist Collaboration
 

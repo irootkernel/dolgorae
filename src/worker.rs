@@ -4319,9 +4319,12 @@ fn terminate_unpublished_child(
     registration: &mut crate::process_inventory::Registration,
     socket: &Path,
 ) {
-    let group_absent = registration.abort_spawn().is_ok();
+    let mut group_absent = registration.abort_spawn().is_ok();
     let _ = child.kill();
     let _ = child.wait();
+    if !group_absent {
+        group_absent = registration.abort_spawn().is_ok();
+    }
     if group_absent {
         let _ = crate::codex_socket::remove_unpublished(socket, DarwinSystem.current_uid());
     }

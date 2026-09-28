@@ -97,6 +97,9 @@ development commits.
 
 ### Fixed
 
+- Finish unpublished server cleanup after the child exits, including when its
+  process group disappears during the ownership census.
+
 - Wait for a streaming ledger's background publisher to release its writer lock
   before the ledger can be reopened.
 

@@ -363,7 +363,7 @@ unavailable selection without substitution. An absent model resolves to
 default is rejected without substitution. Model rejection identifies the
 requested model and the advertised alternatives. The Reviewer-specific rules
 are defined under
-[independent review readiness](#independent-review-readiness-planned);
+[independent review readiness](#independent-review-readiness);
 ordinary Run defaults keep their existing meaning.
 
 Codex App Server 0.157.1 is the minimum runtime version. The checked 0.157.0
@@ -3986,13 +3986,12 @@ reusable member after the adapter closes the engagement, or enable lateral
 Specialist collaboration. Later durable External Specialist Engagement features
 extend the same aggregate and Run contracts rather than replacing this adapter.
 
-### Independent Review Readiness (Planned)
+### Independent Review Readiness
 
-The following requirements are adopted for
+These requirements define the implemented v3 independent review boundary from
 [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review).
-They describe the acceptance boundary for dependable v3 independent review;
-the roadmap owns their implementation status. Existing CLI and checked wire
-contracts remain current until the owning Tasks synchronize their successors.
+The roadmap owns delivery status; the checked CLI and wire contracts own their
+current shapes.
 
 For one-shot Reviewer creation, an absent Profile model or reasoning-effort
 setting MUST resolve to `gpt-6-sol` or `high`, respectively. An explicit

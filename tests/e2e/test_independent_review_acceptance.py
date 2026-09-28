@@ -201,6 +201,8 @@ def validate(binary: pathlib.Path) -> None:
                             and observed["engagement"]["state"] == "closed"
                             and observed["capture"]["state"] == "settled"
                             and observed["server"]["status"] == "retired"
+                            # The operation lock may outlive server retirement.
+                            and observed["recovery"] == {"status": "not_needed", "blocked_reasons": []}
                         ):
                             break
                         if time.monotonic() >= deadline:

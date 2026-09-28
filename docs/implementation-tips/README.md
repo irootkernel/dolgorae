@@ -62,13 +62,12 @@ live-provider acceptance result.
 
 ## Independent review readiness verification
 
+The [independent review requirements](../specs/README.md#independent-review-readiness),
+[architecture](../architecture/README.md#independent-review-readiness), and
 [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
-and its [dossier](../todo/TODO-independent-review-readiness.md) define the
-remaining review checks. Implement the adopted
-[requirements](../specs/README.md#independent-review-readiness-planned) in the
-owning Task before claiming a new default, diagnostic field, cleanup option,
-or installed resource. Synchronize the private checked contracts and examples
-before runtime changes; preserve the public-v1 descriptor and legacy results.
+record the shipped boundary and its verification. For future changes, synchronize
+the private checked contracts and examples before runtime changes; preserve the
+public-v1 descriptor and legacy results.
 
 Test the full contract through both one-shot and reusable production paths.
 Model/effort tests must vary advertised ordering and explicit overrides.
@@ -79,10 +78,10 @@ await/collect. Cover the terminal/diagnostic commit boundaries and historical
 records with no diagnostic payload; never reconstruct missing detail from raw
 model output.
 
-TASK-058 must establish a reference the caller retains before effects and a
-public one-shot lookup/recovery authority contract. Terminate the original CLI
-and discard its responses, then use a new process and public commands only to
-inspect the same operation. Check read-only observation, authorized recovery,
+Retain a reference before effects and use the public one-shot lookup/recovery
+authority contract. Terminate the original CLI and discard its responses, then
+inspect the same operation through public commands in a new process. Check
+read-only observation, authorized recovery,
 unknown/blocked outcomes, and rejection of mutation without authority. An
 engagement ID alone cannot bypass the current `legacy_one_shot`/`external_v1`
 boundary. No private database query or replacement review may count as recovery.

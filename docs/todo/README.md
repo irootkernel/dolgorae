@@ -89,11 +89,7 @@ roadmap identity, order, status, or dependencies.
 
 ## Adopted Epic dossiers
 
-- [Independent review readiness](TODO-independent-review-readiness.md): adopted
-  as [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review).
-  The dossier records v3 output and durable failure diagnostics, public one-shot
-  recovery and temporary-server cleanup, installed-skill checks, and live
-  acceptance. Delivery status and order remain in the roadmap.
+No adopted Epic dossiers are currently awaiting closeout.
 
 The term adopted here does not imply that the roadmap state is `ACTIVE`.
 

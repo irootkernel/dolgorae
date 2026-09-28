@@ -475,6 +475,9 @@ impl DarwinSystem {
         })
     }
 
+    /// Return the current group census. A group that vanishes during the lookup
+    /// has an empty census; emptiness says nothing about its earlier members.
+    /// Callers making ownership decisions must verify the recorded identity.
     pub fn process_group_pids(self, process_group_id: u32) -> Result<Vec<u32>, std::io::Error> {
         if process_group_id <= 1 {
             return Err(std::io::Error::new(
@@ -497,7 +500,11 @@ impl DarwinSystem {
             let count =
                 unsafe { proc_listpgrppids(process_group_id, pids.as_mut_ptr().cast(), byte_size) };
             if count < 0 {
-                return Err(std::io::Error::last_os_error());
+                let error = std::io::Error::last_os_error();
+                if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) {
+                    return Ok(Vec::new());
+                }
+                return Err(error);
             }
             let count = usize::try_from(count)
                 .map_err(|_| std::io::Error::other("invalid process group census count"))?;

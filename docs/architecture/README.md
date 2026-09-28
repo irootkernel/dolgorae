@@ -367,11 +367,11 @@ workspace-change claims, non-terminal cancellation cleanup, credential or
 private-endpoint disclosure, and any MCP advertisement under the selected
 `mcp_unavailable` disposition. Raw model output is not retained.
 
-#### Planned independent review readiness
+#### Independent review readiness
 
 [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
 implements the adopted
-[readiness requirements](../specs/README.md#independent-review-readiness-planned).
+[readiness requirements](../specs/README.md#independent-review-readiness).
 Reviewer preparation owns explicit Profile overrides and default resolution.
 The shared task prompt and output-contract code supplies the
 complete v3 contract to both the one-shot coordinator and reusable facade;
@@ -412,14 +412,14 @@ identity, and membership under its existing serialization before signalling.
 Concurrent admission or uncertain state cannot grant cleanup authority.
 Forced termination cannot rely on process-local destructors for cleanup.
 
-TASK-058 adds the missing public one-shot lookup and recovery boundary over the
+TASK-058 established the public one-shot lookup and recovery boundary over the
 existing state and lifecycle services. A caller-retained reference established
-before effects maps durably to the request and known owned objects. The current
-`legacy_one_shot` authority and ephemeral carriers do not satisfy the
-`external_v1` facade's owner checks; a new process needs a defined inspection
-authority and a preserved or explicitly reauthorized mutation capability.
-The reference itself grants no mutation authority. Read-only lookup cannot
-start a replacement review or repair state; ambiguous evidence produces a
+before effects maps durably to the request and known owned objects.
+`legacy_one_shot` engagements remain outside the `external_v1` facade's owner
+checks. A new process uses the dedicated inspection command under local
+workspace observation authority; cleanup requires the original Controller
+capability. The reference itself grants no mutation authority. Read-only lookup
+cannot start a replacement review or repair state; ambiguous evidence produces a
 checked unknown or blocked outcome. Recovery mutations use the checked
 one-shot authority and existing lower-level services, with no new job framework
 or skill-owned supervisor.
@@ -432,9 +432,8 @@ closure. The inventory records roots, examples, and byte digests; it grants no
 runtime authority. Installation checks canonical equality and copies only the
 declared package files to a new destination. Installed-resource validation uses
 only the package's local registry and rejects remote retrieval.
-TASK-057 and TASK-058 own the corresponding
-wire and CLI amendments; this architecture adoption adds no runtime capability
-or public-v1 gRPC change.
+TASK-057 and TASK-058 own the corresponding wire and CLI contracts. The Epic
+does not change public-v1 gRPC.
 
 ### Immutable Review Target Coordinator
 
@@ -2364,10 +2363,13 @@ their UID, session, and process group must still match the registration before
 KILL. A provisional registration without a reliable PID, an identity mismatch,
 or a foreign group member is unverifiable and fails closed. An unreadable boot
 UUID is also unverifiable; only a verified different UUID makes the process
-absent. After spawn succeeds, the launcher retains the registration until it
-verifies that the entire group is absent, including when startup fails. Test
-harnesses move isolated homes away from their recorded owner paths, then clean
-up processes
+absent. A census of a group that has disappeared is empty; it does not prove
+earlier membership. Cleanup pairs that census with the recorded leader and
+member identities. After spawn succeeds, the launcher retains the registration
+until it verifies that the entire group is absent, including when startup fails.
+A failed first cleanup attempt is rechecked after reaping the child; unpublished
+socket removal still requires verified group absence. Test harnesses move
+isolated homes away from their recorded owner paths, then clean up processes
 before deleting the moved homes. Failed cleanup preserves those homes for
 diagnosis. Descendants that escaped the registered session or process group are
 outside this command's absence claim.

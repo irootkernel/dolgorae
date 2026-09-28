@@ -2596,8 +2596,9 @@ server cleanup, installed skill usability, and live acceptance. Preserve
 completed Epic and Task history.
 The roadmap places this work after EPIC-008 and before EPIC-009 and requires
 its completion for v0.1.3. EPIC-009 and TASK-027 are `PLANNED` for v0.1.4.
-The [dossier](../todo/TODO-independent-review-readiness.md) holds the task-level
-verification detail until closeout.
+The [specification](../specs/README.md#independent-review-readiness) and
+[architecture](../architecture/README.md#independent-review-readiness) retain
+the resulting behavior and component boundaries after closeout.
 
 Keep strict output validation and deliver the complete contract to the model.
 Use `gpt-6-sol` and `high` only as omitted one-shot Reviewer defaults;
