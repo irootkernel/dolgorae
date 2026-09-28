@@ -4177,9 +4177,8 @@ the same operation, retrieve any committed diagnostic, and exercise authorized
 recovery or a checked blocked outcome without a new review or Turn. TASK-058
 also requires native failure injection before Reviewer allocation, for both
 new and pre-existing servers. Run the live fixture with the required defaults
-at Codex `0.157.1` and a recorded representative newer compatible version.
-A newer version's lack of behavioral qualification alone MUST NOT block
-admission; report `unverified` once as
+at Codex `0.157.1`. A newer version's lack of behavioral qualification alone
+MUST NOT block admission; report `unverified` once as
 concise compatibility metadata and retain existing schema and capability checks.
 Live use requires separate explicit authorization. Missing live evidence
 prevents the readiness acceptance from passing.

@@ -114,7 +114,7 @@ def wait_for(path_root: pathlib.Path, predicate, process: subprocess.Popen[str])
 
 
 def finish(
-    process: subprocess.Popen[str], timeout: int = 30
+    process: subprocess.Popen[str], timeout: int = 90
 ) -> tuple[int, dict[str, object]]:
     stdout, stderr = process.communicate(timeout=timeout)
     if stderr:

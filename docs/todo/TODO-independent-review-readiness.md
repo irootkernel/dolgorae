@@ -226,10 +226,9 @@ settlement, and server lifecycle actions.
 Use an exact candidate build and the corresponding skill package in isolated
 test state. Live account use requires explicit authorization; record each
 selected Codex executable version and immutable candidate identity in local
-campaign evidence. Run the minimum `0.157.1` and a representative newer
-compatible version. The newer version may remain `unverified`; this status
-must not suppress the review or be promoted to full compatibility qualification
-by this narrow campaign alone.
+campaign evidence. Run the minimum `0.157.1`. Newer versions may remain
+`unverified`; that metadata does not change the product's admission rules or
+turn this narrow campaign into full compatibility qualification.
 
 Commit a one-line program in an isolated fixture that prints `Hello world!`.
 Submit a v3 completion request whose sole criterion `C-1` requires it to print

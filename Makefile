@@ -19,7 +19,7 @@ INT_TESTS := \
 .PHONY: test test-prepare test-unit test-int test-e2e validate-agent-skills \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
-	test-live-provider-acceptance \
+	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
 
@@ -139,6 +139,8 @@ test-e2e:
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_installed_review_skill.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_independent_review_acceptance.py --binary "$(DOLGORAE_BIN)"; \
+		$(PYTHON_BIN) tests/e2e/test_live_independent_review_admission.py; \
 		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		$(PYTHON_BIN) tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
@@ -205,6 +207,20 @@ test-live-scoped-specialist-review:
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--target-kind "$${DOLGORAE_REVIEW_TARGET_KIND:-workspace}" \
 		$${DOLGORAE_REVIEW_REVISION:+--revision "$${DOLGORAE_REVIEW_REVISION}"}
+
+test-live-independent-review:
+	@test "$${DOLGORAE_RUN_LIVE_INDEPENDENT_REVIEW:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_INDEPENDENT_REVIEW=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_CODEX_MINIMUM_BIN:-}" && test -n "$${DOLGORAE_LIVE_AUTH_FILE:-}" || { \
+		echo "DOLGORAE_CODEX_MINIMUM_BIN and DOLGORAE_LIVE_AUTH_FILE are required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_live_independent_review_acceptance.py \
+		--binary "$(DOLGORAE_BIN)" \
+		--codex-minimum "$${DOLGORAE_CODEX_MINIMUM_BIN}" \
+		--auth-file "$${DOLGORAE_LIVE_AUTH_FILE}"
 
 test-live-access-safety:
 	@test "$${DOLGORAE_RUN_LIVE_ACCESS_SAFETY:-}" = 1 || { \

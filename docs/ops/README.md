@@ -168,15 +168,24 @@ existing destination. Resolve schema IDs through the installed local registry;
 do not fetch missing dependencies from the network or a checkout.
 `make validate-agent-skills` checks canonical byte equality, temporary
 installation, local reference resolution, and missing/stale resource failures.
-The default E2E gate runs native wait, interruption, and public recovery scenarios
-against the installed resources.
+The default E2E gate runs native wait, interruption, public recovery, an
+isolated defective-Hello-World v3 scenario against the installed resources,
+and a credential-free check of the live campaign's admission guards.
 
-The current live review drivers do not establish dependable v3 completion
-review with the required default configuration. Follow
-[EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
-for the remaining acceptance work. TASK-060 owns the required live campaign;
-installed-package and deterministic recovery checks do not establish live
-acceptance.
+After separate live-account authorization, run `make test-live-independent-review`
+with `DOLGORAE_RUN_LIVE_INDEPENDENT_REVIEW=1`,
+`DOLGORAE_CODEX_MINIMUM_BIN` pointing to Codex 0.157.1, and
+`DOLGORAE_LIVE_AUTH_FILE` pointing to the approved credential file. The campaign
+uses the exact local candidate binary and installs its matching skill package
+into isolated test state. It copies credentials into protected isolated Codex
+homes, leaves Profile model and effort unset, and runs both the ordinary review
+and a public recovery after losing the original CLI response. Its output contains
+bounded version, executable, candidate, result, and source digests plus the
+recorded capability verdict; `unverified` is not a full compatibility claim.
+Keep raw reports, logs, credentials, and runtime identifiers out of tracked
+evidence. Installed-package and deterministic checks do not establish live
+acceptance; follow [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)
+for the completion gate.
 
 The source-distributed [`use-dolgorae` skill](../../skills/use-dolgorae/SKILL.md)
 provides capability-adaptive agent guidance for the currently supported setup,

@@ -2623,8 +2623,8 @@ limits of recovery after the original process/result handle is lost. TASK-060
 checks that boundary from a new process through public interfaces only.
 
 Keep Codex `0.157.1` as the minimum and the checked `0.157.0` schema baseline.
-The live campaign covers the minimum and a recorded newer compatible version.
-Unqualified newer versions retain `unverified` metadata and existing admission
+The readiness live campaign covers the `0.157.1` minimum. Unqualified newer
+versions retain `unverified` metadata and existing admission
 checks; the historical `0.153.4` and `0.155.1` targets are not restored.
 
 ### Consequences

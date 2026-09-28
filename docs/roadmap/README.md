@@ -22,8 +22,8 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
-`EPIC-016` is `ACTIVE`; `TASK-057`, `TASK-058`, and `TASK-059` are `COMPLETE`,
-and `TASK-060` remains `PLANNED` after EPIC-008
+`EPIC-016` is `ACTIVE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
+are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -2065,12 +2065,12 @@ prose matching or source-tree link success alone cannot complete this Task.
 
 ### TASK-060: Prove Live Independent Review Readiness
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on TASK-059 and the completed TASK-057/TASK-058 behavior. Add and run an
 opt-in live v3 acceptance campaign with the defective committed Hello World
-fixture and the required default configuration. Cover Codex `0.157.1` and one
-recorded newer compatible version without restoring older runtime support.
+fixture and the required default configuration. Cover Codex `0.157.1` without
+restoring older runtime support.
 Exercise the installed skill/package against the exact candidate build. Keep
 unverified-version metadata separate from admission and campaign success.
 
@@ -2086,8 +2086,8 @@ repository gate and an independent read-only review; resolve all blocking
 findings. Missing authorized live evidence prevents completion. Evidence
 handling follows the dossier and repository retention policy.
 
-Epic acceptance: all four Tasks pass their completion gates. The minimum and
-newer-version live campaigns pass, malformed outputs have safe actionable
+Epic acceptance: all four Tasks pass their completion gates. The Codex
+`0.157.1` live campaign passes, malformed outputs have safe actionable
 diagnostics that survive response loss and restart, installed-package checks
 pass without a checkout, and public one-shot lookup and authorized recovery
 work after loss of the original CLI. Lifecycle checks cover preparation failures

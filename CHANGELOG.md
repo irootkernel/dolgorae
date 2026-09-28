@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Add an isolated v3 response-loss scenario and credential-free live-admission
+  check to the default E2E gate, plus a separately opted-in Codex 0.157.1 live
+  independent-review campaign.
+
 - Package the review skill's checked schemas and examples for independent installation,
   with guidance for native waits, interrupted clients, and authorized recovery.
 
