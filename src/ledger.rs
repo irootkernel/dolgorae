@@ -185,6 +185,7 @@ pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFault
     replay_started_millis: u64,
     faults: Arc<F>,
     scheduled: Arc<ScheduledCommit<C, F>>,
+    scheduler: Option<thread::JoinHandle<()>>,
     event_context: Option<EventAppendContext>,
     tail_interaction_revision: u64,
 }
@@ -197,33 +198,38 @@ impl Ledger<SystemLedgerClock, NoFaults> {
 
 impl<C: LedgerClock, F: FaultInjector> Drop for Ledger<C, F> {
     fn drop(&mut self) {
-        let mut state = self
-            .scheduled
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.cancelled = true;
-        let Some(pending) = state.pending.take() else {
-            return;
-        };
-        let result = commit_projection(
-            &self.file,
-            &self.root,
-            &self.state_path,
-            &*self.faults,
-            &pending.projection,
-        );
-        match result {
-            Ok(()) => state.published = Some(pending.projection),
-            Err(error) => {
-                let message = error.to_string();
-                eprintln!(
-                    "dolgorae: final ledger commit failed for run {} at {}: {message}",
-                    self.run_id,
-                    self.state_path.display()
+        {
+            let mut state = self
+                .scheduled
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.cancelled = true;
+            if let Some(pending) = state.pending.take() {
+                let result = commit_projection(
+                    &self.file,
+                    &self.root,
+                    &self.state_path,
+                    &*self.faults,
+                    &pending.projection,
                 );
-                state.error = Some(message);
+                match result {
+                    Ok(()) => state.published = Some(pending.projection),
+                    Err(error) => {
+                        let message = error.to_string();
+                        eprintln!(
+                            "dolgorae: final ledger commit failed for run {} at {}: {message}",
+                            self.run_id,
+                            self.state_path.display()
+                        );
+                        state.error = Some(message);
+                    }
+                }
             }
+        }
+        if let Some(scheduler) = self.scheduler.take() {
+            // Its duplicated descriptor must release the writer lock before reopen.
+            let _ = scheduler.join();
         }
     }
 }
@@ -307,6 +313,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             replay_started_millis: replay_started,
             faults,
             scheduled,
+            scheduler: None,
             event_context: None,
             tail_interaction_revision,
         };
@@ -557,7 +564,10 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         }
         drop(scheduled_state);
         if spawn_scheduler {
-            spawn_group_commit(Arc::clone(&scheduled));
+            if let Some(scheduler) = self.scheduler.take() {
+                let _ = scheduler.join();
+            }
+            self.scheduler = Some(spawn_group_commit(Arc::clone(&scheduled)));
         }
         match durability {
             AppendDurability::Required => self.flush(),
@@ -1180,7 +1190,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
 
 fn spawn_group_commit<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     scheduled: Arc<ScheduledCommit<C, F>>,
-) {
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         loop {
             let deadline = match scheduled.state.lock() {
@@ -1227,7 +1237,7 @@ fn spawn_group_commit<C: LedgerClock + 'static, F: FaultInjector + 'static>(
             }
             return;
         }
-    });
+    })
 }
 
 fn commit_projection(

@@ -97,6 +97,9 @@ development commits.
 
 ### Fixed
 
+- Wait for a streaming ledger's background publisher to release its writer lock
+  before the ledger can be reopened.
+
 - Deliver the complete v3 review output contract to one-shot and reusable Specialists, preserve safe failure diagnostics
   across restart and collection, and default omitted one-shot settings to `gpt-6-sol` and `high`.
 
