@@ -157,6 +157,8 @@ struct ScheduledState {
     published: Option<RunStateProjection>,
     error: Option<String>,
     cancelled: bool,
+    // A flushed group may be replaced before its scheduler observes the empty slot.
+    epoch: u64,
 }
 
 struct ScheduledCommit<C, F> {
@@ -548,7 +550,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         let started = *self
             .pending_since_millis
             .get_or_insert_with(|| self.clock.monotonic_millis());
-        let mut spawn_scheduler = false;
+        let mut scheduler_epoch = None;
         if durability == AppendDurability::Streaming {
             let deadline = scheduled_state
                 .pending
@@ -556,18 +558,21 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 .map_or(started.saturating_add(GROUP_COMMIT_MILLIS), |pending| {
                     pending.deadline_millis
                 });
-            spawn_scheduler = scheduled_state.pending.is_none();
+            if scheduled_state.pending.is_none() {
+                scheduled_state.epoch = scheduled_state.epoch.wrapping_add(1);
+                scheduler_epoch = Some(scheduled_state.epoch);
+            }
             scheduled_state.pending = Some(PendingCommit {
                 deadline_millis: deadline,
                 projection: candidate_projection,
             });
         }
         drop(scheduled_state);
-        if spawn_scheduler {
+        if let Some(epoch) = scheduler_epoch {
             if let Some(scheduler) = self.scheduler.take() {
                 let _ = scheduler.join();
             }
-            self.scheduler = Some(spawn_group_commit(Arc::clone(&scheduled)));
+            self.scheduler = Some(spawn_group_commit(Arc::clone(&scheduled), epoch));
         }
         match durability {
             AppendDurability::Required => self.flush(),
@@ -1190,11 +1195,12 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
 
 fn spawn_group_commit<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     scheduled: Arc<ScheduledCommit<C, F>>,
+    epoch: u64,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         loop {
             let deadline = match scheduled.state.lock() {
-                Ok(state) if state.cancelled => return,
+                Ok(state) if state.cancelled || state.epoch != epoch => return,
                 Ok(state) => match &state.pending {
                     Some(pending) => pending.deadline_millis,
                     None => return,
@@ -1210,7 +1216,7 @@ fn spawn_group_commit<C: LedgerClock + 'static, F: FaultInjector + 'static>(
                 Ok(state) => state,
                 Err(_) => return,
             };
-            if state.cancelled {
+            if state.cancelled || state.epoch != epoch {
                 return;
             }
             let Some(pending) = state.pending.take() else {
