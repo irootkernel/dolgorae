@@ -8,14 +8,19 @@
     "production_runtime_eligible": "TASK-034"
   },
   "architecture_contract_requirements": {
-    "runtime_baseline": "0.157.1",
+    "runtime_baseline": "0.158.0",
     "topology": "shared_readonly_plus_sticky_dedicated_lanes",
     "background_authority": "dolgorae_dedicated_lane_process_census",
     "required_live_evidence": ["same_home_shared_and_multiple_dedicated_servers", "globally_unique_server_epochs", "fixed_thread_residency", "closed_generation_history_barrier", "complete_dedicated_lane_census", "exact_cleanup", "unrelated_process_not_signalled"],
-    "failure": "0.157.1 architecture campaign and independent review are pending"
+    "failure": "0.158.0 architecture campaign and independent review are pending"
   },
   "stable_schema_bundle_sha256": "da1efd332c38eccf3275ab0029a81e76c4f34c3d3cc8dfc96d297cd63b7683e7",
   "experimental_schema_bundle_sha256": "9b1b77375db6622965466126f5115a47ca21e25e892e1032480f7aa9bbf5f71b",
+  "pinned_runtime_schema": {
+    "version": "0.158.0",
+    "stable_schema_bundle_sha256": "26c32e39dd56061a2758ca6317eb90e7020a91a16973f944a8827e0bf6ef56dc",
+    "experimental_schema_bundle_sha256": "fd8b2149485a70dd52fa89d767deeff1b7c9aab1f1e61728a16f70f0e63886aa"
+  },
   "experimental_thread_surfaces": {
     "required_schema_files": [
       "v2/ThreadUnsubscribeParams.json",

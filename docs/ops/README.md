@@ -174,7 +174,7 @@ and a credential-free check of the live campaign's admission guards.
 
 After separate live-account authorization, run `make test-live-independent-review`
 with `DOLGORAE_RUN_LIVE_INDEPENDENT_REVIEW=1`,
-`DOLGORAE_CODEX_MINIMUM_BIN` pointing to Codex 0.157.1, and
+`DOLGORAE_CODEX_MINIMUM_BIN` pointing to Codex 0.158.0, and
 `DOLGORAE_LIVE_AUTH_FILE` pointing to the approved credential file. The campaign
 uses the exact local candidate binary and installs its matching skill package
 into isolated test state. It copies credentials into protected isolated Codex

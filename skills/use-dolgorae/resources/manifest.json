@@ -81,7 +81,7 @@
     "protocol/examples/external-engagement-v2-hire.valid.json": "0e781db66cb004eb2fbbe28fca80321c3b39dad99d25a7824c727129c8ccd000",
     "protocol/examples/external-engagement-v3-assign.valid.json": "8fda7ae9b5514943657f6926964a7ae257acb0f619f37da37b850f0fe9d51ca9",
     "protocol/examples/one-shot-review-observation-v1-blocked.valid.json": "a114c0b85b5c49800bd4f263cbfff892e83fd70075dc910f50dd5e54b74b09ac",
-    "protocol/examples/one-shot-review-observation-v1-known.valid.json": "ee6e3fb49256ce5b2c8b947ecc2e648fda12f6df6049514c9397f281546f0e8c",
+    "protocol/examples/one-shot-review-observation-v1-known.valid.json": "d33b9b8c1574018aeef93065b47b5d1b8ae3c61132bbac7bcd5cb278ca2b65f9",
     "protocol/examples/one-shot-review-observation-v1-response-lost.valid.json": "2ff23616369b985d0e6addded44970c75245ecfffec99b1041d7e4b3d39d9c7c",
     "protocol/examples/one-shot-review-observation-v1-unknown.valid.json": "8de3fca54b6ae2316780d80265927aef4c113e62d2fd7eb2b010b4188fe66844",
     "protocol/examples/specialist-review-v3-request.valid.json": "2e354430a10c9ddb55b4c3cbc21ffd3c8d13cbac1658079580b7f09a9818884c"

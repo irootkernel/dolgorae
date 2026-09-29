@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../docs/protocol/codex-0.157.0-required-subset.json");
-const MINIMUM_CODEX_VERSION: &str = "0.157.1";
+const MINIMUM_CODEX_VERSION: &str = "0.158.0";
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 /// One diagnostic record is bounded so a single observation can never
@@ -2542,9 +2542,9 @@ fn observe_snapshot(
     let result: Result<ProfileSnapshot, MachineError> = (|| {
         compare_required_subset(name, &schema_root.join("stable"))?;
         let schema_bundle_sha256 = directory_sha256(name, &schema_root.join("stable"))?;
-        verify_exact_bundle_digests(name, &schema_root, &version, &schema_bundle_sha256)?;
-        let compatibility_manifest_sha256 = sha256_hex(MANIFEST.as_bytes());
         let verdict = version_verdict(name, &version)?;
+        verify_exact_bundle_digests(name, &schema_root, verdict, &schema_bundle_sha256)?;
+        let compatibility_manifest_sha256 = sha256_hex(MANIFEST.as_bytes());
         let normalized_argv = normalized_argv(profile, &canonical_executable)?;
         let mut sanitized_environment = prepared_environment(profile)?;
         sanitized_environment.insert("CODEX_HOME".to_owned(), canonical_codex_home.clone());
@@ -3038,7 +3038,11 @@ fn version_verdict(
             "Codex version is older than the supported minimum",
         ));
     }
-    Ok(CompatibilityVerdict::Unverified)
+    Ok(if actual == minimum {
+        CompatibilityVerdict::Tested
+    } else {
+        CompatibilityVerdict::Unverified
+    })
 }
 
 fn parse_version(profile_name: &str, value: &str) -> Result<(u64, u64, u64), MachineError> {
@@ -3327,14 +3331,22 @@ fn resolve_refs(
 fn verify_exact_bundle_digests(
     profile_name: &str,
     root: &Path,
-    version: &str,
+    verdict: CompatibilityVerdict,
     stable_digest: &str,
 ) -> Result<(), MachineError> {
-    if version != MINIMUM_CODEX_VERSION {
+    if verdict != CompatibilityVerdict::Tested {
         return Ok(());
     }
     let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
-    let expected_stable = manifest["stable_schema_bundle_sha256"]
+    let pinned = &manifest["pinned_runtime_schema"];
+    if pinned["version"].as_str() != Some(MINIMUM_CODEX_VERSION) {
+        return Err(compatibility(
+            profile_name,
+            "schema_bundle_digest",
+            "pinned runtime schema version differs from the supported minimum",
+        ));
+    }
+    let expected_stable = pinned["stable_schema_bundle_sha256"]
         .as_str()
         .ok_or_else(|| {
             compatibility(
@@ -3343,7 +3355,7 @@ fn verify_exact_bundle_digests(
                 "manifest stable bundle digest is missing",
             )
         })?;
-    let expected_experimental = manifest["experimental_schema_bundle_sha256"]
+    let expected_experimental = pinned["experimental_schema_bundle_sha256"]
         .as_str()
         .ok_or_else(|| {
             compatibility(
@@ -6780,17 +6792,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_policy_rejects_pre_minimum_and_keeps_newer_unverified() {
+    fn version_policy_tests_exact_minimum_and_keeps_newer_unverified() {
         assert_eq!(
-            version_verdict("default", "0.157.0").unwrap_err().code,
+            version_verdict("default", "0.157.1").unwrap_err().code,
             "COMPATIBILITY_REJECTED"
         );
         assert_eq!(
-            version_verdict("default", "0.157.1").unwrap(),
-            CompatibilityVerdict::Unverified
+            version_verdict("default", MINIMUM_CODEX_VERSION).unwrap(),
+            CompatibilityVerdict::Tested
         );
         assert_eq!(
-            version_verdict("default", "0.158.0").unwrap(),
+            version_verdict("default", "0.158.1").unwrap(),
             CompatibilityVerdict::Unverified
         );
         assert_eq!(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in TASK-060 v3 campaign against Codex 0.157.1."""
+"""Opt-in TASK-060 v3 campaign against Codex 0.158.0."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "tools" / "validators"))
 from validate_agent_skills import validate_installed_resources
 
 OPT_IN = "DOLGORAE_RUN_LIVE_INDEPENDENT_REVIEW"
-MINIMUM = (0, 157, 1)
+MINIMUM = (0, 158, 0)
 
 
 def digest(path: pathlib.Path) -> str:
@@ -318,7 +318,7 @@ def main() -> int:
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         parser.error(f"selected path or Codex version is invalid: {error}")
     if minimum["version"] != MINIMUM:
-        parser.error("select Codex 0.157.1")
+        parser.error("select Codex 0.158.0")
     try:
         binary = arguments.binary.resolve(strict=True)
         auth_file = arguments.auth_file.expanduser().resolve(strict=True)

@@ -33,7 +33,7 @@ from run_live_primary_bridge import (
 
 
 OPT_IN = "DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE"
-PINNED_CODEX_VERSION = "codex-cli 0.157.1"
+PINNED_CODEX_VERSION = "codex-cli 0.158.0"
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT_SOURCE = ROOT / "tests/e2e/private_boundary_client"
 RESULT_PAGE_BYTES = 65_536

@@ -20,7 +20,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
-PINNED_CODEX_VERSION = "codex-cli 0.157.1"
+PINNED_CODEX_VERSION = "codex-cli 0.158.0"
 LIVE_OPT_IN = "DOLGORAE_RUN_LIVE_SPECIALIST_REVIEW"
 MAX_OUTPUT_BYTES = 1_048_576
 ROOT = Path(__file__).resolve().parents[2]
@@ -247,8 +247,8 @@ def reviewer_isolation_evidence(state_root: Path, reviewer_run_id: str) -> dict[
     state = json.loads(matches[0].read_text(encoding="utf-8"))
     manifest = json.loads(matches[0].with_name("manifest.json").read_text(encoding="utf-8"))
     configuration = manifest.get("agent_configuration", {})
-    if (configuration.get("model"), configuration.get("default_effort")) != ("gpt-5.6-luna", "low"):
-        raise ValueError("live review did not use gpt-5.6-luna / low")
+    if (configuration.get("model"), configuration.get("default_effort")) != ("gpt-6-sol", "high"):
+        raise ValueError("live review did not use gpt-6-sol / high")
     reviewer_thread = state.get("thread_id")
     host_thread = os.environ.get("CODEX_THREAD_ID")
     if not isinstance(reviewer_thread, str) or not reviewer_thread or not host_thread:
@@ -369,7 +369,12 @@ def success_evidence(
         state_root, canary
     )
     if before != after or data.get("workspace_write_observed") is not False or not all(scan.values()):
-        raise ValueError("review isolation or observable-output canary failed")
+        raise ValueError(
+            "review isolation or observable-output canary failed: "
+            f"workspace_unchanged={before == after}, "
+            f"read_only={data.get('workspace_write_observed') is False}, "
+            f"checks={scan}"
+        )
     return {
         "phase": "machine_cli_review",
         "codex_version": version,

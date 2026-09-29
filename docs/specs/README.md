@@ -365,12 +365,16 @@ requested model and the advertised alternatives. The Reviewer-specific rules
 are defined under
 [independent review readiness](#independent-review-readiness);
 ordinary Run defaults keep their existing meaning.
+The one-shot Specialist Review live acceptance gate uses the omitted-setting
+`gpt-6-sol` / `high` defaults. The scoped-review live gate separately checks an
+explicit `gpt-5.6-luna` / `low` Profile configuration.
 
-Codex App Server 0.157.1 is the minimum runtime version. The checked 0.157.0
-schema bundle remains the required-subset comparison baseline; it is byte-for-
-byte identical to the 0.157.1 stable and experimental bundles. A version at or
-above the minimum remains `unverified` until its complete behavioral campaign
-qualifies it.
+Codex App Server 0.158.0 is the minimum runtime version. The checked 0.157.0
+schema bundle remains the required-subset comparison baseline. The exact
+0.158.0 stable and experimental bundle digests are pinned separately in that
+manifest. The minimum version reports `tested` after its complete behavioral
+campaign qualifies it and both exact bundle digests match. Newer compatible
+versions report `unverified` until separately qualified.
 Background-process safety is owned by each Sticky Dedicated logical lane across its successive physical generations and
 by the macOS process census; it MUST NOT depend on a future Codex terminal-
 management API. A newer native API MAY supply additional evidence but never
@@ -439,7 +443,8 @@ does not serialize worktrees that share a Git common directory.
 
 Dirty Git workspaces are allowed. Run creation MUST record a read-only baseline
 containing HEAD, branch, tracked changes, and untracked paths. Dolgorae MUST NOT
-discard, reset, stash, or otherwise rewrite pre-existing changes.
+discard, reset, stash, or otherwise rewrite pre-existing changes. Baseline
+capture MUST NOT refresh the Git index or other repository metadata.
 
 Later commands discover the nearest ancestor containing `.dolgorae`; an
 explicit `--workspace PATH` overrides discovery. Discovery selects a workspace
@@ -571,7 +576,7 @@ and cleanup, so it advertises lifecycle observation and quiescence tracking as
 native state still blocks pause, physical-generation replacement, profile stop,
 and shutdown. A disabled diagnostic result is recorded as `unverified`; it can
 never be published as a usable profile capability.
-For the 0.157.1 minimum runtime profile, initialize MUST send
+For the 0.158.0 minimum runtime profile, initialize MUST send
 `optOutNotificationMethods:[]`. It MUST NOT suppress `item/started`,
 `item/completed`, `thread/started`, turn lifecycle, or correlation methods.
 Observed lifecycle suppression downgrades `native_subagents` to `unverified`
@@ -2744,7 +2749,7 @@ For command and file-change approvals they map respectively to the pinned wire
 values `accept`, `decline`, and `cancel`.
 
 The opt-in access-safety acceptance carrier is `make test-live-access-safety`.
-It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.157.1
+It requires `DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1` and the exact Codex 0.158.0
 executable. It verifies the complete writer `sandboxPolicy`, successful writes
 to both the canonical workspace and the OS temporary directory, and live
 command-execution and file-change approval requests against the pinned schema.
@@ -2950,7 +2955,7 @@ Reasoning text, reasoning summaries, reasoning deltas, and internal planning
 streams MUST NOT be persisted in the ledger, projections, logs, diagnostics, or
 exports. The worker MUST independently filter every reasoning method before
 representation. Initialization-time suppression is not available on the pinned
-0.157.1 minimum runtime profile, whose SPEC-003 launch contract requires
+0.158.0 minimum runtime profile, whose SPEC-003 launch contract requires
 `optOutNotificationMethods:[]` because reasoning-only methods cannot be
 isolated from required native lifecycle evidence. Receipt-side filtering is
 therefore the sole normative mechanism for that profile; a future pin that
@@ -3358,7 +3363,7 @@ mutation. The wired operations reach the existing Primary Orchestration Service.
 
 The separately authorized focused acceptance target is
 `DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE=1 make test-live-primary-bridge`. It requires
-the exact Codex 0.157.1 minimum runtime (selectable with
+the exact Codex 0.158.0 minimum runtime (selectable with
 `DOLGORAE_CODEX_BIN`), creates isolated HOME, Codex-home, Dolgorae, and Git
 roots, copies only the account credential into the temporary Codex home, and
 proves the real call through a durable `brokered_tool_results` receipt. It does
@@ -4176,7 +4181,7 @@ the same operation, retrieve any committed diagnostic, and exercise authorized
 recovery or a checked blocked outcome without a new review or Turn. TASK-058
 also requires native failure injection before Reviewer allocation, for both
 new and pre-existing servers. Run the live fixture with the required defaults
-at Codex `0.157.1`. A newer version's lack of behavioral qualification alone
+at Codex `0.158.0`. A newer version's lack of behavioral qualification alone
 MUST NOT block admission; report `unverified` once as
 concise compatibility metadata and retain existing schema and capability checks.
 Live use requires separate explicit authorization. Missing live evidence
@@ -4427,7 +4432,7 @@ The explicit `make test-live-codex-compatibility` gate requires
 `DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY=1` and a prepared `CODEX_HOME`. It uses
 `gpt-5.6-luna` / `low` to check history, early response identity, completed and
 interrupted native forks, interruption, and unanswered-approval restart/resume.
-It accepts a Codex version at or above the 0.157.1 minimum and reports the
+It accepts a Codex version at or above the 0.158.0 minimum and reports the
 observed version; a pass applies only to that tested candidate.
 The access-safety and Specialist Review live gates independently cover sandbox,
 approval requests, selected model/effort, result delivery, cancellation, and
@@ -4495,7 +4500,7 @@ native item families, child identity, parent relationship, ordered
 active-to-terminal lifecycle, persisted history, restart behavior, and cleanup.
 A binary-level query without a profile reports lifecycle and quiescence as
 `unverified`. The exact 0.147.0 enabled probe passed that complete gate; the
-0.157.1 profile reports those native lifecycle and quiescence capabilities as
+0.158.0 profile reports those native lifecycle and quiescence capabilities as
 `unverified` until the same gate is rerun. Disable
 enforcement is `unavailable` because the diagnostic disabled case still created
 a child. A later pin must rerun the same gate; a policy change still
@@ -4824,9 +4829,9 @@ Assurance levels are ordered `best_effort_personal_alpha`,
 `verified_thread_scoped_control`, and `strong_process_containment`. Run creation
 MUST compare `required_assurance` with the profile snapshot before allocating a
 Run ID, lane, thread, or server. Failure is `ASSURANCE_LEVEL_UNAVAILABLE`.
-Requested and achieved levels are durable Run state. Codex 0.157.1 is capped at
+Requested and achieved levels are durable Run state. Codex 0.158.0 is capped at
 `best_effort_personal_alpha` conservatively; it does not inherit the following
-historical 0.147.0 campaign as 0.157.1 evidence. In that historical campaign,
+historical 0.147.0 campaign as 0.158.0 evidence. In that historical campaign,
 same-home, policy transition, multi-workspace, closed-generation history, and
 Dolgorae process-census cleanup tests passed, while background-terminal
 completeness failed. The prior native-subagent semantic

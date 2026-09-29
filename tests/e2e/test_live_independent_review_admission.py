@@ -20,7 +20,7 @@ def main() -> int:
         other_baseline = root / "other-baseline"
         candidate = root / "candidate"
         candidate.write_bytes(b"candidate identity only")
-        for path, version in ((baseline, "0.157.1"), (other_baseline, "0.157.0")):
+        for path, version in ((baseline, "0.158.0"), (other_baseline, "0.157.0")):
             path.write_text(f"#!/bin/sh\nprintf 'codex-cli {version}\\n'\n")
             path.chmod(0o700)
 
@@ -41,7 +41,7 @@ def main() -> int:
 
         environment["DOLGORAE_RUN_LIVE_INDEPENDENT_REVIEW"] = "1"
         wrong_baseline = invoke(environment, other_baseline)
-        if wrong_baseline.returncode != 2 or "Codex 0.157.1" not in wrong_baseline.stderr:
+        if wrong_baseline.returncode != 2 or "Codex 0.158.0" not in wrong_baseline.stderr:
             raise AssertionError("live runner admitted the wrong baseline version")
         missing_auth = invoke(environment, baseline)
         if missing_auth.returncode != 2 or "missing-auth" not in missing_auth.stderr:

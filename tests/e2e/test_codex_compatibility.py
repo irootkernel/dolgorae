@@ -40,9 +40,10 @@ def main() -> int:
         for version, accepted in (
             ("codex-cli 0.156.9", False),
             ("codex-cli 0.157.0", False),
-            ("codex-cli 0.157.1", True),
+            ("codex-cli 0.157.1", False),
             ("codex-cli 0.158.0", True),
-            ("codex-cli 0.157.1-dev", False),
+            ("codex-cli 0.158.1", True),
+            ("codex-cli 0.158.0-dev", False),
         ):
             codex.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n", encoding="utf-8")
             codex.chmod(0o700)

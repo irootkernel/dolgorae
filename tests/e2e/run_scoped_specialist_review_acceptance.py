@@ -16,7 +16,7 @@ from referencing import Registry, Resource
 from run_specialist_review_acceptance import digest, run, workspace_fingerprint
 
 OPT_IN = "DOLGORAE_RUN_LIVE_SCOPED_SPECIALIST_REVIEW"
-PINNED_VERSION = "codex-cli 0.157.1"
+PINNED_VERSION = "codex-cli 0.158.0"
 PROTOCOL = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol"
 
 

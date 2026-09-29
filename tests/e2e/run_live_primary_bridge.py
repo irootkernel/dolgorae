@@ -22,7 +22,7 @@ from typing import Any
 
 
 OPT_IN = "DOLGORAE_RUN_LIVE_PRIMARY_BRIDGE"
-PINNED_CODEX_VERSION = "codex-cli 0.157.1"
+PINNED_CODEX_VERSION = "codex-cli 0.158.0"
 PROFILE = "task047-live"
 POLICY = "task047-live"
 

@@ -35,7 +35,7 @@ def main() -> int:
     ast.parse(source)
     required = (
         'OPT_IN = "DOLGORAE_RUN_LIVE_PROVIDER_ACCEPTANCE"',
-        'PINNED_CODEX_VERSION = "codex-cli 0.157.1"',
+        'PINNED_CODEX_VERSION = "codex-cli 0.158.0"',
         'CAMPAIGN_TEMP_ROOT = Path("/private/tmp")',
         "GATEWAY_READY_TIMEOUT_SECONDS = 15",
         "GATEWAY_READY_MAXIMUM_BYTES = 65_536",

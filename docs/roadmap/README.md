@@ -1523,7 +1523,7 @@ Freeze the internal live-Primary contract in the specification and architecture:
 accepted execution identity, Worker/Broker routing, business-rejection replay,
 and layered authorization. Production wiring of those boundaries remains with
 TASK-047 through TASK-051. The campaign pin is the locally installed Codex CLI;
-the checked schema baseline is 0.157.0 and the runtime minimum is 0.157.1; the
+the checked schema baseline is 0.157.0 and the runtime minimum is 0.158.0; the
 0.155.1 campaign remains historical.
 
 Depends on `TASK-023`, `TASK-024`, `EPIC-014`, and `EPIC-015`. Start here.
@@ -2332,8 +2332,8 @@ evidence without secrets or unbounded logs.
 Status: `PLANNED`
 
 Run opt-in live smoke tests against prepared primary and secondary profiles
-using the checked 0.157.0 schema baseline with a 0.157.1-or-newer runtime (or a separately migrated
-compatible version). Profile
+using the checked 0.157.0 schema baseline with a 0.158.0-or-newer runtime (or a
+separately migrated compatible version). Profile
 names and local wrapper paths are runner inputs and are not normative fixtures.
 Cover profile-home isolation, singleton sharing within a profile, separation
 between profiles, read session, writer conflict, multi-turn resume,

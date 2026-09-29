@@ -102,7 +102,7 @@ provider, using TASK-058's implemented commands after process-handle loss.
 Prose assertions alone cannot establish the behavior.
 
 The live v3 campaign uses the required defaults, the defective Hello World
-fixture and Codex `0.157.1`. Run it only
+fixture and Codex `0.158.0`. Run it only
 with explicit live authority. The existing v1/v2 drivers and a passing default
 gate do not supply this evidence. Complete each Task's designated checks and
 independent review, then run the full repository gate and live acceptance for

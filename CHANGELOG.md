@@ -79,6 +79,9 @@ development commits.
 
 ### Changed
 
+- Require Codex 0.158.0 or newer and pin its exact schema bundles. Report the
+  qualified minimum as `tested`; keep newer compatible versions `unverified`.
+
 - Report nonterminal Specialist cancellation as `interrupt_requested`.
 - Close Orchestrated Sessions with expired tasks.
 - Refuse Machine CLI `run close` for Orchestrated roots so public `CloseRun`

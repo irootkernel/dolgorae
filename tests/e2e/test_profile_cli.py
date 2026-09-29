@@ -99,7 +99,7 @@ args = sys.argv[1:]
 control_path = pathlib.Path(__file__).with_name("codex-mode.json")
 control = json.loads(control_path.read_text(encoding="utf-8")) if control_path.exists() else {{}}
 if args == ["--version"]:
-    print("codex-cli " + control.get("version", "0.157.1"))
+    print("codex-cli " + control.get("version", "0.158.0"))
     raise SystemExit(0)
 if "generate-json-schema" in args:
     if control.get("schema") == "command-missing":
@@ -112,6 +112,18 @@ if "generate-json-schema" in args:
         target = output / "v2" / "ModelListResponse.json"
         value = json.loads(target.read_text(encoding="utf-8"))
         value["required"] = []
+        target.write_text(json.dumps(value), encoding="utf-8")
+    if control.get("schema") == "digest-mismatch":
+        output = pathlib.Path(args[args.index("--out") + 1])
+        target = output / "v2" / "ModelListResponse.json"
+        value = json.loads(target.read_text(encoding="utf-8"))
+        value["x-test-digest-mismatch"] = True
+        target.write_text(json.dumps(value), encoding="utf-8")
+    if control.get("schema") == "experimental-digest-mismatch" and "--experimental" in args:
+        output = pathlib.Path(args[args.index("--out") + 1])
+        target = output / "v2" / "ModelListResponse.json"
+        value = json.loads(target.read_text(encoding="utf-8"))
+        value["x-test-experimental-digest-mismatch"] = True
         target.write_text(json.dumps(value), encoding="utf-8")
     raise SystemExit(0)
 if "app-server" in args and "--listen" in args:
@@ -145,7 +157,7 @@ def create_script_codex(path: pathlib.Path) -> None:
     path.chmod(0o755)
 
 
-def set_mode(path: pathlib.Path, *, version: str = "0.157.1", schema: str = "ok") -> None:
+def set_mode(path: pathlib.Path, *, version: str = "0.158.0", schema: str = "ok") -> None:
     path.with_name("codex-mode.json").write_text(
         json.dumps({"version": version, "schema": schema}), encoding="utf-8"
     )
@@ -410,8 +422,10 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"exact compatibility failed: {exact.stdout}")
         exact_data = exact_envelope["data"]
         assert_valid(exact_envelope, machine, "profile-doctor Machine envelope")
-        if exact_data["compatibility"] != "unverified" or exact_data["codex_version"] != "0.157.1":
+        if exact_data["compatibility"] != "tested" or exact_data["codex_version"] != "0.158.0":
             raise AssertionError(f"exact compatibility returned wrong facts: {exact.stdout}")
+        if exact_data["diagnostics"]:
+            raise AssertionError(f"tested minimum reported compatibility warnings: {exact.stdout}")
         never_started_root = home / ".dolgorae" / "profiles" / exact_data["server_key"]
         never_started_verify = run(
             binary, home, "profile", "membership", "verify", "default"
@@ -443,7 +457,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if any(state != "unverified" for state in bare_capabilities.values()):
             raise AssertionError(f"bare doctor fabricated a non-unverified capability: {bare_capabilities}")
 
-        set_mode(fake, version="0.158.0")
+        set_mode(fake, version="0.158.1", schema="digest-mismatch")
         newer = run(
             binary,
             home,
@@ -453,8 +467,10 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         )
         if newer.returncode != 0 or envelope(newer)["data"]["compatibility"] != "unverified":
             raise AssertionError(f"newer compatible version failed: {newer.stdout}")
+        if envelope(newer)["data"]["diagnostics"][0]["code"] != "CODEX_VERSION_UNVERIFIED":
+            raise AssertionError(f"newer version lost its qualification warning: {newer.stdout}")
 
-        set_mode(fake, version="0.157.0")
+        set_mode(fake, version="0.157.1")
         below_minimum = run(binary, home, "profile", "doctor", "default")
         if (
             below_minimum.returncode != 0
@@ -472,6 +488,30 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         )
         if older.returncode != 0 or envelope(older)["data"]["compatibility"] != "rejected":
             raise AssertionError(f"older version was not rejected: {older.stdout}")
+
+        set_mode(fake, schema="digest-mismatch")
+        wrong_digest = run(binary, home, "profile", "doctor", "default")
+        if (
+            wrong_digest.returncode != 0
+            or envelope(wrong_digest)["data"]["compatibility"] != "rejected"
+        ):
+            raise AssertionError(f"exact version with wrong schema digest was not rejected: {wrong_digest.stdout}")
+
+        set_mode(fake, version="0.158.00", schema="digest-mismatch")
+        equivalent_version = run(binary, home, "profile", "doctor", "default")
+        if (
+            equivalent_version.returncode != 0
+            or envelope(equivalent_version)["data"]["compatibility"] != "rejected"
+        ):
+            raise AssertionError(f"equivalent minimum version bypassed schema digest pin: {equivalent_version.stdout}")
+
+        set_mode(fake, schema="experimental-digest-mismatch")
+        wrong_experimental = run(binary, home, "profile", "doctor", "default")
+        if (
+            wrong_experimental.returncode != 0
+            or envelope(wrong_experimental)["data"]["compatibility"] != "rejected"
+        ):
+            raise AssertionError(f"exact version with wrong experimental digest was not rejected: {wrong_experimental.stdout}")
 
         set_mode(fake, schema="missing-field")
         missing = run(
@@ -1264,7 +1304,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"conflict profile cleanup failed: {conflicting_remove.stdout}")
         assert_valid(envelope(conflicting_remove), machine, "profile-remove Machine envelope")
 
-        set_mode(fake, version="0.158.0")
+        set_mode(fake, version="0.158.1")
         migrated_snapshot = envelope(
             run(binary, home, "profile", "doctor", "default")
         )["data"]
@@ -1389,7 +1429,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             encoding="utf-8",
         )
         active_path.chmod(0o600)
-        set_mode(fake, version="0.157.2")
+        set_mode(fake, version="0.158.1")
         changed_contract = run(binary, home, "profile", "doctor", "default")
         if (
             changed_contract.returncode != 0

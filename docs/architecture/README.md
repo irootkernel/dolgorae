@@ -1347,7 +1347,7 @@ the parent Run's thread tree, policy, and authority, and never become aggregate
 members, Independent Specialist Runs, peer Workers, or Dedicated Lane Servers.
 The selected Codex Profile must explicitly acknowledge
 `native_subagents: enabled`; v1 does not claim disable enforcement for the
-Codex 0.157.1 minimum runtime. The original negative probe remains historical
+Codex 0.158.0 minimum runtime. The original negative probe remains historical
 0.147.0 evidence.
 
 Instruction composition is split into a generation-immutable role and behavior
@@ -2508,9 +2508,10 @@ handshake, paginated models, codexHome, and absent-thread errors. The opt-in
 compatibility, access-safety, and review acceptance gates separately check
 history, sandbox, early-ID, server requests, and review lifecycle behavior.
 
-The checked 0.157.0 manifest remains the schema comparison baseline. Runtime
-versions below 0.157.1 are rejected; 0.157.1 and newer compatible versions are
-`unverified` until the complete behavioral campaign qualifies one as `tested`.
+The checked 0.157.0 manifest remains the required-subset comparison baseline.
+Runtime versions below 0.158.0 are rejected. The exact 0.158.0 runtime is
+`tested` after its complete behavioral campaign passes and both pinned schema
+bundle digests match; newer compatible versions remain `unverified`.
 The verdict is written to every run generation.
 
 Runtime code tolerates additive data but never infers lifecycle progress from

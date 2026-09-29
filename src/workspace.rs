@@ -452,6 +452,7 @@ impl GitRunner for SystemGitRunner {
         };
         let mut child = Command::new("git")
             .args(arguments)
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .stderr(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()?;
@@ -1922,7 +1923,25 @@ mod tests {
             mode: WorkspaceMode::Git,
             created: false,
         };
+        let index_before = fs::metadata(root.join(".git/index")).unwrap();
         let baseline = service.capture_run_baseline(&view).unwrap();
+        let index_after = fs::metadata(root.join(".git/index")).unwrap();
+        assert_eq!(
+            (
+                index_before.ino(),
+                index_before.mtime(),
+                index_before.mtime_nsec(),
+                index_before.ctime(),
+                index_before.ctime_nsec()
+            ),
+            (
+                index_after.ino(),
+                index_after.mtime(),
+                index_after.mtime_nsec(),
+                index_after.ctime(),
+                index_after.ctime_nsec()
+            )
+        );
         assert!(baseline.head.is_some());
         assert_eq!(
             baseline.tracked_changes,

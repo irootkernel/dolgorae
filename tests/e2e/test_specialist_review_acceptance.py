@@ -41,7 +41,7 @@ def main() -> int:
         )
         (workspace / "change.txt").write_text("nontrivial working-tree change\n", encoding="utf-8")
         codex = root / "codex"
-        executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.157.1\\n'\n")
+        executable(codex, "#!/bin/sh\nprintf 'codex-cli 0.158.0\\n'\n")
         fake = root / "dolgorae"
         success = {
             "schema_version": 2,
@@ -102,7 +102,7 @@ def main() -> int:
         (reviewer_state / "manifest.json").write_text(
             json.dumps({
                 "profile": {"process_static_configuration": {"mcp_servers": {}}},
-                "agent_configuration": {"model": "gpt-5.6-luna", "default_effort": "low"},
+                "agent_configuration": {"model": "gpt-6-sol", "default_effort": "high"},
             }),
             encoding="utf-8",
         )
@@ -115,16 +115,16 @@ def main() -> int:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["profile"]["process_static_configuration"]["mcp_servers"] = None
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        assert MODULE.success_evidence(fake, workspace, "reviewer", codex, canary)["reviewer_isolation"]["effort"] == "low"
+        assert MODULE.success_evidence(fake, workspace, "reviewer", codex, canary)["reviewer_isolation"]["effort"] == "high"
         manifest["agent_configuration"]["default_effort"] = "medium"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         try:
             MODULE.success_evidence(fake, workspace, "reviewer", codex, canary)
         except ValueError as error:
-            assert "gpt-5.6-luna / low" in str(error)
+            assert "gpt-6-sol / high" in str(error)
         else:
             raise AssertionError("a substituted live effort was accepted")
-        manifest["agent_configuration"]["default_effort"] = "low"
+        manifest["agent_configuration"]["default_effort"] = "high"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         failed = MODULE.failure_evidence(fake, workspace, codex, canary)
         assert failed["error_code"] == "PROFILE_NOT_FOUND"

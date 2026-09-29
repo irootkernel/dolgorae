@@ -18,7 +18,7 @@ from run_access_safety_acceptance import (
 )
 
 OPT_IN = "DOLGORAE_RUN_LIVE_CODEX_COMPATIBILITY"
-MINIMUM_VERSION = "codex-cli 0.157.1"
+MINIMUM_VERSION = "codex-cli 0.158.0"
 OBSERVATIONS = json.loads(
     (Path(__file__).resolve().parents[2] / "docs/protocol/codex-0.157.0-required-subset.json")
     .read_text(encoding="utf-8")
