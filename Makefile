@@ -122,34 +122,38 @@ test-e2e:
 		export TMPDIR="$$test_root/tmp"; \
 		export XDG_CONFIG_HOME="$$test_root/config"; \
 		export XDG_CACHE_HOME="$$test_root/cache"; \
-		$(PYTHON_BIN) tests/e2e/test_orphan_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_socket_ownership.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_gateway_restart.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_slow_consumer_isolation.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_event_revision_action_barrier.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_frozen_consumer_compatibility.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_private_boundary.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_start_run_allocation_replay.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_run_configuration_restart.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_threadless_first_write_runtime.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_protected_interaction_lost_response.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_interaction_size_and_secret_barrier.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_review_target_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_installed_review_skill.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_independent_review_acceptance.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_live_independent_review_admission.py; \
-		$(PYTHON_BIN) tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
-		$(PYTHON_BIN) tests/e2e/test_specialist_review_acceptance.py; \
-		$(PYTHON_BIN) tests/e2e/test_codex_compatibility.py; \
-		$(PYTHON_BIN) tests/e2e/test_live_transport_probe.py; \
-		$(PYTHON_BIN) tests/e2e/test_live_primary_bridge.py; \
-		$(PYTHON_BIN) tests/e2e/test_live_provider_acceptance.py
+		run_case() { \
+			$(PYTHON_BIN) "$$@"; \
+			$(PYTHON_BIN) tests/e2e/orphan_cleanup.py --binary "$(DOLGORAE_BIN)" --owner-root-under "$$test_root" --allow-existing-root; \
+		}; \
+		run_case tests/e2e/test_orphan_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_socket_ownership.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_gateway_restart.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_slow_consumer_isolation.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_event_revision_action_barrier.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_frozen_consumer_compatibility.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_private_boundary.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_start_run_allocation_replay.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_run_configuration_restart.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_threadless_first_write_runtime.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_protected_interaction_lost_response.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_interaction_size_and_secret_barrier.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_review_target_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_scoped_specialist_review_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_scoped_specialist_review_failures.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_installed_review_skill.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_independent_review_acceptance.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_live_independent_review_admission.py; \
+		run_case tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_specialist_review_acceptance.py; \
+		run_case tests/e2e/test_codex_compatibility.py; \
+		run_case tests/e2e/test_live_transport_probe.py; \
+		run_case tests/e2e/test_live_primary_bridge.py; \
+		run_case tests/e2e/test_live_provider_acceptance.py
 	@echo "[test-e2e] completed"
 
 test-live-transport-probe:

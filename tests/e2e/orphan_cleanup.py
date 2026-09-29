@@ -1,4 +1,4 @@
-"""Reap only verified Dolgorae processes from a removed E2E owner root."""
+"""Reap verified Dolgorae processes from removed E2E fixture roots."""
 
 from __future__ import annotations
 
@@ -25,9 +25,12 @@ def _call(binary: pathlib.Path, command: str, owner_root: pathlib.Path, *extra: 
     return envelope
 
 
-def cleanup_removed_root(binary: pathlib.Path, owner_root: pathlib.Path) -> None:
+def cleanup_removed_root(
+    binary: pathlib.Path, owner_root: pathlib.Path, *, allow_existing_root: bool = False
+) -> None:
     owner_root = owner_root.resolve()
-    if owner_root.exists():
+    # The suite root remains while its removed child fixtures are reaped.
+    if owner_root.exists() and not allow_existing_root:
         raise RuntimeError(f"owner root must be removed before orphan cleanup: {owner_root}")
     last_observation: dict | None = None
     for _ in range(50):
@@ -57,8 +60,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=pathlib.Path, required=True)
     parser.add_argument("--owner-root-under", type=pathlib.Path, required=True)
+    parser.add_argument("--allow-existing-root", action="store_true")
     arguments = parser.parse_args()
-    cleanup_removed_root(arguments.binary.resolve(), arguments.owner_root_under.resolve())
+    cleanup_removed_root(
+        arguments.binary.resolve(),
+        arguments.owner_root_under.resolve(),
+        allow_existing_root=arguments.allow_existing_root,
+    )
     return 0
 
 

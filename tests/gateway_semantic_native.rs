@@ -525,7 +525,8 @@ async fn broker_approval_provisions_and_dispatches_through_production_effects() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_bootstrap_and_machine_parity() {
-    let fixture = Fixture::new("run_start_model_list.json");
+    // Worker startup hashes this executable before its ten-second bound handoff.
+    let fixture = Fixture::new_compact("run_start_model_list.json");
     let run_id = fixture.start_run(&[]);
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
