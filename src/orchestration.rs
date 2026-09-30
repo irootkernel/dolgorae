@@ -2884,8 +2884,18 @@ impl OrchestrationStore {
         validate_member_credential(&member, &credential)?;
         self.faults
             .check(OrchestrationBarrier::BeforeTaskDispatch)?;
-        let now = self.now_ms()?;
+        let deadline = checked_deadline_ms(
+            accepted_task.deadline_origin_ms,
+            accepted_task.deadline_seconds,
+        )?;
+        let clock = self.clock.clone();
         let transaction = self.transaction()?;
+        let now = clock.now_ms()?;
+        if now >= deadline {
+            transaction.rollback().map_err(internal)?;
+            self.settle_task_control(context.session_id, task_id, "expiry", adapter)?;
+            return self.task(task_id);
+        }
         let reserved = transaction
             .execute(
                 "UPDATE brokered_tasks SET state='dispatching',updated_at_ms=?2
@@ -8348,6 +8358,131 @@ mod tests {
             "ORCHESTRATION_SCHEMA_UNSUPPORTED"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pre_dispatch_deadline_survives_restart_without_writer_or_turn_effects() {
+        for access in ["read_only", "canonical_workspace_write"] {
+            for retry_at_ms in [1_999, 2_000, 2_001] {
+                let root = root();
+                let clock = Arc::new(ManualClock::new(1_000));
+                let (mut store, session) = active_session_with_clock(&root, clock.clone());
+                let mut adapter = FakeAdapter::default();
+                let child = store
+                    .request_specialist(
+                        &context(session.session_id, "deadline-member"),
+                        &request(access),
+                        &mut adapter,
+                    )
+                    .unwrap()
+                    .specialist_run_id
+                    .unwrap();
+                drop(store);
+                let fault = Arc::new(OneFault {
+                    barrier: OrchestrationBarrier::BeforeTaskDispatch,
+                    fired: Mutex::new(false),
+                });
+                let mut store =
+                    OrchestrationStore::open_with_faults_and_clock(&root, fault, clock.clone())
+                        .unwrap();
+                let call = context(session.session_id, "deadline-task");
+                let mut task_request = task_request(child, access);
+                task_request.deadline_seconds = 1;
+                assert!(
+                    store
+                        .assign_task(&call, &task_request, &mut adapter)
+                        .is_err()
+                );
+                let accepted = store
+                    .task_by_key(session.session_id, &call.idempotency_key)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(accepted.state, "accepted");
+                drop(store);
+
+                clock.now_ms.store(retry_at_ms, Ordering::SeqCst);
+                let mut store = OrchestrationStore::open_with_faults_and_clock(
+                    &root,
+                    Arc::new(NoOrchestrationFaults),
+                    clock.clone(),
+                )
+                .unwrap();
+                adapter.calls.clear();
+                let recovered = store
+                    .assign_task(&call, &task_request, &mut adapter)
+                    .unwrap();
+                assert_eq!(recovered.task_id, accepted.task_id);
+                assert_eq!(
+                    store
+                        .accepted_task(accepted.task_id)
+                        .unwrap()
+                        .deadline_origin_ms,
+                    1_000
+                );
+                if retry_at_ms < 2_000 {
+                    assert_eq!(recovered.state, "completed_not_delivered");
+                    assert_eq!(
+                        adapter
+                            .calls
+                            .iter()
+                            .filter(|call| call.starts_with("dispatch:"))
+                            .count(),
+                        1
+                    );
+                } else {
+                    assert_eq!(recovered.state, "expired");
+                    assert_eq!(
+                        recovered.safe_error_code.as_deref(),
+                        Some("OPERATION_TIMEOUT")
+                    );
+                    assert!(recovered.target_turn_id.is_none());
+                    assert!(adapter.calls.is_empty());
+                }
+                let effects = adapter.calls.clone();
+                assert_eq!(
+                    store
+                        .assign_task(&call, &task_request, &mut adapter)
+                        .unwrap(),
+                    recovered
+                );
+                assert_eq!(adapter.calls, effects);
+                drop(store);
+                let mut store = OrchestrationStore::open_with_faults_and_clock(
+                    &root,
+                    Arc::new(NoOrchestrationFaults),
+                    clock.clone(),
+                )
+                .unwrap();
+                assert_eq!(
+                    store
+                        .assign_task(&call, &task_request, &mut adapter)
+                        .unwrap(),
+                    recovered
+                );
+                assert_eq!(adapter.calls, effects);
+                let payload = serde_json::json!({
+                    "operation":"assign_specialist_task",
+                    "target":{"run_id":child},
+                    "objective":task_request.objective,
+                    "context_refs":task_request.context_refs,
+                    "expected_output":task_request.expected_output,
+                    "execution_intent":access,
+                    "blocking":false,
+                    "deadline_seconds":1,
+                });
+                let mut service = PrimaryOrchestrationService {
+                    store: &mut store,
+                    adapter: &mut adapter,
+                };
+                let receipt = service.dispatch(&call, &payload).unwrap();
+                assert_eq!(receipt["task_id"], accepted.task_id.to_string());
+                assert_eq!(receipt["state"], "accepted");
+                assert_eq!(service.dispatch(&call, &payload).unwrap(), receipt);
+                assert_eq!(store.task(accepted.task_id).unwrap(), recovered);
+                assert_eq!(adapter.calls, effects);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

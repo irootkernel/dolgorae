@@ -100,6 +100,8 @@ development commits.
 
 ### Fixed
 
+- Expire overdue accepted Specialist tasks before dispatch, preserving their
+  acceptance across restart and avoiding Writer handoff or Turn submission.
 - Finish unpublished server cleanup after the child exits, including when its
   process group disappears during the ownership census.
 

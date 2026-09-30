@@ -3469,6 +3469,13 @@ Turn. A persisted `dispatching` boundary without authoritative Turn acceptance
 settles as `interrupted_unknown` rather than replaying the work.
 
 Task deadline starts at durable acceptance and MUST survive retry and restart.
+Before reserving dispatch, the Broker MUST compare the current time with that
+persisted deadline. At or after the deadline, a task still known to be
+pre-dispatch MUST durably settle as `expired` with `OPERATION_TIMEOUT`, without
+Writer handoff, Turn submission, or an interrupt. Exact retry preserves its
+task identity and original acceptance receipt. A previously crossed dispatch
+boundary still requires the ordinary authoritative terminal-proof or
+`interrupted_unknown` rules; expiry MUST NOT manufacture proof of no effects.
 A bounded tool wait does not extend that deadline or cancel durable work when
 it expires or its client disconnects. `any` and `all` waits observe the accepted
 tasks and end on their defined terminal condition or transport budget. An exact

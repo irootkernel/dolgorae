@@ -646,6 +646,13 @@ are only an optimization. Assignment `blocking` uses the earlier of the fixed
 always returns the immutable acceptance receipt. Exact-call replay never waits
 again, while a new call may observe later state.
 
+Before reserving the dispatch boundary, the Broker checks the persisted
+acceptance deadline. A known pre-dispatch task at or beyond that deadline uses
+the existing durable expiry-control transition and returns its retained task
+identity without Writer handoff, Turn submission, or interruption. Retry of a
+crossed dispatch boundary retains the existing terminal-proof and unknown
+outcome rules.
+
 Task cancellation records its intent before an external effect. A known
 pre-dispatch task settles without contacting the Worker. Once submission may
 have happened, the Broker uses the member Controller to request ordinary Turn
