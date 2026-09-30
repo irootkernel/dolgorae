@@ -27,6 +27,18 @@ if __name__ == "__main__":
     )
     run_case(
         "gateway_semantic_native",
+        "root_close_preserves_unknown_primary_until_matching_history_is_terminal",
+    )
+    run_case(
+        "gateway_semantic_native",
+        "root_close_cannot_clear_unknown_effect_by_pausing_primary",
+    )
+    run_case(
+        "gateway_semantic_native",
+        "closed_run_rejects_fresh_submission_without_changing_the_terminal_history",
+    )
+    run_case(
+        "gateway_semantic_native",
         "controller_timeline_preserves_input_and_pages_without_replay_duplicates",
     )
     run_case("gateway_semantic_native", "native_interrupt_invalidates_interaction")

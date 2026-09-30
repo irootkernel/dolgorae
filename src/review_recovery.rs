@@ -783,4 +783,39 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn invalid_global_binding_failure_survives_fresh_inspection_and_exact_retry() {
+        let root = std::env::temp_dir().join(format!("dolgorae-recovery-{}", Uuid::now_v7()));
+        let (view, input) = fixture(&root);
+        let mut store =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&root)).unwrap();
+        store.reserve_one_shot(&input).unwrap();
+        assert_eq!(crate::machine::exit_status_for("RUN_MANIFEST_INVALID"), 5);
+        store
+            .finish_one_shot(
+                input.request_ref,
+                &OneShotTerminal::Failed {
+                    safe_error_code: "RUN_MANIFEST_INVALID".to_owned(),
+                },
+            )
+            .unwrap();
+        drop(store);
+        let observed = inspect(&root, &view, input.request_ref, false).unwrap();
+        assert_eq!(observed["outcome"], "failed");
+        assert_eq!(observed["safe_error_code"], "RUN_MANIFEST_INVALID");
+        assert!(observed["reviewer"].is_null());
+        let mut reopened =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&root)).unwrap();
+        let (retained, created) = reopened.reserve_one_shot(&input).unwrap();
+        assert!(!created);
+        assert_eq!(
+            retained.terminal,
+            Some(OneShotTerminal::Failed {
+                safe_error_code: "RUN_MANIFEST_INVALID".to_owned(),
+            })
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

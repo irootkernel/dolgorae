@@ -61,7 +61,6 @@ pub struct GlobalLaunchSnapshot {
     pub enabled_features: Vec<String>,
     pub disabled_features: Vec<String>,
     pub process_static_configuration: BTreeMap<String, Value>,
-    pub initial_configuration_observation: BTreeMap<String, Value>,
     pub executable_identity: ExecutableIdentity,
     pub codex_version: String,
     pub schema_bundle_sha256: String,
@@ -83,7 +82,6 @@ impl From<&ProfileSnapshot> for GlobalLaunchSnapshot {
             enabled_features: snapshot.enabled_features.clone(),
             disabled_features: snapshot.disabled_features.clone(),
             process_static_configuration: snapshot.process_static_configuration.clone(),
-            initial_configuration_observation: snapshot.initial_configuration_observation.clone(),
             executable_identity: snapshot.executable_identity.clone(),
             codex_version: snapshot.codex_version.clone(),
             schema_bundle_sha256: snapshot.schema_bundle_sha256.clone(),
@@ -1251,6 +1249,53 @@ mod tests {
             .push("--strict-config".to_owned());
         assert_eq!(
             other_snapshot.discover_global(&binding).unwrap_err().code,
+            "RUN_MANIFEST_INVALID"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn runtime_trust_observation_does_not_change_compatible_generation() {
+        let (parent, home) = home();
+        let profile = definition(&parent);
+        GlobalProfileStore::new(&home)
+            .add("selected".to_owned(), profile.clone())
+            .unwrap();
+        let resolved = ResolvedGlobalProfile::resolve(&home, "selected").unwrap();
+        let original = snapshot("selected", &profile, &"b".repeat(64));
+        let mut observed = original.clone();
+        observed.initial_configuration_observation.insert(
+            "projects".to_owned(),
+            json!({"/synthetic/project": {"trust_level": "trusted"}}),
+        );
+        let original_binding = resolved.clone().bind(original.clone()).unwrap();
+        let observed_binding = resolved.bind(observed.clone()).unwrap();
+        assert_ne!(
+            original_binding.launch_snapshot_sha256,
+            observed_binding.launch_snapshot_sha256
+        );
+        for (state, binding) in [
+            (server_state(original), &observed_binding),
+            (server_state(observed), &original_binding),
+        ] {
+            assert_eq!(state.discover_global(binding).unwrap().server_epoch, 7);
+            let mut incompatible = state;
+            incompatible.snapshot.process_static_configuration.insert(
+                "openai_base_url".to_owned(),
+                json!("https://incompatible.invalid"),
+            );
+            assert_eq!(
+                incompatible.discover_global(binding).unwrap_err().code,
+                "RUN_MANIFEST_INVALID"
+            );
+        }
+        let mut corrupted = observed_binding;
+        corrupted
+            .launch_snapshot
+            .initial_configuration_observation
+            .clear();
+        assert_eq!(
+            corrupted.validate_for_recovery().unwrap_err().code,
             "RUN_MANIFEST_INVALID"
         );
         fs::remove_dir_all(parent).unwrap();

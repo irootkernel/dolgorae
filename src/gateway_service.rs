@@ -235,15 +235,14 @@ impl CoreGatewayBackend {
             return Ok(None);
         };
         snapshot.authorize_current_controller(&state_root, &carrier, "run.recover")?;
-        if matches!(
-            snapshot.projection.lifecycle,
-            domain::RunLifecycle::ReconciliationRequired | domain::RunLifecycle::OutcomeUnknown
-        ) && let Err(mut error) = self.mutate(
-            reference,
-            controller,
-            Some(expected_state_revision),
-            operation,
-        ) {
+        if crate::semantic::primary_close_outcome_unknown(&state_root, &snapshot)?
+            && let Err(mut error) = self.mutate(
+                reference,
+                controller,
+                Some(expected_state_revision),
+                operation,
+            )
+        {
             let _ = store.record_session_close_failure(snapshot.manifest.run_id, &error.code);
             if let Some(details) = error.details.as_object_mut() {
                 details.insert(
@@ -285,6 +284,17 @@ impl CoreGatewayBackend {
             return Err(error);
         }
         let (_, current) = self.run_state(reference)?;
+        if crate::semantic::primary_close_outcome_unknown(state_root, &current)? {
+            store.record_session_close_failure(run_id, "OUTCOME_UNKNOWN")?;
+            let mut error = MachineError::new(
+                "OUTCOME_UNKNOWN",
+                "the Primary effect has no authoritative terminal outcome",
+                false,
+                serde_json::json!({"run_id":run_id,"required_action":"reconcile_run"}),
+            );
+            close_error_details(&mut error, close, run_id);
+            return Err(error);
+        }
         if current.projection.lifecycle != domain::RunLifecycle::Closed
             && let Err(mut error) = self.mutate(
                 reference,
@@ -763,7 +773,7 @@ fn broker_approval_projection(
 }
 
 fn broker_approval_decision(bytes: &[u8]) -> Result<bool, MachineError> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+    let value = crate::semantic::decode_response(bytes, "response_json").map_err(|_| {
         MachineError::new(
             "INTERACTION_RESPONSE_INVALID",
             "interaction response does not match its checked schema",
@@ -1562,9 +1572,7 @@ impl GatewayBackend for CoreGatewayBackend {
             });
         };
         if !newly_admitted {
-            if matches!(close.progress.as_str(), "completed" | "aborted")
-                || snapshot.projection.lifecycle == domain::RunLifecycle::Closed
-            {
+            if matches!(close.progress.as_str(), "completed" | "aborted") {
                 store.complete_session_close(snapshot.manifest.run_id)?;
                 let (_, snapshot, facts) = self.run_snapshot(reference)?;
                 let mut context = self.context();
@@ -1573,6 +1581,16 @@ impl GatewayBackend for CoreGatewayBackend {
                     context: Some(context),
                     run: Some(project::run_projection(&snapshot, &facts)?),
                 });
+            }
+            if snapshot.projection.lifecycle == domain::RunLifecycle::Closed {
+                return self.settle_and_complete_session_close(
+                    &state_root,
+                    &mut store,
+                    reference,
+                    controller,
+                    &close,
+                    snapshot.stamp.run_state_revision,
+                );
             }
             return Err(match close.progress.as_str() {
                 "settling" => {
@@ -1699,6 +1717,8 @@ mod broker_approval_tests {
             Ok(false)
         );
         for invalid in [
+            b"\xff".as_slice(),
+            br#"{"answers": "#.as_slice(),
             br#"{}"#.as_slice(),
             br#"{"decision":"approve"}"#.as_slice(),
             br#"{"answers":{"specialist_approval":{"answers":["approve","reject"]}}}"#.as_slice(),
@@ -1708,6 +1728,21 @@ mod broker_approval_tests {
                 broker_approval_decision(invalid).unwrap_err().code,
                 "INTERACTION_RESPONSE_INVALID"
             );
+        }
+    }
+
+    #[test]
+    fn broker_approval_response_rejects_duplicate_members_at_every_level() {
+        for invalid in [
+            br#"{"answers":{"specialist_approval":{"answers":["reject"]}},"answers":{"specialist_approval":{"answers":["approve"]}}}"#.as_slice(),
+            br#"{"answers":{"specialist_approval":{"answers":["reject"]},"specialist_approval":{"answers":["approve"]}}}"#.as_slice(),
+            br#"{"answers":{"specialist_approval":{"answers":["reject"],"answers":["approve"]}}}"#.as_slice(),
+            br#"{"answers":{"specialist_approval":{"answers":["reject"],"\u0061nswers":["approve"]}}}"#.as_slice(),
+        ] {
+            let error = broker_approval_decision(invalid).unwrap_err();
+            assert_eq!(error.code, "INTERACTION_RESPONSE_INVALID");
+            assert!(!error.retryable);
+            assert_eq!(error.details, serde_json::json!({}));
         }
     }
 

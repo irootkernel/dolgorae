@@ -100,6 +100,29 @@ development commits.
 
 ### Fixed
 
+- Reject native Codex `--profile` launch arguments before Profile registration
+  because the qualified app-server does not support them.
+- Accept native absolute file-change and move paths within the canonical
+  workspace while refusing paths that escape it.
+- Report durable policy epochs and thread generations in Run snapshots; resume
+  retained threads after idle-worker loss and retire absent-generation Writer
+  authority before starting a successor.
+- Complete prepared write admissions after a definite `WRITER_BUSY` refusal.
+- Reject duplicate Broker approval JSON members and fresh Primary Turns after
+  Session close begins; preserve the checked close error and exact replay.
+- Record Reviewer readiness before the first Turn and retain resolved v3
+  execution metadata in capture failures.
+- Align Specialist Policy v2 success and rejection details with the checked
+  machine contracts.
+- Keep resumed Run snapshots available by rebinding the retained thread and
+  policy to the current native server before reporting idle, without submitting a Turn.
+- Reuse compatible Profile servers after Codex updates runtime trust settings.
+- Retain `RUN_MANIFEST_INVALID` as a checked one-shot failure across inspection
+  and exact retry, with exit status 5.
+- Allow External Specialists to be released before their first task. Retire
+  closed Workers and global Profile membership on release or abort so Profile
+  servers can stop normally; preserve terminal ledger seals when interrupting
+  stale closed attachments.
 - Expire overdue accepted Specialist tasks before dispatch, preserving their
   acceptance across restart and avoiding Writer handoff or Turn submission.
 - Finish unpublished server cleanup after the child exits, including when its

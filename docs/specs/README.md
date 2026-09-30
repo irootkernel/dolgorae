@@ -167,8 +167,9 @@ validator explicitly named by this specification are also normative.
   Collaboration Plane, Mailbox Scheduler, Activation Manager, private tool
   bridge, and sole workspace orchestration-database mutation owner hosted by
   `dolgorae serve`. SQLite, not this runtime, remains durable authority.
-- **Codex Config Profile**: a Codex `--profile` selection inside normalized
-  global argv; it is not a Dolgorae Codex Profile.
+- **Codex Config Profile**: a native Codex CLI `--profile` selection. It is
+  unsupported in Dolgorae's app-server launch argv and is distinct from a
+  Dolgorae Codex Profile.
 - **Reader**: a Run whose Turns use Codex read-only sandbox policy.
 - **Writer**: the single Run named by durable Dolgorae writer authority for a
   canonical workspace and whose Turns may use workspace-write sandbox policy.
@@ -561,10 +562,15 @@ is not a supported production profile contract. `argv[0]`
 MUST be an absolute regular Codex executable; v1 rejects shell interpreters,
 arbitrary wrappers, and argv that already contains an app-server subcommand.
 Only the required-subset manifest's `profile_launch.global_arguments` are
-allowed after `argv[0]`. V1 accepts canonical `--profile <name>`, repeatable
-`--enable <feature>`, repeatable `--disable <feature>`, and flag-only
+allowed after `argv[0]`. V1 accepts repeatable `--enable <feature>`, repeatable
+`--disable <feature>`, and flag-only
 `--strict-config`; it rejects aliases, `--flag=value`, missing values, and every
 other option. Normalization preserves argument and repetition order exactly.
+Native Codex `--profile <name>` is rejected with `PROFILE_CONFIG_INVALID`
+before Profile registration because the qualified Codex app-server does not
+support it. Dolgorae neither removes nor translates this option. Dolgorae's
+own `run start --profile <name>` continues to select a registered Dolgorae
+Codex Profile.
 The `multi_agent` Codex flag is reserved to Dolgorae and MUST NOT appear in raw
 profile argv. Dolgorae injects exactly one canonical `--enable multi_agent`
 pair. The `--disable multi_agent` form is diagnostic-only because the pinned
@@ -837,7 +843,10 @@ Unknown fields and unclassified include mechanisms fail compatibility. Only
 normalized process-static and explicitly accepted migratable fields enter the
 launch contract. Runtime-mutated trust and operational state are recorded as an
 initial observation but their enclosing file's raw digest MUST NOT enter
-`server_key`. The key remains fixed for the lifetime; a later process-static
+`server_key` or compatible-generation admission comparisons. Persisted Run
+bindings retain their original observations and digests; later runtime-mutable
+observations MUST NOT prevent reuse of the same launch contract.
+The key remains fixed for the lifetime; a later process-static
 change fixes that lifetime to its recorded snapshot. A generation-starting
 command MAY replace it automatically only after complete membership and exact
 process evidence prove that no Run remains attached; otherwise the change
@@ -2109,6 +2118,17 @@ generation. It separately records writer authority state/generation and
 workspace/run identity. A run is externally writable only when effective access
 is `write`, verification is `verified`, and writer authority is `active` for the
 same run and generation. Neither dimension is inferred from the other.
+
+Resume MUST bind the retained thread to the current native server generation
+and durably advance its thread generation and effective-policy epoch before
+publishing the idle snapshot. It MUST NOT submit a Turn. The new policy
+observation remains unverified until positively established; a prior server's
+policy MUST NOT make the resumed Run's public snapshot unavailable.
+
+After the previous physical generation reaches verified absence, its active
+Writer authority is retired under Run startup serialization. A successor starts
+read-only and requires explicit Writer acquisition before a new write Turn.
+Blocked, reserved, or uncertain authority is not cleared by this retirement.
 
 Activation first rejects a known `unavailable` transition without changing
 authority. It acquires home, server, writer, then run serialization, validates controller,
@@ -3527,6 +3547,13 @@ Servers are not stopped on client disconnect. No new process cleanup subsystem,
 full operator API, queue scheduler, or lateral collaboration is part of this
 slice.
 
+Successful external member release or abort MUST retire the closed Run's global
+Profile membership before reporting completion. An exact retry reconciles an
+already closed member without starting a replacement Worker. Profile shutdown
+MUST preserve a closed member's terminal ledger seal; after proving its runtime
+absent, it records retirement through the Profile membership authority rather
+than appending another Run-local observation.
+
 ### Brokered Specialist Collaboration
 
 A Specialist in one active Brokered Hierarchy MAY submit a bounded consultation
@@ -4059,6 +4086,9 @@ different identity. No provider error text is copied.
 Post-preparation v3 scoped errors also carry `execution` with the resolved
 model, effort, and Codex version and the Reviewer Run when allocated. This
 does not invent an execution identity for a failure before preparation.
+V3 target-capture failures after preparation preserve the known `execution`
+fields in their target-error details even before a capture or Reviewer is
+allocated.
 
 New v3 invalid-output errors carry this object as `diagnostic` beside the fixed
 safe reason and required action. Authorized v3 await and collect summaries
@@ -4118,6 +4148,11 @@ It does not interrupt an active Turn implicitly. Unknown acceptance or completio
 unresolved provisioning, missing authority, and active or uncertain members
 produce a checked `recovery_blocked` outcome. Terminal response loss does not
 change the stored outcome or permit a replacement Turn.
+
+An invalid persisted global Profile binding is the non-retryable checked
+`RUN_MANIFEST_INVALID` error (exit status 5). Recoverable one-shot execution MUST
+retain this known failure as its terminal safe error code, rather than replacing
+it with an input-validation failure or leaving the accepted operation unknown.
 
 A fresh CLI process MUST be able to inspect the original operation using only
 the public interface after the first process and its responses are lost.
@@ -5287,6 +5322,9 @@ exactly one UTF-8 string or opaque POSIX byte sequence. Dolgorae MUST NOT emit a
 lossy Unicode replacement string. This applies to the canonical workspace root
 returned by `InspectWorkspace`, workspace-change paths, command cwd,
 file-change paths, and move paths.
+Native absolute file-change and move paths inside the canonical workspace are
+normalized to workspace-relative paths. Paths outside that workspace and paths
+containing parent traversal are refused before publishing the change.
 
 Protected response bytes are a
 bounded one-shot `ResolveInteraction` body only: never metadata, audit, trace,

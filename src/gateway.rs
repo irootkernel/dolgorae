@@ -1615,6 +1615,45 @@ mod tests {
         assert_eq!(unknown.message(), "INTERNAL_ERROR");
     }
 
+    #[test]
+    fn close_in_progress_error_preserves_checked_policy_and_operation_identity() {
+        let run_id = Uuid::now_v7().to_string();
+        let operation_id = Uuid::now_v7().to_string();
+        let error = MachineError::new(
+            "SESSION_CLOSE_IN_PROGRESS",
+            "whole-session close was accepted and is still settling",
+            false,
+            json!({
+                "run_id": run_id,
+                "operation_id": operation_id,
+                "required_action": "refresh_snapshot"
+            }),
+        );
+        assert_eq!(error.exit_status(), 4);
+        let status = error_status(&error, "RunService.CloseRun");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "SESSION_CLOSE_IN_PROGRESS");
+        let detail = detail(&status);
+        assert_eq!(detail.dolgorae_error_code, "SESSION_CLOSE_IN_PROGRESS");
+        assert_eq!(
+            detail.action,
+            pb::RequiredClientAction::RefreshSnapshot as i32
+        );
+        assert_eq!(
+            detail.retry_classification,
+            pb::RetryClassification::Forbidden as i32
+        );
+        assert_eq!(
+            detail.recovery_classification,
+            pb::RecoveryClassification::SnapshotRequired as i32
+        );
+        assert_eq!(detail.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(detail.operation_id.as_deref(), Some(operation_id.as_str()));
+        let submitting = error_status(&error, "RunService.SubmitTurn");
+        assert_eq!(submitting.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(self::detail(&submitting), detail);
+    }
+
     #[tokio::test]
     async fn queue_count_bytes_and_stall_bounds_close_only_their_stream() {
         let mut full = StreamQueue::default();

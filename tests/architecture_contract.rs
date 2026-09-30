@@ -358,6 +358,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "app_server",
                 "audit",
+                "conformance",
                 "darwin",
                 "domain",
                 "fault",
@@ -403,6 +404,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         // coordinator is handed a writer rather than deriving one.
         // It names `writer` to refresh the current holder after control-socket
         // recovery, within the worker's writer-authority transaction boundary.
+        // It names `orchestration` to check durable Session close intent before
+        // fresh Primary Turn admission, after accepted receipt replay.
+        // It names `semantic` and `snapshot` to restore retained close
+        // reconciliation before a paused Primary takes a lifecycle no-op path.
         (
             "worker",
             &[
@@ -420,6 +425,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "ledger",
                 "machine",
                 "mutation_admission",
+                "orchestration",
                 "paths",
                 "profile",
                 "primary_bridge",
@@ -428,6 +434,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "projection",
                 "providers",
                 "run",
+                "semantic",
+                "snapshot",
                 "turn",
                 "workspace",
                 "writer",
@@ -506,6 +514,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "controller",
                 "darwin",
                 "domain",
+                "jcs",
                 "ledger",
                 "machine",
                 "projection",

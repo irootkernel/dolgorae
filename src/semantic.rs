@@ -1563,6 +1563,72 @@ fn run_history_reconciliation(
     history_reconciliation_typed(&view, &state_root, run_id, &carrier, operation, None)
 }
 
+pub(crate) fn primary_close_outcome_unknown(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+) -> Result<bool, MachineError> {
+    if matches!(
+        snapshot.projection.lifecycle,
+        RunLifecycle::OutcomeUnknown | RunLifecycle::ReconciliationRequired
+    ) {
+        return Ok(true);
+    }
+    let ledger = crate::ledger::ObservedLedger::open_run(
+        state_root,
+        snapshot.manifest.run_id,
+        snapshot.stamp.run_state_revision,
+    )?;
+    let mut unknown = false;
+    for record in ledger.records() {
+        match record.kind() {
+            crate::audit::AuditKind::OutcomeUnknown => unknown = true,
+            crate::audit::AuditKind::TurnTerminal | crate::audit::AuditKind::Reconciliation => {
+                let bytes = crate::jcs::canonicalize(record.payload())
+                    .map_err(|_| internal("Primary terminal evidence"))?;
+                let payload: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| internal("Primary terminal evidence"))?;
+                let status = if record.kind() == crate::audit::AuditKind::TurnTerminal {
+                    payload["status"].as_str()
+                } else {
+                    payload["observed_status"].as_str()
+                };
+                if payload["turn_id"].as_str() == snapshot.projection.latest_turn_id.as_deref()
+                    && matches!(status, Some("completed" | "interrupted" | "failed"))
+                {
+                    unknown = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(unknown)
+}
+
+pub(crate) fn primary_close_reconciliation_required(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+) -> Result<bool, MachineError> {
+    if snapshot.projection.lifecycle != RunLifecycle::Paused
+        || !snapshot
+            .manifest
+            .aggregate_binding
+            .as_ref()
+            .is_some_and(|binding| {
+                binding.aggregate_kind == crate::domain::AggregateKind::OrchestratedSession
+                    && binding.member_kind == crate::run::AggregateMemberKind::Primary
+                    && binding.aggregate_id == snapshot.manifest.run_id
+            })
+    {
+        return Ok(false);
+    }
+    Ok(
+        crate::orchestration::OrchestrationStore::open_observer(state_root)?
+            .session_close(snapshot.manifest.run_id)?
+            .is_some()
+            && primary_close_outcome_unknown(state_root, snapshot)?,
+    )
+}
+
 fn history_reconciliation_typed(
     view: &WorkspaceView,
     state_root: &Path,
@@ -1579,7 +1645,23 @@ fn history_reconciliation_typed(
     let control_recovery =
         crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid())
             .is_ok_and(|record| record.control_recovery_required);
+    let idle_worker_lost = projection.lifecycle == RunLifecycle::Idle
+        && projection.thread_id.is_some()
+        && crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid()).is_ok_and(
+            |record| {
+                crate::worker::classify_worker_identity(&record)
+                    == crate::worker::ProcessIdentityVerdict::Absent
+            },
+        );
+    let paused_primary_unknown = if projection.lifecycle == RunLifecycle::Paused {
+        let snapshot = crate::snapshot::RunSnapshot::load(state_root, run_id, 0)?;
+        primary_close_reconciliation_required(state_root, &snapshot)?
+    } else {
+        false
+    };
     if !control_recovery
+        && !idle_worker_lost
+        && !paused_primary_unknown
         && durable_pending_admission(state_root, run_id)?.is_none()
         && !matches!(
             projection.lifecycle,
@@ -1982,57 +2064,10 @@ impl<'a> ProductionOrchestrationEffects<'a> {
             return Ok(Vec::new());
         }
         let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, source_run_id, 0)?;
-        let mut contexts = Vec::with_capacity(references.len());
-        for artifact_id in references {
-            let metadata = crate::artifact::metadata(
-                self.state_root,
-                &snapshot,
-                &artifact_id.to_string(),
-                None,
-            )?
-            .artifact;
-            if metadata.byte_length == 0 || metadata.byte_length > 262_144 {
-                return Err(MachineError::invalid_argument(
-                    "context_refs",
-                    "each context artifact must contain 1 to 262144 UTF-8 bytes",
-                ));
-            }
-            if !(metadata.media_type.starts_with("text/")
-                || metadata.media_type == "application/json")
-            {
-                return Err(MachineError::invalid_argument(
-                    "context_refs",
-                    "context artifacts must use a textual media type",
-                ));
-            }
-            let chunk = crate::artifact::chunk(
-                self.state_root,
-                &snapshot,
-                &artifact_id.to_string(),
-                (0, metadata.byte_length as u32),
-                None,
-            )?;
-            let content = String::from_utf8(chunk.data).map_err(|_| {
-                MachineError::invalid_argument(
-                    "context_refs",
-                    "context artifact bytes must be valid UTF-8",
-                )
-            })?;
-            if content.contains('\0') {
-                return Err(MachineError::invalid_argument(
-                    "context_refs",
-                    "context artifact text must not contain NUL",
-                ));
-            }
-            contexts.push(crate::orchestration::AcceptedTaskContext {
-                artifact_id: *artifact_id,
-                media_type: metadata.media_type,
-                byte_length: metadata.byte_length,
-                sha256: metadata.sha256,
-                content,
-            });
-        }
-        Ok(contexts)
+        references
+            .iter()
+            .map(|id| crate::artifact::primary_task_context(self.state_root, &snapshot, *id))
+            .collect()
     }
 }
 
@@ -3729,7 +3764,7 @@ fn run_control_typed(
         None
     };
     if write && matches!(verb, RunVerb::Send | RunVerb::Submit) {
-        acquire_writer_authorized(
+        let acquired = acquire_writer_authorized(
             view,
             state_root,
             run_id,
@@ -3738,7 +3773,21 @@ fn run_control_typed(
             None,
             None,
             admission_id,
-        )?;
+        );
+        if let Err(error) = acquired {
+            if error.code == "WRITER_BUSY" {
+                abort_prepared_turn_admission(
+                    view,
+                    state_root,
+                    run_id,
+                    carrier.expect("mutation carrier"),
+                    admission_id.expect("turn admission"),
+                    verb,
+                    &prepared,
+                )?;
+            }
+            return Err(error);
+        }
     }
     if matches!(verb, RunVerb::Send | RunVerb::Submit | RunVerb::Resume) {
         ensure_run_worker(view, state_root, run_id)?;
@@ -3900,9 +3949,18 @@ fn stop_lifecycle_generation(
     loop {
         let _ = DarwinSystem.reap_child_nonblocking(record.identity.pid);
         if crate::worker::prove_worker_generation_absent(&record).is_ok() {
-            crate::worker::remove_verified_absent_runtime(runtime_record, uid)
-                .map_err(|error| error.machine_error(run_id, runtime_record))?;
-            return Ok(());
+            let lock = RunStartupLock::open(state_root, run_id)?;
+            lock.acquire()?;
+            let result = (|| {
+                lock.lock
+                    .require_unowned_worker_range()
+                    .map_err(|error| worker_startup_range_error(error, run_id, lock.lock.path()))?;
+                retire_absent_generation_writer(state_root, &record)?;
+                crate::worker::remove_verified_absent_runtime(runtime_record, uid)
+                    .map_err(|error| error.machine_error(run_id, runtime_record))
+            })();
+            lock.release();
+            return result;
         }
         if std::time::Instant::now() >= deadline {
             return Err(MachineError::new(
@@ -3919,6 +3977,157 @@ fn stop_lifecycle_generation(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Called under Run startup serialization while the old runtime locator is
+/// retained. Authority is retired only after the entire generation is absent.
+fn retire_absent_generation_writer(
+    state_root: &Path,
+    record: &crate::worker::WorkerRuntimeRecord,
+) -> Result<(), MachineError> {
+    let run_id = record.identity.run_id;
+    crate::worker::prove_worker_generation_absent(record)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    let snapshot = RunSources::load(state_root, run_id, record.control_socket_epoch)?;
+    if snapshot.writer.state != crate::writer::WriterAuthorityState::Active
+        || snapshot
+            .writer
+            .holder
+            .as_ref()
+            .is_none_or(|holder| holder.run_id != run_id)
+    {
+        return Ok(());
+    }
+    crate::writer::WriterStore::new(
+        state_root,
+        &record.identity.workspace_id,
+        record.identity.uid,
+    )
+    .transact(|writer| {
+        if writer.state != crate::writer::WriterAuthorityState::Active
+            || writer
+                .holder
+                .as_ref()
+                .is_none_or(|holder| holder.run_id != run_id)
+        {
+            return Ok(());
+        }
+        let holder = writer.holder.as_ref().expect("active Writer holder");
+        if holder.run_generation != record.identity.run_generation
+            || holder.worker_generation != record.identity.run_generation
+            || Some(holder.profile_server_epoch) != record.app_server_epoch
+        {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "Writer authority does not name the verified absent generation",
+                false,
+                json!({"run_id": run_id, "generation": record.identity.run_generation,
+                    "identity_verdict": "Absent", "reason": "writer_generation_mismatch"}),
+            ));
+        }
+        let transaction_id = Uuid::now_v7();
+        if snapshot.projection.lifecycle != RunLifecycle::Closed
+            && snapshot.projection.thread_id.is_some()
+        {
+            let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
+                .map_err(|error| internal(error.to_string()))?;
+            if ledger
+                .head()
+                .map_err(|error| internal(error.to_string()))?
+                .sequence
+                != snapshot.projection.ledger_head.sequence
+            {
+                return Err(run_state_conflict_error(
+                    run_id,
+                    snapshot.projection.lifecycle,
+                    "run.release_write",
+                ));
+            }
+            let mut policy = snapshot.captured_effective_policy.clone();
+            policy.access = crate::domain::Access::Unknown;
+            policy.verification = crate::domain::PolicyVerification::Unverified;
+            policy.writer_generation = None;
+            policy.policy_epoch.0 = policy
+                .policy_epoch
+                .0
+                .checked_add(1)
+                .ok_or_else(|| internal("effective policy epoch exhausted"))?;
+            ledger
+                .with_event_context(
+                    crate::event::EventAppendContext {
+                        workspace_id: record.identity.workspace_id.clone(),
+                        server_key: snapshot.manifest.profile.initial_server_key.clone(),
+                        server_epoch: record.app_server_epoch.unwrap_or(snapshot.server_epoch()),
+                        writer_state_revision: writer.authority_revision,
+                    },
+                    |ledger| {
+                        ledger.append_required_payload(
+                            AuditKind::WriterReleased,
+                            &json!({"writer_generation": writer.writer_generation,
+                        "transaction_id": transaction_id, "effective_policy": policy}),
+                            record.identity.run_generation,
+                        )
+                    },
+                )
+                .map_err(|error| internal(error.to_string()))?;
+        }
+        writer.prepare_release(run_id, transaction_id)?;
+        writer.commit_release(transaction_id)
+    })
+    .map(|_| ())
+}
+
+pub(crate) fn finish_external_run_close(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    engagement_id: Uuid,
+    owner: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let projection = store.load_state_projection(run_id)?;
+    if projection.lifecycle != RunLifecycle::Closed {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            "run.close",
+        ));
+    }
+    let uid = DarwinSystem.current_uid();
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    if runtime_record.exists() {
+        let record = crate::worker::read_runtime_record(&runtime_record, uid)
+            .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+        match crate::worker::classify_worker_identity(&record) {
+            crate::worker::ProcessIdentityVerdict::Match => {
+                stop_lifecycle_generation(state_root, run_id, &runtime_record)?;
+            }
+            crate::worker::ProcessIdentityVerdict::Absent => {
+                crate::worker::remove_verified_absent_runtime(&runtime_record, uid)
+                    .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+            }
+            verdict => {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the closed Specialist worker cannot be safely retired",
+                    false,
+                    json!({"run_id":run_id,"generation":record.identity.run_generation,
+                    "identity_verdict":verdict.as_str(),"reason":"generation_cleanup_unverified"}),
+                ));
+            }
+        }
+    }
+    let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid).load()?;
+    if writer
+        .holder
+        .as_ref()
+        .is_some_and(|holder| holder.run_id == run_id)
+    {
+        release_external_writer(view, state_root, run_id, engagement_id, owner)?;
+    }
+    release_global_run_membership(&store.load_manifest(run_id)?, run_id)
 }
 
 /// Quiesce one member selected by a durable Profile stop fence, then append
@@ -4101,6 +4310,9 @@ pub fn quiesce_profile_member(
                     .map_err(|error| internal(error.to_string()))?;
                 let (outcome, mark_unknown) =
                     profile_quiesce_outcome(observed_turn.is_some(), after.lifecycle);
+                if after.terminal_sealed {
+                    return Ok(outcome.to_owned());
+                }
                 if mark_unknown {
                     ledger
                         .mark_profile_interrupt_outcome_unknown(&timestamp, operation_id)
@@ -4230,11 +4442,13 @@ fn offline_lifecycle_transition(
         let store = RunStore::new(SystemWorkspacePlatform, state_root);
         let projection = store.load_state_projection(run_id)?;
         let stopped_paused = verb == RunVerb::Close && projection.lifecycle == RunLifecycle::Paused;
-        if (projection.thread_id.is_some() && !stopped_paused)
-            || !matches!(
-                projection.lifecycle,
-                RunLifecycle::Idle | RunLifecycle::Paused
-            )
+        let repeated_close = verb == RunVerb::Close && projection.lifecycle == RunLifecycle::Closed;
+        if (projection.thread_id.is_some() && !stopped_paused && !repeated_close)
+            || (!repeated_close
+                && !matches!(
+                    projection.lifecycle,
+                    RunLifecycle::Idle | RunLifecycle::Paused
+                ))
         {
             return Ok(None);
         }
@@ -4250,7 +4464,9 @@ fn offline_lifecycle_transition(
                 expected_state_revision,
             )?;
         }
-        if verb == RunVerb::Pause && projection.lifecycle == RunLifecycle::Paused {
+        if repeated_close
+            || (verb == RunVerb::Pause && projection.lifecycle == RunLifecycle::Paused)
+        {
             return run_object(state_root, run_id, 0, "Absent")
                 .map(SemanticResult::Run)
                 .map(Some);
@@ -5421,17 +5637,26 @@ fn release_global_run_membership(manifest: &RunManifest, run_id: Uuid) -> Result
             json!({"run_id": run_id}),
         )
     })?;
-    GlobalMembershipStore::new(
+    let membership = GlobalMembershipStore::new(
         &DolgoraeHome::system()?,
         &binding.selected_name,
         &binding.server_key,
-    )?
-    .record(
-        &manifest.workspace_id,
-        run_id,
-        MembershipDisposition::Released,
-    )
-    .map(|_| ())
+    )?;
+    if membership
+        .load()?
+        .members
+        .get(&format!("{}:{run_id}", manifest.workspace_id))
+        .is_some_and(|member| member.disposition == MembershipDisposition::Released)
+    {
+        return Ok(());
+    }
+    membership
+        .record(
+            &manifest.workspace_id,
+            run_id,
+            MembershipDisposition::Released,
+        )
+        .map(|_| ())
 }
 
 /// Whether this failure means no worker answered, as opposed to a worker that
@@ -6146,8 +6371,8 @@ impl RunSources {
             "effective_policy": {
                 "access": access,
                 "verification": "verified",
-                "policy_epoch": if dedicated { self.writer.authority_revision } else { 0 },
-                "thread_generation": u64::from(projection.thread_id.is_some()),
+                "policy_epoch": self.captured_effective_policy.policy_epoch.0,
+                "thread_generation": self.captured_effective_policy.thread_generation.unwrap_or(0),
                 "server_epoch": if dedicated { json!(physical_server_epoch) } else { json!(self.server_epoch()) },
                 "writer_generation": writer_generation,
             },
@@ -7138,6 +7363,9 @@ fn ensure_run_worker_locked(
                 return Ok(record.control_socket_epoch);
             }
             crate::worker::ProcessIdentityVerdict::Absent => {
+                crate::worker::stop_orphaned_dedicated_server(&record)
+                    .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+                retire_absent_generation_writer(state_root, &record)?;
                 crate::worker::remove_verified_absent_runtime(&runtime_record, uid)
                     .map_err(|error| error.machine_error(run_id, &runtime_record))?;
             }
@@ -9291,6 +9519,9 @@ fn begin_prepared_mutation(
             |_| {
                 let binding = load_reconciled_controller_binding(state_root, run_id)?;
                 authorize_controller(run_id, verb.operation_name(), &binding, carrier)?;
+                if matches!(verb, RunVerb::Send | RunVerb::Submit) {
+                    crate::orchestration::ensure_primary_turn_admission(state_root, run_id)?;
+                }
                 let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
                     .map_err(|error| internal(error.to_string()))?;
                 let request = prepared.normalized_request(verb);
@@ -9307,6 +9538,109 @@ fn begin_prepared_mutation(
                     matches!(prepared, Prepared::Turn { request, .. } if request.write),
                 )
                 .map(|admission| PreparedAdmission::Admitted(admission.admission_id))
+            },
+        )?
+    })();
+    lock.release();
+    result
+}
+
+struct PreparedMutationIdentity<'a> {
+    verb: RunVerb,
+    prepared: &'a Prepared,
+}
+
+impl crate::mutation_admission::MutationRequest for PreparedMutationIdentity<'_> {
+    fn mutation_request_identity(
+        &self,
+    ) -> Result<crate::mutation_admission::MutationRequestIdentity, MachineError> {
+        let request = self.prepared.normalized_request(self.verb);
+        let bytes = canonicalize(
+            &parse(&request.to_string()).map_err(|error| internal(error.to_string()))?,
+        )
+        .map_err(|error| internal(error.to_string()))?;
+        Ok(crate::mutation_admission::MutationRequestIdentity::new(
+            sha256_hex(&bytes),
+            self.verb.operation_name(),
+            matches!(self.prepared, Prepared::Turn { request, .. } if request.write),
+            &[],
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn abort_prepared_turn_admission(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    admission_id: Uuid,
+    verb: RunVerb,
+    prepared: &Prepared,
+) -> Result<(), MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let runtime_path =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    if crate::worker::read_runtime_record(&runtime_path, uid).is_ok_and(|record| {
+        crate::worker::classify_worker_identity(&record)
+            == crate::worker::ProcessIdentityVerdict::Match
+    }) {
+        let response = crate::worker::call_run_worker(
+            state_root,
+            run_id,
+            uid,
+            Some(carrier.raw_fd()),
+            |identity| {
+                checked_controller_request(
+                    ControlRequestV1::AbortPreparedMutation {
+                        admission_id,
+                        request: Box::new(prepared.clone().into_request(verb, identity)),
+                    },
+                    Some(carrier),
+                )
+            },
+        )
+        .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+        return match response {
+            ControlResponseV1::MutationAborted {
+                admission_id: completed,
+            } if completed == admission_id => Ok(()),
+            ControlResponseV1::Failed {
+                code,
+                message,
+                retryable,
+                details,
+            } => Err(MachineError::new(code, message, retryable, details)),
+            _ => Err(internal(
+                "worker did not confirm the pre-effect admission abort",
+            )),
+        };
+    }
+    let lock = RunStartupLock::open(state_root, run_id)?;
+    lock.acquire()?;
+    let result = (|| {
+        lock.lock
+            .require_unowned_worker_range()
+            .map_err(|error| worker_startup_range_error(error, run_id, lock.lock.path()))?;
+        if runtime_path.exists() {
+            let record = crate::worker::read_runtime_record(&runtime_path, uid)
+                .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+            crate::worker::prove_worker_generation_absent(&record)
+                .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+        }
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, uid).observe_locked(
+            |_| {
+                let binding = load_reconciled_controller_binding(state_root, run_id)?;
+                authorize_controller(run_id, verb.operation_name(), &binding, carrier)?;
+                let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
+                    .map_err(|error| internal(error.to_string()))?;
+                crate::mutation_admission::abort_prepared_turn_admission(
+                    &mut ledger,
+                    admission_id,
+                    binding.identity.controller_id,
+                    &PreparedMutationIdentity { verb, prepared },
+                )
             },
         )?
     })();
@@ -9375,6 +9709,17 @@ fn durable_pending_admission(
     let head = durable_head(state_root, run_id)?;
     let ledger = crate::ledger::ObservedLedger::open(&run_root(state_root, run_id), run_id, head)
         .map_err(|error| internal(error.to_string()))?;
+    // Close's final seal completes its admission without another ledger append.
+    if let Some(record) = ledger.records().last()
+        && record.kind() == AuditKind::LifecycleTransition
+    {
+        let bytes = canonicalize(record.payload()).map_err(|error| internal(error.to_string()))?;
+        let payload: Value =
+            serde_json::from_slice(&bytes).map_err(|error| internal(error.to_string()))?;
+        if payload["current"] == RunLifecycle::Closed.as_str() && payload["terminal_seal"] == true {
+            return Ok(None);
+        }
+    }
     let admitted = ledger
         .payloads_of_kind(AuditKind::MutationAdmitted)
         .map_err(|error| internal(error.to_string()))?;

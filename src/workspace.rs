@@ -1502,7 +1502,15 @@ fn validate_profile_argv(
         }
         match option {
             "--strict-config" => index += 1,
-            "--profile" | "--enable" | "--disable" => {
+            "--profile" => {
+                return Err(MachineError::profile_config_invalid(
+                    registry_path,
+                    format!(
+                        "profile {profile_name:?} contains --profile, which Codex app-server does not support"
+                    ),
+                ));
+            }
+            "--enable" | "--disable" => {
                 let value = argv
                     .get(index + 1)
                     .filter(|value| !value.is_empty() && !value.starts_with('-'));
@@ -1512,7 +1520,7 @@ fn validate_profile_argv(
                         format!("profile {profile_name:?} has a missing value for {option}"),
                     ));
                 };
-                if matches!(option, "--enable" | "--disable") && value == "multi_agent" {
+                if value == "multi_agent" {
                     return Err(MachineError::profile_config_invalid(
                         registry_path,
                         format!("profile {profile_name:?} contains reserved multi_agent policy"),

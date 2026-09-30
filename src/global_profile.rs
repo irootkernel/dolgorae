@@ -791,6 +791,75 @@ mod tests {
     }
 
     #[test]
+    fn native_config_profile_is_rejected_before_registry_persistence() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let store = GlobalProfileStore::new(&home);
+        let path = home.root().join("profiles.yaml");
+        let empty_bytes = fs::read(&path).unwrap();
+        let mut rejected = valid_profile(&parent);
+        rejected
+            .argv
+            .extend(["--profile".to_owned(), "selected".to_owned()]);
+        let error = store
+            .add("selected".to_owned(), rejected.clone())
+            .unwrap_err();
+        assert_eq!(error.code, "PROFILE_CONFIG_INVALID");
+        assert_eq!(fs::read(&path).unwrap(), empty_bytes);
+        assert!(store.load().unwrap().profiles.is_empty());
+
+        let mut supported = valid_profile(&parent);
+        supported.argv.extend(
+            [
+                "--enable",
+                "shell_tool",
+                "--disable",
+                "shell_tool",
+                "--enable",
+                "shell_tool",
+                "--strict-config",
+            ]
+            .map(str::to_owned),
+        );
+        store.add("default".to_owned(), supported.clone()).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            store.load().unwrap().profiles["default"].argv,
+            supported.argv
+        );
+        assert_eq!(
+            store.add("selected".to_owned(), rejected).unwrap_err().code,
+            "PROFILE_CONFIG_INVALID"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(store.load().unwrap().profiles.len(), 1);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn hand_edited_native_config_profile_is_rejected_without_mutation() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let path = home.root().join("profiles.yaml");
+        let mut profile = valid_profile(&parent);
+        profile
+            .argv
+            .extend(["--profile".to_owned(), "selected".to_owned()]);
+        let registry = GlobalProfileRegistry {
+            schema_version: 1,
+            profiles: BTreeMap::from([("default".to_owned(), profile)]),
+        };
+        let bytes = serde_yaml_ng::to_string(&registry).unwrap().into_bytes();
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            GlobalProfileStore::new(&home).load().unwrap_err().code,
+            "PROFILE_CONFIG_INVALID"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn global_registry_names_match_the_persisted_binding_contract() {
         let (parent, home) = test_home();
         initialize_generation(&home).unwrap();

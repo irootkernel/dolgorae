@@ -18,8 +18,9 @@ use crate::fault::{FaultInjector, NoFaults};
 use crate::ledger::{Ledger, LedgerClock, SystemLedgerClock};
 use crate::machine::MachineError;
 use crate::mutation_admission::{
-    MutationRequest, MutationRequestIdentity, active_mutation_admission, admit_mutation,
-    complete_mutation_admission, validate_mutation_admission,
+    MutationRequest, MutationRequestIdentity, abort_prepared_turn_admission,
+    active_mutation_admission, admit_mutation, complete_mutation_admission,
+    validate_mutation_admission,
 };
 use crate::run::{AggregateMemberKind, RunStore};
 use crate::turn::{
@@ -456,12 +457,12 @@ fn prove_group_empty(
             } else {
                 ProcessIdentityVerdict::Absent
             };
-            if classify_dedicated_server_identity(server) != expected_server
-                || !dedicated_group_has_only_expected_leader(
-                    server,
-                    allow_recorded_worker || allow_recorded_dedicated_server,
-                )?
-            {
+            let scope_verified = if allow_recorded_dedicated_server {
+                dedicated_group_safe_to_signal(server)
+            } else {
+                dedicated_group_has_only_expected_leader(server, allow_recorded_worker)?
+            };
+            if classify_dedicated_server_identity(server) != expected_server || !scope_verified {
                 return Err(WorkerProtocolError::InvalidIdentity);
             }
         }
@@ -1223,6 +1224,11 @@ pub enum ControlRequestV1 {
         admission_id: Uuid,
         request: Box<ControlRequestV1>,
     },
+    /// Release an exact prepared Turn after a definite local Writer refusal.
+    AbortPreparedMutation {
+        admission_id: Uuid,
+        request: Box<ControlRequestV1>,
+    },
     Hello {
         expected: WorkerIdentity,
     },
@@ -1418,7 +1424,8 @@ impl ControlRequestV1 {
             Self::ControllerChecked { request, .. }
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
-            | Self::AdmittedMutation { request, .. } => request.expected(),
+            | Self::AdmittedMutation { request, .. }
+            | Self::AbortPreparedMutation { request, .. } => request.expected(),
             Self::Hello { expected }
             | Self::Status { expected }
             | Self::Shutdown { expected }
@@ -1455,6 +1462,9 @@ impl ControlRequestV1 {
                 && request.external_engagement().is_none()
                 && request.valid_checked_mutation();
         }
+        if let Self::AbortPreparedMutation { request, .. } = self {
+            return matches!(request.as_ref(), Self::Send { .. } | Self::Submit { .. });
+        }
         let (Self::CheckedMutation { request, .. }
         | Self::BeginPreparedMutation { request, .. }
         | Self::AdmittedMutation { request, .. }) = self
@@ -1484,7 +1494,8 @@ impl ControlRequestV1 {
             Self::ControllerChecked { request, .. }
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
-            | Self::AdmittedMutation { request, .. } => request.caller(),
+            | Self::AdmittedMutation { request, .. }
+            | Self::AbortPreparedMutation { request, .. } => request.caller(),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => None,
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
@@ -1517,7 +1528,8 @@ impl ControlRequestV1 {
             Self::ControllerChecked { request, .. }
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
-            | Self::AdmittedMutation { request, .. } => request.declare_caller(build),
+            | Self::AdmittedMutation { request, .. }
+            | Self::AbortPreparedMutation { request, .. } => request.declare_caller(build),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => {}
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
@@ -1569,6 +1581,7 @@ impl ControlRequestV1 {
                 | Self::CheckedMutation { .. }
                 | Self::BeginPreparedMutation { .. }
                 | Self::AdmittedMutation { .. }
+                | Self::AbortPreparedMutation { .. }
                 | Self::Send { .. }
                 | Self::Submit { .. }
                 | Self::ExternalSubmit { .. }
@@ -1608,7 +1621,8 @@ impl ControlRequestV1 {
             Self::ControllerChecked { request, .. }
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
-            | Self::AdmittedMutation { request, .. } => request.operation_name(),
+            | Self::AdmittedMutation { request, .. }
+            | Self::AbortPreparedMutation { request, .. } => request.operation_name(),
             Self::Hello { .. } => "run.hello",
             Self::Status { .. } => "run.status",
             Self::Shutdown { .. } => "run.shutdown",
@@ -1900,6 +1914,9 @@ pub enum ControlResponseV1 {
     },
     /// Immutable acceptance facts for ordinary typed Submit callers.
     MutationAdmitted {
+        admission_id: Uuid,
+    },
+    MutationAborted {
         admission_id: Uuid,
     },
     AcceptedReceipt {
@@ -2532,6 +2549,10 @@ enum SessionAdmission {
         request: ControlRequestV1,
     },
     Execute {
+        admission_id: Uuid,
+        request: ControlRequestV1,
+    },
+    Abort {
         admission_id: Uuid,
         request: ControlRequestV1,
     },
@@ -3541,107 +3562,113 @@ impl WorkerSession {
             let mailbox = Arc::clone(&mailbox);
             move || read_app_server(&wire, &mailbox)
         });
-        let (replayed, interaction_decisions, turn_receipts) = {
-            let ledger = ledger
-                .lock()
+        let coordinator = (|| {
+            let (replayed, interaction_decisions, turn_receipts) = {
+                let ledger = ledger
+                    .lock()
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                let replayed = ledger
+                    .projection()
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                let interaction_decisions = ledger
+                    .approval_decisions()
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                let turn_receipts = ledger
+                    .durable_records()
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                    .iter()
+                    .filter(|record| {
+                        matches!(
+                            record.kind(),
+                            crate::audit::AuditKind::IdempotencyReserved
+                                | crate::audit::AuditKind::ThreadBound
+                                | crate::audit::AuditKind::TurnStarted
+                                | crate::audit::AuditKind::TurnTerminal
+                                | crate::audit::AuditKind::WriterAcquired
+                                | crate::audit::AuditKind::WriterReleased
+                        )
+                    })
+                    .map(|record| {
+                        let raw = crate::jcs::canonicalize(record.payload())
+                            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                        let payload = serde_json::from_slice(&raw)
+                            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                        Ok((record.kind(), payload))
+                    })
+                    .collect::<Result<Vec<_>, WorkerProtocolError>>()?;
+                (replayed, interaction_decisions, turn_receipts)
+            };
+            let mut coordinator = TurnCoordinator::initialize(
+                SessionServer::new(
+                    Arc::clone(&wire),
+                    Arc::clone(&mailbox),
+                    Duration::from_secs(session.transport_timeout_seconds),
+                ),
+                SharedLedgerJournal::new(ledger, run_generation).with_event_authority(
+                    state_root,
+                    workspace_id,
+                    uid,
+                    &session.server_key,
+                    session.server_epoch,
+                ),
+                artifacts,
+                CoordinatorConfig {
+                    attach,
+                    foreign_diagnostics,
+                    fixed_model: session.fixed_model.clone(),
+                    default_effort: session.default_effort.clone(),
+                    supported_efforts: session.supported_efforts.iter().cloned().collect(),
+                    cwd: session.cwd.clone(),
+                    developer_instructions: session.developer_instructions.clone(),
+                    sandbox: session.sandbox.clone(),
+                    approval_policy: session.approval_policy.clone(),
+                    safety_policy: session.safety_policy,
+                    run_generation,
+                    server_key: session.server_key.clone(),
+                    server_epoch: session.server_epoch,
+                    run_id: facts.run_id,
+                    controller_id: session.controller_id,
+                    control_mode: session.control_mode.clone(),
+                    record_accepted_user_input: manifest.aggregate_binding.as_ref().is_none_or(
+                        |binding| binding.member_kind != AggregateMemberKind::Specialist,
+                    ),
+                    primary_tool,
+                },
+                &session.canonical_codex_home,
+            )
+            .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+            coordinator.restore_durable_state(
+                replayed.lifecycle,
+                replayed.thread_id,
+                replayed.active_turn_id,
+                replayed.latest_turn_id,
+            );
+            coordinator
+                .restore_turn_receipts(turn_receipts)
                 .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-            let replayed = ledger
-                .projection()
+            coordinator
+                .restore_interaction_resolutions(interaction_decisions)
                 .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-            let interaction_decisions = ledger
-                .approval_decisions()
-                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-            let turn_receipts = ledger
-                .durable_records()
-                .map_err(|_| WorkerProtocolError::LedgerReplay)?
-                .iter()
-                .filter(|record| {
-                    matches!(
-                        record.kind(),
-                        crate::audit::AuditKind::IdempotencyReserved
-                            | crate::audit::AuditKind::ThreadBound
-                            | crate::audit::AuditKind::TurnStarted
-                            | crate::audit::AuditKind::TurnTerminal
-                            | crate::audit::AuditKind::WriterAcquired
-                            | crate::audit::AuditKind::WriterReleased
-                    )
-                })
-                .map(|record| {
-                    let raw = crate::jcs::canonicalize(record.payload())
-                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-                    let payload = serde_json::from_slice(&raw)
-                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-                    Ok((record.kind(), payload))
-                })
-                .collect::<Result<Vec<_>, WorkerProtocolError>>()?;
-            (replayed, interaction_decisions, turn_receipts)
-        };
-        let coordinator = TurnCoordinator::initialize(
-            SessionServer::new(
-                Arc::clone(&wire),
-                Arc::clone(&mailbox),
-                Duration::from_secs(session.transport_timeout_seconds),
-            ),
-            SharedLedgerJournal::new(ledger, run_generation).with_event_authority(
-                state_root,
-                workspace_id,
-                uid,
-                &session.server_key,
-                session.server_epoch,
-            ),
-            artifacts,
-            CoordinatorConfig {
-                attach,
-                foreign_diagnostics,
-                fixed_model: session.fixed_model.clone(),
-                default_effort: session.default_effort.clone(),
-                supported_efforts: session.supported_efforts.iter().cloned().collect(),
-                cwd: session.cwd.clone(),
-                developer_instructions: session.developer_instructions.clone(),
-                sandbox: session.sandbox.clone(),
-                approval_policy: session.approval_policy.clone(),
-                safety_policy: session.safety_policy,
-                run_generation,
-                server_key: session.server_key.clone(),
-                server_epoch: session.server_epoch,
-                run_id: facts.run_id,
-                controller_id: session.controller_id,
-                control_mode: session.control_mode.clone(),
-                record_accepted_user_input: manifest
-                    .aggregate_binding
-                    .as_ref()
-                    .is_none_or(|binding| binding.member_kind != AggregateMemberKind::Specialist),
-                primary_tool,
-            },
-            &session.canonical_codex_home,
-        );
-        let mut coordinator = match coordinator {
+            coordinator
+                .complete_connection_startup(replayed.lifecycle)
+                .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+            if let Some(operation_id) = session.eager_thread_operation_id {
+                coordinator
+                    .initialize_thread(operation_id)
+                    .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+            }
+            Ok(coordinator)
+        })();
+        let coordinator = match coordinator {
             Ok(coordinator) => coordinator,
-            Err(_) => {
+            Err(error) => {
                 mailbox.stop();
                 wire.shutdown();
                 let _ = reader.join();
                 let _ = stop_dedicated_server(&mut dedicated_server);
-                return Err(WorkerProtocolError::AppServerUnavailable);
+                return Err(error);
             }
         };
-        coordinator.restore_durable_state(
-            replayed.lifecycle,
-            replayed.thread_id,
-            replayed.active_turn_id,
-            replayed.latest_turn_id,
-        );
-        coordinator
-            .restore_turn_receipts(turn_receipts)
-            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-        coordinator
-            .restore_interaction_resolutions(interaction_decisions)
-            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
-        if let Some(operation_id) = session.eager_thread_operation_id {
-            coordinator
-                .initialize_thread(operation_id)
-                .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
-        }
         let progress = Arc::new(SessionProgress::new(facts.clone()));
         progress.publish(
             coordinator_control_state(&coordinator, false),
@@ -4418,20 +4445,45 @@ fn dedicated_group_safe_to_signal(identity: &DedicatedServerIdentity) -> bool {
     let Ok(census) = DarwinSystem.all_process_identities() else {
         return false;
     };
+    dedicated_scope_is_owned(identity, &members, &census)
+}
+
+fn dedicated_scope_is_owned(
+    identity: &DedicatedServerIdentity,
+    members: &[u32],
+    census: &[crate::darwin::BsdProcessIdentity],
+) -> bool {
+    let mut enumerated = census
+        .iter()
+        .filter(|process| process.process_group_id == identity.process_group_id)
+        .map(|process| process.pid)
+        .collect::<Vec<_>>();
+    enumerated.sort_unstable();
+    if enumerated != members
+        || !census.iter().any(|process| {
+            process.pid == identity.pid
+                && process.uid == identity.uid
+                && process.process_group_id == identity.process_group_id
+                && process.session_id == identity.session_id
+                && process.start_tvsec == identity.start_tvsec
+                && process.start_tvusec == identity.start_tvusec
+                && !process.zombie
+        })
+    {
+        return false;
+    }
     let by_pid = census
         .iter()
         .map(|process| (process.pid, process.parent_pid))
         .collect::<std::collections::BTreeMap<_, _>>();
-    members.iter().all(|pid| {
-        census
-            .iter()
-            .find(|process| process.pid == *pid)
-            .is_some_and(|process| {
-                process.uid == identity.uid
-                    && (process.pid == identity.pid
-                        || process.session_id == identity.session_id
-                        || process_descends_from(process.pid, identity.pid, &by_pid))
-            })
+    census.iter().all(|process| {
+        !process_is_in_scope(
+            process,
+            identity.pid,
+            identity.process_group_id,
+            identity.session_id,
+            &by_pid,
+        ) || process.uid == identity.uid
     })
 }
 
@@ -4635,6 +4687,10 @@ fn perform(
     );
     let typed_receipt = mutation.preconditions.expected_state_revision.is_some()
         || mutation.preconditions.admission.is_some();
+    let aborting = matches!(
+        mutation.preconditions.admission,
+        Some(SessionAdmission::Abort { .. })
+    );
     {
         // Response-loss retries retain their accepted identity even though
         // acceptance itself advanced the durable head. Never skip authority.
@@ -4656,6 +4712,16 @@ fn perform(
                     Err(error) => return failed(&error, &context),
                 };
                 match coordinator.replay_delivery(&turn) {
+                    Ok(Some(_)) if aborting => {
+                        let state =
+                            coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
+                        return run_state_conflict(
+                            &progress.facts,
+                            &state,
+                            operation,
+                            "an accepted Turn cannot be aborted as local preparation".to_owned(),
+                        );
+                    }
                     Ok(Some(DeliveryResult::Accepted(accepted))) => {
                         let receipt = accepted_receipt(coordinator, accepted.clone());
                         if matches!(receipt, ControlResponseV1::Failed { .. }) {
@@ -4720,6 +4786,47 @@ fn perform(
             _ => {}
         }
     }
+    if let Some(SessionAdmission::Abort {
+        admission_id,
+        request,
+    }) = mutation.preconditions.admission.as_ref()
+    {
+        if !matches!(
+            coordinator.state(),
+            CoordinatorState::Idle | CoordinatorState::Threadless
+        ) {
+            let state = coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
+            return run_state_conflict(
+                &progress.facts,
+                &state,
+                operation,
+                "prepared Turn abort requires an idle Run".to_owned(),
+            );
+        }
+        return match with_admission_ledger(coordinator, identity, authority, |ledger, _writer| {
+            let binding =
+                load_reconciled_controller_binding(&authority.state_root, authority.run_id)?;
+            abort_prepared_turn_admission(
+                ledger,
+                *admission_id,
+                binding.identity.controller_id,
+                request,
+            )
+        }) {
+            Ok(()) => ControlResponseV1::MutationAborted {
+                admission_id: *admission_id,
+            },
+            Err(error) => refusal_from(error),
+        };
+    }
+    if matches!(mutation.command, SessionCommand::Accept { .. })
+        && let Err(error) = crate::orchestration::ensure_primary_turn_admission(
+            &authority.state_root,
+            identity.run_id,
+        )
+    {
+        return refusal_from(error);
+    }
     let mut admission_completion = None;
     let admission_result =
         with_admission_ledger(coordinator, identity, authority, |ledger, writer| {
@@ -4757,6 +4864,9 @@ fn perform(
                 }
             }
             match mutation.preconditions.admission.as_ref() {
+                Some(SessionAdmission::Abort { .. }) => Err(admission_internal(
+                    "prepared abort reached native admission",
+                )),
                 Some(SessionAdmission::Begin { expected, request }) => {
                     let admitted =
                         admit_mutation(ledger, binding.identity.controller_id, *expected, request)?;
@@ -4824,6 +4934,29 @@ fn perform(
                 operation,
                 format!("{operation} expected Run revision {expected}, observed {observed}"),
             );
+        }
+    }
+    if matches!(mutation.command, SessionCommand::Reconcile)
+        && coordinator.state() == &CoordinatorState::Paused
+        && coordinator.primary_session_id().is_some()
+    {
+        let snapshot =
+            match crate::snapshot::RunSnapshot::load(&authority.state_root, authority.run_id, 0) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return refusal_from(error),
+            };
+        match crate::semantic::primary_close_reconciliation_required(
+            &authority.state_root,
+            &snapshot,
+        ) {
+            Ok(true) => coordinator.restore_durable_state(
+                crate::projection::RunLifecycle::OutcomeUnknown,
+                snapshot.projection.thread_id,
+                snapshot.projection.active_turn_id,
+                snapshot.projection.latest_turn_id,
+            ),
+            Ok(false) => {}
+            Err(error) => return refusal_from(error),
         }
     }
     let response = perform_command(
@@ -4981,6 +5114,9 @@ fn perform_command(
                 return failed(&error, &context);
             }
             if close {
+                if coordinator.primary_session_id().is_some() {
+                    return failed(&TurnError::OutcomeUnknown, &context);
+                }
                 if let Err(error) = coordinator.seal_closed(false) {
                     return failed(&error, &context);
                 }
@@ -5125,6 +5261,11 @@ fn settle_replayed_admission(
             return Ok(());
         };
         let request = match admission {
+            SessionAdmission::Abort { .. } => {
+                return Err(admission_internal(
+                    "accepted Turn cannot use prepared abort",
+                ));
+            }
             SessionAdmission::Begin { request, .. } => request,
             SessionAdmission::Execute {
                 admission_id,
@@ -6626,7 +6767,9 @@ pub fn remove_verified_absent_runtime(
 /// must first be proved absent, and every signal is guarded by the recorded
 /// four-verdict identity plus a complete same-scope census. A mismatched or
 /// unreadable generation remains untouched and blocks replacement.
-fn stop_orphaned_dedicated_server(record: &WorkerRuntimeRecord) -> Result<(), WorkerProtocolError> {
+pub(crate) fn stop_orphaned_dedicated_server(
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
     let Some(server) = record.dedicated_server_identity.as_ref() else {
         return Ok(());
     };
@@ -7204,7 +7347,8 @@ fn serve_run_operation(
         wrapped @ (ControlRequestV1::ControllerChecked { .. }
         | ControlRequestV1::CheckedMutation { .. }
         | ControlRequestV1::BeginPreparedMutation { .. }
-        | ControlRequestV1::AdmittedMutation { .. }) => {
+        | ControlRequestV1::AdmittedMutation { .. }
+        | ControlRequestV1::AbortPreparedMutation { .. }) => {
             let (expected_controller_generation, wrapped) = match wrapped {
                 ControlRequestV1::ControllerChecked {
                     expected_controller_generation,
@@ -7234,6 +7378,17 @@ fn serve_run_operation(
                 } => (
                     None,
                     Some(SessionAdmission::Execute {
+                        admission_id,
+                        request: (*request).clone(),
+                    }),
+                    request,
+                ),
+                ControlRequestV1::AbortPreparedMutation {
+                    admission_id,
+                    request,
+                } => (
+                    None,
+                    Some(SessionAdmission::Abort {
                         admission_id,
                         request: (*request).clone(),
                     }),
@@ -7501,6 +7656,53 @@ mod tests {
             Err(TurnError::IdempotencyConflict { .. })
         ));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn prepared_abort_wrapper_preserves_identity_and_accepts_only_direct_turn_requests() {
+        let admission_id = Uuid::now_v7();
+        let abort = |request| ControlRequestV1::AbortPreparedMutation {
+            admission_id,
+            request: Box::new(request),
+        };
+        let expected = identity();
+        let mut wrapped = abort(ControlRequestV1::Submit {
+            expected: expected.clone(),
+            caller: None,
+            request: TurnControlRequest {
+                write: true,
+                normalized_request_sha256: None,
+                message: "write after admission".to_owned(),
+                idempotency_key: "prepared-only".to_owned(),
+                effort: None,
+                images: Vec::new(),
+            },
+        });
+        assert!(wrapped.valid_checked_mutation());
+        assert!(wrapped.requires_controller());
+        assert!(!wrapped.frozen_control_v1());
+        assert_eq!(wrapped.expected(), &expected);
+        assert_eq!(wrapped.operation_name(), "run.submit");
+        let build = ExecutingBuild {
+            version: "0.1.2".to_owned(),
+            mutation_protocol_version: 1,
+            binary_sha256: "11".repeat(32),
+        };
+        wrapped.declare_caller(build.clone());
+        assert_eq!(wrapped.caller(), Some(&build));
+        let encoded = serde_json::to_vec(&wrapped).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ControlRequestV1>(&encoded).unwrap(),
+            wrapped
+        );
+        assert!(!abort(wrapped).valid_checked_mutation());
+        assert!(
+            !abort(ControlRequestV1::Interrupt {
+                expected,
+                caller: None,
+            })
+            .valid_checked_mutation()
+        );
     }
 
     #[test]
@@ -8017,28 +8219,77 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn an_orphaned_dedicated_server_is_retired_only_after_worker_absence() {
-        let mut worker_command = Command::new("/bin/sleep");
-        worker_command
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut worker = DarwinSystem.spawn_detached(&mut worker_command).unwrap();
-        let mut server_command = Command::new("/bin/sleep");
-        server_command
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut server = DarwinSystem.spawn_detached(&mut server_command).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+    fn dedicated_stop_scope_requires_complete_census_and_owned_descendants() {
+        let server = DedicatedServerIdentity {
+            pid: 42,
+            process_group_id: 42,
+            session_id: 42,
+            uid: 501,
+            start_tvsec: 10,
+            start_tvusec: 20,
+            executable_path: PathBuf::from("/bin/server"),
+            executable_device: 1,
+            executable_inode: 2,
+            executable_sha256: "11".repeat(32),
+        };
+        let leader = crate::darwin::BsdProcessIdentity {
+            pid: 42,
+            parent_pid: 1,
+            uid: 501,
+            process_group_id: 42,
+            session_id: 42,
+            start_tvsec: 10,
+            start_tvusec: 20,
+            zombie: false,
+        };
+        let helper = crate::darwin::BsdProcessIdentity {
+            pid: 43,
+            parent_pid: 42,
+            process_group_id: 43,
+            start_tvsec: 11,
+            ..leader
+        };
+        let descendant = crate::darwin::BsdProcessIdentity {
+            pid: 44,
+            parent_pid: 43,
+            process_group_id: 44,
+            session_id: 44,
+            ..helper
+        };
+        let census = [leader, helper, descendant];
+        assert!(dedicated_scope_is_owned(&server, &[42], &census));
+        assert!(!dedicated_scope_is_owned(&server, &[], &census));
+        assert!(!dedicated_scope_is_owned(&server, &[42, 43], &census));
+        for index in 0..census.len() {
+            let mut foreign = census;
+            foreign[index].uid = 502;
+            assert!(!dedicated_scope_is_owned(&server, &[42], &foreign));
+        }
+        let mut reused = census;
+        reused[0].start_tvusec += 1;
+        assert!(!dedicated_scope_is_owned(&server, &[42], &reused));
+        assert!(!dedicated_scope_is_owned(
+            &server,
+            &[],
+            &[helper, descendant]
+        ));
+    }
 
-        let worker_observed = DarwinSystem.bsd_process_identity(worker.id()).unwrap();
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dedicated_absence_still_refuses_a_surviving_separate_group_helper() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "set -m; sleep 2 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut server = DarwinSystem.spawn_detached(&mut command).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
         let observed = DarwinSystem.bsd_process_identity(server.id()).unwrap();
-        let executable_path = DarwinSystem.realpath(Path::new("/bin/sleep")).unwrap();
+        let executable_path = DarwinSystem.realpath(Path::new("/bin/sh")).unwrap();
         let metadata = fs::metadata(&executable_path).unwrap();
-        let server_identity = DedicatedServerIdentity {
+        let identity = DedicatedServerIdentity {
             pid: observed.pid,
             process_group_id: observed.process_group_id,
             session_id: observed.session_id,
@@ -8050,10 +8301,76 @@ mod tests {
             executable_inode: metadata.ino(),
             executable_sha256: file_sha256(&executable_path).unwrap(),
         };
-        let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
-        let _ = worker.wait();
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(dedicated_group_safe_to_signal(&identity));
+            DarwinSystem
+                .signal_process_group(identity.process_group_id, libc::SIGTERM)
+                .unwrap();
+            server.wait().unwrap();
+            assert_eq!(
+                classify_dedicated_server_identity(&identity),
+                ProcessIdentityVerdict::Absent
+            );
+            assert!(!dedicated_group_has_only_expected_leader(&identity, false).unwrap());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline
+                && !dedicated_group_has_only_expected_leader(&identity, false).unwrap()
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(dedicated_group_has_only_expected_leader(&identity, false).unwrap());
+        }));
+        if classify_dedicated_server_identity(&identity) == ProcessIdentityVerdict::Match {
+            let _ = DarwinSystem.signal_process_group(server.id(), libc::SIGTERM);
+        }
+        let _ = server.wait();
+        if let Err(error) = checked {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_orphaned_dedicated_server_is_retired_only_after_worker_absence() {
+        let mut worker_command = Command::new("/bin/sleep");
+        worker_command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut worker = DarwinSystem.spawn_detached(&mut worker_command).unwrap();
+        let mut server_command = Command::new("/bin/sh");
+        server_command
+            .args([
+                "-c",
+                "set -m; trap 'kill -TERM \"$helper\"; wait \"$helper\"; exit 0' TERM; sleep 30 & helper=$!; wait \"$helper\"",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut server = DarwinSystem.spawn_detached(&mut server_command).unwrap();
         std::thread::sleep(Duration::from_millis(100));
 
+        let worker_observed = DarwinSystem.bsd_process_identity(worker.id()).unwrap();
+        let observed = DarwinSystem.bsd_process_identity(server.id()).unwrap();
+        let executable_path = DarwinSystem.realpath(Path::new("/bin/sleep")).unwrap();
+        let metadata = fs::metadata(&executable_path).unwrap();
+        let server_executable = DarwinSystem
+            .realpath(&DarwinSystem.live_process_path(server.id()).unwrap())
+            .unwrap();
+        let server_metadata = fs::metadata(&server_executable).unwrap();
+        let server_identity = DedicatedServerIdentity {
+            pid: observed.pid,
+            process_group_id: observed.process_group_id,
+            session_id: observed.session_id,
+            uid: observed.uid,
+            start_tvsec: observed.start_tvsec,
+            start_tvusec: observed.start_tvusec,
+            executable_path: server_executable.clone(),
+            executable_device: server_metadata.dev(),
+            executable_inode: server_metadata.ino(),
+            executable_sha256: file_sha256(&server_executable).unwrap(),
+        };
         let current = DarwinSystem.current_process().unwrap();
         let workspace_id = "11".repeat(32);
         let run_id = Uuid::now_v7();
@@ -8064,7 +8381,7 @@ mod tests {
                 workspace_id,
                 run_id,
                 run_generation: 1,
-                boot_uuid: Uuid::now_v7(),
+                boot_uuid: boot_session_uuid(current.uid).unwrap(),
                 pid: worker_observed.pid,
                 process_group_id: worker_observed.process_group_id,
                 session_id: worker_observed.session_id,
@@ -8089,16 +8406,80 @@ mod tests {
             binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
         };
 
-        assert_eq!(
-            classify_worker_identity(&record),
-            ProcessIdentityVerdict::Absent
-        );
-        stop_orphaned_dedicated_server(&record).unwrap();
-        assert_eq!(
-            classify_dedicated_server_identity(&server_identity),
-            ProcessIdentityVerdict::Absent
-        );
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let census = DarwinSystem.all_process_identities().unwrap();
+            assert!(census.iter().any(|process| {
+                process.parent_pid == server_identity.pid
+                    && process.session_id == server_identity.session_id
+                    && process.process_group_id != server_identity.process_group_id
+            }));
+            assert!(!dedicated_group_has_only_expected_leader(&server_identity, true).unwrap());
+            assert!(dedicated_group_safe_to_signal(&server_identity));
+            assert_eq!(
+                classify_worker_identity(&record),
+                ProcessIdentityVerdict::Match
+            );
+            assert_eq!(
+                stop_orphaned_dedicated_server(&record),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(
+                classify_dedicated_server_identity(&server_identity),
+                ProcessIdentityVerdict::Match
+            );
+
+            DarwinSystem
+                .signal_process_group(worker.id(), libc::SIGKILL)
+                .unwrap();
+            worker.wait().unwrap();
+            assert_eq!(
+                classify_worker_identity(&record),
+                ProcessIdentityVerdict::Absent
+            );
+            assert!(prove_group_empty(&record, false, true).is_ok());
+            // The dedicated leader survives Worker loss: writer retirement's
+            // complete-generation proof cannot run before guarded cleanup.
+            assert_eq!(
+                prove_worker_generation_absent(&record),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            let mut mismatched = record.clone();
+            mismatched
+                .dedicated_server_identity
+                .as_mut()
+                .unwrap()
+                .start_tvusec += 1;
+            assert_eq!(
+                stop_orphaned_dedicated_server(&mismatched),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(
+                classify_dedicated_server_identity(&server_identity),
+                ProcessIdentityVerdict::Match
+            );
+            stop_orphaned_dedicated_server(&record).unwrap();
+            assert_eq!(
+                classify_dedicated_server_identity(&server_identity),
+                ProcessIdentityVerdict::Absent
+            );
+            assert_eq!(
+                prove_worker_generation_absent(&record)
+                    .unwrap()
+                    .consecutive_empty_samples,
+                5
+            );
+        }));
+        if classify_worker_identity(&record) == ProcessIdentityVerdict::Match {
+            let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
+        }
+        if classify_dedicated_server_identity(&server_identity) == ProcessIdentityVerdict::Match {
+            let _ = DarwinSystem.signal_process_group(server.id(), libc::SIGTERM);
+        }
+        let _ = worker.wait();
         let _ = server.wait();
+        if let Err(error) = checked {
+            std::panic::resume_unwind(error);
+        }
     }
 
     fn reviewer_bootstrap() -> WorkerSessionBootstrap {

@@ -149,6 +149,7 @@ test-e2e:
 		run_case tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_profile_cli.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_profile_closed_member_seal.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_specialist_review_acceptance.py; \
 		run_case tests/e2e/test_codex_compatibility.py; \
 		run_case tests/e2e/test_live_transport_probe.py; \

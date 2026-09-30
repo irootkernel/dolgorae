@@ -4,7 +4,9 @@
   "title": "Dolgorae error contract v2",
   "x-exit-status": {
     "LEGACY_STATE_UNSUPPORTED": 5,
+    "RUN_MANIFEST_INVALID": 5,
     "STATE_CONFLICT": 4,
+    "SESSION_CLOSE_IN_PROGRESS": 4,
     "SPECIALIST_POLICY_DENIED": 4,
     "SPECIALIST_NOT_MEMBER": 4,
     "ENGAGEMENT_NOT_FOUND": 4,
@@ -47,6 +49,42 @@
   "oneOf": [
     {
       "$ref": "https://dolgorae.local/schema/error-contract/v1"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": {"const": "SESSION_CLOSE_IN_PROGRESS"},
+        "message": {"type": "string"},
+        "retryable": {"const": false},
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "operation_id", "required_action"],
+          "properties": {
+            "run_id": {"type": "string", "format": "uuid"},
+            "operation_id": {"type": "string", "format": "uuid"},
+            "required_action": {"const": "refresh_snapshot"}
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": {"const": "RUN_MANIFEST_INVALID"},
+        "message": {"type": "string"},
+        "retryable": {"const": false},
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {"reason": {"type": "string"}}
+        }
+      }
     },
     {
       "type": "object",
@@ -152,6 +190,9 @@
           "properties": {
             "required_action": {
               "const": "none"
+            },
+            "execution": {
+              "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1#/properties/execution"
             }
           }
         }
@@ -187,6 +228,9 @@
           "properties": {
             "invariant": {
               "type": "string"
+            },
+            "execution": {
+              "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1#/properties/execution"
             }
           }
         }

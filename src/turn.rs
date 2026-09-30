@@ -1669,6 +1669,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     pub fn thread_id(&self) -> Option<&str> {
         self.thread_id.as_deref()
     }
+    pub(crate) fn primary_session_id(&self) -> Option<Uuid> {
+        self.primary_tool.as_ref().map(|config| config.session_id)
+    }
     /// The one model this Run may use; a Turn that names another is refused.
     #[must_use]
     pub fn fixed_model(&self) -> &str {
@@ -1802,7 +1805,19 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         records: Vec<(AuditKind, Value)>,
     ) -> Result<(), TurnError> {
-        for (_, payload) in &records {
+        for (kind, payload) in &records {
+            if *kind == AuditKind::ThreadBound
+                && let Some(generation) = payload.get("thread_generation")
+            {
+                let generation =
+                    generation
+                        .as_u64()
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            TurnError::Journal("durable thread generation is invalid".to_owned())
+                        })?;
+                self.thread_generation = self.thread_generation.max(generation);
+            }
             if let Some(policy) = payload.get("effective_policy") {
                 let policy: crate::domain::EffectivePolicy = serde_json::from_value(policy.clone())
                     .map_err(|_| {
@@ -1970,10 +1985,76 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         Ok(())
     }
 
+    /// Complete a new physical connection after handshake and durable replay.
+    /// Idle retained threads must be attached to this connection before it
+    /// accepts input, while initial readiness belongs in the durable ledger.
+    pub(crate) fn complete_connection_startup(
+        &mut self,
+        lifecycle: RunLifecycle,
+    ) -> Result<(), TurnError> {
+        match lifecycle {
+            RunLifecycle::Starting => {
+                if self.state != CoordinatorState::Threadless {
+                    return Err(TurnError::TurnBusy);
+                }
+                self.journal
+                    .append_and_sync(JournalEntry::LifecycleTransition {
+                        previous: RunLifecycle::Starting,
+                        current: RunLifecycle::Idle,
+                        terminal_seal: false,
+                        interrupt_terminal_confirmed: false,
+                    })
+            }
+            RunLifecycle::Idle if self.thread_id.is_some() => {
+                if self.state != CoordinatorState::Idle {
+                    return Err(TurnError::TurnBusy);
+                }
+                self.rebind_retained_thread()
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn rebind_retained_thread(&mut self) -> Result<(), TurnError> {
+        if let Some(previous_thread) = self.thread_id.clone() {
+            let generation = self
+                .thread_generation
+                .checked_add(1)
+                .ok_or(TurnError::OutcomeUnknown)?;
+            let operation_id = Uuid::now_v7();
+            self.attach = ThreadAttach::Resume {
+                thread_id: previous_thread.clone(),
+            };
+            self.thread_id = None;
+            let rebound = (|| {
+                let thread_id = self.ensure_thread(operation_id)?;
+                if thread_id != previous_thread {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.thread_generation = generation;
+                let effective_policy = self.next_unverified_policy(self.writer_generation)?;
+                let policy_epoch = effective_policy.policy_epoch.0;
+                self.journal.append_and_sync(JournalEntry::ThreadBound {
+                    operation_id,
+                    thread_id,
+                    thread_generation: generation,
+                    effective_policy,
+                })?;
+                self.policy_epoch = policy_epoch;
+                Ok(())
+            })();
+            if let Err(error) = rebound {
+                return Err(self.lost_after_write(operation_id, error));
+            }
+        }
+        Ok(())
+    }
+
     pub fn resume(&mut self) -> Result<(), TurnError> {
         if self.state != CoordinatorState::Paused {
             return Err(TurnError::TurnBusy);
         }
+        self.rebind_retained_thread()?;
         self.journal
             .append_and_sync(JournalEntry::LifecycleTransition {
                 previous: RunLifecycle::Paused,
@@ -2394,6 +2475,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     fn mark_unknown(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
         self.journal
             .append_and_sync(JournalEntry::OutcomeUnknown { operation_id })?;
+        if self.active_turn_id.is_some() {
+            self.recovery_turn_id = self.active_turn_id.clone();
+        }
         self.active_turn_id = None;
         self.active_turn_effort = None;
         self.active_operation_id = None;
@@ -3958,6 +4042,7 @@ fn normalize_file_changes(
                     .get("path")
                     .and_then(Value::as_str)
                     .ok_or(TurnError::CorrelationMismatch)?,
+                workspace,
             )?;
             let kind_object = object
                 .get("kind")
@@ -3988,7 +4073,7 @@ fn normalize_file_changes(
                     value
                         .as_str()
                         .ok_or(TurnError::CorrelationMismatch)
-                        .and_then(checked_change_path)
+                        .and_then(|path| checked_change_path(path, workspace))
                 })
                 .transpose()?;
             if kind != "update" && move_path.is_some() {
@@ -4004,12 +4089,22 @@ fn normalize_file_changes(
         .collect()
 }
 
-fn checked_change_path(path: &str) -> Result<String, TurnError> {
+fn checked_change_path(path: &str, workspace: &Path) -> Result<String, TurnError> {
     use std::path::Component;
-    if path.is_empty()
-        || path.len() > 4_096
-        || Path::new(path).is_absolute()
-        || Path::new(path).components().any(|part| {
+    if path.is_empty() || path.len() > 4_096 {
+        return Err(TurnError::CorrelationMismatch);
+    }
+    let path = Path::new(path);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(workspace)
+            .map_err(|_| TurnError::CorrelationMismatch)?
+    } else {
+        path
+    };
+    if !relative
+        .components()
+        .any(|part| matches!(part, Component::Normal(_)))
+        || relative.components().any(|part| {
             matches!(
                 part,
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
@@ -4018,7 +4113,10 @@ fn checked_change_path(path: &str) -> Result<String, TurnError> {
     {
         return Err(TurnError::CorrelationMismatch);
     }
-    Ok(path.to_owned())
+    relative
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(TurnError::CorrelationMismatch)
 }
 
 fn turn_input(request: &TurnRequest) -> Result<Vec<Value>, TurnError> {
@@ -5014,6 +5112,45 @@ mod tests {
     }
 
     #[test]
+    fn native_absolute_changes_and_moves_remain_within_the_workspace() {
+        let workspace = Path::new("/tmp/workspace");
+        let changes = serde_json::json!([
+            {"path":"/tmp/workspace/new.txt","kind":{"type":"add"},"diff":"+new"},
+            {"path":"/tmp/workspace/deleted.txt","kind":{"type":"delete"},"diff":"-old"},
+            {"path":"/tmp/workspace/old.txt","kind":{"type":"update","move_path":"/tmp/workspace/nested/new.txt"},"diff":"-old\n+new"}
+        ]);
+        let normalized = normalize_file_changes(changes.as_array().unwrap(), workspace).unwrap();
+        assert_eq!(normalized[0].path, LosslessPath::Utf8("new.txt".to_owned()));
+        assert_eq!(
+            normalized[1].path,
+            LosslessPath::Utf8("deleted.txt".to_owned())
+        );
+        assert_eq!(
+            normalized[2].move_path,
+            Some(LosslessPath::Utf8("nested/new.txt".to_owned()))
+        );
+        for path in [
+            "/tmp/other/file",
+            "/tmp/workspace-sibling/file",
+            "/tmp/workspace/../other/file",
+            "../file",
+            "/tmp/workspace",
+            ".",
+        ] {
+            let invalid = serde_json::json!([{"path":path,"kind":{"type":"add"},"diff":"+new"}]);
+            assert!(matches!(
+                normalize_file_changes(invalid.as_array().unwrap(), workspace),
+                Err(TurnError::CorrelationMismatch)
+            ));
+            let invalid_move = serde_json::json!([{"path":"old","kind":{"type":"update","move_path":path},"diff":"+new"}]);
+            assert!(matches!(
+                normalize_file_changes(invalid_move.as_array().unwrap(), workspace),
+                Err(TurnError::CorrelationMismatch)
+            ));
+        }
+    }
+
+    #[test]
     fn a_foreign_thread_request_is_recorded_durably_and_never_answered() {
         let sink = RecordingDiagnostics::default();
         let mut coordinator = running_turn_with(
@@ -5657,6 +5794,198 @@ mod tests {
     }
 
     #[test]
+    fn connection_startup_records_ready_before_the_first_turn_in_conformant_history() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        let mut coordinator = coordinator(server);
+        coordinator.restore_durable_state(RunLifecycle::Starting, None, None, None);
+        assert!(coordinator.journal.entries.is_empty());
+        coordinator
+            .complete_connection_startup(RunLifecycle::Starting)
+            .unwrap();
+        assert_eq!(coordinator.server.calls.len(), 2);
+        coordinator
+            .start_turn(request("first-turn", DeliveryMode::Submit))
+            .unwrap();
+
+        let run_id = coordinator.run_id;
+        let bootstrap = [
+            (
+                AuditKind::WorkspaceInitialized,
+                serde_json::json!({"workspace_id":"a".repeat(64)}),
+            ),
+            (
+                AuditKind::IdempotencyReserved,
+                serde_json::to_value(crate::conformance::IdempotencyIntent {
+                    schema_version: 1,
+                    operation: crate::conformance::IdempotencyOperation::StartRun,
+                    idempotency_key: "start".to_owned(),
+                    normalized_identity_sha256: "b".repeat(64),
+                    run_id,
+                })
+                .unwrap(),
+            ),
+            (
+                AuditKind::RunCreated,
+                serde_json::json!({"initial_access":"read"}),
+            ),
+        ];
+        let runtime = coordinator
+            .journal
+            .entries
+            .into_iter()
+            .map(journal_record)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for include_readiness in [false, true] {
+            let mut previous = crate::audit::GENESIS_PREVIOUS_HASH.to_owned();
+            let mut records = Vec::new();
+            for (kind, payload) in bootstrap
+                .iter()
+                .chain(runtime.iter().skip(usize::from(!include_readiness)))
+            {
+                let record = crate::audit::AuditRecord::new(
+                    records.len() as u64 + 1,
+                    "2026-09-30T00:00:00.000000Z",
+                    run_id,
+                    u64::from(records.len() >= bootstrap.len()),
+                    *kind,
+                    parse(&serde_json::to_string(payload).unwrap()).unwrap(),
+                    &previous,
+                )
+                .unwrap();
+                previous = record.hash().to_owned();
+                records.push(record);
+            }
+            let report = crate::conformance::verify_ledger_records(run_id, &records);
+            if include_readiness {
+                assert_eq!(report.unwrap().lifecycle, RunLifecycle::Running);
+            } else {
+                assert!(report.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn retained_thread_rebinds_current_server_policy_without_submitting_a_turn() {
+        for lifecycle in [RunLifecycle::Paused, RunLifecycle::Idle] {
+            let mut server = FakeServer::default();
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"thread":{"id":"thread-old"}})));
+            let mut coordinator = coordinator(server);
+            coordinator.server_epoch = 8;
+            coordinator.restore_durable_state(
+                lifecycle,
+                Some("thread-old".to_owned()),
+                None,
+                Some("turn-terminal".to_owned()),
+            );
+            coordinator
+                .restore_turn_receipts(vec![(
+                    AuditKind::ThreadBound,
+                    serde_json::json!({
+                        "thread_id":"thread-old", "thread_generation":3, "effective_policy": {
+                            "access":"read", "verification":"verified", "policy_epoch":10,
+                            "thread_generation":3, "server_epoch":7, "writer_generation":null
+                        }
+                    }),
+                )])
+                .unwrap();
+            if lifecycle == RunLifecycle::Paused {
+                coordinator.resume().unwrap();
+            } else {
+                coordinator.complete_connection_startup(lifecycle).unwrap();
+            }
+            assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+            assert_eq!(coordinator.thread_id(), Some("thread-old"));
+            assert_eq!(coordinator.server.calls.last().unwrap().0, "thread/resume");
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+            let JournalEntry::ThreadBound {
+                thread_generation,
+                effective_policy,
+                ..
+            } = &coordinator.journal.entries[1]
+            else {
+                panic!("resume must durably rebind the thread")
+            };
+            assert_eq!(*thread_generation, 4);
+            assert_eq!(effective_policy.policy_epoch.0, 11);
+            assert_eq!(effective_policy.server_epoch, Some(8));
+            assert_eq!(effective_policy.thread_generation, Some(4));
+            assert_eq!(effective_policy.access, crate::domain::Access::Unknown);
+            assert_eq!(
+                effective_policy.verification,
+                crate::domain::PolicyVerification::Unverified
+            );
+            if lifecycle == RunLifecycle::Paused {
+                assert!(matches!(
+                    coordinator.journal.entries.last(),
+                    Some(JournalEntry::LifecycleTransition {
+                        previous: RunLifecycle::Paused,
+                        current: RunLifecycle::Idle,
+                        ..
+                    })
+                ));
+            } else {
+                assert!(
+                    !coordinator
+                        .journal
+                        .entries
+                        .iter()
+                        .any(|entry| matches!(entry, JournalEntry::LifecycleTransition { .. }))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resume_with_a_different_native_thread_never_publishes_idle() {
+        for lifecycle in [RunLifecycle::Paused, RunLifecycle::Idle] {
+            let mut server = FakeServer::default();
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"thread":{"id":"thread-foreign"}})));
+            let mut coordinator = coordinator(server);
+            coordinator.restore_durable_state(lifecycle, Some("thread-old".to_owned()), None, None);
+            let error = if lifecycle == RunLifecycle::Paused {
+                coordinator.resume().unwrap_err()
+            } else {
+                coordinator
+                    .complete_connection_startup(lifecycle)
+                    .unwrap_err()
+            };
+            assert_eq!(error, TurnError::CorrelationMismatch);
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+            assert!(!coordinator.journal.entries.iter().any(|entry| matches!(
+                entry,
+                JournalEntry::LifecycleTransition {
+                    current: RunLifecycle::Idle,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
     fn lost_turn_response_records_outcome_unknown_and_forbids_replay() {
         let mut server = FakeServer::default();
         server
@@ -5743,6 +6072,62 @@ mod tests {
             coordinator.journal().entries.last(),
             Some(JournalEntry::OutcomeUnknown { .. })
         ));
+    }
+
+    #[test]
+    fn abandoned_live_turn_reconciles_only_its_terminal_history_without_replay() {
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        for status in ["inProgress", "completed"] {
+            server.replies.push_back(Ok(serde_json::json!({
+                "thread":{"id":"thread-1","turns":[{"id":"turn-1","status":status}]}
+            })));
+        }
+        let mut coordinator = coordinator(server);
+        coordinator
+            .start_turn(request("original", DeliveryMode::Submit))
+            .unwrap();
+        coordinator.abandon().unwrap();
+        assert_eq!(coordinator.active_turn_id(), None);
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        let before = coordinator.journal().entries.len();
+        assert_eq!(
+            coordinator.reconcile_history(),
+            Err(TurnError::CorrelationMismatch)
+        );
+        assert_eq!(coordinator.journal().entries.len(), before);
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        assert!(coordinator.reconcile_history().unwrap());
+        assert_eq!(coordinator.state(), &CoordinatorState::Paused);
+        let reads = coordinator
+            .server
+            .calls
+            .iter()
+            .filter(|(method, _)| method == "thread/read")
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 2);
+        assert!(reads.iter().all(|(_, params)| {
+            params == &serde_json::json!({"threadId":"thread-1","includeTurns":true})
+        }));
+        assert_eq!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .filter(|(method, _)| method == "turn/start")
+                .count(),
+            1
+        );
+        assert!(
+            !coordinator.server.calls.iter().any(|(method, _)| {
+                matches!(method.as_str(), "thread/resume" | "turn/interrupt")
+            })
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub struct RunSnapshot {
     pub stamp: ProjectionStamp,
     pub control_socket_epoch: u64,
     pub app_server_epoch: Option<u64>,
+    pub(crate) captured_effective_policy: crate::domain::EffectivePolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +90,7 @@ impl RunSnapshot {
             state,
             writer,
             controller,
+            effective_policy,
             server_key,
             server_epoch,
             ..
@@ -117,6 +119,7 @@ impl RunSnapshot {
             stamp: stamp.clone(),
             control_socket_epoch: 0,
             app_server_epoch: Some(*server_epoch),
+            captured_effective_policy: effective_policy.clone(),
         })
     }
 
@@ -125,7 +128,7 @@ impl RunSnapshot {
         run_id: Uuid,
         control_socket_epoch: u64,
     ) -> Result<Self, MachineError> {
-        Self::capture(state_root, run_id, control_socket_epoch, |_, _| Ok(()))
+        Self::capture(state_root, run_id, control_socket_epoch, |_, _, _| Ok(()))
             .map(|(snapshot, ())| snapshot)
     }
 
@@ -147,7 +150,11 @@ impl RunSnapshot {
         state_root: &Path,
         run_id: Uuid,
         control_socket_epoch: u64,
-        mut observe: impl FnMut(&CaptureSources, Option<&ObservedLedger>) -> Result<T, MachineError>,
+        mut observe: impl FnMut(
+            &CaptureSources,
+            Option<&ObservedLedger>,
+            &crate::domain::EffectivePolicy,
+        ) -> Result<T, MachineError>,
     ) -> Result<(Self, T), MachineError> {
         let store = RunStore::new(SystemWorkspacePlatform, state_root);
         let captured = capture_consistent(
@@ -168,11 +175,13 @@ impl RunSnapshot {
                 let revision = ledger
                     .as_ref()
                     .map_or(0, ObservedLedger::interaction_state_revision);
-                let observation = observe(sources, ledger.as_ref())?;
-                Ok((revision, observation))
+                let effective_policy = durable_policy(sources, ledger.as_ref())?;
+                let observation = observe(sources, ledger.as_ref(), &effective_policy)?;
+                Ok((revision, effective_policy, observation))
             },
         )?;
-        let Some((sources, (interaction_state_revision, observation))) = captured else {
+        let Some((sources, (interaction_state_revision, effective_policy, observation))) = captured
+        else {
             return Err(state_conflict(
                 run_id,
                 store.load_state_projection(run_id)?.lifecycle,
@@ -199,6 +208,7 @@ impl RunSnapshot {
                 controller_authority: Some(sources.controller),
                 runtime_record: sources.runtime_record,
                 stamp,
+                captured_effective_policy: effective_policy,
             },
             observation,
         ))
@@ -326,11 +336,11 @@ impl RunObservation {
     fn read(
         sources: &CaptureSources,
         ledger: Option<&ObservedLedger>,
+        effective_policy: &crate::domain::EffectivePolicy,
     ) -> Result<Self, MachineError> {
         use crate::worker::{
             ProcessIdentityVerdict, classify_dedicated_server_identity, classify_worker_identity,
         };
-        let effective_policy = durable_policy(sources, ledger)?;
         let worker_identity = sources
             .runtime_record
             .as_ref()
@@ -402,7 +412,7 @@ impl RunObservation {
             ));
         }
         Ok(Self {
-            effective_policy,
+            effective_policy: effective_policy.clone(),
             worker_identity,
             server_identity,
             background,
@@ -416,15 +426,41 @@ fn durable_policy(
     sources: &CaptureSources,
     ledger: Option<&ObservedLedger>,
 ) -> Result<crate::domain::EffectivePolicy, MachineError> {
-    use crate::domain::{Access, EffectivePolicy, PolicyEpoch, PolicyVerification};
-    let conflict = || {
-        state_conflict(
+    let server_epoch = sources
+        .runtime_record
+        .as_ref()
+        .and_then(|record| record.app_server_epoch);
+    let policy = policy_at_head(&sources.projection, ledger, server_epoch)?;
+    if sources.projection.thread_id.is_none() {
+        return Ok(policy);
+    }
+    if server_epoch.is_some_and(|epoch| Some(epoch) != policy.server_epoch)
+        || (policy.access == crate::domain::Access::Write
+            && (!sources
+                .writer
+                .holder
+                .as_ref()
+                .is_some_and(|holder| holder.run_id == sources.manifest.run_id)
+                || sources.writer.state != crate::writer::WriterAuthorityState::Active
+                || policy.writer_generation != Some(sources.writer.writer_generation)))
+    {
+        return Err(state_conflict(
             sources.manifest.run_id,
             sources.projection.lifecycle,
             "capture_snapshot",
-        )
-    };
-    if sources.projection.thread_id.is_none() {
+        ));
+    }
+    Ok(policy)
+}
+
+fn policy_at_head(
+    projection: &RunStateProjection,
+    ledger: Option<&ObservedLedger>,
+    server_epoch: Option<u64>,
+) -> Result<crate::domain::EffectivePolicy, MachineError> {
+    use crate::domain::{Access, EffectivePolicy, PolicyEpoch, PolicyVerification};
+    let conflict = || state_conflict(projection.run_id, projection.lifecycle, "capture_snapshot");
+    if projection.thread_id.is_none() {
         return Ok(EffectivePolicy {
             access: Access::Unknown,
             verification: PolicyVerification::Unverified,
@@ -443,7 +479,7 @@ fn durable_policy(
         .rev()
         .find(|payload| {
             payload.get("thread_id").and_then(serde_json::Value::as_str)
-                == sources.projection.thread_id.as_deref()
+                == projection.thread_id.as_deref()
         })
         .and_then(|payload| payload.get("thread_generation"))
         .and_then(serde_json::Value::as_u64)
@@ -461,37 +497,16 @@ fn durable_policy(
                 .map_err(|error| internal_runtime(error.to_string()))?,
         );
     }
-    let policy = policy_from_payloads(generation, payloads)?.unwrap_or_else(|| EffectivePolicy {
-        access: Access::Unknown,
-        verification: PolicyVerification::Unverified,
-        policy_epoch: PolicyEpoch(0),
-        thread_generation: Some(generation),
-        server_epoch: sources
-            .runtime_record
-            .as_ref()
-            .and_then(|record| record.app_server_epoch),
-        writer_generation: None,
-    });
-    if sources
-        .runtime_record
-        .as_ref()
-        .and_then(|record| record.app_server_epoch)
-        .is_some_and(|epoch| Some(epoch) != policy.server_epoch)
-    {
-        return Err(conflict());
-    }
-    if policy.access == Access::Write
-        && (!sources
-            .writer
-            .holder
-            .as_ref()
-            .is_some_and(|holder| holder.run_id == sources.manifest.run_id)
-            || sources.writer.state != crate::writer::WriterAuthorityState::Active
-            || policy.writer_generation != Some(sources.writer.writer_generation))
-    {
-        return Err(conflict());
-    }
-    Ok(policy)
+    Ok(
+        policy_from_payloads(generation, payloads)?.unwrap_or(EffectivePolicy {
+            access: Access::Unknown,
+            verification: PolicyVerification::Unverified,
+            policy_epoch: PolicyEpoch(0),
+            thread_generation: Some(generation),
+            server_epoch,
+            writer_generation: None,
+        }),
+    )
 }
 
 fn policy_from_payloads(
@@ -590,6 +605,7 @@ mod capture_tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
     fn payload(epoch: u64, generation: u64) -> serde_json::Value {
         serde_json::json!({"effective_policy": {
@@ -609,6 +625,76 @@ mod policy_tests {
             crate::domain::PolicyVerification::Unverified
         );
         assert!(policy_from_payloads(4, [payload(8, 3)]).unwrap().is_none());
+    }
+
+    #[test]
+    fn captured_ledger_head_preserves_policy_before_a_later_thread_generation() {
+        use crate::audit::{AuditKind, AuditRecord, GENESIS_PREVIOUS_HASH};
+        use std::io::Write as _;
+
+        let run_id = Uuid::now_v7();
+        let root = std::env::temp_dir().join(format!("dolgorae-policy-head-{run_id}"));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let mut previous = GENESIS_PREVIOUS_HASH.to_owned();
+        for (index, (kind, epoch, generation)) in [
+            (AuditKind::ThreadBound, 8, 3),
+            (AuditKind::WriterReleased, 11, 3),
+            (AuditKind::ThreadBound, 20, 4),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut value = payload(epoch, generation);
+            value["thread_id"] = serde_json::json!("same-thread");
+            value["thread_generation"] = serde_json::json!(generation);
+            let record = AuditRecord::new(
+                index as u64 + 1,
+                "2026-09-30T00:00:00.000000Z",
+                run_id,
+                generation,
+                kind,
+                crate::jcs::parse(&value.to_string()).unwrap(),
+                &previous,
+            )
+            .unwrap();
+            file.write_all(&record.canonical_line().unwrap()).unwrap();
+            previous = record.hash().to_owned();
+        }
+        file.sync_all().unwrap();
+        let mut projection = RunStateProjection::starting(run_id);
+        projection.thread_id = Some("same-thread".to_owned());
+        for (head, epoch, generation) in [(2, 11, 3), (3, 20, 4)] {
+            projection.ledger_head.sequence = head;
+            let observed = ObservedLedger::open(&root, run_id, head).unwrap();
+            let selected = policy_at_head(&projection, Some(&observed), None).unwrap();
+            assert_eq!(selected.policy_epoch.0, epoch);
+            assert_eq!(selected.thread_generation, Some(generation));
+        }
+    }
+
+    #[test]
+    fn unstarted_run_has_no_thread_policy_generation() {
+        let projection = RunStateProjection::starting(Uuid::now_v7());
+        let selected = policy_at_head(&projection, None, Some(7)).unwrap();
+        assert_eq!(selected.policy_epoch.0, 0);
+        assert_eq!(selected.thread_generation, None);
+        assert_eq!(selected.server_epoch, None);
     }
 
     #[test]

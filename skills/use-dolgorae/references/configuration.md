@@ -38,8 +38,11 @@ directly.
    ```
 
    The arguments after `--` belong to the Codex launch command. V1 permits only
-   `--profile <name>`, repeatable `--enable <feature>`, repeatable `--disable
-   <feature>`, and flag-only `--strict-config`. Do not use aliases,
+   repeatable `--enable <feature>`, repeatable `--disable <feature>`, and
+   flag-only `--strict-config`. Native Codex `--profile <name>` is rejected
+   before registration because the app-server does not support it. Dolgorae's
+   own `run start --profile <name>` selects a registered Dolgorae Profile.
+   Do not use aliases,
    `--flag=value`, or any other option, and omit global arguments unless the
    requested profile requires them. The `multi_agent` feature is reserved to
    Dolgorae and must not appear in raw profile arguments. Do not copy shell

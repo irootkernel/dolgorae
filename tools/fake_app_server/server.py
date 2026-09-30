@@ -198,6 +198,12 @@ class FakeAppServer:
             task_id = payload.get("task_id")
             if isinstance(task_id, str):
                 self.scenario.bind("specialist_task_id", task_id)
+        elif payload.get("operation") == "collect_specialist_results_result":
+            tasks = payload.get("tasks")
+            if isinstance(tasks, list) and tasks and isinstance(tasks[0], dict):
+                artifact_id = tasks[0].get("result_artifact_ref")
+                if isinstance(artifact_id, str):
+                    self.scenario.bind("specialist_result_artifact_id", artifact_id)
 
     def build_response(self, request_id: Any, respond: dict[str, Any]) -> dict[str, Any]:
         if "error" in respond:

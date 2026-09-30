@@ -13,8 +13,8 @@ use crate::run::{
 };
 use crate::semantic::{
     ExternalAgentConfigurationInput, ExternalSpecialistStartContext, acquire_external_writer,
-    durable_terminal_turn, ensure_external_specialist_worker, prepare_external_specialist,
-    release_external_writer, start_external_specialist_run,
+    durable_terminal_turn, ensure_external_specialist_worker, finish_external_run_close,
+    prepare_external_specialist, release_external_writer, start_external_specialist_run,
 };
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use crate::turn::FinalResponse;
@@ -1156,6 +1156,20 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                     &reason,
                     &idempotency_key,
                 )?;
+                if run_root(&state_root, specialist_run_id).exists()
+                    && RunStore::new(SystemWorkspacePlatform, &state_root)
+                        .load_state_projection(specialist_run_id)?
+                        .lifecycle
+                        == RunLifecycle::Closed
+                {
+                    finish_external_run_close(
+                        &view,
+                        &state_root,
+                        specialist_run_id,
+                        engagement_id,
+                        &owner,
+                    )?;
+                }
                 cleanup_isolated_root(
                     &view.canonical_path.to_path_buf()?,
                     &state_root,
@@ -1187,44 +1201,56 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                 ));
             }
             if actor_residency != "unavailable" {
-                if requested_access == "canonical_workspace_write" {
-                    release_external_writer_safely(
-                        &view,
+                let projection = RunStore::new(SystemWorkspacePlatform, &state_root)
+                    .load_state_projection(specialist_run_id)?;
+                if projection.lifecycle != RunLifecycle::Closed {
+                    if requested_access == "canonical_workspace_write" {
+                        release_external_writer_safely(
+                            &view,
+                            &state_root,
+                            specialist_run_id,
+                            engagement_id,
+                            &owner,
+                        )?;
+                    }
+                    ensure_external_specialist_worker(&view, &state_root, specialist_run_id)?;
+                    let response = call_run_worker(
                         &state_root,
                         specialist_run_id,
-                        engagement_id,
-                        &owner,
-                    )?;
-                } else {
-                    ensure_external_specialist_worker(&view, &state_root, specialist_run_id)?;
+                        DarwinSystem.current_uid(),
+                        Some(owner.raw_fd()),
+                        |expected| ControlRequestV1::ExternalClose {
+                            expected,
+                            caller: None,
+                            engagement_id,
+                            interrupt: false,
+                        },
+                    );
+                    match response {
+                        Ok(ControlResponseV1::Closed { .. }) => {}
+                        Ok(ControlResponseV1::Failed {
+                            code,
+                            message,
+                            retryable,
+                            details,
+                        }) => return Err(MachineError::new(code, message, retryable, details)),
+                        Ok(_) => {
+                            return Err(integrity(
+                                "Specialist close returned an unexpected response",
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(error.machine_error(specialist_run_id, &state_root));
+                        }
+                    }
                 }
-                let response = call_run_worker(
+                finish_external_run_close(
+                    &view,
                     &state_root,
                     specialist_run_id,
-                    DarwinSystem.current_uid(),
-                    Some(owner.raw_fd()),
-                    |expected| ControlRequestV1::ExternalClose {
-                        expected,
-                        caller: None,
-                        engagement_id,
-                        interrupt: false,
-                    },
-                );
-                match response {
-                    Ok(ControlResponseV1::Closed { .. }) => {}
-                    Ok(ControlResponseV1::Failed {
-                        code,
-                        message,
-                        retryable,
-                        details,
-                    }) => return Err(MachineError::new(code, message, retryable, details)),
-                    Ok(_) => {
-                        return Err(integrity(
-                            "Specialist close returned an unexpected response",
-                        ));
-                    }
-                    Err(error) => return Err(error.machine_error(specialist_run_id, &state_root)),
-                }
+                    engagement_id,
+                    &owner,
+                )?;
             }
             let state = store.release_external_member(
                 engagement_id,
@@ -2057,7 +2083,7 @@ fn abort_member(
     let projection =
         RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
     if projection.lifecycle == RunLifecycle::Closed {
-        return Ok(());
+        return finish_external_run_close(view, state_root, run_id, engagement_id, owner);
     }
     ensure_external_specialist_worker(view, state_root, run_id)?;
     let status = call_run_worker(
@@ -2151,7 +2177,9 @@ fn abort_member(
             interrupt: false,
         },
     ) {
-        Ok(ControlResponseV1::Closed { .. }) => Ok(()),
+        Ok(ControlResponseV1::Closed { .. }) => {
+            finish_external_run_close(view, state_root, run_id, engagement_id, owner)
+        }
         Ok(ControlResponseV1::Failed {
             code,
             message,

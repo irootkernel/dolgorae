@@ -835,6 +835,12 @@ pub(crate) fn execute_scoped_common(
         )?
     };
     let review_id = opened.engagement_id;
+    let resolved_execution = v3.map(|_| crate::review_output::ReviewExecution {
+        model: Some(prepared.model.clone()),
+        effort: Some(prepared.effort.clone()),
+        codex_version: Some(prepared.profile_snapshot.codex_version.clone()),
+        ..Default::default()
+    });
     let capture = capture_review_target(
         &canonical_workspace,
         target,
@@ -842,7 +848,11 @@ pub(crate) fn execute_scoped_common(
         &carriers.settlement_owner,
         reserved_capture,
     );
-    let capture = match capture {
+    let capture = capture.and_then(|capture| {
+        let capture_ref = uuid_field(&capture, "capture_ref")?;
+        Ok((capture, capture_ref))
+    });
+    let (capture, capture_ref) = match capture {
         Ok(value) => value,
         Err(error) => {
             close_failed_engagement(
@@ -853,21 +863,7 @@ pub(crate) fn execute_scoped_common(
                 &canonical_workspace,
                 &carriers,
             );
-            return Err(error);
-        }
-    };
-    let capture_ref = match uuid_field(&capture, "capture_ref") {
-        Ok(value) => value,
-        Err(error) => {
-            close_failed_engagement(
-                &mut store,
-                review_id,
-                &key,
-                None,
-                &canonical_workspace,
-                &carriers,
-            );
-            return Err(error);
+            return Err(scoped_review_execution_error(error, resolved_execution));
         }
     };
     let capture_root = prepared
@@ -1186,24 +1182,27 @@ pub(crate) fn execute_scoped_common(
                     "required_action": if settlement_state == "preserved" {"inspect_authority"} else {"none"},
                     "cause_details":cause_details
                 });
-                if v3.is_some() {
-                    let execution = crate::review_output::execution_fields(
-                        crate::review_output::ReviewExecution {
-                            model: Some(prepared.model.clone()),
-                            effort: Some(prepared.effort.clone()),
-                            codex_version: Some(prepared.profile_snapshot.codex_version.clone()),
-                            run_id: reviewer_run_id,
-                            ..Default::default()
-                        },
-                    );
-                    if !execution.is_empty() {
-                        error.details["execution"] = json!(execution);
-                    }
+                if let Some(mut execution) = resolved_execution {
+                    execution.run_id = reviewer_run_id;
+                    error = scoped_review_execution_error(error, Some(execution));
                 }
             }
             Err(error)
         }
     }
+}
+
+fn scoped_review_execution_error(
+    mut error: MachineError,
+    execution: Option<crate::review_output::ReviewExecution>,
+) -> MachineError {
+    if let Some(execution) = execution {
+        let fields = crate::review_output::execution_fields(execution);
+        if !fields.is_empty() {
+            error.details["execution"] = json!(fields);
+        }
+    }
+    error
 }
 
 fn capture_review_target(
@@ -2151,6 +2150,68 @@ fn internal(error: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_capture_errors_preserve_resolved_v3_execution_without_inventing_identities() {
+        // An invalid reserved capture fails before any workspace or runtime
+        // effects, through the capture coordinator's actual error boundary.
+        let original = capture_review_target(
+            Path::new("/unused-workspace"),
+            &ReviewTargetRequest {
+                kind: "workspace".to_owned(),
+                revision: None,
+            },
+            new_uuid_v7(),
+            Path::new("/unused-owner"),
+            Some(Uuid::nil()),
+        )
+        .unwrap_err();
+        assert_eq!(original.code, "INVALID_ARGUMENT");
+        let error = scoped_review_execution_error(
+            original.clone(),
+            Some(crate::review_output::ReviewExecution {
+                model: Some("gpt-6-sol".to_owned()),
+                effort: Some("high".to_owned()),
+                codex_version: Some("0.158.0".to_owned()),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(error.code, original.code);
+        assert_eq!(error.message, original.message);
+        assert_eq!(
+            error.details["execution"],
+            json!({"model":"gpt-6-sol","effort":"high","codex_version":"0.158.0"})
+        );
+        let mut details = error.details;
+        details.as_object_mut().unwrap().remove("execution");
+        assert_eq!(details, original.details);
+
+        // Legacy scoped requests and failures before preparation have no
+        // resolved v3 execution to project and retain their original shape.
+        assert_eq!(
+            scoped_review_execution_error(original.clone(), None),
+            original
+        );
+    }
+
+    #[test]
+    fn scoped_error_execution_keeps_only_known_bounded_metadata() {
+        let run_id = new_uuid_v7();
+        let error = scoped_review_execution_error(
+            review_error("REVIEW_TIMEOUT", "timeout"),
+            Some(crate::review_output::ReviewExecution {
+                model: Some("x".repeat(129)),
+                effort: Some("high\n".to_owned()),
+                codex_version: Some("0.158.0".to_owned()),
+                run_id: Some(run_id),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            error.details["execution"],
+            json!({"codex_version":"0.158.0","run_id":run_id})
+        );
+    }
 
     #[test]
     fn recovery_observes_partial_publication_and_replays_interrupted_settlement() {

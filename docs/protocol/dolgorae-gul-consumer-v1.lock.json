@@ -42,7 +42,7 @@
     {"path": "dolgorae-capabilities-v1.schema.json", "sha256": "bdcb76265d6508f73b791e5f289e09f28fda9a6dcc67a5ca03c2a425e8ea9b79"},
     {"path": "dolgorae-grpc-conformance-v1.json", "sha256": "5abffb57914829399bde0c2fc9b7852e143cab847e8ad40b7beee077bfa1fb72"},
     {"path": "dolgorae-grpc-client-policy-v1.json", "sha256": "01237c8f8f7c43934fee457b587c46f288a4ec9bf68081ef7719d1ce31edf3fd"},
-    {"path": "dolgorae-grpc-error-mapping-v1.json", "sha256": "ccb8f43430f98d434b0fd37640357b1bb36ff84767f9ad6ded92e624f1421437"},
+    {"path": "dolgorae-grpc-error-mapping-v1.json", "sha256": "e50a3cfec9e6d9beb95edd21e9427bff28cf11c452d3a4369ba8d5eeb20f2b08"},
     {"path": "dolgorae-rpc-mutation-policy-v1.json", "sha256": "2c2e62ef464c4fa587f9023a404cd83de0622bffda5bd05eca852f70eba73e06"}
   ]
 }

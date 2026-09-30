@@ -168,6 +168,16 @@ pub(crate) fn admit_mutation_digest<C: LedgerClock + 'static, F: FaultInjector +
     let projection = ledger
         .projection()
         .map_err(|error| internal(error.to_string()))?;
+    if matches!(
+        projection.lifecycle,
+        RunLifecycle::Closed | RunLifecycle::StartFailed
+    ) {
+        return Err(state_conflict(
+            projection.run_id,
+            projection.lifecycle,
+            operation,
+        ));
+    }
     if let Some(active) = active_mutation_admission(ledger)? {
         if active.controller_id == controller_id
             && active.expected_state_revision == expected_state_revision
@@ -252,6 +262,65 @@ pub(crate) fn validate_mutation_admission<
     Ok(())
 }
 
+/// Release only a prepared write Turn that has not begun native acceptance.
+pub(crate) fn abort_prepared_turn_admission<
+    C: LedgerClock + 'static,
+    F: FaultInjector + 'static,
+    R: MutationRequest,
+>(
+    ledger: &mut Ledger<C, F>,
+    admission_id: Uuid,
+    controller_id: Uuid,
+    request: &R,
+) -> Result<(), MachineError> {
+    let identity = request.mutation_request_identity()?;
+    let projection = ledger
+        .projection()
+        .map_err(|error| internal(error.to_string()))?;
+    let active = active_mutation_admission(ledger)?;
+    let Some(active) = active.filter(|active| {
+        matches!(
+            projection.lifecycle,
+            RunLifecycle::Starting | RunLifecycle::Idle
+        ) && matches!(identity.operation, "run.send" | "run.submit")
+            && active.admission_id == admission_id
+            && active.controller_id == controller_id
+            && active.operation == identity.operation
+            && active.request_sha256 == identity.request_sha256
+            && active.allow_writer_acquire
+            && identity.allow_writer_acquire
+    }) else {
+        return Err(state_conflict(
+            projection.run_id,
+            projection.lifecycle,
+            identity.operation,
+        ));
+    };
+    if ledger
+        .durable_records()
+        .map_err(|error| internal(error.to_string()))?
+        .iter()
+        .any(|record| {
+            record.sequence() > active.expected_state_revision
+                && matches!(
+                    record.kind(),
+                    AuditKind::TurnIntent
+                        | AuditKind::IdempotencyReserved
+                        | AuditKind::ThreadBound
+                        | AuditKind::TurnStarted
+                        | AuditKind::TurnTerminal
+                )
+        })
+    {
+        return Err(state_conflict(
+            projection.run_id,
+            projection.lifecycle,
+            identity.operation,
+        ));
+    }
+    complete_mutation_admission(ledger, admission_id)
+}
+
 pub(crate) fn complete_mutation_admission<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     ledger: &mut Ledger<C, F>,
     admission_id: Uuid,
@@ -280,4 +349,202 @@ pub(crate) fn complete_mutation_admission<C: LedgerClock + 'static, F: FaultInje
             projection.run_generation,
         )
         .map_err(|error| internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    struct PreparedTurn {
+        digest: String,
+        operation: &'static str,
+    }
+
+    impl MutationRequest for PreparedTurn {
+        fn mutation_request_identity(&self) -> Result<MutationRequestIdentity, MachineError> {
+            Ok(MutationRequestIdentity::new(
+                self.digest.clone(),
+                self.operation,
+                true,
+                &[],
+            ))
+        }
+    }
+
+    fn idle_ledger() -> (std::path::PathBuf, Ledger) {
+        let root = std::env::temp_dir().join(format!("dg-prepared-abort-{}", Uuid::now_v7()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let mut ledger = Ledger::open(&root, Uuid::now_v7()).unwrap();
+        ledger
+            .append_conformance_payload(
+                AuditKind::LifecycleTransition,
+                &json!({"previous":"starting","current":"idle"}),
+                1,
+            )
+            .unwrap();
+        (root, ledger)
+    }
+
+    #[test]
+    fn closed_ledger_rejects_fresh_admission_without_appending_after_its_seal() {
+        let (root, mut ledger) = idle_ledger();
+        ledger
+            .append_conformance_payload(
+                AuditKind::CleanupResult,
+                &json!({"outcome":"owned runtime absent"}),
+                1,
+            )
+            .unwrap();
+        ledger
+            .append_conformance_payload(
+                AuditKind::LifecycleTransition,
+                &json!({"previous":"idle","current":"closed","terminal_seal":true}),
+                1,
+            )
+            .unwrap();
+        let before = std::fs::read(root.join("audit.jsonl")).unwrap();
+        let head = ledger.head().unwrap().sequence;
+        assert_eq!(
+            admit_mutation_digest(
+                &mut ledger,
+                Uuid::now_v7(),
+                head,
+                "a".repeat(64),
+                "run.submit",
+                false,
+            )
+            .unwrap_err()
+            .code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert_eq!(std::fs::read(root.join("audit.jsonl")).unwrap(), before);
+        assert!(active_mutation_admission(&ledger).unwrap().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_turn_abort_requires_exact_authority_and_preserves_future_admission() {
+        let (root, mut ledger) = idle_ledger();
+        let controller = Uuid::now_v7();
+        let request = PreparedTurn {
+            digest: "a".repeat(64),
+            operation: "run.submit",
+        };
+        let head = ledger.head().unwrap().sequence;
+        let admission = admit_mutation(&mut ledger, controller, head, &request).unwrap();
+        let admitted_head = ledger.head().unwrap().sequence;
+        for (id, controller, request) in [
+            (
+                Uuid::now_v7(),
+                controller,
+                PreparedTurn {
+                    digest: "a".repeat(64),
+                    operation: "run.submit",
+                },
+            ),
+            (
+                admission.admission_id,
+                Uuid::now_v7(),
+                PreparedTurn {
+                    digest: "a".repeat(64),
+                    operation: "run.submit",
+                },
+            ),
+            (
+                admission.admission_id,
+                controller,
+                PreparedTurn {
+                    digest: "b".repeat(64),
+                    operation: "run.submit",
+                },
+            ),
+            (
+                admission.admission_id,
+                controller,
+                PreparedTurn {
+                    digest: "a".repeat(64),
+                    operation: "run.send",
+                },
+            ),
+        ] {
+            assert_eq!(
+                abort_prepared_turn_admission(&mut ledger, id, controller, &request)
+                    .unwrap_err()
+                    .code,
+                "RUN_STATE_CONFLICT"
+            );
+            assert_eq!(ledger.head().unwrap().sequence, admitted_head);
+        }
+        abort_prepared_turn_admission(&mut ledger, admission.admission_id, controller, &request)
+            .unwrap();
+        assert!(active_mutation_admission(&ledger).unwrap().is_none());
+        assert_eq!(ledger.head().unwrap().sequence, admitted_head + 1);
+        let run_id = ledger.projection().unwrap().run_id;
+        drop(ledger);
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        assert!(active_mutation_admission(&ledger).unwrap().is_none());
+        let head = ledger.head().unwrap().sequence;
+        admit_mutation(&mut ledger, controller, head, &request).unwrap();
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_turn_abort_refuses_durable_native_acceptance_prefix() {
+        let (root, mut ledger) = idle_ledger();
+        let controller = Uuid::now_v7();
+        let request = PreparedTurn {
+            digest: "a".repeat(64),
+            operation: "run.send",
+        };
+        let head = ledger.head().unwrap().sequence;
+        let admission = admit_mutation(&mut ledger, controller, head, &request).unwrap();
+        ledger
+            .append_required_payload(
+                AuditKind::IdempotencyReserved,
+                &json!({
+                    "schema_version":1,"operation":"submit_turn","idempotency_key":"accepted",
+                    "normalized_identity_sha256":"b".repeat(64),
+                    "run_id":ledger.projection().unwrap().run_id
+                }),
+                1,
+            )
+            .unwrap();
+        let head = ledger.head().unwrap().sequence;
+        assert_eq!(
+            abort_prepared_turn_admission(
+                &mut ledger,
+                admission.admission_id,
+                controller,
+                &request
+            )
+            .unwrap_err()
+            .code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert_eq!(ledger.head().unwrap().sequence, head);
+        assert_eq!(
+            active_mutation_admission(&ledger)
+                .unwrap()
+                .unwrap()
+                .admission_id,
+            admission.admission_id
+        );
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

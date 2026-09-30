@@ -65,6 +65,13 @@
       }
     },
     "RunService.SubmitTurn": {
+      "SESSION_CLOSE_IN_PROGRESS": {
+        "status": "FAILED_PRECONDITION",
+        "required_action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "retry_classification": "RETRY_CLASSIFICATION_FORBIDDEN",
+        "recovery_classification": "RECOVERY_CLASSIFICATION_SNAPSHOT_REQUIRED",
+        "required_fields": ["run_id", "operation_id"]
+      },
       "DEDICATED_SERVER_START_FAILED": {
         "required_action": "REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY",
         "retry_classification": "RETRY_CLASSIFICATION_EXACT_IDEMPOTENCY_KEY",

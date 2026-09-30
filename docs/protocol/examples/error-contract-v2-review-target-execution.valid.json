@@ -1,0 +1,13 @@
+{
+  "code": "REVIEW_TARGET_REVISION_INVALID",
+  "message": "revision does not resolve to a commit",
+  "retryable": false,
+  "details": {
+    "required_action": "none",
+    "execution": {
+      "model": "gpt-6-sol",
+      "effort": "high",
+      "codex_version": "0.158.0"
+    }
+  }
+}

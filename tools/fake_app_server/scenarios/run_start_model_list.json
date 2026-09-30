@@ -279,6 +279,10 @@
       "respond": {"result":{"thread":{"id":"thread-beta"}}}
     },
     {
+      "method": "thread/resume",
+      "respond": {"result":{"thread":{"id":"${thread_id}"}}}
+    },
+    {
       "method": "turn/start",
       "occurrence": 1,
       "respond": {"result":{"turn":{"id":"turn-1"}}},

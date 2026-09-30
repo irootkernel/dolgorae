@@ -584,6 +584,56 @@ pub fn chunk(
     })
 }
 
+/// Called only after the orchestration service authenticates the source Primary.
+pub(crate) fn primary_task_context(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: Uuid,
+) -> Result<crate::orchestration::AcceptedTaskContext, MachineError> {
+    let run_id = snapshot.manifest.run_id;
+    let reference = artifact_reference(state_root, &ledger(state_root, snapshot)?, run_id, id)?;
+    if reference.visibility == ArtifactVisibility::ControllerOnly
+        && specialist_result_reference(state_root, run_id, id)?.as_ref() != Some(&reference)
+    {
+        authorize_artifact(state_root, snapshot, id, &reference, None)?;
+    }
+    if reference.byte_length == 0 || reference.byte_length > 262_144 {
+        return Err(MachineError::invalid_argument(
+            "context_refs",
+            "each context artifact must contain 1 to 262144 UTF-8 bytes",
+        ));
+    }
+    if !(reference.media_type.starts_with("text/") || reference.media_type == "application/json") {
+        return Err(MachineError::invalid_argument(
+            "context_refs",
+            "context artifacts must use a textual media type",
+        ));
+    }
+    let bytes = read_artifact_range(
+        state_root,
+        run_id,
+        id,
+        &reference,
+        (0, reference.byte_length as u32),
+    )?;
+    let content = String::from_utf8(bytes).map_err(|_| {
+        MachineError::invalid_argument("context_refs", "context artifact bytes must be valid UTF-8")
+    })?;
+    if content.contains('\0') {
+        return Err(MachineError::invalid_argument(
+            "context_refs",
+            "context artifact text must not contain NUL",
+        ));
+    }
+    Ok(crate::orchestration::AcceptedTaskContext {
+        artifact_id: id,
+        media_type: reference.media_type,
+        byte_length: reference.byte_length,
+        sha256: reference.sha256,
+        content,
+    })
+}
+
 fn read_artifact_range(
     state_root: &Path,
     run_id: Uuid,

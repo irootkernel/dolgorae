@@ -1828,7 +1828,7 @@ fn idle_pause_and_resume_are_durable_and_fence_turns() {
             .iter()
             .filter(|kind| **kind == AuditKind::LifecycleTransition)
             .count(),
-        2
+        3 // connection readiness, pause, then resume
     );
 }
 

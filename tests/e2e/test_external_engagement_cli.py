@@ -321,6 +321,7 @@ def validate(binary: pathlib.Path) -> None:
                         {"method": "model/list", "respond": {"result": {"data": [{"model": "gpt-5.6", "isDefault": True, "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]}], "nextCursor": None}}},
                         {"method": "thread/start", "occurrence": 1, "respond": {"result": {"thread": {"id": "thread-reusable"}}}},
                         {"method": "thread/start", "occurrence": 2, "respond": {"result": {"thread": {"id": "thread-abort"}}}},
+                        {"method": "thread/resume", "respond": {"result": {"thread": {"id": "thread-reusable"}}}},
                         {"method": "thread/read", "respond": {"error": {"code": -32600, "message": "thread not found"}}},
                         {"method": "turn/start", "occurrence": 1, "respond": {"result": {"turn": {"id": "turn-one"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-one", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-one", "status": "completed", "text": "first reusable answer"}]}}}]},
                         {"method": "turn/start", "occurrence": 2, "respond": {"result": {"turn": {"id": "turn-two"}}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-reusable", "turn": {"id": "turn-two", "status": "completed", "items": [{"type": "agentMessage", "phase": "final_answer", "threadId": "thread-reusable", "turnId": "turn-two", "status": "completed", "text": "second reusable answer"}]}}}]},
@@ -1291,33 +1292,40 @@ def validate(binary: pathlib.Path) -> None:
             })["state"] != "released":
                 raise AssertionError("isolated release replay did not converge")
 
-            canonical_hired = call(
-                binary,
-                home,
-                workspace,
-                owner,
-                {
-                    "operation": "hire_external_specialist",
-                    "engagement_id": engagement_id,
-                    "role_ref": "implementer",
-                    "agent_configuration": {
-                        "schema_version": 2,
-                        "selected_profile": isolated_profile,
-                        "model": "gpt-5.6",
-                        "default_effort": "medium",
-                        "purpose": "implementation",
-                        "purpose_label": None,
-                        "required_capabilities": [],
-                        "instructions": "Return the canonical task result.",
-                        "execution_lane": "dedicated",
-                        "required_assurance": "best_effort_personal_alpha",
-                        "native_subagent_policy": "enabled",
-                    },
-                    "objective": "Exercise canonical-write lifecycle",
-                    "requested_access": "canonical_workspace_write",
-                    "idempotency_key": "hire-canonical",
+            canonical_hire_request = {
+                "operation": "hire_external_specialist",
+                "engagement_id": engagement_id,
+                "role_ref": "implementer",
+                "agent_configuration": {
+                    "schema_version": 2,
+                    "selected_profile": isolated_profile,
+                    "model": "gpt-5.6",
+                    "default_effort": "medium",
+                    "purpose": "implementation",
+                    "purpose_label": None,
+                    "required_capabilities": [],
+                    "instructions": "Return the canonical task result.",
+                    "execution_lane": "dedicated",
+                    "required_assurance": "best_effort_personal_alpha",
+                    "native_subagent_policy": "enabled",
                 },
-                canonical_child,
+                "objective": "Exercise canonical-write lifecycle",
+                "requested_access": "canonical_workspace_write",
+                "idempotency_key": "hire-canonical",
+            }
+            unstarted_request = dict(canonical_hire_request, idempotency_key="hire-canonical-unstarted")
+            unstarted = call(binary, home, workspace, owner, unstarted_request, canonical_child)
+            unstarted_release = call(binary, home, workspace, owner, {
+                "operation": "release_external_specialist",
+                "engagement_id": engagement_id,
+                "specialist_run_id": unstarted["specialist_run_id"],
+                "reason": "No task was assigned",
+                "idempotency_key": "release-canonical-unstarted",
+            })
+            if unstarted_release["state"] != "released":
+                raise AssertionError("unstarted canonical Specialist could not be released")
+            canonical_hired = call(
+                binary, home, workspace, owner, canonical_hire_request, canonical_child,
             )
             canonical_run_id = str(canonical_hired["specialist_run_id"])
             dedicated_messages = [
@@ -1399,8 +1407,8 @@ def validate(binary: pathlib.Path) -> None:
             if closed["state"] != "completed":
                 raise AssertionError(f"engagement was not completed: {closed!r}")
             completed_runtime = state_root / "runtime" / "runs" / f"{run_id}.json"
-            completed_record = json.loads(completed_runtime.read_text(encoding="utf-8"))
-            stop_worker(int(completed_record["identity"]["pid"]))
+            if completed_runtime.exists():
+                raise AssertionError("released Specialist retained its Worker runtime")
 
             interaction_opened = call(binary, home, workspace, owner, {
                 "operation": "open_external_engagement",
@@ -1569,6 +1577,16 @@ def validate(binary: pathlib.Path) -> None:
                 with sqlite3.connect(database) as connection:
                     connection.execute(
                         "UPDATE metadata SET value=? WHERE key='schema_version'", (original_schema,)
+                    )
+
+            for retired_profile in (profile, isolated_profile, interaction_profile):
+                stopped, envelope = invoke(binary, home, [
+                    "profile", "server", "stop", retired_profile,
+                    "--operator-file", str(operator),
+                ])
+                if stopped.returncode != 0 or envelope["ok"] is not True:
+                    raise AssertionError(
+                        f"released Specialists kept {retired_profile} busy: {envelope!r}"
                     )
 
         finally:

@@ -677,6 +677,12 @@ results. `read_specialist_result` is the frozen private reader for actual
 Primary-owned bytes; `collect_specialist_results` remains only the delivery
 cursor.
 
+Task-context reads through the authenticated Primary bridge may use that
+Primary's published Specialist results without an external Controller carrier.
+The internal reader verifies the publication's Primary Run binding and artifact
+integrity. Other Controller-only artifacts still require their Controller;
+public artifact reads retain the same authorization rules.
+
 ### Live Provider Integration Boundary
 
 EPIC-008 connects existing orchestration, Run, Worker, Controller, writer,
@@ -895,12 +901,20 @@ and current Interaction responses retain their distinct paths. No human-input
 queue, steering or automatic interruption is introduced.
 
 Whole-session root CloseRun records durable close intent, stops new admission
-and retires owned children through the Broker. Admission races with spawn/task
+and retires owned children through the Broker. Both semantic and Worker
+admission consult the orchestration-owned durable close intent before accepting
+a fresh Primary Turn; accepted receipt replay precedes this check.
+Admission races with spawn/task
 publication use the existing serialization order; a per-root close gate admits
 one settler while waits hold no SQLite transaction or global mutation owner.
 Compatible concurrent calls observe the retained operation. Unknown effects
-prevent successful closed state. Root recovery
-accounts for retained aggregate intent without new semantic work or auto-resume.
+prevent successful closed state. A Primary lifecycle timeout retains the
+unknown outcome without sealing the Run closed; the ordinary Run timeout-close
+path does not satisfy whole-session completion. Close settlement checks the
+Primary's durable unknown-outcome evidence even when a later Pause has changed
+its lifecycle; only matching terminal or reconciled history clears that blocker.
+Root recovery accounts for retained aggregate intent without new semantic work
+or auto-resume.
 History, results, workspace changes and unrelated runtimes remain intact.
 Primary Pause/Interrupt does not imply aggregate pause.
 
@@ -1144,7 +1158,9 @@ resident Dolgorae daemon. It computes a launch contract from canonical
 resolved executable identity, sanitized explicit environment, deterministic
 symbolic `profile_state_directory_v1` cwd policy, normalized process-static configuration, version, schema,
 and feature digests. Runtime-mutable configuration is observed but excluded
-from the key. Compatible profile names are aliases for one `server_key`.
+from the key and compatible-generation comparison. Immutable bindings retain
+their observation bytes for integrity checks. Compatible profile names are aliases
+for one `server_key`.
 Different stopped definitions for one canonical home may coexist, but a
 different contract cannot start while another verified lifetime is active.
 
@@ -1234,6 +1250,12 @@ unknown turn/interaction/native descendant, and a durable-history barrier.
 The thread then resumes in the same logical lane. Infrastructure state,
 workspace writer authority, effective Codex policy, and background workload
 state are four independent facts.
+
+The Worker persists the resumed thread generation and a new unverified policy
+epoch for its current native server before publishing idle. Resume performs no
+Turn submission. External member retirement reconciles the global membership
+journal after Run closure; Profile shutdown never adds observations after a
+Run's terminal seal.
 
 One canonical workspace has at most one writer. A profile may have concurrent
 dedicated writers in different workspaces; the home coordinator serializes
@@ -2300,6 +2322,14 @@ thread with stable history APIs only after the lane-specific barrier below is
 proved.
 
 - Confirmed idle history resumes normally.
+- If an absent Worker leaves its recorded Dedicated Lane Server alive, recovery
+  first retires that exact server through the guarded identity and process-scope
+  checks. Before signalling the matching server group, a complete census must
+  agree with group enumeration. Every process in that group or session, and every
+  descendant, must have the recorded UID. Owned descendants may still be alive
+  before the stop; the subsequent five complete empty samples must account for
+  them. Recovery proves the complete generation absent before
+  retiring Writer authority or removing the old Worker locator.
 - A terminal turn absent from Dolgorae's projection is appended as reconciled
   evidence and the run returns to idle.
 - An active turn without authoritative terminal evidence produces

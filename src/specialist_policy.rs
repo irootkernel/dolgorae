@@ -231,7 +231,10 @@ impl SpecialistPolicyRegistry {
                     "POLICY_REJECTED",
                     "the Specialist Policy already exists",
                     false,
-                    serde_json::json!({"policy_name": policy.policy_name}),
+                    serde_json::json!({
+                        "policy": policy.policy_name,
+                        "operation": "specialist.policy.add",
+                    }),
                 )
             } else {
                 MachineError::runtime_path_invalid(&path, error.to_string())
@@ -632,24 +635,20 @@ pub(crate) fn validate_live_provider_policy(
     policy: &InstalledSpecialistPolicy,
 ) -> Result<(), MachineError> {
     validate_installed_policy(policy)?;
-    let unsupported = policy.roles.iter().find(|role| {
+    let unsupported = policy.roles.iter().any(|role| {
         role.reuse_policy == "reuse_any_compatible"
             || role.collaboration_source
             || role.collaboration_target
             || role.activation_policy == "on_mail"
     });
-    if let Some(role) = unsupported {
+    if unsupported {
         return Err(MachineError::new(
             "POLICY_REJECTED",
             "the Specialist Policy uses controls outside the live provider slice",
             false,
             serde_json::json!({
-                "policy_name": policy.policy_name,
-                "role_ref": role.role_ref,
-                "reuse_policy": role.reuse_policy,
-                "activation_policy": role.activation_policy,
-                "collaboration_source": role.collaboration_source,
-                "collaboration_target": role.collaboration_target,
+                "policy": policy.policy_name,
+                "operation": "run.start",
             }),
         ));
     }
@@ -1198,9 +1197,12 @@ mod tests {
             let mut policy = base.clone();
             mutate(&mut policy);
             assert_eq!(validate_installed_policy(&policy), Ok(()));
+            let error = validate_live_provider_policy(&policy).unwrap_err();
+            assert_eq!(error.code, "POLICY_REJECTED");
+            assert!(!error.retryable);
             assert_eq!(
-                validate_live_provider_policy(&policy).unwrap_err().code,
-                "POLICY_REJECTED"
+                error.details,
+                serde_json::json!({"policy": "review-policy", "operation": "run.start"}),
             );
         }
     }
@@ -1216,9 +1218,12 @@ mod tests {
             role("reviewer", "Inspect the bounded target."),
         );
         assert_eq!(fixture.registry.install(policy.clone()).unwrap(), policy);
+        let error = fixture.registry.install(policy.clone()).unwrap_err();
+        assert_eq!(error.code, "POLICY_REJECTED");
+        assert!(!error.retryable);
         assert_eq!(
-            fixture.registry.install(policy.clone()).unwrap_err().code,
-            "POLICY_REJECTED"
+            error.details,
+            serde_json::json!({"policy": "review-policy", "operation": "specialist.policy.add"}),
         );
         assert_eq!(fixture.registry.resolve("review-policy").unwrap(), policy);
     }

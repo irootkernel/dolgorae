@@ -354,6 +354,26 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if stat.S_IMODE(registry_path.stat().st_mode) != 0o600:
             raise AssertionError("profile registry mode is not 0600")
 
+        before_rejected_add = registry_path.read_bytes()
+        for selection in (["--profile", "selected"], ["--profile=selected"], ["--profile"]):
+            rejected_selection = run(
+                binary, home, "profile", "add", "selected",
+                *add_arguments(codex_home, fake), *selection,
+            )
+            rejected_envelope = envelope(rejected_selection)
+            if (
+                rejected_selection.returncode != 3
+                or rejected_envelope["error"]["code"] != "PROFILE_CONFIG_INVALID"
+            ):
+                raise AssertionError(
+                    f"native Codex Profile selection was accepted: {rejected_selection.stdout}"
+                )
+            assert_valid(rejected_envelope, machine, "native-config-profile rejection envelope")
+            if registry_path.read_bytes() != before_rejected_add:
+                raise AssertionError("rejected native Codex Profile selection changed the registry")
+        if (home / ".dolgorae" / "profiles").exists():
+            raise AssertionError("rejected native Codex Profile selection created a server home")
+
         # `profile show` never executes the profile, so its closed capability
         # snapshot must always be the explicit-unverified baseline: present,
         # complete, and never fabricated as supported.

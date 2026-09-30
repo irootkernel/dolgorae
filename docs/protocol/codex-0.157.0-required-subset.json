@@ -50,13 +50,13 @@
     "mode": "dolgorae_owned_direct_executable",
     "unix_socket_rendezvous": "deterministic_symlink_to_private_physical_socket",
     "global_arguments": {
-      "value_flags": ["--profile", "--enable", "--disable"],
+      "value_flags": ["--enable", "--disable"],
       "flag_only": ["--strict-config"],
       "aliases_allowed": false,
       "equals_form_allowed": false,
       "preserve_occurrence_order": true
     },
-    "configuration_inputs": ["$CODEX_HOME/config.toml", "$CODEX_HOME/<selected-profile>.config.toml"],
+    "configuration_inputs": ["$CODEX_HOME/config.toml"],
     "configuration_policy": {
       "raw_file_digest_in_server_key": false,
       "closed_classification": ["process_static", "operator_migratable", "runtime_mutable", "ignored"],

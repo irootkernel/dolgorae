@@ -2550,7 +2550,7 @@ fn observe_snapshot(
         sanitized_environment.insert("CODEX_HOME".to_owned(), canonical_codex_home.clone());
         let enabled_features = vec!["multi_agent".to_owned()];
         let disabled_features = Vec::new();
-        let configuration = configuration_snapshot(name, profile, &canonical_codex_home)?;
+        let configuration = configuration_snapshot(name, &canonical_codex_home)?;
         let process_static_configuration = configuration.launch;
         let initial_configuration_observation = configuration.observation;
         let launch_contract = json!({
@@ -2843,7 +2843,6 @@ fn normalize_observed_models(
 
 fn configuration_snapshot(
     profile_name: &str,
-    profile: &RuntimeProfile,
     canonical_codex_home: &str,
 ) -> Result<ConfigurationSnapshot, MachineError> {
     let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
@@ -2891,24 +2890,7 @@ fn configuration_snapshot(
         }
     }
     let home = Path::new(canonical_codex_home);
-    let mut effective = read_toml_table_if_present(profile_name, &home.join("config.toml"))?;
-    let selected = selected_codex_profile(&profile.argv);
-    if let Some(selected) = selected {
-        if let Some(profiles) = effective.remove("profiles")
-            && let Some(table) = profiles
-                .as_table()
-                .and_then(|profiles| profiles.get(selected))
-                .and_then(toml::Value::as_table)
-        {
-            for (key, value) in table {
-                effective.insert(key.clone(), value.clone());
-            }
-        }
-        let selected_path = home.join(format!("{selected}.config.toml"));
-        for (key, value) in read_toml_table_if_present(profile_name, &selected_path)? {
-            effective.insert(key, value);
-        }
-    }
+    let effective = read_toml_table_if_present(profile_name, &home.join("config.toml"))?;
     for name in effective.keys() {
         if name.contains("include") || !classification.contains_key(name) {
             return Err(compatibility(
@@ -2984,12 +2966,6 @@ fn read_toml_table_if_present(
             format!("configuration input is invalid: {}", path.display()),
         )
     })
-}
-
-fn selected_codex_profile(argv: &[String]) -> Option<&str> {
-    argv.windows(2)
-        .find(|pair| pair[0] == "--profile")
-        .map(|pair| pair[1].as_str())
 }
 
 fn toml_to_json(value: &toml::Value) -> Result<Value, MachineError> {
@@ -6853,7 +6829,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-        let snapshot = configuration_snapshot("default", &profile, &profile.codex_home).unwrap();
+        let snapshot = configuration_snapshot("default", &profile.codex_home).unwrap();
         assert_eq!(snapshot.launch["model"], "gpt-5");
         assert_eq!(snapshot.launch["approvals_reviewer"], "user");
         assert_eq!(
@@ -6879,7 +6855,7 @@ mod tests {
         ] {
             fs::write(&config, unsupported).unwrap();
             assert_eq!(
-                configuration_snapshot("default", &profile, &profile.codex_home)
+                configuration_snapshot("default", &profile.codex_home)
                     .unwrap_err()
                     .code,
                 "COMPATIBILITY_REJECTED"

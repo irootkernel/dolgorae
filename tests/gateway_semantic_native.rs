@@ -328,6 +328,28 @@ async fn broker_approval_provisions_and_dispatches_through_production_effects() 
                         "return_when":"all","transport_wait_seconds":10
                     }
                 }},
+                {"kind":"request","id":54,"method":"item/tool/call","await_reply":true,"params":{
+                    "threadId":"${thread_id}","turnId":"${turn_id}","callId":"collect-member",
+                    "tool":"dolgorae_orchestration","arguments":{
+                        "operation":"collect_specialist_results","after_sequence":0,"limit":10
+                    }
+                }},
+                {"kind":"request","id":55,"method":"item/tool/call","await_reply":true,"params":{
+                    "threadId":"${thread_id}","turnId":"${turn_id}","callId":"reuse-published-context",
+                    "tool":"dolgorae_orchestration","arguments":{
+                        "operation":"assign_specialist_task","target":{"run_id":"${specialist_run_id}"},
+                        "objective":"Use the immutable previous result.",
+                        "context_refs":["${specialist_result_artifact_id}"],
+                        "expected_output":["One result"],"execution_intent":"read_only",
+                        "blocking":true,"deadline_seconds":10
+                    }
+                }},
+                {"kind":"request","id":56,"method":"item/tool/call","await_reply":true,"params":{
+                    "threadId":"${thread_id}","turnId":"${turn_id}","callId":"collect-reused-context",
+                    "tool":"dolgorae_orchestration","arguments":{
+                        "operation":"collect_specialist_results","after_sequence":0,"limit":10
+                    }
+                }},
                 {"kind":"notification","method":"turn/completed","await_reply":true,"params":{
                     "threadId":"${thread_id}","turn":{
                         "id":"${turn_id}","status":"completed",
@@ -500,10 +522,46 @@ async fn broker_approval_provisions_and_dispatches_through_production_effects() 
         .unwrap()
         .collect_results(session_id, 0, 10)
         .unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.len(), 2);
     assert_eq!(results[0].state, "delivered");
+    assert_eq!(results[1].state, "delivered");
     assert!(results[0].result_artifact_ref.is_some());
     assert!(results[0].result_sha256.is_some());
+    let artifact_id = results[0].result_artifact_ref.unwrap();
+    let root_snapshot =
+        dolgorae::snapshot::RunSnapshot::load(&fixture.state_root, session_id, 0).unwrap();
+    assert_eq!(
+        dolgorae::artifact::metadata(
+            &fixture.state_root,
+            &root_snapshot,
+            &artifact_id.to_string(),
+            None
+        )
+        .unwrap_err()
+        .code,
+        "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER"
+    );
+    let accepted_json: String = rusqlite::Connection::open(
+        fixture
+            .state_root
+            .join("orchestration/orchestration.sqlite3"),
+    )
+    .unwrap()
+    .query_row(
+        "SELECT accepted_request_json FROM brokered_task_acceptances WHERE task_id=?1",
+        [results[1].task_id.to_string()],
+        |row| row.get(0),
+    )
+    .unwrap();
+    let accepted: Value = serde_json::from_str(&accepted_json).unwrap();
+    assert_eq!(
+        accepted["contexts"][0]["artifact_id"],
+        artifact_id.to_string()
+    );
+    assert_eq!(
+        accepted["contexts"][0]["sha256"],
+        results[0].result_sha256.clone().unwrap()
+    );
     let current = native_snapshot(&mut runs, &fixture, &session_id.to_string()).await;
     let closed = runs
         .close_run(pb::CloseRunRequest {
@@ -1254,6 +1312,277 @@ async fn root_close_requires_explicit_interrupt_before_committing_active_work() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_close_preserves_unknown_primary_until_matching_history_is_terminal() {
+    let mut scenario = active_turn_scenario(false);
+    let steps = scenario["steps"].as_array_mut().unwrap();
+    let interrupt = steps
+        .iter_mut()
+        .find(|step| step["method"] == "turn/interrupt")
+        .unwrap();
+    interrupt["emit"] = serde_json::json!([]);
+    let history = steps
+        .iter_mut()
+        .find(|step| step["method"] == "thread/read" && step.get("occurrence").is_none())
+        .unwrap();
+    history["occurrence"] = serde_json::json!(3);
+    steps.push(serde_json::json!({"method":"thread/read","occurrence":2,
+        "respond":{"result":{"thread":{"id":"thread-alpha","turns":[]}}}}));
+    let fixture = Fixture::with_scenario(scenario);
+    let controller = install_orchestration_controller(&fixture, "unknown-primary-close");
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let mut request = start_request(
+        &fixture,
+        "unknown-primary",
+        pb::ExecutionLane::SharedReadonly,
+    );
+    request.control_mode = pb::ControlMode::DirectInteractive as i32;
+    request.controller = Some(controller.clone());
+    let started = runs
+        .start_run(request)
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    let run = pb::RunRef {
+        workspace: Some(fixture.workspace()),
+        run_id: started.run_id.clone(),
+    };
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: Some(run.clone()),
+        controller: Some(controller.clone()),
+        idempotency_key: "one-original-primary-turn".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: "Await terminal evidence.".to_owned(),
+        images: Vec::new(),
+        effort: None,
+        expected_state_revision: started.state_revision,
+    })
+    .await
+    .unwrap();
+    let active = native_wait_lifecycle(
+        &mut runs,
+        &fixture,
+        &started.run_id,
+        pb::RunLifecycle::Running,
+    )
+    .await;
+    let refused = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            interrupt: true,
+            expected_state_revision: active.state_revision,
+        })
+        .await
+        .unwrap_err();
+    let operation_id = semantic_error(&refused, "OUTCOME_UNKNOWN")
+        .operation_id
+        .unwrap();
+    let unknown = native_snapshot(&mut runs, &fixture, &started.run_id).await;
+    assert_eq!(unknown.lifecycle, pb::RunLifecycle::OutcomeUnknown as i32);
+    assert!(
+        !audit(&fixture, &started.run_id)
+            .windows(b"\"terminal_seal\":true".len())
+            .any(|bytes| bytes == b"\"terminal_seal\":true")
+    );
+    gateway.terminate();
+
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let mut orchestration =
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel);
+    let pending = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: Some(controller.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(
+        pending.close_operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    assert_eq!(
+        pending.close_progress,
+        pb::SessionCloseProgress::OutcomeUnknown as i32
+    );
+    let refused = runs
+        .recover_run(pb::RecoverRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            expected_state_revision: unknown.state_revision,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        semantic_error(&refused, "OUTCOME_UNKNOWN").operation_id,
+        Some(operation_id.clone())
+    );
+    let still_unknown = native_snapshot(&mut runs, &fixture, &started.run_id).await;
+    assert_eq!(
+        still_unknown.lifecycle,
+        pb::RunLifecycle::OutcomeUnknown as i32
+    );
+    let closed = runs
+        .recover_run(pb::RecoverRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            expected_state_revision: still_unknown.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        closed.run.unwrap().lifecycle,
+        pb::RunLifecycle::Closed as i32
+    );
+    assert_eq!(
+        closed.context.unwrap().operation_id,
+        Some(operation_id.clone())
+    );
+    let completed = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run),
+            controller: Some(controller),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(completed.close_operation_id, Some(operation_id));
+    assert_eq!(
+        completed.close_progress,
+        pb::SessionCloseProgress::Aborted as i32
+    );
+    assert_eq!(transcript_methods(&fixture, "turn/start").len(), 1);
+    assert_eq!(transcript_methods(&fixture, "turn/interrupt").len(), 1);
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_close_cannot_clear_unknown_effect_by_pausing_primary() {
+    let mut scenario = active_turn_scenario(false);
+    scenario["steps"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|step| step["method"] == "turn/interrupt")
+        .unwrap()["emit"] = serde_json::json!([]);
+    let fixture = Fixture::with_scenario(scenario);
+    let controller = install_orchestration_controller(&fixture, "paused-unknown-primary");
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let mut request = start_request(
+        &fixture,
+        "paused-unknown",
+        pb::ExecutionLane::SharedReadonly,
+    );
+    request.control_mode = pb::ControlMode::DirectInteractive as i32;
+    request.controller = Some(controller.clone());
+    let started = runs
+        .start_run(request)
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    let run = pb::RunRef {
+        workspace: Some(fixture.workspace()),
+        run_id: started.run_id.clone(),
+    };
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: Some(run.clone()),
+        controller: Some(controller.clone()),
+        idempotency_key: "paused-original-turn".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: "Retain unresolved execution.".to_owned(),
+        images: Vec::new(),
+        effort: None,
+        expected_state_revision: started.state_revision,
+    })
+    .await
+    .unwrap();
+    let active = native_wait_lifecycle(
+        &mut runs,
+        &fixture,
+        &started.run_id,
+        pb::RunLifecycle::Running,
+    )
+    .await;
+    let paused = runs
+        .pause_run(pb::PauseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            interrupt: true,
+            expected_state_revision: active.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(paused.lifecycle, pb::RunLifecycle::Paused as i32);
+    let refused = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            interrupt: true,
+            expected_state_revision: paused.state_revision,
+        })
+        .await
+        .unwrap_err();
+    let operation_id = semantic_error(&refused, "OUTCOME_UNKNOWN")
+        .operation_id
+        .unwrap();
+    assert_eq!(
+        native_snapshot(&mut runs, &fixture, &started.run_id)
+            .await
+            .lifecycle,
+        pb::RunLifecycle::Paused as i32
+    );
+    gateway.terminate();
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let current = native_snapshot(&mut runs, &fixture, &started.run_id).await;
+    let recovered = runs
+        .reconcile_run(pb::ReconcileRunRequest {
+            context: context(),
+            run: Some(run),
+            controller: Some(controller),
+            expected_state_revision: current.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(recovered.context.unwrap().operation_id, Some(operation_id));
+    assert_eq!(
+        recovered.run.unwrap().lifecycle,
+        pb::RunLifecycle::Closed as i32
+    );
+    assert_eq!(transcript_methods(&fixture, "turn/start").len(), 1);
+    assert_eq!(transcript_methods(&fixture, "turn/interrupt").len(), 1);
+    assert_eq!(transcript_methods(&fixture, "thread/read").len(), 2);
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_orchestrated_session_observation_survives_gateway_restart_without_mutation() {
     let fixture = Fixture::new("run_start_model_list.json");
     let roles = fixture.workspace.join(".dolgorae/roles");
@@ -1885,16 +2214,31 @@ async fn native_concurrent_identical_admission() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_resume_accepts_next_turn() {
+async fn closed_run_rejects_fresh_submission_without_changing_the_terminal_history() {
     let fixture = Fixture::new("run_start_model_list.json");
-    let id = fixture.start_run(&[]);
+    let id = fixture.start_run(&["--execution-lane", "shared-readonly"]);
     let mut gateway = fixture.start_gateway();
     let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
     let initial = native_snapshot(&mut runs, &fixture, &id).await;
-    native_submit(&mut runs, &fixture, &initial, pb::WriteIntent::Read).await;
+    let mut accepted_request = pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        message: "Retain the accepted request after close.".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        idempotency_key: "accepted-before-close".to_owned(),
+        expected_state_revision: initial.state_revision,
+        images: Vec::new(),
+        effort: None,
+    };
+    let accepted = runs
+        .submit_turn(accepted_request.clone())
+        .await
+        .unwrap()
+        .into_inner();
     let idle = native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
-    let paused = runs
-        .pause_run(pb::PauseRunRequest {
+    let closed = runs
+        .close_run(pb::CloseRunRequest {
             context: context(),
             run: fixture.run_ref(&id),
             controller: fixture.carrier(),
@@ -1906,32 +2250,228 @@ async fn native_resume_accepts_next_turn() {
         .into_inner()
         .run
         .unwrap();
-    assert_eq!(paused.lifecycle, pb::RunLifecycle::Paused as i32);
-    let resumed = runs
-        .resume_run(pb::ResumeRunRequest {
+    let before = audit(&fixture, &id);
+    accepted_request.expected_state_revision = closed.state_revision;
+    let replay = runs
+        .submit_turn(accepted_request)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(replay, accepted);
+    assert_eq!(audit(&fixture, &id), before);
+    let error = runs
+        .submit_turn(pb::SubmitTurnRequest {
             context: context(),
             run: fixture.run_ref(&id),
             controller: fixture.carrier(),
-            expected_state_revision: paused.state_revision,
+            message: "Fresh post-close request".to_owned(),
+            write_intent: pb::WriteIntent::Read as i32,
+            idempotency_key: "post-close-new".to_owned(),
+            expected_state_revision: closed.state_revision,
+            images: Vec::new(),
+            effort: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.message(), "RUN_STATE_CONFLICT");
+    assert_eq!(audit(&fixture, &id), before);
+    gateway.terminate();
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    for interrupt in [false, true] {
+        let repeated = runs
+            .close_run(pb::CloseRunRequest {
+                context: context(),
+                run: fixture.run_ref(&id),
+                controller: fixture.carrier(),
+                interrupt,
+                expected_state_revision: closed.state_revision,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .run
+            .unwrap();
+        assert_eq!(repeated.lifecycle, pb::RunLifecycle::Closed as i32);
+        assert_eq!(audit(&fixture, &id), before);
+    }
+    semantic_error(
+        &runs
+            .close_run(pb::CloseRunRequest {
+                context: context(),
+                run: fixture.run_ref(&id),
+                controller: fixture.carrier(),
+                interrupt: false,
+                expected_state_revision: closed.state_revision - 1,
+            })
+            .await
+            .unwrap_err(),
+        "RUN_STATE_CONFLICT",
+    );
+    assert_eq!(audit(&fixture, &id), before);
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_resume_accepts_next_turn() {
+    for lane in ["dedicated", "shared-readonly"] {
+        let fixture = Fixture::new("run_start_model_list.json");
+        let id = fixture.start_run(&["--execution-lane", lane]);
+        let mut gateway = fixture.start_gateway();
+        let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+        let initial = native_snapshot(&mut runs, &fixture, &id).await;
+        native_submit(&mut runs, &fixture, &initial, pb::WriteIntent::Read).await;
+        let idle = native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+        let paused = runs
+            .pause_run(pb::PauseRunRequest {
+                context: context(),
+                run: fixture.run_ref(&id),
+                controller: fixture.carrier(),
+                interrupt: false,
+                expected_state_revision: idle.state_revision,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .run
+            .unwrap();
+        assert_eq!(paused.lifecycle, pb::RunLifecycle::Paused as i32);
+        let resumed = runs
+            .resume_run(pb::ResumeRunRequest {
+                context: context(),
+                run: fixture.run_ref(&id),
+                controller: fixture.carrier(),
+                expected_state_revision: paused.state_revision,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .run
+            .unwrap();
+        assert_eq!(resumed.lifecycle, pb::RunLifecycle::Idle as i32);
+        assert!(resumed.state_revision > paused.state_revision);
+        assert!(resumed.active_turn.is_none());
+        let resumed_thread = resumed.thread.as_ref().unwrap();
+        let paused_thread = paused.thread.as_ref().unwrap();
+        assert_eq!(resumed_thread.thread_id, paused_thread.thread_id);
+        assert!(resumed_thread.thread_generation > paused_thread.thread_generation);
+        if lane == "dedicated" {
+            assert!(resumed_thread.server_epoch > paused_thread.server_epoch);
+        } else {
+            assert_eq!(resumed_thread.server_epoch, paused_thread.server_epoch);
+        }
+        let resumed_policy = resumed.effective_policy.as_ref().unwrap();
+        assert_eq!(resumed_policy.server_epoch, resumed_thread.server_epoch);
+        assert_eq!(
+            resumed_policy.thread_generation,
+            resumed_thread.thread_generation
+        );
+        assert!(
+            resumed_policy.policy_epoch > paused.effective_policy.as_ref().unwrap().policy_epoch
+        );
+        assert_eq!(resumed_policy.access, pb::EffectiveAccess::Unknown as i32);
+        assert_eq!(
+            resumed_policy.verification,
+            pb::PolicyVerification::Unverified as i32
+        );
+        assert_eq!(native_snapshot(&mut runs, &fixture, &id).await, resumed);
+        let listed = runs
+            .list_runs(pb::ListRunsRequest {
+                context: context(),
+                workspace: Some(fixture.workspace()),
+                controller_id: Some(fixture.controller_id.clone()),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].run_id, id);
+        assert_eq!(upstream_turn_starts(&fixture), 1, "resume submitted a Turn");
+        let accepted = native_submit(&mut runs, &fixture, &resumed, pb::WriteIntent::Read).await;
+        assert_eq!(
+            accepted.accepted_turn.unwrap().status,
+            pb::TurnStatus::Accepted as i32
+        );
+        native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+        assert_eq!(turn_starts(&fixture, &id), 2);
+        assert_eq!(upstream_turn_starts(&fixture), 2);
+        gateway.terminate();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_interrupt_preserves_a_closed_members_terminal_seal() {
+    use dolgorae::global_runtime::{
+        GlobalMembershipFacts, GlobalMembershipStore, MembershipDisposition,
+    };
+    use dolgorae::paths::DolgoraeHome;
+
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&[]);
+    let run_id = Uuid::parse_str(&id).unwrap();
+    let home = DolgoraeHome::from_canonical_home(fixture.home.clone()).unwrap();
+    let membership =
+        GlobalMembershipStore::new(&home, &fixture.profile, &fixture.server_key).unwrap();
+    let key = format!("{}:{run_id}", fixture.workspace_id);
+    let before = membership.load().unwrap().members[&key].clone();
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    let closed = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            interrupt: false,
+            expected_state_revision: initial.state_revision,
         })
         .await
         .unwrap()
         .into_inner()
         .run
         .unwrap();
-    assert_eq!(resumed.lifecycle, pb::RunLifecycle::Idle as i32);
-    assert!(resumed.state_revision > paused.state_revision);
-    assert!(resumed.active_turn.is_none());
-    assert_eq!(upstream_turn_starts(&fixture), 1, "resume submitted a Turn");
-    let accepted = native_submit(&mut runs, &fixture, &resumed, pb::WriteIntent::Read).await;
+    assert_eq!(closed.lifecycle, pb::RunLifecycle::Closed as i32);
     assert_eq!(
-        accepted.accepted_turn.unwrap().status,
-        pb::TurnStatus::Accepted as i32
+        membership.load().unwrap().members[&key].disposition,
+        MembershipDisposition::Released
     );
-    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
-    assert_eq!(turn_starts(&fixture, &id), 2);
-    assert_eq!(upstream_turn_starts(&fixture), 2);
+    let sealed_audit = audit(&fixture, &id);
+
+    // Recreate the stale attachment retained by older external release paths.
+    membership
+        .record_observed(
+            &fixture.workspace_id,
+            run_id,
+            MembershipDisposition::Active,
+            GlobalMembershipFacts {
+                controller_id: before.controller_id,
+                worker_generation: before.worker_generation,
+                thread_id: before.thread_id,
+                connection_id: before.connection_id,
+                lifecycle: before.lifecycle,
+                writer: before.writer,
+                observed_epoch: before.observed_epoch,
+                runtime_locator: before.runtime_locator,
+            },
+        )
+        .unwrap();
     gateway.terminate();
+    fixture.cli(&[
+        "profile",
+        "server",
+        "stop",
+        &fixture.profile,
+        "--confirm-server-key",
+        &fixture.server_key,
+        "--interrupt",
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+    ]);
+    assert_eq!(audit(&fixture, &id), sealed_audit);
+    assert_eq!(
+        membership.load().unwrap().members[&key].disposition,
+        MembershipDisposition::Released
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

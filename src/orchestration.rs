@@ -905,19 +905,43 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                 deadline_seconds,
             } => {
                 let run_id = self.store.resolve_target(context.session_id, &target)?;
-                let task = self.store.assign_task(
-                    context,
-                    &AssignSpecialistTask {
-                        specialist_run_id: run_id,
-                        objective,
-                        context_refs,
-                        expected_output,
-                        requested_access: execution_intent,
-                        deadline_seconds,
-                    },
-                    self.adapter,
-                )?;
-                if blocking {
+                let request = AssignSpecialistTask {
+                    specialist_run_id: run_id,
+                    objective,
+                    context_refs,
+                    expected_output,
+                    requested_access: execution_intent,
+                    deadline_seconds,
+                };
+                let accepted_before = self
+                    .store
+                    .task_by_key(context.session_id, &context.idempotency_key)?
+                    .is_some();
+                let task = match self.store.assign_task(context, &request, self.adapter) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        let Some(task) = self
+                            .store
+                            .task_by_key(context.session_id, &context.idempotency_key)?
+                        else {
+                            return Err(error);
+                        };
+                        if !matches!(task.state.as_str(), "failed" | "interrupted_unknown")
+                            || error.details.get("task_id")
+                                != Some(&serde_json::json!(task.task_id))
+                        {
+                            return Err(error);
+                        }
+                        if self.store.task_request_digest(task.task_id)? != digest_value(&request)?
+                        {
+                            return Err(error);
+                        }
+                        self.store.accepted_task(task.task_id)?;
+                        task
+                    }
+                };
+                if blocking && !accepted_before {
+                    // Waiting observes execution; it cannot replace durable acceptance.
                     self.store
                         .wait_assignment(context.session_id, task.task_id, self.adapter)?;
                 }
@@ -1040,6 +1064,50 @@ impl ToolRequest {
                 | Self::CancelSpecialistTask { .. }
         )
     }
+}
+
+/// Fresh Primary Turn admission observes aggregate closure before native work.
+/// Accepted response-loss retries must be resolved before calling this fence.
+pub(crate) fn ensure_primary_turn_admission(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let manifest =
+        crate::run::RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    ensure_primary_turn_admission_for_binding(
+        state_root,
+        run_id,
+        manifest.aggregate_binding.as_ref(),
+    )
+}
+
+fn ensure_primary_turn_admission_for_binding(
+    state_root: &Path,
+    run_id: Uuid,
+    binding: Option<&AggregateBinding>,
+) -> Result<(), MachineError> {
+    let Some(binding) = binding.filter(|binding| {
+        binding.aggregate_kind == crate::domain::AggregateKind::OrchestratedSession
+            && binding.member_kind == AggregateMemberKind::Primary
+            && binding.aggregate_id == run_id
+    }) else {
+        return Ok(());
+    };
+    if let Some(close) =
+        OrchestrationStore::open_observer(state_root)?.session_close(binding.aggregate_id)?
+    {
+        return Err(MachineError::new(
+            "SESSION_CLOSE_IN_PROGRESS",
+            "whole-session close intent prevents new Primary Turns",
+            false,
+            serde_json::json!({
+                "run_id":run_id,
+                "operation_id":close.operation_id,
+                "required_action":"refresh_snapshot"
+            }),
+        ));
+    }
+    Ok(())
 }
 
 pub struct OrchestrationStore {
@@ -7196,6 +7264,65 @@ mod tests {
     }
 
     #[test]
+    fn primary_turn_admission_observes_retained_close_intent_without_writes() {
+        let root = root();
+        let (mut store, session) = active_session(&root, "fully_delegated");
+        let binding = AggregateBinding {
+            aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+            aggregate_id: session.session_id,
+            operation_id: session.bootstrap_operation_id,
+            member_kind: AggregateMemberKind::Primary,
+            policy_sha256: None,
+            role_reference: None,
+            role_snapshot_sha256: None,
+            agent_configuration_sha256: None,
+        };
+        ensure_primary_turn_admission_for_binding(&root, session.root_run_id, Some(&binding))
+            .unwrap();
+        let close = store
+            .begin_session_close(session.session_id, false, 7)
+            .unwrap()
+            .0
+            .unwrap();
+        let revision = store.session(session.session_id).unwrap().revision;
+        drop(store);
+        for _ in 0..2 {
+            let error = ensure_primary_turn_admission_for_binding(
+                &root,
+                session.root_run_id,
+                Some(&binding),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "SESSION_CLOSE_IN_PROGRESS");
+            assert!(!error.retryable);
+            assert_eq!(
+                error.details,
+                serde_json::json!({
+                    "run_id":session.root_run_id,
+                    "operation_id":close.operation_id,
+                    "required_action":"refresh_snapshot"
+                })
+            );
+        }
+        ensure_primary_turn_admission_for_binding(&root, new_uuid_v7(), None).unwrap();
+        let mut child_binding = binding;
+        child_binding.member_kind = AggregateMemberKind::Specialist;
+        ensure_primary_turn_admission_for_binding(&root, new_uuid_v7(), Some(&child_binding))
+            .unwrap();
+        let observer = OrchestrationStore::open_observer(&root).unwrap();
+        assert_eq!(
+            observer.session(session.session_id).unwrap().revision,
+            revision
+        );
+        assert_eq!(
+            observer.session_close(session.session_id).unwrap().unwrap(),
+            close
+        );
+        drop(observer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn durable_close_intent_blocks_admission_replays_and_survives_reopen() {
         let root = root();
         let (mut store, session) = active_session(&root, "fully_delegated");
@@ -8482,6 +8609,149 @@ mod tests {
                 assert_eq!(adapter.calls, effects);
                 std::fs::remove_dir_all(root).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn live_assignment_preserves_acceptance_after_rejected_or_unknown_dispatch() {
+        for blocking in [false, true] {
+            for failure in [
+                AdapterFailure::Rejected("QA_FAILURE".to_owned()),
+                AdapterFailure::Unknown,
+            ] {
+                let root = root();
+                let (mut store, session) = active_session(&root, "fully_delegated");
+                let mut adapter = FakeAdapter::default();
+                let child = store
+                    .request_specialist(
+                        &context(session.session_id, "member"),
+                        &request("read_only"),
+                        &mut adapter,
+                    )
+                    .unwrap()
+                    .specialist_run_id
+                    .unwrap();
+                adapter.dispatch = Err(failure.clone());
+                let call = context(session.session_id, "assignment");
+                let payload = serde_json::json!({
+                    "operation":"assign_specialist_task", "target":{"run_id":child},
+                    "objective":"Retain the accepted assignment.", "context_refs":[],
+                    "expected_output":["Result"], "execution_intent":"read_only",
+                    "blocking":blocking, "deadline_seconds":60,
+                });
+                // Execution without recording the tool response models its lost publication.
+                let receipt = PrimaryOrchestrationService {
+                    store: &mut store,
+                    adapter: &mut adapter,
+                }
+                .execute(&call, serde_json::from_value(payload.clone()).unwrap())
+                .unwrap();
+                assert_eq!(receipt["state"], "accepted");
+                let task_id: Uuid = serde_json::from_value(receipt["task_id"].clone()).unwrap();
+                assert_eq!(
+                    store.task(task_id).unwrap().state,
+                    match failure {
+                        AdapterFailure::Rejected(_) => "failed",
+                        AdapterFailure::Unknown => "interrupted_unknown",
+                    }
+                );
+                let calls = adapter.calls.clone();
+                drop(store);
+                let mut store = OrchestrationStore::open(&root).unwrap();
+                let mut service = PrimaryOrchestrationService {
+                    store: &mut store,
+                    adapter: &mut adapter,
+                };
+                assert_eq!(
+                    service.dispatch_live_bridge(&call, &payload).unwrap(),
+                    receipt
+                );
+                assert_eq!(
+                    service.dispatch_live_bridge(&call, &payload).unwrap(),
+                    receipt
+                );
+                let mut changed = payload.clone();
+                changed["objective"] = serde_json::json!("Changed request");
+                assert_eq!(
+                    service
+                        .dispatch_live_bridge(&call, &changed)
+                        .unwrap_err()
+                        .code,
+                    "IDEMPOTENCY_CONFLICT"
+                );
+                assert_eq!(adapter.calls, calls);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn live_assignment_preserves_post_acceptance_integrity_failures() {
+        struct CorruptCarrier(std::path::PathBuf);
+        impl OrchestrationFaultInjector for CorruptCarrier {
+            fn check(&self, barrier: OrchestrationBarrier) -> Result<(), MachineError> {
+                if barrier == OrchestrationBarrier::AfterTaskDispatch {
+                    std::fs::write(&self.0, b"{}").map_err(internal)?;
+                }
+                Ok(())
+            }
+        }
+        for blocking in [false, true] {
+            let root = root();
+            let (store, session, child) = active_member(&root);
+            let carrier = store.credential_root.join(format!("{child}.json"));
+            drop(store);
+            let mut store = if blocking {
+                OrchestrationStore::open_with_faults(
+                    &root,
+                    Arc::new(CorruptCarrier(carrier.clone())),
+                )
+                .unwrap()
+            } else {
+                std::fs::write(&carrier, b"{}").unwrap();
+                OrchestrationStore::open(&root).unwrap()
+            };
+            let mut adapter = FakeAdapter {
+                dispatch: Ok(TaskDispatch::Accepted {
+                    turn_id: "accepted-turn".to_owned(),
+                }),
+                ..FakeAdapter::default()
+            };
+            let call = context(session.session_id, "integrity-failure");
+            let payload = serde_json::json!({
+                "operation":"assign_specialist_task", "target":{"run_id":child},
+                "objective":"Preserve checked storage failure.", "context_refs":[],
+                "expected_output":["Result"], "execution_intent":"read_only",
+                "blocking":blocking, "deadline_seconds":60,
+            });
+            let error = PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            }
+            .dispatch_live_bridge(&call, &payload)
+            .unwrap_err();
+            assert_eq!(error.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED");
+            let task = store
+                .task_by_key(session.session_id, &call.idempotency_key)
+                .unwrap()
+                .unwrap();
+            store.accepted_task(task.task_id).unwrap();
+            assert_eq!(task.state, if blocking { "running" } else { "accepted" });
+            assert!(
+                store
+                    .tool_result(&call, &digest_value(&payload).unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                adapter
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("dispatch:"))
+                    .count(),
+                usize::from(blocking)
+            );
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 

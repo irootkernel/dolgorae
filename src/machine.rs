@@ -240,6 +240,7 @@ pub fn exit_status_for(code: &str) -> u8 {
         | "COMPATIBILITY_REJECTED"
         | "DOLGORAE_PROTOCOL_MISMATCH"
         | "LEGACY_STATE_UNSUPPORTED"
+        | "RUN_MANIFEST_INVALID"
         | "PROTOCOL_VERSION_UNSUPPORTED"
         | "UNSUPPORTED_SCHEMA_VERSION"
         | "SAME_HOME_MULTI_SERVER_UNSAFE" => 5,

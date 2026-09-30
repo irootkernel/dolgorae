@@ -88,6 +88,9 @@
                   "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/data"
                 },
                 {
+                  "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
+                },
+                {
                   "$ref": "#/$defs/global_membership_verification"
                 },
                 {
