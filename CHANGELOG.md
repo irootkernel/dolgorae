@@ -9,94 +9,56 @@ development commits.
 
 ### Added
 
-- Add an isolated v3 response-loss scenario and credential-free live-admission
-  check to the default E2E gate, plus a separately opted-in Codex 0.157.1 live
-  independent-review campaign.
-
-- Package the review skill's checked schemas and examples for independent installation,
-  with guidance for native waits, interrupted clients, and authorized recovery.
-
-- Add caller-retained one-shot review references, read-only inspection and authorized
-  recovery after CLI loss, with guarded retirement of explicitly owned temporary servers.
-
-- Add a generated-client provider conformance campaign for the frozen 27-method
-  public profile, with production-gateway deterministic coverage and verified
-  pinned-live Codex Primary/Specialist execution in both approval modes. The
-  campaign includes public result discovery, digest-checked bounded reads, and
-  canonical provider operations guidance.
-- Preserve executable compatibility for the frozen TASK-053 and pre-extension
-  generated Go consumers, with immutable descriptor baselines, exact schema
-  digest checks, and real-gateway regression coverage across restart and
-  whole-session closure.
-- Make root `CloseRun` retire a complete Orchestrated Session through one
-  durable close operation, with admission fencing, owned-Specialist settlement,
-  restart recovery, explicit in-progress correlation, and fail-closed unknown
-  outcomes while preserving ordinary low-level Run controls.
-- Expose Controller-authorized Orchestrated Session snapshots and stable
-  published Specialist results through the public gateway, with independent
-  aggregate revisions, read-only captured-head paging, explicit Primary-owned
-  artifact references, and retained discovery after private collection and
-  gateway restart.
-- Expose the complete Controller-authorized Run timeline through Machine CLI
-  and gRPC, preserving accepted UTF-8 prompts, safe image metadata, bounded
-  paging, long-input artifacts, interaction history, terminal outcomes, and
-  exact replay without admitting Specialist prompts as human history.
-- Publish completed brokered Specialist output as verified immutable
-  Primary-owned bytes with recoverable artifact association, exact redelivery,
-  and bounded UTF-8 `read_specialist_result` pages without exposing child
-  Controller authority.
-- Add bounded `any`/`all` operation and task waits, acceptance-anchored blocking
-  budgets and execution deadlines, and fail-closed Specialist cancellation that
-  requires terminal Turn proof instead of treating an interrupt acknowledgement
-  as a known outcome.
-- Connect accepted brokered tasks to actual Specialist Turn submission with
-  immutable readable artifact context, durable deadline origin and Turn
-  identity, exact acceptance replay, busy rejection, and fail-closed writer and
-  ambiguous-dispatch boundaries.
-- Connect policy-admitted Specialist requests to preallocated managed-agent
-  Runs, Workers, and eager threads, with durable Controller approval routing,
-  exact replay, deterministic idle reuse, and known/unknown publication recovery.
-- Add the Run-scoped `dolgorae_orchestration` Primary tool bridge with trusted
-  Run/Turn/call binding, durable replay, generation fencing, and pinned Codex 0.153.4 live acceptance.
-- Freeze the checked `dolgorae.gul-consumer/v1` wire contract with two
-  Controller-authorized orchestration queries, a 27-method required profile,
-  whole-session close correlation, generated clients, and immutable fixtures.
-- Select native Codex `item/tool/call` as the private live Primary transport on the TASK-025 isolated-home campaign pin (locally installed Codex CLI 0.155.1; the product compatibility baseline remains 0.153.4). Freeze assignment receipts and `blocking` waits, lossless UTF-8 `read_specialist_result` pages, and the internal live-Primary boundaries for submission versus completion, Worker/Broker routing, business-rejection replay, and layered authorization.
-- Add verified orphan inspection and cleanup for detached Dolgorae processes, including disposable E2E owners.
-- Add task-aware Specialist Review v3 for one-shot and reusable assignments,
-  with exact accepted briefs, inline contexts, ordered completion criteria, and criterion-complete structured results.
-- Add a same-user Unix socket gateway with bounded event subscriptions and the
-  27-method v0.1.3 provider profile.
-- Shared Run, Controller, Writer, interaction, and artifact observations for Machine CLI and gRPC,
-  with durable event revisions and immutable Turn acceptance replay across gateway and worker replacement.
-- Checked common and project Specialist Role sources, create-exclusive
-  Specialist Policy Registry operations, and immutable global-Profile v2 policy
-  snapshots.
-- Prepared Dolgorae-Orchestrated Session bootstrap and a durable Brokered
-  Hierarchy core with approval-aware Specialist provisioning, broker-owned
-  Controller capabilities, accepted task/result delivery, writer sequencing,
-  recovery, and a transport-independent Primary tool dispatcher.
+- Serve the 27-method public-v1 provider API over a protected same-user Unix socket,
+  with bounded subscriptions and durable Machine CLI/gRPC observations.
+- Add immutable Specialist Roles and policy snapshots, create-exclusive policy
+  installation, and atomic Orchestrated Session bootstrap.
+- Connect trusted Run-bound Primary calls to managed Specialist provisioning,
+  durable approval routing, generation fencing, and deterministic idle reuse.
+- Dispatch accepted Specialist tasks with immutable artifact context, exact replay,
+  busy rejection, and fail-closed Writer and uncertain-dispatch boundaries.
+- Add acceptance-anchored deadlines, bounded `any`/`all` waits, and cancellation
+  that remains `interrupt_requested` until terminal Turn proof.
+- Publish verified Primary-owned Specialist results with exact redelivery and
+  bounded UTF-8 artifact pages without exposing child Controller authority.
+- Expose complete Controller-authorized Run timelines with accepted prompts,
+  safe image metadata, large-input artifacts, interactions, and exact replay.
+- Expose coherent Orchestrated Session snapshots and captured-head result
+  discovery that survives private collection and gateway restart.
+- Close complete Orchestrated Sessions through one durable operation, fencing new
+  work and preserving close correlation, restart recovery, and unknown outcomes.
+- Freeze `dolgorae.gul-consumer/v1` generated clients, descriptor baselines, and
+  schema digests while preserving pre-extension public-v1 consumers.
+- Add task-aware Specialist Review v3 with immutable accepted briefs, inline
+  context, ordered criteria, and criterion-complete results alongside legacy v1/v2.
+- Retain one-shot review references for read-only inspection and authorized cleanup
+  after CLI loss, retiring only explicitly owned temporary servers.
+- Package `use-dolgorae` with local checked schemas, examples, and operating
+  guidance; reinstall from v0.1.3 to update the optional skill.
+- Add identity-verified orphan inspection and cleanup for detached processes
+  owned by explicitly selected retired homes.
+- Provide opt-in compatibility, provider, and independent-review acceptance
+  campaigns alongside isolated default E2E coverage.
 
 ### Changed
 
-- Require Codex 0.158.0 or newer and pin its exact schema bundles. Report the
-  qualified minimum as `tested`; keep newer compatible versions `unverified`.
+- Require Codex 0.158.0 or newer for Profile runtimes and pin its schema bundles;
+  report the qualified minimum as `tested` and newer compatible versions as `unverified`.
+- Bind endpoint overrides to launch state, verify protected socket rendezvous,
+  guard Profile reset, and retain completed-only history-copying forks.
+- Honor explicit one-shot Profile model and reasoning effort without substitution;
+  omitted settings use `gpt-6-sol` and `high`.
+- Require public `CloseRun` for Orchestrated roots; Machine CLI `run close`
+  refuses them.
+- Keep accepted review results and safe structured-output diagnostics stable
+  across exact retry, restart, await, and collection.
+- Bound transient result-capture recovery by the durable task deadline and
+  restrict ledger fallback to quiescent restart recovery.
+- Require Go 1.26.6 and Buf 1.69.0 for repository validation alongside Rust 1.97.1
+  and the documented Python validation dependencies.
 
-- Report nonterminal Specialist cancellation as `interrupt_requested`.
-- Close Orchestrated Sessions with expired tasks.
-- Refuse Machine CLI `run close` for Orchestrated roots so public `CloseRun`
-  settles their owned work.
-- Bound transient Specialist result-capture recovery by the durable task
-  deadline, restrict ledger fallback to fail-closed quiescent restart recovery,
-  anchor one-shot v3 waits to durable acceptance, preserve legacy review failure
-  meanings, validate checked scoped-review failures and v3 await/collect task
-  results, bind terminal facade result construction to the accepted request
-  digest, classify corrupt accepted v3 tasks as integrity failures, and
-  preserve structured-output validation errors across exact retry.
-- Require Codex 0.157.1 or newer, bind endpoint overrides to launch state,
-  verify symlinked sockets, guard Profile reset, and retain completed-only forks.
-- Honor explicit Profile model and reasoning-effort settings for one-shot
-  Specialist Review, rejecting unavailable selections without substitution.
+- Update Aquarium Procedures with explicit review-route evidence and separate
+  implementation, commit, and publication approvals.
 
 ### Fixed
 
@@ -125,14 +87,12 @@ development commits.
   stale closed attachments.
 - Expire overdue accepted Specialist tasks before dispatch, preserving their
   acceptance across restart and avoiding Writer handoff or Turn submission.
-- Finish unpublished server cleanup after the child exits, including when its
+- Keep streaming ledger schedulers within their commit groups and wait for
+  publisher Writer locks to be released before reopening.
+- Finish unpublished server cleanup after its child exits, including when its
   process group disappears during the ownership census.
-
-- Wait for a streaming ledger's background publisher to release its writer lock
-  before the ledger can be reopened.
-
-- Deliver the complete v3 review output contract to one-shot and reusable Specialists, preserve safe failure diagnostics
-  across restart and collection, and default omitted one-shot settings to `gpt-6-sol` and `high`.
+- Reduce debug-build executable verification cost while preserving fresh
+  SHA-256 integrity checks.
 
 ## v0.1.2 - 2026-09-08
 

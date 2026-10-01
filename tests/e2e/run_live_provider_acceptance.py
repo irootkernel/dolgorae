@@ -293,15 +293,27 @@ def assert_primary_consumed_result(results: list[dict[str, Any]], minimum: int) 
     pages = [result for result in results if result.get("operation") == "read_specialist_result_result"]
     if not pages:
         raise RuntimeError("live Primary did not read the Specialist result")
-    pages.sort(key=lambda page: page["offset"])
+    unique_pages: dict[int, dict[str, Any]] = {}
+    for page in pages:
+        previous = unique_pages.get(page["offset"])
+        if previous is not None and previous != page:
+            raise RuntimeError("live Primary returned conflicting repeated result pages")
+        unique_pages[page["offset"]] = page
+    pages = sorted(unique_pages.values(), key=lambda page: page["offset"])
     expected_offset = 0
+    task_id = pages[0]["task_id"]
     length = pages[0]["length"]
     digest = pages[0]["sha256"]
     if length > MAXIMUM_RESULT_BYTES:
         raise RuntimeError("live Primary result exceeded the artifact bound")
     downloaded = bytearray()
     for page in pages:
-        if page["length"] != length or page["sha256"] != digest or page["offset"] != expected_offset:
+        if (
+            page["task_id"] != task_id
+            or page["length"] != length
+            or page["sha256"] != digest
+            or page["offset"] != expected_offset
+        ):
             raise RuntimeError("live Primary result pages are not one contiguous immutable result")
         content = page["content"].encode("utf-8")
         if len(content) > RESULT_PAGE_BYTES:

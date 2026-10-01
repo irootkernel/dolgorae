@@ -83,6 +83,7 @@ def main() -> int:
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     page = {
         "operation": "read_specialist_result_result",
+        "task_id": "fixture-task",
         "offset": 0,
         "length": len(content),
         "sha256": digest,
@@ -158,6 +159,36 @@ def main() -> int:
     )
     if accepted["pages"] != 2:
         raise AssertionError("valid above-bound result did not preserve both pages")
+    repeated = assert_primary_consumed_result(
+        [*operations, paged[0], dict(paged[0]), paged[1]], RESULT_PAGE_BYTES + 1
+    )
+    if repeated != accepted:
+        raise AssertionError("identical repeated page changed the verified result")
+    for conflicting in (
+        dict(paged[0], content="C" * RESULT_PAGE_BYTES),
+        dict(paged[0], length=len(paged_content) + 1),
+        dict(paged[0], sha256="0" * 64),
+        dict(paged[0], truncated=False),
+        dict(paged[0], task_id="other-task"),
+    ):
+        try:
+            assert_primary_consumed_result([*operations, *paged, conflicting], 1)
+        except RuntimeError as error:
+            if str(error) != "live Primary returned conflicting repeated result pages":
+                raise
+        else:
+            raise AssertionError("conflicting repeated page passed verification")
+    for invalid_pages in (
+        [paged[1]],
+        [paged[0], dict(paged[1], task_id="other-task")],
+    ):
+        try:
+            assert_primary_consumed_result([*operations, *invalid_pages], 1)
+        except RuntimeError as error:
+            if str(error) != "live Primary result pages are not one contiguous immutable result":
+                raise
+        else:
+            raise AssertionError("gapped or mixed-task result passed verification")
     try:
         client(
             Path(sys.executable),
