@@ -215,6 +215,75 @@ fn run_publication_is_exclusive_canonical_and_permission_safe() {
 }
 
 #[test]
+fn snapshot_preserves_audit_integrity_failure_for_committed_corruption() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    for path in [
+        state_root.clone(),
+        state_root.join("runs"),
+        state_root.join("runtime"),
+        state_root.join("runtime/locks"),
+    ] {
+        make_dir(&path);
+    }
+    let manifest = sample_manifest();
+    dolgorae::writer::WriterStore::initialize_layout(
+        &state_root,
+        &manifest.workspace_id,
+        dolgorae::darwin::DarwinSystem.current_uid(),
+    )
+    .unwrap();
+    let directory = RunStore::new(SystemWorkspacePlatform, &state_root)
+        .publish(&manifest)
+        .unwrap();
+    let record = AuditRecord::new(
+        1,
+        "2026-08-21T12:34:56.123456Z",
+        manifest.run_id,
+        0,
+        AuditKind::RunCreated,
+        parse("{}").unwrap(),
+        GENESIS_PREVIOUS_HASH,
+    )
+    .unwrap();
+    let valid = record.canonical_line().unwrap();
+    let mut projection = RunStateProjection::starting(manifest.run_id);
+    projection.ledger_head.sequence = 1;
+    projection.ledger_head.hash = record.hash().to_owned();
+    let state = directory.root.join("state.json");
+    fs::write(&state, serde_json::to_vec(&projection).unwrap()).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&directory.audit, &valid).unwrap();
+    dolgorae::snapshot::RunSnapshot::load(&state_root, manifest.run_id, 0).unwrap();
+    let original: Value = serde_json::from_slice(&valid).unwrap();
+    for field in ["structure", "sequence", "hash"] {
+        let mut corrupt = original.clone();
+        match field {
+            "structure" => corrupt.as_object_mut().unwrap().remove("kind"),
+            "sequence" => corrupt
+                .as_object_mut()
+                .unwrap()
+                .insert("sequence".to_owned(), 2.into()),
+            "hash" => corrupt
+                .as_object_mut()
+                .unwrap()
+                .insert("previous_hash".to_owned(), "invalid".into()),
+            _ => unreachable!(),
+        };
+        let mut bytes = serde_json::to_vec(&corrupt).unwrap();
+        bytes.push(b'\n');
+        fs::write(&directory.audit, bytes).unwrap();
+        let error =
+            dolgorae::snapshot::RunSnapshot::load(&state_root, manifest.run_id, 0).unwrap_err();
+        assert_eq!(error.code, "AUDIT_INTEGRITY_FAILURE", "{field}");
+        assert_eq!(dolgorae::machine::exit_status_for(&error.code), 8);
+        assert!(!error.retryable);
+    }
+    fs::write(&directory.audit, valid).unwrap();
+    dolgorae::snapshot::RunSnapshot::load(&state_root, manifest.run_id, 0).unwrap();
+}
+
+#[test]
 fn global_profile_manifest_v2_is_complete_and_recoverable_without_registry() {
     let tree = TestTree::new();
     let state_root = tree.path("state");

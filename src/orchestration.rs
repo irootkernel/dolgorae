@@ -679,7 +679,7 @@ pub enum SpecialistTaskObservation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 enum TargetSelector {
     Run { run_id: Uuid },
     Role { role_ref: String },
@@ -3634,13 +3634,18 @@ impl OrchestrationStore {
         offset: u64,
         limit: u32,
     ) -> Result<Value, MachineError> {
-        if limit == 0 || limit > 65_536 || self.task_session(task_id)? != session_id {
+        if limit == 0
+            || limit > 65_536
+            || self
+                .task_session(task_id)
+                .map_err(|_| specialist_result_unreadable(task_id, "result is unavailable"))?
+                != session_id
+        {
             return Err(specialist_result_unreadable(
                 task_id,
                 "result range is invalid",
             ));
         }
-        let publication = self.result_publication(task_id)?;
         let task = self.task(task_id)?;
         if !matches!(task.state.as_str(), "completed_not_delivered" | "delivered") {
             return Err(specialist_result_unreadable(
@@ -3648,6 +3653,9 @@ impl OrchestrationStore {
                 "result is not published",
             ));
         }
+        let publication = self
+            .result_publication(task_id)
+            .map_err(|_| specialist_result_unreadable(task_id, "result is not published"))?;
         let bytes = self.read_result_artifact(&publication)?;
         let offset = usize::try_from(offset)
             .map_err(|_| specialist_result_unreadable(task_id, "result offset is invalid"))?;
@@ -5769,6 +5777,7 @@ fn is_replayable_business_error(error: &MachineError) -> bool {
                 | "SPECIALIST_POLICY_DENIED"
                 | "SPECIALIST_REQUEST_DENIED"
                 | "SPECIALIST_TASK_NOT_FOUND"
+                | "SPECIALIST_RESULT_UNREADABLE"
                 | "SPECIALIST_WRITER_CONFLICT"
                 | "WRITER_BUSY"
                 | "LIVE_POLICY_UNSUPPORTED"
@@ -7192,6 +7201,157 @@ mod tests {
             assert_eq!(delivered[0].delivery_sequence, Some(1));
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn unreadable_result_calls_replay_after_publication_and_artifact_restoration() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "turn-result-replay".to_owned(),
+            }),
+            ..FakeAdapter::default()
+        };
+        let task = store
+            .assign_task(
+                &context(session.session_id, "result-replay-task"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let payload = serde_json::json!({
+            "operation":"read_specialist_result", "task_id":task.task_id,
+            "offset":0, "limit":64,
+        });
+        let early_context = context(session.session_id, "result-early-read");
+        let early_error = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&early_context, &payload)
+        .unwrap_err();
+        assert_eq!(early_error.code, "SPECIALIST_RESULT_UNREADABLE");
+        assert!(!early_error.retryable);
+        assert_eq!(
+            store
+                .read_specialist_result(session.session_id, new_uuid_v7(), 0, 64)
+                .unwrap_err()
+                .code,
+            "SPECIALIST_RESULT_UNREADABLE"
+        );
+        adapter.task_observation = Ok(SpecialistTaskObservation::Terminal {
+            status: "completed".to_owned(),
+            output: Some(CompletedTaskOutput {
+                value: Value::String("published".to_owned()),
+                bytes: b"published".to_vec(),
+                created_at: "2026-09-22T00:00:00.000000Z".to_owned(),
+            }),
+        });
+        let completed = store
+            .wait_tasks(session.session_id, &[task.task_id], "any", 1, &mut adapter)
+            .unwrap();
+        drop(store);
+        let mut store = OrchestrationStore::open(&root).unwrap();
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            }
+            .dispatch(&early_context, &payload)
+            .unwrap_err(),
+            early_error
+        );
+        assert_eq!(
+            store
+                .read_specialist_result(session.session_id, task.task_id, 0, 64)
+                .unwrap()["content"],
+            "published"
+        );
+        let artifact = completed[0].result_artifact_ref.unwrap();
+        let path = crate::run::run_root(&root, session.root_run_id)
+            .join("artifacts")
+            .join(format!("{artifact}.bin"));
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"corrupt").unwrap();
+        let corrupt_context = context(session.session_id, "result-corrupt-read");
+        let corrupt_error = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&corrupt_context, &payload)
+        .unwrap_err();
+        assert_eq!(corrupt_error.code, "SPECIALIST_RESULT_UNREADABLE");
+        assert!(!corrupt_error.retryable);
+        std::fs::write(&path, original).unwrap();
+        drop(store);
+        let mut store = OrchestrationStore::open(&root).unwrap();
+        let mut service = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        };
+        assert_eq!(
+            service.dispatch(&corrupt_context, &payload).unwrap_err(),
+            corrupt_error
+        );
+        assert_eq!(
+            service
+                .dispatch(
+                    &context(session.session_id, "result-restored-read"),
+                    &payload
+                )
+                .unwrap()["content"],
+            "published"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_target_rejects_extra_fields_before_reservation_or_dispatch() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter::default();
+        for (key, target) in [
+            (
+                "both",
+                serde_json::json!({"run_id":child,"role_ref":"missing"}),
+            ),
+            (
+                "run-extra",
+                serde_json::json!({"run_id":child,"extra":true}),
+            ),
+            (
+                "role-extra",
+                serde_json::json!({"role_ref":"reviewer","extra":true}),
+            ),
+        ] {
+            let calls = adapter.calls.len();
+            let error = PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            }
+            .dispatch(
+                &context(session.session_id, key),
+                &serde_json::json!({
+                    "operation":"assign_specialist_task", "target":target,
+                    "objective":"Read the evidence.", "context_refs":[],
+                    "expected_output":["Verdict"], "execution_intent":"read_only",
+                    "blocking":false, "deadline_seconds":60,
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT");
+            assert!(!error.retryable);
+            assert_eq!(adapter.calls.len(), calls);
+            assert!(store.session_tasks(session.session_id).unwrap().is_empty());
+        }
+        for target in [
+            serde_json::json!({"run_id":child}),
+            serde_json::json!({"role_ref":"reviewer"}),
+        ] {
+            assert!(serde_json::from_value::<TargetSelector>(target).is_ok());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

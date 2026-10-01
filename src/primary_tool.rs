@@ -126,6 +126,11 @@ impl PrimaryToolContract {
                 false,
                 "the requested Specialist result is not readable",
             ),
+            "LIVE_POLICY_UNSUPPORTED" => (
+                "LIVE_POLICY_UNSUPPORTED",
+                false,
+                "the Specialist Policy is not supported by the live provider",
+            ),
             "SPECIALIST_WRITER_CONFLICT" | "WRITER_BUSY" => (
                 "SPECIALIST_WRITER_CONFLICT",
                 false,
@@ -236,5 +241,21 @@ mod tests {
         assert_eq!(result["retryable"], false);
         assert!(result.get("details").is_none());
         assert!(!result.to_string().contains("private-result-canary"));
+    }
+
+    #[test]
+    fn unsupported_live_policy_error_preserves_nonretryable_contract() {
+        let error = MachineError::new(
+            "LIVE_POLICY_UNSUPPORTED",
+            "private-policy-canary",
+            false,
+            serde_json::json!({"policy_name":"private-policy-canary"}),
+        );
+        let result = PrimaryToolContract::load().unwrap().error_result(&error);
+        assert_eq!(result["operation"], "orchestration_error");
+        assert_eq!(result["code"], "LIVE_POLICY_UNSUPPORTED");
+        assert_eq!(result["retryable"], false);
+        assert!(result.get("details").is_none());
+        assert!(!result.to_string().contains("private-policy-canary"));
     }
 }

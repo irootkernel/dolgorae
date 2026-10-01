@@ -163,15 +163,8 @@ impl RunSnapshot {
             |sources| {
                 let head = sources.projection.ledger_head.sequence;
                 let ledger = (head != 0)
-                    .then(|| {
-                        ObservedLedger::open(
-                            &state_root.join("runs").join(run_id.to_string()),
-                            run_id,
-                            head,
-                        )
-                    })
-                    .transpose()
-                    .map_err(|error| internal_runtime(error.to_string()))?;
+                    .then(|| ObservedLedger::open_run(state_root, run_id, head))
+                    .transpose()?;
                 let revision = ledger
                     .as_ref()
                     .map_or(0, ObservedLedger::interaction_state_revision);
