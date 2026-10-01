@@ -94,14 +94,18 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 
 ### Commit Messages
 
+- Every developer-authored subject uses one header and a concise English imperative summary: `[FEAT]`, `[FIX]`, `[DEV]`, `[TEST]`, `[DOC]`, `[CI]`, `[REL]`, or `[INT]`.
+- Use `[FEAT]` for new user-facing capabilities, `[FIX]` for defects, and `[DEV]` for development tools, build configuration, dependencies, or internal integration. Use `[TEST]`, `[DOC]`, or `[CI]` for changes limited to that concern, and `[INT]` for internal contracts or refactoring.
+- Release metadata commits use exactly `[REL] Release v<version>`. Tool-generated commits retain their native subjects and provenance; never hand-author a `[SANHO]` synchronization commit.
+- End every developer-authored message with one trailer block containing exactly one `Aquarium-Workflow:`, `Aquarium-Epic:`, and `Aquarium-Task:`, in that order. Separate the block from the subject or optional body with one blank line; do not put blank lines between trailers.
+- `Aquarium-Workflow` records the responsible `aquarium:<canonical-skill-name>`. Preserve a verified original skill through later commits, including changes from documentation, development, or test setup. Child phases and reviews inherit an established parent's owner; independently approved workflows own their candidate. Use `aquarium:task-commit` only for a direct commit without an original Aquarium workflow, and `none` for work outside Aquarium.
+- Resolve a Task and its parent Epic from the accepted relationship and canonical roadmap, including a standing `EPIC-000` where applicable. Preserve native IDs, suffixes, and scope qualification. Epic-owned work uses `Aquarium-Task: none`; work without either owner uses `none` for both. Resolve unknown relationships instead of treating them as absent.
+- Put primary work IDs in these attributes rather than the subject or legacy `Task:` and `Task-Relationship:` aliases. Use `$lore-commits` for useful decision context on non-trivial changes; optional Lore trailers may repeat. Preserve required evidence, release-note, and tool provenance trailers.
+- Parse the prepared message and actual post-hook commit with `git interpret-trailers --parse`; verify all three attributes against the accepted candidate. Attribution never grants staging, commit, amend, push, or publication authority.
+
 - Do not run `git add`, `git commit`, or `git push` unless Master explicitly authorizes the specific operation. Commit authorization permits staging and committing only the approved files and never authorizes a push.
-- Every commit title starts with exactly one square-bracket header followed by a concise imperative summary.
-- Use the owning roadmap task ID, such as `[TASK-014] <summary>`, when one task owns the change.
-- Use the owning roadmap epic ID, such as `[EPIC-004] <summary>`, only when no task owns the epic-level change.
-- Use `[INT] <summary>` when no unambiguous roadmap task or epic owns the change. Do not invent an ID from branches, issues, or nearby documentation.
-- Use `[REL] Release v<version>` only for the release metadata commit that closes the matching changelog cycle after release QA passes.
-- When multiple roadmap items are related, use the primary owner in the title and record the others through useful Lore `Related:` trailers.
-- Use `$lore-commits` for non-trivial commit messages. Lore trailers remain optional for trivial changes, but the title header is always required.
+- Release metadata closes the matching changelog cycle only after release QA passes.
+- Use useful `Related:` trailers for secondary roadmap relationships; do not invent an owner from branches, issues, or nearby documentation.
 
 ### Project-Specific Operating Rules
 
