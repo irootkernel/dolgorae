@@ -89,7 +89,9 @@ roadmap identity, order, status, or dependencies.
 
 ## Adopted Epic dossiers
 
-No adopted Epic dossiers are currently awaiting closeout.
+- [Caller-Owned Workspaces and Explicit Agent Roles](TODO-caller-owned-workspaces-and-agent-roles.md)
+  (EPIC-017 execution dossier). Identity, delivery order, dependencies and
+  lifecycle remain in the [roadmap](../roadmap/README.md#epic-017-caller-owned-workspaces-and-explicit-agent-roles).
 
 The term adopted here does not imply that the roadmap state is `ACTIVE`.
 

@@ -26,6 +26,9 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
+`EPIC-017` and `TASK-061` through `TASK-066` are `PLANNED` after EPIC-016
+and before EPIC-009. They introduce caller-owned workspaces, explicit common
+and Markdown Role instructions, default writable starts, and copy-free review.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
 tool. The narrow external MCP adapter is included only when the pinned host
@@ -40,8 +43,9 @@ Dolgorae as Aquarium independent-review's Codex backend. After the `v0.1.0`
 Integration Preview, the implementation roadmap proceeds through access and
 recovery safety, external Specialist hardening, the global Codex Profile
 cutover, the supervised Gul Run gateway and Brokered Hierarchy core, live
-Primary control-plane integration, independent review readiness, the durable
-Collaboration Plane, operator and audit interfaces, and final conformance and
+Primary control-plane integration, independent review readiness, caller-owned
+workspaces and explicit Agent Roles, the durable Collaboration Plane, operator
+and audit interfaces, and final conformance and
 Personal Alpha acceptance.
 `TASK-025` remains the live run-bound transport probe and occurs only after the
 Brokered Hierarchy core, EPIC-014, and EPIC-015 are complete. The revised
@@ -73,11 +77,15 @@ Document roles and the required synchronization procedure are defined by the
 | `MILESTONE-ES1` | `EPIC-006` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
 | `MILESTONE-BH1-P` | `EPIC-008` | Dolgorae operates a live Primary and durable Brokered Hierarchy with the 27-method Gul consumer profile, complete prompt history and whole-session closure, independently verified without actual Gul. |
 | `MILESTONE-BH1` | [Deferred Gul acceptance](../todo/README.md#actual-gul-consumer-acceptance) | Actual Gul integration is verified against the provider; provider QA alone does not unlock this milestone. |
+| `MILESTONE-CW1` | `EPIC-017` | New Runs work in caller-selected workspaces with explicit Role instructions, read-only or writable access, and copy-free Specialist Review. |
 | `MILESTONE-BC1` | `EPIC-009` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
 | `MILESTONE-PA1` | `EPIC-011` | The complete Personal Alpha acceptance campaign passes. |
 
-Delivered provider capabilities are cumulative. An earlier capability remains
-usable while later Epics are implemented. `MILESTONE-BH1` is a separate consumer
+Delivered provider capabilities are cumulative except for explicitly adopted
+successor contracts. EPIC-017 retires new source captures and Dolgorae-created
+worktrees at its versioned cutover while retaining historical inspection and
+recovery. MILESTONE-IR1 records its delivered immutable-review boundary; CW1
+adds Git-object pinning and explicitly drift-sensitive mutable review. `MILESTONE-BH1` is a separate consumer
 acceptance branch: neither BH1-P nor later provider work implies actual Gul QA.
 A milestone does not waive its own Task completion gate or any safety limitation
 stated in its owning Epic.
@@ -90,8 +98,8 @@ stated in its owning Epic.
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
 | `v0.1.3` | Milestone Preview | `EPIC-008` and `EPIC-016` complete, including all twelve provider Tasks, all four independent review Tasks, and both Epic acceptance gates; preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` and `dolgorae.gul-consumer/v1` included; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
-| `v0.1.4` | Milestone Preview | `EPIC-009` complete on the verified provider boundary | v0.1.3 provider capabilities plus `MILESTONE-BC1`; no automatic Gul acceptance claim |
-| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013` and `EPIC-016` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
+| `v0.1.4` | Milestone Preview | `EPIC-017` and then `EPIC-009` complete on the verified provider boundary | v0.1.3 provider capabilities under the EPIC-017 successor contracts, plus `MILESTONE-CW1` and `MILESTONE-BC1`; no automatic Gul acceptance claim |
+| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013`, `EPIC-016`, and `EPIC-017` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
 readiness, the complete target specification, or customer support. Read-only
@@ -100,7 +108,8 @@ of v0.1.4 or v0.2.0. A completion boundary makes a version eligible for release;
 release, change the changelog, authorize a tag or publication, or prove an
 installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
-EPIC-016 is required for v0.1.3; EPIC-009 remains assigned to v0.1.4.
+EPIC-016 is required for v0.1.3; EPIC-017 precedes EPIC-009 in v0.1.4.
+This design does not change v0.1.3 eligibility or release metadata.
 The TASK-053 frozen conformance registry retains its original provider-only
 release metadata. This table owns current release eligibility, including
 EPIC-016 completion.
@@ -2106,6 +2115,131 @@ and one-shot recovery passed native E2E checks. Independent read-only review
 covered the closeout changes, and its one low-severity finding was resolved in
 follow-up. No stable release, installation, or external publication is claimed.
 
+## EPIC-017: Caller-Owned Workspaces and Explicit Agent Roles
+
+Status: `PLANNED`
+
+Detailed SOT: [execution dossier](../todo/TODO-caller-owned-workspaces-and-agent-roles.md)
+
+Goal: Make Dolgorae useful for ordinary work and Specialist Review in a
+caller-selected workspace, with explicit Role instructions and runtime writer
+coordination, without creating source snapshots or worktrees.
+
+Delivery order: after EPIC-016 and before EPIC-009. Assigned release: v0.1.4.
+Execute TASK-061 through TASK-066 sequentially. Completed Epics and frozen
+public-v1 consumer behavior remain historical authorities; the dossier defines
+the successor work to promote before implementation.
+
+### TASK-061: Define Workspace, Access, Role, and Review Successor Contracts
+
+Status: `PLANNED`
+
+Reconcile the owning specification, architecture and ADRs before source changes.
+Define modern startup access and Role inputs, runtime transitions, explicit
+instruction loading, copy-free review guarantees, and the versioned cutover.
+Define the checked candidate-reading boundary for selected index entries and
+pinned Git objects, including full-file context, distinct from live-workspace
+context. Specify typed rejection when that boundary cannot be verified.
+Update checked successor schemas and capability/error contracts without
+changing the TASK-053 public-v1 source or descriptor.
+
+Verification: document and schema gates; complete old/new contract mapping;
+unchanged TASK-056 clients; no contradictory owner or implicit legacy default.
+Handoff: implementation-ready contracts and acceptance cases for TASK-062
+through TASK-066.
+
+### TASK-062: Load Common and Markdown Role Instructions Explicitly
+
+Status: `PLANNED`
+
+Implement `~/.dolgorae/home/AGENTS.md` and
+`~/.dolgorae/roles/<role-name>/AGENTS.md`, explicit initialization and
+bounded admission, captured instruction identity, and task/Role separation.
+Keep the selected workspace as the thread and command cwd and Profile
+CODEX_HOME separate. Verify control over Codex AGENTS discovery before enabling
+the new instruction contract.
+
+Verification: accepted bytes match stored digests; missing/unsafe sources fail
+before Run allocation; source edits do not alter accepted Runs; conflicting
+ambient AGENTS do not enter the managed prefix; initialization never overwrites
+user files. Required Codex behavior has separately authorized empirical proof.
+
+### TASK-063: Start and Transition Workspace Access
+
+Status: `PLANNED`
+
+Add modern `run start --access read-only|writable --role <name>` inputs;
+omitted access resolves to writable. A successful writable start holds the
+canonical workspace writer authority and verified write policy. Read-only
+starts support later authorized acquisition on the dedicated lane. Reuse
+Controller-bound acquire/release with idle, interaction, process and recovery
+guards; retain explicit fixed read-only legacy lanes.
+
+Verification: cross-Profile single-writer races, concurrent readers,
+startup/transition failures and ambiguity, idempotent retries, restart and
+release proof. No implicit read-only fallback, access from Role text, or
+success while effective policy is unverified.
+
+### TASK-064: Remove Automatic Source Copies and Managed Worktrees
+
+Status: `PLANNED`
+
+Remove new source-capture and isolated-worktree creation from every facade,
+including review, Engagements and brokered Specialists. Reject retired new
+requests before effects; never map isolated-write intent to the original
+workspace. Keep caller-prepared Git or non-Git workspaces under the existing
+canonical identity rules and outside Dolgorae cleanup ownership.
+
+Verification: no source materialization or Git worktree creation on new paths;
+caller directories survive failures, close, cleanup, export and deletion.
+Historical captures remain inspectable and settleable under their original
+ownership and recovery rules. Reassess the launch-preparation TODO candidate
+against the remaining shared responsibilities.
+
+### TASK-065: Review Direct Workspaces and Pinned Git Objects
+
+Status: `PLANNED`
+
+Implement explicitly read-only review for workspace, staged, dirty, HEAD,
+commit and range scopes without checkout or source copies. Read committed
+targets from resolved Git objects; bind mutable inputs to checked fingerprints
+and disclose drift-sensitive assurance. Route staged candidate reads through
+admitted index entries and HEAD/commit/range reads through pinned Git objects,
+including full-file context. For these scopes, treat live-workspace reads as
+separately identified context, never candidate evidence. Reject unsupported
+reading boundaries before dispatch and results whose candidate provenance
+cannot be verified.
+Preserve Role/task separation, fresh Reviewer identity, bounded results,
+Controller boundaries and unknown-outcome recovery.
+
+Verification: dirty/untracked workspace coverage, index drift, moved refs,
+historical content differing from cwd, range semantics, non-Git scope rejection,
+no checkout/source capture, and no clean accepted result after detected drift.
+Include index, commit and worktree contents that differ before dispatch, deliberate
+native-tool reads of the worktree, and typed rejection when the reading boundary
+is unsupported or violated even with unchanged refs and fingerprints.
+
+### TASK-066: Complete Migration and Integrated Acceptance
+
+Status: `PLANNED`
+
+Synchronize CLI help, Machine/private contracts, examples, operator guidance
+and the source-distributed use-dolgorae skill. Provide explicit migration of
+legacy JSON Role sources and policy inputs; preserve accepted Runs, installed
+policies, review results and recovery records without reinterpretation.
+Integrate startup, instructions, transitions and all review scopes.
+
+Verification: focused and complete repository gates, unchanged TASK-056
+consumer, independent adversarial review, and separately authorized pinned
+Codex probes. Update affected future-task handoffs and promote durable outcomes
+before the last dossier closeout.
+
+Epic acceptance: all six Tasks pass the ordinary Task completion gate.
+New operations never create source snapshots or worktrees, use only admitted
+instructions, enforce one writer per canonical workspace, and retain honest
+review and recovery guarantees. Completion unlocks `MILESTONE-CW1`; it does
+not authorize installation, a release, external review, or actual Gul QA.
+
 ## EPIC-009: Brokered Specialist Collaboration
 
 Status: `PLANNED`
@@ -2113,7 +2247,7 @@ Status: `PLANNED`
 Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
 Brokered Hierarchy without making the Primary Agent a message relay.
 
-Delivery order: after EPIC-016 and before EPIC-010. Assigned release: v0.1.4.
+Delivery order: after EPIC-017 and before EPIC-010. Assigned release: v0.1.4.
 
 ### TASK-027: Durable Mailbox, Virtual Actor, and Collaboration Plane
 
@@ -2121,7 +2255,8 @@ Status: `PLANNED`
 
 Depends on completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
 foundations, including selected transport TASK-025 and provider acceptance
-TASK-026. Execute after EPIC-016 under the roadmap delivery order. It does not
+TASK-026 and completed EPIC-017. Execute after EPIC-017 under the roadmap
+delivery order. It does not
 depend on actual Gul acceptance. Integrate the checked Specialist collaboration
 tool through the selected run-bound transport. Enable
 the deferred busy-target queue, reuse-any and activation policies only with their
@@ -2137,7 +2272,10 @@ wake an `on_mail` passivated target without per-actor polling, retain mail acros
 activation failure, reject paused or terminal targets according to policy, and
 never allow collaboration to mutate peer lifecycle, writer, role, Controller,
 or aggregate membership. External Specialist Engagements cannot use this plane
-in v1.
+in v1. Resolve collaboration selectors from accepted Role/policy snapshots,
+never ambient AGENTS files. Activation uses the selected caller workspace and
+explicit access contract from EPIC-017; it cannot create a source copy or
+acquire writer authority through peer mail.
 
 Verification: resident idle request-response; busy-target queueing; exact
 priority and FIFO tie breaks; aging and source fairness; role-selector
@@ -2193,7 +2331,11 @@ truncation, Git/non-Git algorithms, and every command `data` variant. Test
 identity, observer/controller interaction and artifact denial matrices, profile
 redaction/authorization, and pre-ready failures that create no Run. Rerun
 TASK-056 unchanged; activating declared event variants must preserve existing
-history, projection freshness and consumer behavior.
+history, projection freshness and consumer behavior. Include requested/effective access, transition state,
+admitted instruction identity, review target identity and drift assurance from
+EPIC-017 through checked safe successor projections. Historical snapshot
+results retain their original meaning; observations never imply attribution or
+immutable review of mutable workspaces.
 
 ### TASK-029: Complete Gul gRPC Surface and Extended Operational Conformance
 
@@ -2225,7 +2367,10 @@ and the exhaustive typed error map. Re-run the TASK-023 socket, restart,
 carrier TOCTOU, allocation-loss, Interaction-loss, and secret-canary tests as
 regressions. Run the TASK-056 consumer unchanged, including operation when new
 optional methods are advertised. All timing uses injectable clocks and no test
-binds TCP.
+binds TCP. Integrate EPIC-017 writer and Role semantics only where existing
+public-v1 requests express them. New startup inputs and successor projections
+use separately versioned contracts; do not repurpose frozen fields or alter
+TASK-053 source, descriptor, or consumer semantics.
 
 ### TASK-030: Verify, Export, and Confirmed Delete
 
@@ -2240,20 +2385,23 @@ Verification: clean/corrupt ledger cases, active-run delete refusal, missing
 Codex history export, output collision, deterministic hashes, excluded runtime/
 recovery artifacts, plaintext residual warning, deletion scope, and orphan
 Export cases capture one fsynced ledger-head watermark, copy only that complete
-prefix, and regenerate bundled projections from it.
+prefix, and regenerate bundled projections from it. Export copies durable
+ledger/results, not source workspaces. Delete only Run-owned state; never delete
+caller workspaces, shared common/Role instruction files, or externally prepared
+worktrees. Legacy capture cleanup still requires its original settlement proof.
 
 ### TASK-031: Agent Governance and Process Cleanup
 
 Status: `PLANNED`
 
-Implement bounded versioned direct-interactive and managed-agent instruction
-prefixes, role-aware Primary Agent and Independent Specialist Agent wording,
-subordinate Run instructions, `.dolgorae` reservation, access-aware mutation
-policy, explicit Git and background-process rules, advisory managed-Run
-context, both user-facing use cases, Standalone Primary and Brokered Hierarchy
-composition, Orchestration-Broker-only Specialist control, external-AI
-Specialist boundaries, manager-owned bounded singleton shutdown, and cleanup
-audit records.
+Depends on completed TASK-062 and TASK-063. Common/Role source loading,
+instruction snapshot composition, and startup/runtime access belong to
+EPIC-017. Integrate those contracts with direct-interactive and managed-agent
+governance, subordinate instructions, `.dolgorae` reservation, explicit Git and
+background-process rules, advisory managed-Run context, both user-facing use
+cases, Standalone Primary and Brokered Hierarchy composition,
+Orchestration-Broker-only Specialist control, external-AI Specialist boundaries,
+manager-owned bounded singleton shutdown, and cleanup audit records.
 
 Verification: control-mode and aggregate-role prompt-composition snapshots,
 Controller-kind compatibility, observer interaction denial, capability
@@ -2266,8 +2414,10 @@ write-heavy Native Delegation language, Independent Specialist result routing
 without Controller disclosure,
 detached-worker signal/stdout behavior, five-second graceful/forced cleanup, and
 escaped-process limitation reporting. Rerun TASK-056 with unchanged clients;
-new instruction composition must not rewrite stored user input, introduce
-steering, expose child authority or change aggregate closure.
+new governance instructions must not rewrite stored user input, introduce
+steering, expose child authority or change aggregate closure. Reuse EPIC-017
+composition and access fixtures; ambient AGENTS files and Role wording must
+not authorize peer control or mutate accepted instruction snapshots.
 
 Epic acceptance: every public command and audit workflow in
 `docs/specs/README.md` is
@@ -2303,7 +2453,11 @@ adapter-only envelope and transport metadata.
 Verification: the complete unit/integration suite passes without network,
 credentials, timing-sensitive sleeps, or real Codex quota. Injectable time
 drives every timeout; named fault barriers cover every durability/effect edge;
-control v1 and all machine-output/error variants are included.
+control v1 and all machine-output/error variants are included. Add the EPIC-017
+successor contract matrix: explicit Markdown instruction identity, requested
+and effective access, transitions, direct/Git review identity and drift,
+retired new captures, and historical recovery. Keep old persisted fixtures and
+TASK-056 clients unchanged; normalize only adapter metadata, never assurance.
 
 ### TASK-033: Crash, Concurrency, and Security E2E
 
@@ -2325,7 +2479,11 @@ Verification: drive each named fault barrier and injected identity/boot/
 enumeration schedule deterministically, then run 100 stress iterations as
 supplemental evidence. A pass requires every barrier case and iteration to
 succeed; random seeds alone are not scheduling proof. Retain bounded failure
-evidence without secrets or unbounded logs.
+evidence without secrets or unbounded logs. Include default-writable startup
+and acquire/release crash barriers across Profiles, instruction-source races,
+mutable-review drift, moved Git refs, and proof that new paths create no source
+copy or worktree. Cleanup and deletion must preserve caller-owned roots and
+shared instruction files; unknown writer or review effects retain their guards.
 
 ### TASK-034: Two-Profile Live Smoke and Alpha Acceptance
 
@@ -2363,7 +2521,12 @@ and early-ID gates match each executable; every SOT contract has deterministic
 evidence; all blocking independent review findings are resolved. A future
 version is accepted for an existing profile only through the operator-authorized
 `profile server migrate` transaction; run-local resume/recover/reconcile
-commands cannot approve process-static drift.
+commands cannot approve process-static drift. Add EPIC-017 live scenarios for
+explicit common/Role loading with conflicting ambient AGENTS, correct workspace
+cwd and separate Profile home, writable startup, read-only denial and runtime
+transitions, and copy-free direct/pinned-Git review. Runtime discovery and
+transition guarantees require observed proof, not prompt compliance. This
+campaign remains opt-in and separately authorized.
 
 Epic acceptance: mark the `v0.2.0` Personal Alpha ready only after TASK-034 and
 the full Task completion gate are satisfied. This is the first release eligible
