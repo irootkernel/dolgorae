@@ -15,13 +15,14 @@ pub const TRANSPORT_BOUND_FIELDS: [&str; 7] = [
     "idempotency_key",
 ];
 
-const REQUEST_DEFS: [&str; 8] = [
+const REQUEST_DEFS: [&str; 9] = [
     "request_specialist_request",
     "await_operations_request",
     "list_specialists_request",
     "assign_task_request",
     "await_tasks_request",
     "collect_results_request",
+    "read_result_request",
     "cancel_task_request",
     "release_request",
 ];
@@ -120,6 +121,11 @@ impl PrimaryToolContract {
                 false,
                 "the requested Specialist task was not found",
             ),
+            "SPECIALIST_RESULT_UNREADABLE" => (
+                "SPECIALIST_RESULT_UNREADABLE",
+                false,
+                "the requested Specialist result is not readable",
+            ),
             "SPECIALIST_WRITER_CONFLICT" | "WRITER_BUSY" => (
                 "SPECIALIST_WRITER_CONFLICT",
                 false,
@@ -177,7 +183,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            8
+            9
         );
         for field in TRANSPORT_BOUND_FIELDS {
             assert!(
@@ -196,5 +202,39 @@ mod tests {
         let result = contract.error_result(&error);
         assert_eq!(result["code"], "ORCHESTRATION_NOT_AVAILABLE");
         assert!(result.get("details").is_none());
+    }
+
+    #[test]
+    fn contract_advertises_specialist_result_reader() {
+        let spec = PrimaryToolContract::load().unwrap().tool_spec();
+        let schema = &spec["inputSchema"];
+        assert!(
+            schema["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|request| request["$ref"] == "#/$defs/read_result_request")
+        );
+        assert_eq!(
+            schema["$defs"]["read_result_request"]["properties"]["operation"]["const"],
+            "read_specialist_result"
+        );
+    }
+
+    #[test]
+    fn unreadable_result_error_preserves_nonretryable_contract() {
+        let contract = PrimaryToolContract::load().unwrap();
+        let error = MachineError::new(
+            "SPECIALIST_RESULT_UNREADABLE",
+            "private-result-canary",
+            false,
+            serde_json::json!({"artifact_path":"private-result-canary"}),
+        );
+        let result = contract.error_result(&error);
+        assert_eq!(result["operation"], "orchestration_error");
+        assert_eq!(result["code"], "SPECIALIST_RESULT_UNREADABLE");
+        assert_eq!(result["retryable"], false);
+        assert!(result.get("details").is_none());
+        assert!(!result.to_string().contains("private-result-canary"));
     }
 }
