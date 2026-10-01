@@ -4472,7 +4472,7 @@ mod tests {
         assert_eq!(tools[0]["name"], PRIMARY_TOOL_NAME);
         assert_eq!(
             tools[0]["inputSchema"]["oneOf"].as_array().unwrap().len(),
-            8
+            9
         );
 
         coordinator
