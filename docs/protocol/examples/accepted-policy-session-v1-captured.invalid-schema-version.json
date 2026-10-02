@@ -1,0 +1,149 @@
+{
+  "schema": "dolgorae.accepted-policy-session/v2",
+  "session_id": "018f0000-0000-7000-8000-000000062001",
+  "root_run_id": "018f0000-0000-7000-8000-000000062001",
+  "idempotency_key": "example-bootstrap",
+  "request_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+  "captures": {
+    "home_root": "/example/home/.dolgorae",
+    "workspace_id": "09e3b762508a820b92c9f8304bf185e4516573a67a9c0f44c6ab32920e78423f",
+    "canonical_workspace": "/example/workspace",
+    "policy": {
+      "schema_version": 3,
+      "policy_name": "brokered-review",
+      "revision": 1,
+      "approval_policy": "user_approval_required",
+      "max_active_specialists": 2,
+      "roles": [
+        {
+          "role_ref": "reviewer",
+          "role_source": {
+            "name": "reviewer"
+          },
+          "agent_configuration": {
+            "schema_version": 3,
+            "selected_profile": "reviewer",
+            "model": "gpt-5.6",
+            "default_effort": "high",
+            "purpose": "review",
+            "purpose_label": null,
+            "required_capabilities": [],
+            "execution_lane": "dedicated",
+            "required_assurance": "best_effort_personal_alpha",
+            "native_subagent_policy": "enabled"
+          },
+          "max_active_instances": 1,
+          "reuse_policy": "reuse_idle_compatible",
+          "allowed_access": [
+            "read_only"
+          ],
+          "activation_policy": "keep_resident",
+          "primary_may_request": true,
+          "collaboration_source": false,
+          "collaboration_target": false,
+          "auto_approve_when_fully_delegated": true,
+          "display_name": "Reviewer",
+          "description": "Review selected candidate evidence.",
+          "role_capture": {
+            "body": "Review the selected candidate with checked evidence.\n",
+            "byte_length": 53,
+            "sha256": "389b9edebd58d26ea2d797ecb0c650e8d92b6b13cb8e053bbdf04daaa57bfe81",
+            "name": "reviewer"
+          }
+        }
+      ]
+    },
+    "configurations": {
+      "reviewer": {
+        "schema_version": 3,
+        "selected_profile": "reviewer",
+        "global_profile_binding_sha256": "f9ada56baffff5418b858c958c1ca2b240cab89d7a8aafcb4fdf85e5d159f831",
+        "model": "gpt-5.6",
+        "default_effort": "high",
+        "purpose": {
+          "kind": "review",
+          "external_label": null
+        },
+        "required_capabilities": [],
+        "role_reference": "reviewer",
+        "instructions": {
+          "schema": "dolgorae.instructions/v2",
+          "core_prefix_version": 2,
+          "core_prefix_sha256": "46a3095dafbab01f665305825db0adcac7b4b0c6b0cde931e0611568d10657e9",
+          "common": {
+            "body": "Follow the Controller and workspace access policy.\n",
+            "byte_length": 51,
+            "sha256": "1abd99d316f7b16b7a830496bae87597c465e7d7053006f64e86502064d4252b"
+          },
+          "role": {
+            "body": "Review the selected candidate with checked evidence.\n",
+            "byte_length": 53,
+            "sha256": "389b9edebd58d26ea2d797ecb0c650e8d92b6b13cb8e053bbdf04daaa57bfe81",
+            "name": "reviewer"
+          },
+          "composition_sha256": "c9ff144a2c5fcc54c550a55b9c63908cf3a14a5528f54888f371db1af416c5f4"
+        },
+        "execution_lane": "dedicated",
+        "required_assurance": "best_effort_personal_alpha",
+        "native_subagent_policy": "enabled"
+      }
+    },
+    "profile_bindings": {
+      "reviewer": {
+        "schema_version": 2,
+        "selected_name": "reviewer",
+        "definition": {
+          "argv": [
+            "/example/codex"
+          ],
+          "codex_home": "/example/profile-home",
+          "environment": {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C"
+          },
+          "native_subagents": "enabled"
+        },
+        "definition_sha256": "23938b4e189322f14c3ff423261e0316c6371a99dbae3a7d292b64bdabf311cf",
+        "launch_snapshot": {
+          "schema_version": 1,
+          "profile_name": "reviewer",
+          "canonical_codex_home": "/example/profile-home",
+          "normalized_argv": [
+            "/example/codex",
+            "--strict-config",
+            "--enable",
+            "multi_agent"
+          ],
+          "launch_cwd_policy": "profile_state_directory_v1",
+          "derived_launch_cwd": "/example/server-state",
+          "sanitized_environment": {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C"
+          },
+          "enabled_features": [
+            "multi_agent"
+          ],
+          "disabled_features": [],
+          "process_static_configuration": {},
+          "initial_configuration_observation": {},
+          "executable_identity": {
+            "resolved_path": "/example/codex",
+            "device": 1,
+            "inode": 1,
+            "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "codex_version": "0.159.3",
+          "schema_bundle_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "compatibility_manifest_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "launch_contract_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "compatibility_verdict": "tested",
+          "server_key": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "launch_snapshot_sha256": "259fdf6462dc5fde6920dd55aadadfc586dfec46de51aaafd46995a30254a8a2",
+        "server_key": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    }
+  }
+}

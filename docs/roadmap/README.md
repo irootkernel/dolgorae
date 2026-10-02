@@ -26,8 +26,8 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
-`EPIC-017` is `ACTIVE` and `TASK-061` is `COMPLETE`; `TASK-062` through
-`TASK-066` remain `PLANNED` after EPIC-016 and before EPIC-009.
+`EPIC-017` is `ACTIVE`; `TASK-061` and `TASK-062` are `COMPLETE`.
+`TASK-063` through `TASK-066` remain `PLANNED` after EPIC-016 and before EPIC-009.
 They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -2153,7 +2153,7 @@ through TASK-066.
 
 ### TASK-062: Load Common and Markdown Role Instructions Explicitly
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement `~/.dolgorae/home/AGENTS.md` and
 `~/.dolgorae/roles/<role-name>/AGENTS.md`, explicit initialization and

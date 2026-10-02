@@ -550,6 +550,40 @@ for its children. Agent Configuration v3 and manifest v3 retain immutable
 instruction identity. Retry, generation recovery and child activation consume
 accepted bytes without reopening live sources.
 
+`instructions` owns descriptor-relative source admission, exclusive template
+publication and `dolgorae.instructions/v2` composition. Explicit `init` installs
+the common, general and reviewer files after workspace admission; ordinary
+discovery does not create them. Named fault barriers cover capture entry, the
+bounded read and acceptance for standalone, policy and bootstrap admission.
+The successor configuration reader is separate
+from the legacy v1/v2 reader. `markdown_policy` prepares policy v3 captures and
+bootstrap instructions for the later integrated adapters. These internal APIs
+do not activate modern starts or advertise ambient-discovery support. The
+successor configuration preparation checks discovery qualification before Profile
+observation and returns `INSTRUCTION_DISCOVERY_UNSUPPORTED` before Run allocation
+until pinned-runtime qualification is integrated. A project instruction byte limit
+alone does not qualify suppression of Profile guidance. Retained capture readback
+and legacy preparation remain available. Thread startup and manifest v3 wiring
+remain with TASK-063; the public adapter cutover remains with TASK-066.
+
+`OrchestrationStore` owns durable acceptance of the prepared successor captures
+in its workspace database. Its private
+[`dolgorae.accepted-policy-session/v1`](../protocol/dolgorae-accepted-policy-session-v1.schema.json)
+receipt binds one session/root identity, canonical workspace and Dolgorae home,
+request identity, policy v3, and each child configuration v3 and Profile binding
+v2. One transaction publishes the complete receipt and its JCS digest; all
+children bind the same captured common body and the installed Role bytes.
+The complete receipt has a 64 MiB retained-record bound, separate from the
+65,536-byte combined raw source ceiling. Acceptance validates these bonds and
+bounds before publication. A retry looks up the
+receipt before source admission, while recovery and reactivation validate only
+retained receipt bytes. Source edits, source removal, and installed-policy
+changes or removal therefore cannot change an accepted session. The existing
+session-commit fault barriers distinguish failure before acceptance from an
+unknown response after commit; retry preserves the accepted identity. This
+private capture acceptance does not publish a physical Run, thread, or active
+session, and leaves legacy session rows and readers unchanged.
+
 The existing JSON resolver below is the legacy v2 authoring path. Explicit
 migration produces new Markdown sources and policy input without replacing
 accepted snapshots or choosing collision winners. After integrated cutover,

@@ -414,6 +414,126 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// Internal successor input. Public adapters activate only at integrated cutover.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallerAgentConfigurationInput {
+    pub schema_version: u32,
+    pub selected_profile: String,
+    #[serde(default, deserialize_with = "deserialize_present_binding")]
+    pub global_profile_binding_sha256: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub model: Option<String>,
+    pub default_effort: String,
+    pub purpose: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub purpose_label: Option<String>,
+    pub required_capabilities: Vec<String>,
+    pub execution_lane: String,
+    pub required_assurance: String,
+    pub native_subagent_policy: String,
+    pub role: String,
+}
+
+pub(crate) struct PreparedCallerAgentConfiguration {
+    pub view: WorkspaceView,
+    pub agent_configuration: crate::run::CallerAgentConfigurationSnapshot,
+    pub global_profile_binding: GlobalProfileBinding,
+}
+
+fn deserialize_present_binding<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+/// Resolve configuration using accepted bytes without starting a Profile Server,
+/// allocating a Run, or reading a live Role. This is preparation, not activation.
+pub(crate) fn prepare_caller_agent_configuration_read_only(
+    workspace: Option<&Path>,
+    role_ref: Option<&str>,
+    input: CallerAgentConfigurationInput,
+    instructions: crate::instructions::InstructionSnapshot,
+) -> Result<PreparedCallerAgentConfiguration, MachineError> {
+    instructions.developer_prefix()?;
+    if input.schema_version != 3
+        || input.execution_lane != "dedicated"
+        || input.role != instructions.role.name
+        || !matches!(
+            input.purpose.as_str(),
+            "planning"
+                | "implementation"
+                | "review"
+                | "research"
+                | "discussion"
+                | "workflow_stage"
+                | "other"
+        )
+    {
+        return Err(MachineError::invalid_argument(
+            "agent_configuration",
+            "unsupported successor Agent Configuration contract",
+        ));
+    }
+    crate::instructions::require_discovery_control()?;
+    let prepared = prepare_external_specialist_read_only(
+        workspace,
+        role_ref.unwrap_or(&input.role),
+        ExternalAgentConfigurationInput {
+            schema_version: 2,
+            runtime_profile: input.selected_profile,
+            global_profile_binding_sha256: input.global_profile_binding_sha256,
+            model: input.model,
+            default_effort: input.default_effort,
+            purpose: input.purpose,
+            purpose_label: input.purpose_label,
+            required_capabilities: input.required_capabilities,
+            // The existing resolver validates configuration using a bounded raw
+            // body. Core and separators have their own, independent bounds.
+            instructions: instructions.role.body.clone(),
+            execution_lane: input.execution_lane,
+            required_assurance: input.required_assurance,
+            native_subagent_policy: input.native_subagent_policy,
+        },
+    )?;
+    let legacy = prepared.agent_configuration;
+    let instruction_home = DolgoraeHome::system()?.root().join("home");
+    let cwd = prepared.view.canonical_path.to_path_buf()?;
+    let codex_home = Path::new(
+        &prepared
+            .global_profile_binding
+            .launch_snapshot
+            .canonical_codex_home,
+    );
+    if cwd == instruction_home || cwd == codex_home || instruction_home == codex_home {
+        return Err(MachineError::invalid_argument(
+            "agent_configuration",
+            "workspace, instruction home and Profile CODEX_HOME must be separate",
+        ));
+    }
+    let agent_configuration = crate::run::CallerAgentConfigurationSnapshot {
+        schema_version: 3,
+        selected_profile: legacy.runtime_profile,
+        global_profile_binding_sha256: legacy.runtime_profile_snapshot_sha256,
+        model: legacy.model,
+        default_effort: legacy.default_effort,
+        purpose: legacy.purpose,
+        required_capabilities: legacy.required_capabilities,
+        role_reference: role_ref.map(str::to_owned),
+        instructions,
+        execution_lane: legacy.execution_lane,
+        required_assurance: legacy.required_assurance,
+        native_subagent_policy: legacy.native_subagent_policy,
+    };
+    agent_configuration.validate()?;
+    Ok(PreparedCallerAgentConfiguration {
+        view: prepared.view,
+        agent_configuration,
+        global_profile_binding: prepared.global_profile_binding,
+    })
+}
+
 pub(crate) struct PreparedExternalSpecialist {
     pub view: WorkspaceView,
     pub agent_configuration: AgentConfigurationSnapshot,
@@ -1048,7 +1168,13 @@ impl SemanticService for CoreSemanticService {
             SemanticCommand::Initialize { path, mode } => WorkspaceService::system()?
                 .initialize_with_preparation(path.as_deref(), *mode, || {
                     let home = crate::paths::DolgoraeHome::system()?;
-                    crate::global_profile::initialize_generation(&home).map(|_| ())
+                    crate::global_profile::initialize_generation(&home)?;
+                    crate::instructions::InstructionSourceStore::new(&home)
+                        .initialize_templates()
+                        .map_err(|_| MachineError::config_invalid(
+                            "instruction-sources",
+                            "common and default Role sources require safe, nonempty UTF-8 files",
+                        ))
                 })
                 .map(SemanticResult::Workspace),
             SemanticCommand::WorkspaceInspect { workspace } => WorkspaceService::system()?
@@ -8242,6 +8368,68 @@ impl RunMutationLock for RunStartupLock {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn caller_preparation_rejects_unqualified_discovery_before_workspace_or_profile_effects() {
+        let workspace =
+            std::env::temp_dir().join(format!("dolgorae-unqualified-{}", Uuid::now_v7()));
+        assert!(!workspace.exists());
+        let common = "Common instructions\n";
+        let role = "Reviewer instructions\n";
+        let instructions = crate::instructions::InstructionSnapshot::compose(
+            crate::instructions::SourceCapture {
+                body: common.to_owned(),
+                byte_length: common.len() as u64,
+                sha256: crate::jcs::sha256_hex(common.as_bytes()),
+            },
+            crate::instructions::RoleCapture {
+                name: "reviewer".to_owned(),
+                body: role.to_owned(),
+                byte_length: role.len() as u64,
+                sha256: crate::jcs::sha256_hex(role.as_bytes()),
+            },
+        )
+        .unwrap();
+        let input = || CallerAgentConfigurationInput {
+            schema_version: 3,
+            selected_profile: "unqualified".to_owned(),
+            global_profile_binding_sha256: None,
+            model: Some("gpt-5.6-luna".to_owned()),
+            default_effort: "low".to_owned(),
+            purpose: "review".to_owned(),
+            purpose_label: None,
+            required_capabilities: Vec::new(),
+            execution_lane: "dedicated".to_owned(),
+            required_assurance: "best_effort_personal_alpha".to_owned(),
+            native_subagent_policy: "enabled".to_owned(),
+            role: "reviewer".to_owned(),
+        };
+        let rejected = prepare_caller_agent_configuration_read_only(
+            Some(&workspace),
+            None,
+            input(),
+            instructions.clone(),
+        )
+        .err()
+        .expect("unqualified discovery must reject preparation");
+        assert_eq!(rejected.code, "INSTRUCTION_DISCOVERY_UNSUPPORTED");
+        assert_eq!(rejected.details["phase"], "admission");
+        assert_eq!(rejected.details["outcome"], "not_dispatched");
+        assert!(rejected.details["run_id"].is_null());
+        assert!(rejected.details["review_id"].is_null());
+        assert!(!workspace.exists());
+
+        let mut changed = instructions;
+        changed.common.body.push_str("changed");
+        assert_eq!(
+            prepare_caller_agent_configuration_read_only(Some(&workspace), None, input(), changed)
+                .err()
+                .unwrap()
+                .code,
+            "INSTRUCTION_SOURCE_INVALID"
+        );
+        assert!(!workspace.exists());
+    }
 
     #[test]
     fn reviewer_start_keeps_prepared_generation_without_ensuring_a_replacement() {

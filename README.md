@@ -66,6 +66,14 @@ Stopping or replacing the gateway preserves durable Runs and their workers.
 
 ## Specialist policies and orchestrated sessions
 
+Explicit `init` also installs private common and default Markdown instruction
+templates at `~/.dolgorae/home/AGENTS.md` and
+`~/.dolgorae/roles/{general,reviewer}/AGENTS.md`. Existing files keep their bytes;
+invalid files require correction before initialization succeeds. The
+[successor instruction contract](docs/specs/caller-workspaces-v1.md) awaits
+integrated activation. Current policy commands continue to use the JSON sources
+described below.
+
 Specialist Roles keep reusable instructions separate from account and execution
 configuration. Put an explicitly named Role source in either
 `~/.dolgorae/roles/<name>.json` for machine-local use or

@@ -20,6 +20,7 @@ def schema_name(example_name: str) -> str:
     # Explicit v2 names validate successor payloads; executable E2E checks
     # validate the current machine/v2 producers.
     prefixes = {
+        "accepted-policy-session-v1-": "dolgorae-accepted-policy-session-v1.schema.json",
         "workspace-execution-": "dolgorae-workspace-execution-v1.schema.json",
         "workspace-policy-": "dolgorae-workspace-execution-v1.schema.json",
         "workspace-machine-v4-": "dolgorae-machine-v4.schema.json",
@@ -139,6 +140,8 @@ def repaired_negative_example(
         del repaired["details"]["capability"]
     elif example_name == "one-shot-review-observation-v1-blocked.invalid-private-diagnostic.json":
         del repaired["diagnostic"]["private_provider_key"]
+    elif example_name == "accepted-policy-session-v1-captured.invalid-schema-version.json":
+        repaired["schema"] = "dolgorae.accepted-policy-session/v1"
     elif example_name == "one-shot-operation-v1-reserved.invalid-reference-version.json":
         repaired["input"]["request_ref"] = "018f0000-0000-7000-8000-000000058001"
     elif example_name == "profile-review-ownership-v1-reserved.invalid-launch-token.json":
@@ -473,6 +476,7 @@ def main() -> int:
             *EXAMPLES.glob("specialist-review-v4-*.invalid-*.json"),
             *EXAMPLES.glob("error-contract-v4-*.invalid-*.json"),
             *EXAMPLES.glob("external-engagement-v4-*.invalid-*.json"),
+            *EXAMPLES.glob("accepted-policy-session-v1-*.invalid-*.json"),
         ]
     )
     recognized_examples = {

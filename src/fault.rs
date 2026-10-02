@@ -1,5 +1,8 @@
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FaultBarrier {
+    BeforeInstructionCapture,
+    AfterInstructionRead,
+    BeforeInstructionAccept,
     BeforeManifestCreate,
     AfterManifestFileSync,
     AfterManifestDirectorySync,
@@ -22,7 +25,10 @@ pub enum FaultBarrier {
     AfterExternalEffect,
 }
 
-pub const ALL_FAULT_BARRIERS: [FaultBarrier; 20] = [
+pub const ALL_FAULT_BARRIERS: [FaultBarrier; 23] = [
+    FaultBarrier::BeforeInstructionCapture,
+    FaultBarrier::AfterInstructionRead,
+    FaultBarrier::BeforeInstructionAccept,
     FaultBarrier::BeforeManifestCreate,
     FaultBarrier::AfterManifestFileSync,
     FaultBarrier::AfterManifestDirectorySync,
@@ -67,7 +73,7 @@ impl std::fmt::Display for FaultInjected {
 
 impl std::error::Error for FaultInjected {}
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct NoFaults;
 
 impl FaultInjector for NoFaults {

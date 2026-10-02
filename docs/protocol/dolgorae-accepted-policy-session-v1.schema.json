@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/accepted-policy-session/v1",
+  "title": "Private durable caller-workspace policy capture acceptance",
+  "description": "A capture receipt before physical Run or session activation; it does not activate public successor adapters. The complete JCS receipt is bounded to 64 MiB, independently of the 65,536-byte combined raw instruction-source ceiling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "session_id", "root_run_id", "idempotency_key", "request_sha256", "captures"],
+  "properties": {
+    "schema": { "const": "dolgorae.accepted-policy-session/v1" },
+    "session_id": { "$ref": "https://dolgorae.local/schema/one-shot-operation/v1#/$defs/uuid7" },
+    "root_run_id": { "$ref": "https://dolgorae.local/schema/one-shot-operation/v1#/$defs/uuid7" },
+    "idempotency_key": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 256 },
+    "request_sha256": { "$ref": "https://dolgorae.local/schema/one-shot-operation/v1#/$defs/sha256" },
+    "captures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["home_root", "workspace_id", "canonical_workspace", "policy", "configurations", "profile_bindings"],
+      "properties": {
+        "home_root": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/path" },
+        "workspace_id": { "$ref": "https://dolgorae.local/schema/one-shot-operation/v1#/$defs/sha256" },
+        "canonical_workspace": { "$ref": "https://dolgorae.local/schema/workspace-record/v1#/$defs/path" },
+        "policy": { "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/policy_snapshot" },
+        "configurations": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9._-]{0,63}$": { "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration" }
+          }
+        },
+        "profile_bindings": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9._-]{0,63}$": { "$ref": "https://dolgorae.local/schema/global-profile-binding/v2" }
+          }
+        }
+      }
+    }
+  },
+  "x-maxUtf8Bytes": 67108864,
+  "x-invariants": [
+    "OrchestrationStore atomically retains this immutable JCS receipt and its SHA-256 in caller_policy_session_acceptances; this extension does not reinterpret legacy session rows or publish a physical Run, thread, or active session.",
+    "session_id equals root_run_id; both are UUID7. SQL session/root/workspace/request indexes exactly match the retained receipt.",
+    "home_root is the canonical Dolgorae home, canonical_workspace derives workspace_id, and the storing state root is home_root/workspaces/workspace_id.",
+    "configuration and Profile-binding key sets equal the unique policy role_ref set; each configuration retains exactly its installed Role capture and full accepted Profile binding digest.",
+    "Every child has the same exact common capture admitted once at bootstrap. Composition, individual source digests, and the combined raw source ceiling are revalidated from retained bytes.",
+    "Request identity and all captured bytes are immutable; exact repetition returns the same receipt and conflicting input fails. Retry lookup occurs before source admission.",
+    "Recovery and child reactivation read the accepted receipt without reopening common, Role, installed-policy, or Profile authoring inputs. Observer lookup does not create or recover database state."
+  ]
+}

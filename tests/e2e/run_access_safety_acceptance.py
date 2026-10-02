@@ -25,10 +25,11 @@ REQUIRED_REQUESTS = {
 
 
 class AppServer:
-    def __init__(self, codex: Path, cwd: Path) -> None:
+    def __init__(self, codex: Path, cwd: Path, env: dict[str, str] | None = None) -> None:
         self.process = subprocess.Popen(
             [str(codex), "app-server", "--listen", "stdio://"],
             cwd=cwd,
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

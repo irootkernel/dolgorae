@@ -118,6 +118,21 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if home_entries != {".dolgorae"}:
             raise AssertionError(f"unexpected per-user state roots: {home_entries!r}")
 
+        instruction_root = home / ".dolgorae"
+        sources = [
+            instruction_root / "home" / "AGENTS.md",
+            instruction_root / "roles" / "general" / "AGENTS.md",
+            instruction_root / "roles" / "reviewer" / "AGENTS.md",
+        ]
+        for source in sources:
+            if not source.read_bytes() or stat.S_IMODE(source.stat().st_mode) != 0o600:
+                raise AssertionError("init did not publish a private instruction template")
+            if stat.S_IMODE(source.parent.stat().st_mode) != 0o700:
+                raise AssertionError("init did not protect an instruction directory")
+        custom_common = " \r\nPreserve 공통 e\u0301 bytes.\n ".encode("utf-8")
+        sources[0].write_bytes(custom_common)
+        accepted_sources = {source: source.read_bytes() for source in sources}
+
         repeated = run(binary, ["init", str(repository)], home)
         if repeated.returncode != 0:
             raise AssertionError(f"repeated init failed: {repeated.stdout}")
@@ -125,6 +140,18 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(repeated_envelope, machine, "repeated-init Machine envelope")
         if repeated_envelope["data"]["created"] is not False:
             raise AssertionError("repeated initialization did not report created:false")
+        if {source: source.read_bytes() for source in sources} != accepted_sources:
+            raise AssertionError("repeated init rewrote existing instruction bytes")
+
+        sources[2].write_bytes(b"")
+        invalid_init = run(binary, ["init", str(repository)], home)
+        invalid_envelope = json.loads(invalid_init.stdout)
+        assert_valid(invalid_envelope, machine, "invalid-instruction-init Machine envelope")
+        if invalid_init.returncode != 3 or invalid_envelope["error"]["code"] != "CONFIG_INVALID":
+            raise AssertionError("invalid existing instruction source was not rejected")
+        if sources[2].read_bytes() != b"" or sources[0].read_bytes() != custom_common:
+            raise AssertionError("init repaired or overwrote an existing source")
+        sources[2].write_bytes(accepted_sources[sources[2]])
         if (repository / "tracked.txt").read_text(encoding="utf-8") != "dirty\n":
             raise AssertionError("initialization changed a pre-existing tracked modification")
         if (repository / "untracked.txt").read_text(encoding="utf-8") != "preserve\n":
@@ -159,6 +186,13 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(inspected_envelope, machine, "workspace-inspect Machine envelope")
         if inspected_envelope["data"]["workspace_id"] != workspace_id:
             raise AssertionError("upward discovery selected the wrong workspace")
+
+        sources[1].unlink()
+        without_role = run(binary, ["workspace", "inspect", "--workspace", str(repository)], home)
+        if without_role.returncode != 0 or sources[1].exists():
+            raise AssertionError("workspace discovery created a missing instruction source")
+        sources[1].write_bytes(accepted_sources[sources[1]])
+        sources[1].chmod(0o600)
 
         state_root = home / ".dolgorae" / "workspaces" / workspace_id
         record = json.loads((state_root / "workspace.json").read_text(encoding="utf-8"))

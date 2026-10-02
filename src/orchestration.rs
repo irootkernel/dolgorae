@@ -5,6 +5,7 @@ use crate::domain::{ControllerIdentity, ControllerKind};
 use crate::engagement::EngagementStore;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::{MachineError, new_uuid_v7};
+use crate::markdown_policy::PreparedPolicySession;
 pub use crate::primary_tool::PrimaryCallContext;
 use crate::run::{
     AggregateBinding, AggregateMemberKind, ControllerBinding, controller_capability_digest,
@@ -103,6 +104,38 @@ pub struct OrchestratedSessionSnapshot {
     pub specialist_policy_sha256: String,
     pub revision: u64,
     pub members: Vec<BrokeredMemberSnapshot>,
+}
+
+const ACCEPTED_POLICY_SESSION_SCHEMA: &str = "dolgorae.accepted-policy-session/v1";
+const MAX_ACCEPTED_POLICY_SESSION_BYTES: usize = 64 * 1024 * 1024;
+
+/// Private capture acceptance, before physical Run or session activation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedPolicySessionSnapshot {
+    pub schema: String,
+    pub session_id: Uuid,
+    pub root_run_id: Uuid,
+    pub idempotency_key: String,
+    pub request_sha256: String,
+    pub captures: PreparedPolicySession,
+}
+
+impl AcceptedPolicySessionSnapshot {
+    fn validate(&self, state_root: &Path) -> Result<(), MachineError> {
+        if self.schema != ACCEPTED_POLICY_SESSION_SCHEMA
+            || self.session_id != self.root_run_id
+            || self.root_run_id.get_version_num() != 7
+            || self.root_run_id.get_variant() != uuid::Variant::RFC4122
+        {
+            return Err(integrity("accepted session identity is invalid"));
+        }
+        checked(&self.idempotency_key, 256, "idempotency_key")?;
+        digest(&self.request_sha256, "request_sha256")?;
+        self.captures
+            .validate_for_state_root(state_root)
+            .map_err(|_| integrity("accepted session capture bonds are invalid"))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1239,6 +1272,118 @@ impl OrchestrationStore {
         self.clock.now_ms()
     }
 
+    /// Atomically accept immutable successor captures without creating a
+    /// legacy session row, a physical Run, or a provider thread.
+    pub fn accept_policy_session(
+        &mut self,
+        root_run_id: Uuid,
+        idempotency_key: &str,
+        request_sha256: &str,
+        captures: PreparedPolicySession,
+    ) -> Result<AcceptedPolicySessionSnapshot, MachineError> {
+        let accepted = AcceptedPolicySessionSnapshot {
+            schema: ACCEPTED_POLICY_SESSION_SCHEMA.to_owned(),
+            session_id: root_run_id,
+            root_run_id,
+            idempotency_key: idempotency_key.to_owned(),
+            request_sha256: request_sha256.to_owned(),
+            captures,
+        };
+        accepted.validate(&self.state_root)?;
+        let receipt_json = canonical_string(&accepted)?;
+        if receipt_json.len() > MAX_ACCEPTED_POLICY_SESSION_BYTES {
+            return Err(integrity(
+                "accepted session receipt exceeds the retained-record bound",
+            ));
+        }
+        let receipt_sha256 = sha256_hex(receipt_json.as_bytes());
+        if let Some(previous) = self.find_accepted_policy_session(
+            accepted.captures.workspace_id(),
+            root_run_id,
+            idempotency_key,
+            request_sha256,
+        )? {
+            if previous != accepted {
+                return Err(idempotency_conflict(idempotency_key));
+            }
+            return Ok(previous);
+        }
+        self.faults
+            .check(OrchestrationBarrier::BeforeSessionCommit)?;
+        let state_root = self.state_root.clone();
+        let transaction = self.transaction()?;
+        if let Some(previous) = find_accepted_policy_session_on(
+            &transaction,
+            &state_root,
+            accepted.captures.workspace_id(),
+            root_run_id,
+            idempotency_key,
+            request_sha256,
+        )? {
+            if previous != accepted {
+                return Err(idempotency_conflict(idempotency_key));
+            }
+            return Ok(previous);
+        }
+        let conflicts: i64 = transaction.query_row(
+            "SELECT (SELECT COUNT(*) FROM orchestrated_sessions WHERE root_run_id=?1 OR session_id=?1)
+                  + (SELECT COUNT(*) FROM members WHERE specialist_run_id=?1 AND state!='retired')
+                  + (SELECT COUNT(*) FROM brokered_members WHERE run_id=?1 AND membership_state!='retired')
+                  + (SELECT COUNT(*) FROM caller_policy_session_acceptances WHERE root_run_id=?1)",
+            [root_run_id.to_string()], |row| row.get(0),
+        ).map_err(internal)?;
+        if conflicts != 0 {
+            return Err(session_conflict(
+                root_run_id,
+                "Run already has an aggregate capture or membership",
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO caller_policy_session_acceptances(
+               session_id,root_run_id,workspace_id,idempotency_key,request_sha256,receipt_json,receipt_sha256
+             ) VALUES(?1,?1,?2,?3,?4,?5,?6)",
+            params![root_run_id.to_string(), accepted.captures.workspace_id(), idempotency_key,
+                request_sha256, receipt_json, receipt_sha256],
+        ).map_err(internal)?;
+        transaction
+            .commit()
+            .map_err(|_| accepted_policy_session_unknown())?;
+        self.faults
+            .check(OrchestrationBarrier::AfterSessionCommit)
+            .map_err(|_| accepted_policy_session_unknown())?;
+        self.accepted_policy_session(root_run_id)
+    }
+
+    /// Recovery validates retained bytes and their DB identity. It does not
+    /// inspect source, installed-policy, Profile authoring, or provider state.
+    pub fn accepted_policy_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<AcceptedPolicySessionSnapshot, MachineError> {
+        read_accepted_policy_session_on(&self.connection, &self.state_root, session_id)?
+            .ok_or_else(|| session_not_found(session_id))
+    }
+
+    pub fn find_accepted_policy_session(
+        &self,
+        workspace_id: &str,
+        root_run_id: Uuid,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<Option<AcceptedPolicySessionSnapshot>, MachineError> {
+        checked(idempotency_key, 256, "idempotency_key")?;
+        digest(workspace_id, "workspace_id")?;
+        digest(request_sha256, "request_sha256")?;
+        find_accepted_policy_session_on(
+            &self.connection,
+            &self.state_root,
+            workspace_id,
+            root_run_id,
+            idempotency_key,
+            request_sha256,
+        )
+    }
+
     fn ensure_live_provider_policy(&self, session_id: Uuid) -> Result<(), MachineError> {
         let policy_json: String = self
             .connection
@@ -1309,7 +1454,14 @@ impl OrchestrationStore {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        if external_membership != 0 || brokered_membership != 0 {
+        let accepted_capture: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM caller_policy_session_acceptances WHERE root_run_id=?1",
+                [root_run_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if external_membership != 0 || brokered_membership != 0 || accepted_capture != 0 {
             return Err(session_conflict(
                 root_run_id,
                 "Run already belongs to another aggregate",
@@ -5092,9 +5244,131 @@ impl OrchestrationStore {
     }
 }
 
+fn accepted_policy_session_table_exists(connection: &Connection) -> Result<bool, MachineError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='caller_policy_session_acceptances')",
+        [], |row| row.get(0),
+    ).map_err(internal)
+}
+
+fn find_accepted_policy_session_on(
+    connection: &Connection,
+    state_root: &Path,
+    workspace_id: &str,
+    root_run_id: Uuid,
+    idempotency_key: &str,
+    request_sha256: &str,
+) -> Result<Option<AcceptedPolicySessionSnapshot>, MachineError> {
+    if !accepted_policy_session_table_exists(connection)? {
+        return Ok(None);
+    }
+    let session = connection.query_row(
+        "SELECT session_id FROM caller_policy_session_acceptances WHERE workspace_id=?1 AND idempotency_key=?2",
+        params![workspace_id, idempotency_key], |row| row.get::<_, String>(0),
+    ).optional().map_err(internal)?;
+    let indexed = session.is_some();
+    let session_id = match session {
+        Some(session) => parse_uuid(&session)
+            .map_err(|_| integrity("accepted session index identity is invalid"))?,
+        None => root_run_id,
+    };
+    let Some(accepted) = read_accepted_policy_session_on(connection, state_root, session_id)?
+    else {
+        return if indexed {
+            Err(integrity("accepted session index has no receipt"))
+        } else {
+            Ok(None)
+        };
+    };
+    if accepted.root_run_id != root_run_id
+        || accepted.request_sha256 != request_sha256
+        || accepted.idempotency_key != idempotency_key
+        || accepted.captures.workspace_id() != workspace_id
+    {
+        return Err(idempotency_conflict(idempotency_key));
+    }
+    Ok(Some(accepted))
+}
+
+fn read_accepted_policy_session_on(
+    connection: &Connection,
+    state_root: &Path,
+    session_id: Uuid,
+) -> Result<Option<AcceptedPolicySessionSnapshot>, MachineError> {
+    if !accepted_policy_session_table_exists(connection)? {
+        return Ok(None);
+    }
+    let row = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(receipt_json AS BLOB))<=?2 THEN receipt_json END,
+                receipt_sha256,root_run_id,workspace_id,idempotency_key,request_sha256
+         FROM caller_policy_session_acceptances WHERE session_id=?1",
+            params![
+                session_id.to_string(),
+                MAX_ACCEPTED_POLICY_SESSION_BYTES as u64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((json, recorded_sha256, root, workspace, key, request)) = row else {
+        return Ok(None);
+    };
+    let json = json
+        .ok_or_else(|| integrity("accepted session receipt exceeds the retained-record bound"))?;
+    let parsed = parse(&json).map_err(|_| integrity("accepted session receipt JSON is invalid"))?;
+    let canonical =
+        canonicalize(&parsed).map_err(|_| integrity("accepted session receipt JSON is invalid"))?;
+    let accepted: AcceptedPolicySessionSnapshot = serde_json::from_slice(&canonical)
+        .map_err(|_| integrity("accepted session receipt contract is invalid"))?;
+    accepted.validate(state_root)?;
+    if json.as_bytes() != canonical.as_slice()
+        || canonical_string(&accepted)?.as_bytes() != canonical.as_slice()
+        || sha256_hex(&canonical) != recorded_sha256
+        || accepted.session_id != session_id
+        || accepted.root_run_id.to_string() != root
+        || accepted.captures.workspace_id() != workspace
+        || accepted.idempotency_key != key
+        || accepted.request_sha256 != request
+    {
+        return Err(integrity(
+            "accepted session receipt differs from its DB identity or digest",
+        ));
+    }
+    Ok(Some(accepted))
+}
+
+fn accepted_policy_session_unknown() -> MachineError {
+    MachineError::new(
+        "INTERRUPTED_UNKNOWN",
+        "accepted session publication response is unknown",
+        false,
+        serde_json::json!({"required_action":"retry the same request to read the durable accepted capture"}),
+    )
+}
+
 const SCHEMA: &str = "
 PRAGMA foreign_keys=ON;
 PRAGMA synchronous=FULL;
+CREATE TABLE IF NOT EXISTS caller_policy_session_acceptances(
+  session_id TEXT PRIMARY KEY,
+  root_run_id TEXT NOT NULL UNIQUE,
+  workspace_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_sha256 TEXT NOT NULL,
+  receipt_json TEXT NOT NULL,
+  receipt_sha256 TEXT NOT NULL,
+  UNIQUE(workspace_id,idempotency_key)
+) STRICT;
 CREATE TABLE IF NOT EXISTS orchestrated_sessions(
   session_id TEXT PRIMARY KEY,
   bootstrap_operation_id TEXT NOT NULL UNIQUE,
@@ -6328,6 +6602,85 @@ mod tests {
         let ready = store.finish_primary_publication(run_id, Ok(())).unwrap();
         assert_eq!(ready.status, "active");
         assert_eq!(ready.specialist_policy, original);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepted_policy_session_examples_validate_retained_semantic_bonds() {
+        let accepted: AcceptedPolicySessionSnapshot = serde_json::from_slice(include_bytes!(
+            "../docs/protocol/examples/accepted-policy-session-v1-captured.valid.json"
+        ))
+        .unwrap();
+        let state_root =
+            Path::new("/example/home/.dolgorae/workspaces").join(accepted.captures.workspace_id());
+        accepted.validate(&state_root).unwrap();
+        for role in &accepted.captures.policy().roles {
+            let binding = accepted.captures.profile_binding(&role.role_ref).unwrap();
+            for required in ["PATH", "LANG", "LC_ALL"] {
+                assert!(binding.definition.environment.contains_key(required));
+            }
+            assert_eq!(
+                binding.definition.environment,
+                binding.launch_snapshot.sanitized_environment
+            );
+        }
+        let invalid: AcceptedPolicySessionSnapshot = serde_json::from_slice(include_bytes!("../docs/protocol/examples/accepted-policy-session-v1-captured.invalid-schema-version.json")).unwrap();
+        assert!(invalid.validate(&state_root).is_err());
+        let root = root();
+        let home_root = root.join(".dolgorae");
+        let state_root = home_root
+            .join("workspaces")
+            .join(accepted.captures.workspace_id());
+        // Keep the checked example's captured bytes and bindings, replacing
+        // only home provenance to admit it into an isolated test database.
+        let mut value = serde_json::to_value(&accepted).unwrap();
+        value["captures"]["home_root"] =
+            serde_json::to_value(crate::workspace::LosslessPath::from_path(&home_root)).unwrap();
+        let executable: AcceptedPolicySessionSnapshot = serde_json::from_value(value).unwrap();
+        let mut store = OrchestrationStore::open(&state_root).unwrap();
+        let retained = store
+            .accept_policy_session(
+                executable.root_run_id,
+                &executable.idempotency_key,
+                &executable.request_sha256,
+                executable.captures.clone(),
+            )
+            .unwrap();
+        assert_eq!(retained, executable);
+        drop(store);
+        let observer = OrchestrationStore::open_observer(&state_root).unwrap();
+        assert_eq!(
+            observer
+                .accepted_policy_session(executable.session_id)
+                .unwrap(),
+            executable
+        );
+        assert_eq!(observer.connection.total_changes(), 0);
+        drop(observer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepted_capture_observer_does_not_initialize_a_legacy_database() {
+        let root = root();
+        let path = EngagementStore::workspace_database_path(&root);
+        let _ = EngagementStore::open(&path).unwrap();
+        let observer = OrchestrationStore::open_observer(&root).unwrap();
+        assert!(!accepted_policy_session_table_exists(&observer.connection).unwrap());
+        assert!(
+            observer
+                .find_accepted_policy_session(
+                    &"a".repeat(64),
+                    new_uuid_v7(),
+                    "none",
+                    &"b".repeat(64)
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(!accepted_policy_session_table_exists(&observer.connection).unwrap());
+        assert_eq!(observer.connection.total_changes(), 0);
+        drop(observer);
         std::fs::remove_dir_all(root).unwrap();
     }
 

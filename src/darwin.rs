@@ -313,6 +313,33 @@ impl DarwinSystem {
         Ok(())
     }
 
+    pub fn renameat_exclusive(
+        self,
+        directory: &File,
+        source: &OsStr,
+        destination: &OsStr,
+    ) -> Result<(), std::io::Error> {
+        let source = CString::new(source.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let destination = CString::new(destination.as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: both components and the borrowed directory remain live.
+        // RENAME_EXCL publishes the completed file without replacing a leaf.
+        if unsafe {
+            libc::renameatx_np(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn openat_nofollow(
         self,
         directory: &File,

@@ -1,7 +1,7 @@
 {
   "schema": "dolgorae.instructions/v2",
   "core_prefix_version": 2,
-  "core_prefix_sha256": "5c638d6dab74ab9bb8de4a5fe918c81127d98bd302d35f5f0c39cad83c5d6b0d",
+  "core_prefix_sha256": "46a3095dafbab01f665305825db0adcac7b4b0c6b0cde931e0611568d10657e9",
   "common": {
     "body": "Follow the Controller and workspace access policy.\n",
     "byte_length": 51,
@@ -14,5 +14,5 @@
     "name": "general",
     "source_path": "/private/role"
   },
-  "composition_sha256": "07fdefbcb308c7f447f06eb8136ebe56a8747d9e05cbc1d34485cf56abee1e4b"
+  "composition_sha256": "86b0f8744bcd91e5f098be8400aa3c4b6a054c9c170cf15826c4b7eb23074540"
 }

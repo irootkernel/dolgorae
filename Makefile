@@ -19,6 +19,7 @@ INT_TESTS := \
 .PHONY: test test-prepare test-unit test-int test-e2e validate-agent-skills \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
+	test-live-instruction-discovery \
 	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
@@ -145,6 +146,7 @@ test-e2e:
 		run_case tests/e2e/test_installed_review_skill.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_independent_review_acceptance.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_live_independent_review_admission.py; \
+		run_case tests/e2e/test_live_instruction_discovery.py; \
 		run_case tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
@@ -242,3 +244,17 @@ test-live-codex-compatibility:
 	}
 	$(PYTHON_BIN) tests/e2e/run_codex_compatibility.py \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
+
+test-live-instruction-discovery:
+	@test "$${DOLGORAE_RUN_LIVE_INSTRUCTION_DISCOVERY:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_INSTRUCTION_DISCOVERY=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_CODEX_PINNED_VERSION:-}" && test -n "$${DOLGORAE_LIVE_AUTH_FILE:-}" || { \
+		echo "DOLGORAE_CODEX_PINNED_VERSION and DOLGORAE_LIVE_AUTH_FILE are required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_live_instruction_discovery.py \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--expected-version "$${DOLGORAE_CODEX_PINNED_VERSION}" \
+		--auth-file "$${DOLGORAE_LIVE_AUTH_FILE}"

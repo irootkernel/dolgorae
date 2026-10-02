@@ -7,6 +7,11 @@ development commits.
 
 ## v0.1.4 - Unreleased
 
+### Added
+
+- Install private common and default Markdown Role templates during explicit init,
+  preserving existing files and rejecting unsafe or invalid instruction sources.
+
 ### Fixed
 
 - Wait for External Specialist terminal evidence after an interrupt even while

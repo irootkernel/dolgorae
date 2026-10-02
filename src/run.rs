@@ -104,6 +104,103 @@ pub struct AgentConfigurationSnapshot {
     pub native_subagent_policy: String,
 }
 
+/// Successor configuration; legacy v1/v2 records retain their original reader.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerAgentConfigurationSnapshot {
+    pub schema_version: u32,
+    pub selected_profile: String,
+    pub global_profile_binding_sha256: String,
+    pub model: String,
+    pub default_effort: String,
+    #[serde(deserialize_with = "deserialize_caller_purpose")]
+    pub purpose: Purpose,
+    pub required_capabilities: Vec<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub role_reference: Option<String>,
+    pub instructions: crate::instructions::InstructionSnapshot,
+    pub execution_lane: ExecutionLane,
+    pub required_assurance: Assurance,
+    pub native_subagent_policy: String,
+}
+
+fn deserialize_caller_purpose<'de, D>(deserializer: D) -> Result<Purpose, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CheckedPurpose {
+        kind: PurposeKind,
+        #[serde(deserialize_with = "Option::deserialize")]
+        external_label: Option<String>,
+    }
+    let purpose = CheckedPurpose::deserialize(deserializer)?;
+    Ok(Purpose {
+        kind: purpose.kind,
+        external_label: purpose.external_label,
+    })
+}
+
+impl CallerAgentConfigurationSnapshot {
+    pub fn validate(&self) -> Result<(), MachineError> {
+        self.instructions.developer_prefix()?;
+        if self.schema_version != 3
+            || self.execution_lane != ExecutionLane::Dedicated
+            || self.required_assurance != Assurance::BestEffortPersonalAlpha
+            || self.native_subagent_policy != "enabled"
+            || self.selected_profile.is_empty()
+            || self.selected_profile.len() > 128
+            || !self
+                .selected_profile
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                })
+            || self.global_profile_binding_sha256.len() != 64
+            || !self
+                .global_profile_binding_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !bounded_identity(&self.model, 128)
+            || !bounded_identity(&self.default_effort, 64)
+            || self.required_capabilities.len() > 64
+            || self
+                .required_capabilities
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.required_capabilities.len()
+            || self
+                .required_capabilities
+                .iter()
+                .any(|name| !bounded_identity(name, 128))
+            || self
+                .purpose
+                .external_label
+                .as_ref()
+                .is_some_and(|label| !bounded_identity(label, 128))
+        {
+            return Err(MachineError::invalid_argument(
+                "agent_configuration",
+                "invalid successor Agent Configuration snapshot",
+            ));
+        }
+        if let Some(reference) = &self.role_reference {
+            crate::instructions::validate_role_name(reference).map_err(|_| {
+                MachineError::invalid_argument(
+                    "role_reference",
+                    "role reference does not match the checked name pattern",
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentConfigurationWire {
