@@ -70,7 +70,8 @@
         "id": {"type": "integer", "minimum": 0},
         "params": {},
         "code": {"type": "integer"},
-        "await_reply": {"type": "boolean"}
+        "await_reply": {"type": "boolean"},
+        "delay_ms": {"type": "integer", "minimum": 0, "maximum": 5000}
       }
     }
   }

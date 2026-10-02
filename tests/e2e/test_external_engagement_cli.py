@@ -248,7 +248,7 @@ def cleaned_temporary_directory(binary: pathlib.Path):
             shutil.rmtree(retired)
 
 
-def validate(binary: pathlib.Path) -> None:
+def validate(binary: pathlib.Path, interaction_terminal: str = "delayed") -> None:
     schema_source = native_codex.installed_codex()
     with cleaned_temporary_directory(binary) as temporary:
         root = pathlib.Path(temporary).resolve()
@@ -379,6 +379,16 @@ def validate(binary: pathlib.Path) -> None:
             transcript=isolated_transcript,
         )
         interaction_scenario = root / "interaction-scenario.json"
+        interaction_emissions = [{
+            "kind": "notification", "method": "turn/completed", "delay_ms": 250,
+            "params": {"threadId": "thread-interaction", "turn": {
+                "id": "turn-interaction", "status": "interrupted", "items": [],
+            }},
+        }]
+        if interaction_terminal == "missing":
+            interaction_emissions = []
+        elif interaction_terminal == "disconnect":
+            interaction_emissions = [{"kind": "close", "code": 1000}]
         interaction_scenario.write_text(
             json.dumps(
                 {
@@ -393,7 +403,7 @@ def validate(binary: pathlib.Path) -> None:
                         {"method": "thread/read", "respond": {"error": {"code": -32600, "message": "thread not found"}}},
                         {"method": "thread/start", "respond": {"result": {"thread": {"id": "thread-interaction"}}}},
                         {"method": "turn/start", "respond": {"result": {"turn": {"id": "turn-interaction"}}}, "emit": [{"kind": "request", "id": 8001, "method": "item/tool/requestUserInput", "params": {"threadId": "thread-interaction", "turnId": "turn-interaction", "questions": [{"id": "confirmation", "header": "Confirm", "question": "Continue?", "isSecret": False}]}}]},
-                        {"method": "turn/interrupt", "respond": {"result": {"interrupted": True}}, "emit": [{"kind": "notification", "method": "turn/completed", "params": {"threadId": "thread-interaction", "turn": {"id": "turn-interaction", "status": "interrupted", "items": []}}}]},
+                        {"method": "turn/interrupt", "respond": {"result": {"interrupted": True}}, "emit": interaction_emissions},
                         {"method": "thread/archive", "respond": {"result": {"thread": {"id": "thread-interaction", "archived": True}}}},
                     ],
                 },
@@ -1444,6 +1454,27 @@ def validate(binary: pathlib.Path) -> None:
                 task_request(interaction_engagement_id, interaction_run_id, 4),
             )
             interaction_task_id = str(interaction_assigned["task_id"])
+            if interaction_terminal != "delayed":
+                unknown = call(binary, home, workspace, owner, {
+                    "operation": "await_external_specialist_tasks",
+                    "engagement_id": interaction_engagement_id,
+                    "task_ids": [interaction_task_id],
+                    "return_when": "all",
+                    "transport_wait_seconds": 10,
+                }, expected_error="OUTCOME_UNKNOWN")
+                if unknown["details"]["required_action"] != "retry_reconciliation":
+                    raise AssertionError("missing terminal proof lost reconciliation guidance")
+                database = state_root / "orchestration" / "orchestration.sqlite3"
+                with sqlite3.connect(database) as connection:
+                    task_state = connection.execute(
+                        "SELECT state,artifact_id FROM tasks WHERE task_id=?",
+                        (interaction_task_id,),
+                    ).fetchone()
+                if task_state != ("running", None):
+                    raise AssertionError(
+                        f"unproved interaction was incorrectly terminalized: {task_state!r}"
+                    )
+                return
             interaction_waited = call(binary, home, workspace, owner, {
                 "operation": "await_external_specialist_tasks",
                 "engagement_id": interaction_engagement_id,
@@ -1607,8 +1638,13 @@ def validate(binary: pathlib.Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--interaction-terminal",
+        choices=("delayed", "missing", "disconnect"),
+        default="delayed",
+    )
     arguments = parser.parse_args()
-    validate(arguments.binary.resolve())
+    validate(arguments.binary.resolve(), arguments.interaction_terminal)
     print("external engagement CLI lifecycle passed")
     return 0
 

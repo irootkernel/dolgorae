@@ -1686,6 +1686,34 @@ fn shutdown_that_observes_no_terminal_records_outcome_unknown_and_says_so() {
     );
 }
 
+#[test]
+fn ordinary_wait_still_returns_an_interaction_after_an_interrupt_acknowledgement() {
+    let run = Run::start(Behaviour {
+        silent_interrupt: true,
+        ..Behaviour::default()
+    });
+    let turn_id = accepted(&run.call(&run.submit("interrupted-interaction")));
+    run.server.open_approval(9, &turn_id);
+    run.await_lifecycle("waiting_interaction");
+    assert!(matches!(
+        run.call(&ControlRequestV1::Interrupt {
+            expected: run.identity.clone(),
+            caller: None,
+        }),
+        ControlResponseV1::Interrupted { .. }
+    ));
+    assert!(matches!(
+        run.call(&run.wait_within(&turn_id, Some(5_000))),
+        ControlResponseV1::WaitingInteraction { .. }
+    ));
+    run.server.complete_turn(&turn_id, "interrupted", "");
+    run.await_lifecycle("idle");
+    assert_eq!(
+        terminal(&run.call(&run.wait(&turn_id))),
+        (turn_id, "interrupted".to_owned())
+    );
+}
+
 /// H4: `wait` requires both run and turn IDs, and answers about the Turn it
 /// was given.
 ///

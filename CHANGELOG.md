@@ -7,6 +7,11 @@ development commits.
 
 ## v0.1.4 - Unreleased
 
+### Fixed
+
+- Wait for External Specialist terminal evidence after an interrupt even while
+  an interaction remains pending, preserving uncertain outcomes without proof.
+
 ## v0.1.3 - 2026-10-01
 
 ### Added

@@ -250,7 +250,12 @@ the authoritative Run projection: it redelivers immutable terminal artifacts,
 interrupts overdue or unsupported-interaction work, and maps any unproved
 effect boundary to an active outcome-unknown refusal until Run evidence proves
 quiescence; it never releases Writer authority after a transient control
-failure. Isolated terminal output captures a
+failure. The private External Specialist interrupt waits up to five seconds
+for the addressed Turn's terminal after the interrupt acknowledgement, including
+while interactions remain pending. It returns terminal evidence only when that
+terminal was observed; callers do not add another ordinary interaction-sensitive
+wait. Ordinary Run `Wait` still returns pending interactions immediately.
+Isolated terminal output captures a
 bounded binary Git patch into the result artifact before worktree cleanup.
 For `structured_review_v3`, terminal reconciliation parses the inline report,
 validates exact ordered criterion coverage and the evidence/status invariants,

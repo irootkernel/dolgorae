@@ -1070,23 +1070,8 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                         engagement_id,
                     },
                 );
-                let terminal = match response {
-                    Ok(ControlResponseV1::Interrupted { turn_id, .. }) => call_run_worker(
-                        &state_root,
-                        task.specialist_run_id,
-                        DarwinSystem.current_uid(),
-                        None,
-                        |expected| ControlRequestV1::Wait {
-                            expected,
-                            caller: None,
-                            turn_id,
-                            timeout_ms: Some(5_000),
-                        },
-                    )
-                    .is_ok_and(|value| matches!(value, ControlResponseV1::Terminal { .. })),
-                    Ok(ControlResponseV1::Terminal { .. }) => true,
-                    _ => false,
-                };
+                let terminal =
+                    response.is_ok_and(|value| matches!(value, ControlResponseV1::Terminal { .. }));
                 store.cancel_external_task(
                     engagement_id,
                     task_id,
@@ -1967,20 +1952,7 @@ fn interrupt_external_turn(
     .map_err(|error| error.machine_error(run_id, state_root))?;
     match interrupted {
         ControlResponseV1::Terminal { .. } => Ok(true),
-        ControlResponseV1::Interrupted { turn_id, .. } => call_run_worker(
-            state_root,
-            run_id,
-            DarwinSystem.current_uid(),
-            None,
-            |expected| ControlRequestV1::Wait {
-                expected,
-                caller: None,
-                turn_id,
-                timeout_ms: Some(5_000),
-            },
-        )
-        .map(|response| matches!(response, ControlResponseV1::Terminal { .. }))
-        .map_err(|error| error.machine_error(run_id, state_root)),
+        ControlResponseV1::Interrupted { .. } => Ok(false),
         ControlResponseV1::Failed {
             code,
             message,
@@ -2106,47 +2078,7 @@ fn abort_member(
         }
     };
     if matches!(lifecycle.as_str(), "running" | "waiting_interaction") {
-        let response = call_run_worker(
-            state_root,
-            run_id,
-            DarwinSystem.current_uid(),
-            Some(owner.raw_fd()),
-            |expected| ControlRequestV1::ExternalInterrupt {
-                expected,
-                caller: None,
-                engagement_id,
-            },
-        )
-        .map_err(|error| error.machine_error(run_id, state_root))?;
-        let turn_id = match response {
-            ControlResponseV1::Interrupted { turn_id, .. } => turn_id,
-            ControlResponseV1::Terminal { terminal } => terminal.turn_id,
-            ControlResponseV1::Failed {
-                code,
-                message,
-                retryable,
-                details,
-            } => return Err(MachineError::new(code, message, retryable, details)),
-            _ => {
-                return Err(integrity(
-                    "Specialist interrupt returned an unexpected response",
-                ));
-            }
-        };
-        let terminal = call_run_worker(
-            state_root,
-            run_id,
-            DarwinSystem.current_uid(),
-            None,
-            |expected| ControlRequestV1::Wait {
-                expected,
-                caller: None,
-                turn_id,
-                timeout_ms: Some(5_000),
-            },
-        )
-        .map_err(|error| error.machine_error(run_id, state_root))?;
-        if !matches!(terminal, ControlResponseV1::Terminal { .. }) {
+        if !interrupt_external_turn(state_root, run_id, engagement_id, owner)? {
             return Err(MachineError::new(
                 "OUTCOME_UNKNOWN",
                 "Specialist did not reach a proved terminal state during abort",

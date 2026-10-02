@@ -1068,7 +1068,9 @@ first-class Specialists.
 Verification: engagement and member recovery across every restart boundary;
 multiple roles and members; repeated tasks without context or idempotency
 confusion; completed-not-delivered redelivery without target Turn replay;
-ambiguous accepted or running task to `interrupted_unknown`; durable cancel,
+ambiguous accepted or running task to `interrupted_unknown`; interrupt
+acknowledgement before delayed terminal while interaction remains pending;
+missing terminal and transport loss without false terminal proof; durable cancel,
 release, complete, and abort; host disconnect and reconnect; isolated-write
 artifact production; canonical writer conflict; nested-hire and collaboration
 denial; and no external task-graph inference.

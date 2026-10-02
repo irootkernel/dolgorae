@@ -97,6 +97,7 @@ pub const MAX_TURN_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// "waits up to five seconds for a terminal event ... and records
 /// `outcome_unknown` on expiry".
 pub const SHUTDOWN_TERMINAL_TIMEOUT: Duration = Duration::from_secs(5);
+const EXTERNAL_INTERRUPT_TERMINAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a fenced controller reset waits for the drain to reach its
 /// question.
 ///
@@ -3226,7 +3227,7 @@ impl SessionProgress {
         }
     }
 
-    /// Wait for one Turn's terminal and nothing else, for shutdown.
+    /// Wait for one interrupted Turn's terminal and nothing else.
     ///
     /// Unlike the Wait verb this does not settle on an interaction pause: the
     /// interrupt has already been sent, so a Turn that pauses on its way out
@@ -3940,12 +3941,22 @@ impl WorkerSession {
         credential: CredentialCarrier,
         engagement_id: Uuid,
     ) -> ControlResponseV1 {
-        self.dispatch_external(
+        let response = self.dispatch_external(
             "engagement.cancel",
             credential,
             engagement_id,
             SessionCommand::Interrupt,
-        )
+        );
+        match response {
+            ControlResponseV1::Interrupted { ref turn_id, .. }
+                if self
+                    .progress
+                    .await_terminal_evidence(turn_id, EXTERNAL_INTERRUPT_TERMINAL_TIMEOUT) =>
+            {
+                self.progress.await_named(turn_id, Some(Duration::ZERO))
+            }
+            response => response,
+        }
     }
 
     pub fn pause(
@@ -8813,6 +8824,93 @@ mod tests {
             );
         }
         assert_eq!(caller_budget(Some(u64::MAX)), Some(MAX_TURN_WAIT_TIMEOUT));
+    }
+
+    fn interaction_progress() -> SessionProgress {
+        let progress = SessionProgress::new(RunFacts {
+            run_id: Uuid::now_v7(),
+            profile: "default".to_owned(),
+        });
+        progress.publish(
+            WorkerControlState {
+                lifecycle: "waiting_interaction".to_owned(),
+                active_turn: Some("turn-interaction".to_owned()),
+            },
+            Some("thread-interaction".to_owned()),
+            Some("medium".to_owned()),
+            vec![Interaction {
+                request_id: 1,
+                method: "item/tool/requestUserInput".to_owned(),
+                thread_id: "thread-interaction".to_owned(),
+                turn_id: "turn-interaction".to_owned(),
+                payload_sha256: "1".repeat(64),
+                byte_length: 2,
+                payload: serde_json::json!({}),
+                file_snapshot_revision: None,
+                file_snapshot_sha256: None,
+            }],
+        );
+        progress
+    }
+
+    #[test]
+    fn terminal_evidence_wait_retains_its_budget_through_pending_interactions() {
+        let progress = Arc::new(interaction_progress());
+        assert!(matches!(
+            progress.await_named("turn-interaction", Some(Duration::ZERO)),
+            ControlResponseV1::WaitingInteraction { .. }
+        ));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiter = thread::spawn({
+            let progress = Arc::clone(&progress);
+            move || {
+                sender
+                    .send(
+                        progress
+                            .await_terminal_evidence("turn-interaction", Duration::from_secs(5)),
+                    )
+                    .unwrap();
+            }
+        });
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        let mut terminal = TerminalTurn {
+            thread_id: "thread-interaction".to_owned(),
+            turn_id: "turn-other".to_owned(),
+            status: "interrupted".to_owned(),
+            effort: "medium".to_owned(),
+            final_response: None,
+            usage: None,
+        };
+        progress.settle(terminal.clone());
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        terminal.turn_id = "turn-interaction".to_owned();
+        progress.settle(terminal);
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn terminal_evidence_wait_refuses_timeout_transport_loss_and_stopped_runs() {
+        let progress = interaction_progress();
+        let started = Instant::now();
+        assert!(!progress.await_terminal_evidence("turn-interaction", Duration::from_millis(20)));
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        assert!(progress.last_terminal().is_none());
+
+        progress.fail(TurnError::OutcomeUnknown);
+        assert!(!progress.await_terminal_evidence("turn-interaction", Duration::from_secs(5)));
+        assert!(progress.last_terminal().is_none());
+
+        let stopped = interaction_progress();
+        stopped.stop();
+        assert!(!stopped.await_terminal_evidence("turn-interaction", Duration::from_secs(5)));
+        assert!(stopped.last_terminal().is_none());
     }
 
     #[test]

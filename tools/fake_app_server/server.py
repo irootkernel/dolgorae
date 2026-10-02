@@ -13,6 +13,7 @@ import pathlib
 import socket
 import stat
 import threading
+import time
 from typing import Any
 
 import jsonlite
@@ -233,6 +234,8 @@ class FakeAppServer:
 
     def emit(self, connection: socket.socket, emission: dict[str, Any]) -> bool:
         kind = emission["kind"]
+        if delay_ms := int(emission.get("delay_ms", 0)):
+            time.sleep(delay_ms / 1000)
         if kind == "close":
             wsframe.send_close(connection, int(emission.get("code", 1000)))
             return False

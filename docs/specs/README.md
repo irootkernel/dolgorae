@@ -3796,8 +3796,14 @@ each task known by the caller to have been accepted through v3.
 Facade v2 has no interaction-response operation and never transfers the member
 Controller credential. If a Specialist requests an interaction, reconciliation
 interrupts it and records `SPECIALIST_INTERACTION_UNSUPPORTED` after terminal
-proof, or `interrupted_unknown` when that proof is unavailable; it never leaves
-an unanswerable request pending or bypasses Controller authority.
+proof. If terminal proof is unavailable, reconciliation reports `OUTCOME_UNKNOWN`
+and preserves the active task and any Writer authority. It MUST NOT treat an
+unanswerable interaction as authorization to release the Writer or bypass
+Controller authority. A later reconciliation may record `interrupted_unknown`
+only when authoritative Run evidence proves that no Turn can still be executing.
+Terminal observation after an interrupt MUST retain its bounded observation
+budget while an interaction remains pending. An interrupt acknowledgement or
+an interaction pause MUST NOT substitute for terminal proof.
 
 The external AI decides the objective, task
 graph, role selection, dependencies, retries, replacement, and semantic
@@ -3874,9 +3880,11 @@ active and reconciliation reports outcome uncertainty without releasing Writer
 authority. A returned Turn ID becomes `running`. At most one of
 these states may exist per member. The task deadline is a total budget beginning
 at durable reservation; reconciliation interrupts overdue running work and
-requires terminal proof before recording `expired`, otherwise it records
-`interrupted_unknown`. Complete close requires all tasks terminal and all
-members released. Abort makes per-member terminal and release progress durable,
+requires terminal proof before recording `expired`, otherwise it reports
+`OUTCOME_UNKNOWN` while preserving the active task and any Writer authority.
+It may record terminal `interrupted_unknown` only when authoritative Run evidence
+proves that no Turn can still be executing. Complete close requires all tasks
+terminal and all members released. Abort makes per-member terminal and release progress durable,
 accepts an already closed Run as terminal proof, and closes the aggregate only
 after every member is settled.
 Facade operations for one engagement share a permanent private `flock(2)`
