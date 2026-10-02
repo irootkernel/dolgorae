@@ -3,9 +3,11 @@
 Consumer Epic: [EPIC-017](../roadmap/README.md#epic-017-caller-owned-workspaces-and-explicit-agent-roles)
 
 This dossier integrates the approved successor design. The roadmap owns IDs,
-order, dependencies and lifecycle. Current product owners remain authoritative
-until TASK-061 promotes the successor contracts before implementation. Do not
-interpret this planning dossier as evidence that the new behavior is available.
+order, dependencies and lifecycle. The accepted
+[caller-workspace contract](../specs/caller-workspaces-v1.md) now owns the
+successor requirements, version map and implementation acceptance cases.
+This dossier retains execution coordination until closeout; it is not evidence
+that the new behavior is available.
 
 ## Outcome and Ownership
 
@@ -23,7 +25,7 @@ instructions and the current task remain separate.
 | [Protocol artifacts](../protocol/) | Versioned inputs, persisted identities, outputs, capabilities and errors |
 | [Roadmap](../roadmap/README.md) | Six sequential member Tasks and handoffs to unfinished consumer work |
 
-TASK-061 resolves contradictions among these owners before source changes.
+TASK-061 promotes the successor contracts among these owners before source changes.
 TASK-062 through TASK-065 implement their accepted contracts; TASK-066 owns
 migration, documentation, integrated acceptance and activation of the complete
 successor capability. Never advertise an incomplete guarantee.

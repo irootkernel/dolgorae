@@ -1,0 +1,170 @@
+{
+  "dolgorae_version": "0.1.4-contract-example",
+  "machine_protocol_version": 4,
+  "event_protocol_version": 1,
+  "rpc_protocol_version": 1,
+  "timeline_protocol_version": 1,
+  "event_projection_version": 1,
+  "grpc_error_detail_version": 1,
+  "minimum_rpc_client_version": 1,
+  "maximum_rpc_client_version": 1,
+  "rpc_descriptor_sha256": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5",
+  "grpc_methods": [
+    "RuntimeService.GetCapabilities"
+  ],
+  "controller_carrier_root": "home/.dolgorae/controller-carriers",
+  "controller_credential": {
+    "schema_id": "https://dolgorae.local/schema/controller-credential/v1",
+    "schema_version": 1,
+    "schema_sha256": "6e888023fa6f12964afbd2867832944307dc626cad3fe6c6bc517768ab98b84f",
+    "accepted_kinds": [
+      "human_cli",
+      "interactive_client",
+      "workflow_orchestrator",
+      "automation",
+      "other"
+    ],
+    "capability_byte_length": 32,
+    "capability_encoding": "base64url_no_padding",
+    "parent_directory_mode": "0700",
+    "file_mode": "0600",
+    "same_uid": true,
+    "regular_file": true,
+    "symlinks": "forbidden",
+    "create_exclusive": true,
+    "maximum_file_bytes": 4096,
+    "client_descendant_pattern": "<client>/<installation-id>/",
+    "normalized_principal": "kind+subject_id_else_kind+instance_id",
+    "initial_generation": 1
+  },
+  "artifact_bounds": {
+    "maximum_artifact_bytes": 33554432,
+    "maximum_chunk_bytes": 1048576,
+    "maximum_inline_response_bytes": 1048576,
+    "digest": "sha256",
+    "exact_byte_length": true,
+    "visibility_classes": [
+      "observer",
+      "controller_only"
+    ]
+  },
+  "supported_transports": [
+    "machine_cli",
+    "local_grpc"
+  ],
+  "app_server_transport": "direct_websocket_unix",
+  "profile_launch_mode": "dolgorae_owned_direct_executable",
+  "projection_profiles": [
+    "minimal",
+    "operational"
+  ],
+  "control_modes": [
+    "direct_interactive",
+    "managed_agent"
+  ],
+  "execution_lanes": [
+    "shared_readonly",
+    "dedicated"
+  ],
+  "assurance": {
+    "supported": [
+      "best_effort_personal_alpha"
+    ],
+    "maximum_achievable": "best_effort_personal_alpha",
+    "selection_time": "before_run_allocation"
+  },
+  "lane_capabilities": {
+    "shared_readonly": {
+      "command_execution": "bounded_best_effort",
+      "background_control": "profile_aggregate_only",
+      "per_run_process_cleanup": "unavailable",
+      "maximum_assurance": "best_effort_personal_alpha",
+      "writer_support": false,
+      "codex_mode": "plan"
+    },
+    "dedicated": {
+      "command_execution": "supported",
+      "background_control": "best_effort_personal_alpha",
+      "per_run_process_cleanup": "bounded_process_census",
+      "maximum_assurance": "best_effort_personal_alpha",
+      "writer_support": true,
+      "physical_start": "lazy_first_input"
+    }
+  },
+  "independent_run_concurrency": {
+    "basic_same_home_coexistence": "unverified",
+    "storage_and_long_duration": "unverified",
+    "resource_warning_live_dedicated": 6
+  },
+  "features": {
+    "persistent_runs": false,
+    "run_fork": false,
+    "reader_writer_access": false,
+    "threadless_acquire_write": false,
+    "first_write_via_submit_turn": false,
+    "write_continuation": false,
+    "controller_timeline": false,
+    "writer_handoff": false,
+    "durable_writer_authority": false,
+    "sticky_dedicated_lanes": false,
+    "control_modes": false,
+    "brokered_independent_subagent_runs": false,
+    "assurance_negotiation": false,
+    "profile_server_migration": false,
+    "profile_membership_repair": false,
+    "event_replay": false,
+    "artifact_retrieval": false,
+    "profile_diagnostics": false,
+    "controller_binding": false,
+    "worker_controller_revalidation": false,
+    "operator_capability": false,
+    "operator_controller_reset": false,
+    "safe_client_projection": false,
+    "public_local_socket": false,
+    "workspace_event_stream": false
+  },
+  "interactions": {
+    "command_execution_approval": "unavailable",
+    "file_change_approval": "unavailable",
+    "permission_request": "unavailable",
+    "user_input": "unavailable",
+    "mcp_elicitation": "unavailable",
+    "connector_approval": "unavailable",
+    "maximum_response_bytes": 1048576,
+    "maximum_safe_payload_bytes": 8388608
+  },
+  "access_policy_transition": "unverified",
+  "background_execution_control": {
+    "support": "unverified",
+    "mechanism": "dedicated_lane_process_census"
+  },
+  "native_subagents": {
+    "lifecycle_observation": "unverified",
+    "disable_enforcement": "unavailable",
+    "quiescence_tracking": "unverified",
+    "reason": "Illustrative contract example; no Profile is selected."
+  },
+  "native_subagents_policy": "enabled",
+  "profile": null,
+  "caller_workspace": {
+    "contract": "caller_workspace/v1",
+    "integrated": false,
+    "managed_instructions": {
+      "state": "unverified",
+      "reason_code": "not_qualified",
+      "evidence_sha256": null
+    },
+    "modern_startup": {
+      "state": "unverified",
+      "reason_code": "not_qualified",
+      "evidence_sha256": null
+    },
+    "checked_candidate_reads": {
+      "state": "unverified",
+      "reason_code": "not_qualified",
+      "evidence_sha256": null
+    },
+    "source_materialization": "retired",
+    "physical_start": "initialized_before_success"
+  }
+}

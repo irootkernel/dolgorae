@@ -1,0 +1,25 @@
+{
+  "schema_version": 4,
+  "ok": true,
+  "command": "run.start",
+  "invocation_id": "018f0000-0000-7000-8000-000000061002",
+  "data": {
+    "run_id": "018f0000-0000-7000-8000-000000061001",
+    "requested_access": "writable",
+    "selected_role": "general",
+    "effective_access": "write",
+    "policy_verification": "verified",
+    "writer_state": "active",
+    "writer_generation": 1,
+    "policy_epoch": 1,
+    "thread_id": "example-thread",
+    "transition_state": "none",
+    "instruction_identity": {
+      "schema": "dolgorae.instructions/v2",
+      "core_prefix_version": 2,
+      "common_sha256": "1abd99d316f7b16b7a830496bae87597c465e7d7053006f64e86502064d4252b",
+      "role_sha256": "7159bbfcb60e8933f7923ec81ad4d3352c0e8482e63e08949ea87493c42c5148",
+      "composition_sha256": "07fdefbcb308c7f447f06eb8136ebe56a8747d9e05cbc1d34485cf56abee1e4b"
+    }
+  }
+}

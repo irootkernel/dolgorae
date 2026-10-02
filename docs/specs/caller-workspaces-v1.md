@@ -1,0 +1,313 @@
+# Caller-workspace successor contract
+
+Status: Accepted contract for EPIC-017; runtime activation is pending its
+integrated acceptance gate. The [roadmap](../roadmap/README.md#epic-017-caller-owned-workspaces-and-explicit-agent-roles)
+owns delivery status. This document is part of the [product specification](README.md).
+Uppercase normative words have the meaning defined there.
+
+## Version and activation map
+
+TASK-061 MUST establish the following contracts before product behavior changes.
+An implementation MUST advertise support only after its required deterministic
+and empirical checks pass. TASK-066 activates the integrated interface when all
+six Tasks meet their completion gates. Earlier Tasks MAY implement internal
+support; they MUST NOT advertise an incomplete integrated guarantee.
+
+| Surface | Existing contract and retained meaning | Successor contract |
+| --- | --- | --- |
+| Public Run and Gul clients | TASK-053 public-v1 source, descriptor and TASK-056 clients; explicit lanes and lazy write activation | Byte-identical public-v1; no new Protobuf generation |
+| Machine/private startup | Existing low-level start input and threadless allocation | `dolgorae-run-start-request/v2`, resolved writable/general defaults, dedicated lane |
+| Instructions and Agent Configuration | `dolgorae.instructions/v1`, Agent Configuration v1/v2 | `dolgorae.instructions/v2` and Agent Configuration v3 |
+| Policy authoring and installation | JSON Role v1 and policy input/snapshot v2 | Policy input/snapshot v3 with named Markdown Role capture |
+| Run manifest | Manifest v1/v2 | Manifest v3 containing resolved startup selection and admitted instruction snapshot |
+| Review | Capture target v1 and review v1/v2/v3, including accepted receipts | Direct target v2 and review v4; six unchanged source-scope meanings |
+| External Specialist facade | Existing open/observe/close and accepted v1/v2/v3 task history | Facade v4 hire/assignment and direct structured results; unchanged aggregate authority |
+| Machine output | Existing command-tagged v1/v2/v3 envelopes | Modern command-tagged v4 envelopes and safe access/review projections |
+| Capabilities and errors | Existing capability v1 and checked errors v1/v2/v3 | Capability v2 with per-guarantee readiness; closed successor errors v4 |
+| New isolated launch | Legacy `copy`/`isolated_write`, capture creation and managed Git worktree creation | Typed retirement before effects; caller prepares any separate workspace |
+
+The [workspace execution schema](../protocol/dolgorae-workspace-execution-v1.schema.json)
+owns the concrete startup, instructions, Agent Configuration, policy and manifest
+successor shapes. The [direct target](../protocol/dolgorae-review-target-v2.schema.json),
+[review v4](../protocol/dolgorae-specialist-review-tool-v4.schema.json),
+[facade v4](../protocol/dolgorae-external-specialist-facade-v4.schema.json),
+[Machine v4](../protocol/dolgorae-machine-v4.schema.json),
+[capability v2](../protocol/dolgorae-capabilities-v2.schema.json) and
+[error v4](../protocol/dolgorae-error-contract-v4.json) schemas own the remaining shapes.
+Rust admission MUST enforce the semantic checks identified in schema
+annotations. JSON Schema validation alone does not prove byte lengths, digests,
+JCS identity, scope provenance or effective runtime policy.
+
+Policy v3 resources are embedded in the workspace execution schema. Their
+canonical document pointers are `#/$defs/policy_input` and
+`#/$defs/policy_snapshot`; offline registries MUST resolve their embedded IDs.
+The capability `caller_workspace` block describes the successor surface.
+Its `source_materialization: retired` field does not claim that retirement of
+new legacy requests has activated while `integrated` is false. The cutover rule
+below continues to govern those requests.
+Inherited `lane_capabilities` describe frozen public-v1 launch semantics,
+including dedicated `lazy_first_input`. Modern starts use the separate
+`caller_workspace.physical_start: initialized_before_success` contract; that
+field does not advertise availability before startup qualification and cutover.
+Policy and facade `read_only` maps to modern `read-only`, and
+`canonical_workspace_write` maps to `writable`; both refer to the caller
+workspace and grant no authority by themselves.
+
+At cutover, a new legacy request requiring source materialization or an isolated
+launch MUST return `SOURCE_ISOLATION_RETIRED` before Run, capture or worktree
+allocation, source publication, provider dispatch or caller-root mutation.
+It MUST NOT be reinterpreted as access to the caller workspace. A legacy input
+that requires JSON Role resolution MUST return `ROLE_MIGRATION_REQUIRED`.
+Existing public-v1 starts retain their explicit lane/access semantics and do
+not acquire modern defaults merely because the executable has been upgraded.
+
+Already accepted Runs, tasks, policies, results, receipts and captures MUST retain
+their original bytes, identities and meaning. Their readers and supported
+inspection, collection, closure and settlement operations remain available.
+Recovery MUST NOT reconstruct a missing source copy or worktree, replay uncertain
+work, rewrite a snapshot from current Role files, or grant new cleanup ownership.
+An accepted old Run MAY finish using its existing proven resources; a new launch
+from an isolated legacy policy requires migration.
+
+## Startup and access
+
+**CW-START**: Modern `run start --access read-only|writable --role <name>` MUST
+resolve omitted access to `writable` and omitted Role to `general` at the modern
+adapter. The private resolved request MUST carry both selections explicitly.
+Startup selection is immutable provenance; current effective access is a
+separate mutable fact. The modern lane is `dedicated` for both selections.
+Workspace discovery, canonical byte identity, Git/non-Git admission, global
+Profile binding, Controller carriers and idempotency retain their existing rules.
+An externally prepared Git worktree is a distinct workspace. Shared Git metadata
+and editors outside Dolgorae remain outside its one-writer guarantee.
+
+**CW-WRITER**: Writable startup MUST reserve the canonical workspace writer
+authority before provider effects. `WRITER_BUSY` MUST fail without dispatch,
+silent access downgrade, source copy, or a second writer. Success MUST require
+active matching authority and positively verified writable policy for the same
+Run, process generation and thread. This includes startup without a task Turn.
+An internal thread initialization is allowed; a synthetic user Turn is not.
+Missing instruction sources and known unsupported required capabilities MUST
+fail before Run allocation. Post-allocation failures retain the original Run
+and idempotency receipt with truthful failure or unknown state; retries MUST
+reconcile it and MUST NOT allocate a replacement. Ambiguous policy/process
+effects MUST retain a reserved or blocked guard until existing recovery proves
+safe absence or a completed transition.
+An unqualified turnless startup/effective-policy mechanism MUST return
+`WORKSPACE_STARTUP_UNSUPPORTED` before allocation. Qualification cannot infer
+write access from a reservation, thread sandbox label or synthetic task.
+
+**CW-TRANSITION**: Dedicated read-only startup MUST establish a verified reader
+thread. Controller-authorized acquire/release MUST retain the same Run and
+Codex thread, enforce idle/no-pending-interaction and process quiescence, and
+commit only after effective-policy proof. Unsupported transitions MUST fail
+before mutation. Release MUST preserve the guard until read-only policy and
+absence of writable descendants are proven. A released reader MAY reacquire.
+Fixed legacy `shared_readonly` remains non-promotable. Review Runs and restricted
+Specialists retain their existing prohibitions on writer acquisition. Role text,
+task wording, Profile selection and peer mail MUST NOT grant writer authority.
+
+Generation recovery MUST preserve accepted instructions and resolved startup
+selection. A successor generation follows the existing conservative authority
+reconciliation; a stored writable selection MUST NOT cause automatic acquisition
+or semantic replay. Readers MAY coexist with a writer and observe intermediate
+files. Effective policy, its verification and epoch, writer state/generation,
+and startup selection MUST be projected independently.
+If a turnless native thread is lost and cannot be resumed, recovery MUST report
+its unavailable binding rather than inventing a replacement or replaying a
+task. Unproven writer authority remains guarded. Qualification MUST exercise
+this boundary and state the selected runtime's persistence limit.
+
+## Instructions and Role admission
+
+**CW-SOURCE**: The common source MUST be `~/.dolgorae/home/AGENTS.md`, and the
+selected Role MUST be `~/.dolgorae/roles/<name>/AGENTS.md`. Names MUST match
+`^[a-z0-9][a-z0-9._-]{0,63}$`. There is no project, JSON, ancestor, include or
+environment fallback. Source text supplies instructions; execution configuration
+and policy display metadata remain separate. Ordinary omission selects `general`;
+standalone review omission selects `reviewer`. Engagement and broker policy
+configuration MUST bind a Role explicitly.
+
+**CW-INIT**: Only explicit `init` or migration MAY create sources. Init MUST
+install common, general and reviewer templates using create-exclusive,
+descriptor-relative publication and the existing owner-only home protections.
+It MUST preserve existing files byte-for-byte and never repair invalid inputs
+silently. Startup, validation, discovery and recovery MUST NOT create sources.
+Existing files take precedence and still require admission.
+
+**CW-CAPTURE**: Admission MUST traverse validated current-uid-owned 0700
+directories without following symlinks and read each current-uid-owned 0600
+regular file once through its validated descriptor. It MUST reject missing,
+unsafe, non-UTF-8, NUL-bearing, empty, raced or oversized sources before a new
+Run is allocated or policy installed. The combined raw common and Role bodies
+MUST be at most 65,536 UTF-8 bytes. Descriptor identity and content stability
+MUST be checked across the bounded read; replacement or in-place changes
+detected during admission fail closed. Accepted raw bytes, their individual
+lengths and SHA-256 digests MUST be preserved without trimming, newline or
+Unicode normalization. Exact captured bytes, not a reopened pathname, become
+the execution input. Existing core, dynamic-context and task bounds remain
+independent of the source-body ceiling.
+
+**CW-COMPOSE**: The immutable developer instruction prefix MUST compose core
+governance, admitted common body and selected Role body, in that order with
+two LF bytes between layers. Its versioned composition identity MUST bind the
+core version and exact source digests. Dynamic access context remains Turn-scoped.
+The current task MUST be submitted separately as user input; it MUST NOT change
+Role identity. Conflicting instructions cannot remove enforced Controller,
+writer, tool or lifecycle boundaries. The command and thread cwd MUST be the
+selected canonical workspace. The instruction home and Profile CODEX_HOME MUST
+remain separate from cwd and from each other.
+
+**CW-SNAPSHOT**: Standalone admission MUST capture both sources. Policy
+installation MUST capture each selected Role once and store its raw body and
+digest independently of live sources. Aggregate bootstrap MUST capture common
+instructions once, combine them with the installed policy's Role captures, and
+retain them in its accepted session snapshot for children and reactivation.
+It MUST recheck the combined ceiling before publishing bootstrap. Editing or
+removing source files after acceptance MUST NOT alter Run, policy or session
+bytes, trigger a source reload on retry, or invalidate accepted snapshots.
+
+**CW-AMBIENT**: Modern admission MUST suppress automatic AGENTS discovery from
+Profile, project and ancestor paths using supported runtime configuration.
+Capability proof MUST include the actual pinned Codex thread with conflicting
+files in each path and a positive control for the explicitly supplied bodies.
+Shell cwd changes or an instruction to ignore files do not establish suppression.
+If the selected runtime cannot establish this guarantee, admission MUST return
+`INSTRUCTION_DISCOVERY_UNSUPPORTED` before allocation. Explicit project guidance
+MAY be supplied as task context; it cannot replace the admitted Role or grant
+authority. The common prefix does not disable supported skills, plugins, apps
+or MCP tools globally; review candidate-reading restrictions are scoped below.
+
+## Direct review and candidate reading
+
+**CW-NOCOPY**: Every new one-shot, review-target, Engagement and brokered launch
+path MUST use the caller workspace without preparing a source tree or Git
+worktree. Durable instruction, configuration, result and bounded target-metadata
+snapshots remain required. Close, failure, recovery, export and deletion MUST
+preserve caller-owned roots. Historical cleanup MUST use original proven
+capture/worktree ownership and MUST NOT recreate absent resources.
+
+**CW-SCOPE**: Direct review MUST retain all six source meanings:
+
+| Scope | Candidate source and comparison |
+| --- | --- |
+| `workspace` | Eligible non-ignored current files, including eligible untracked files |
+| `staged` | Admitted HEAD/empty-tree to index transition; index bytes supply after context |
+| `dirty` | Admitted HEAD/empty-tree to combined staged, unstaged and untracked state; current worktree wins and absence deletes |
+| `head` | Tree of the commit resolved once from HEAD |
+| `commit` | First-parent transition into the resolved commit; root uses the empty tree |
+| `range` | `A..B` compares resolved A and B; `A...B` compares their merge base and resolved B |
+
+Non-Git workspaces MUST support only `workspace`. Conflicts, unsafe paths,
+escaping links, special files and recognized secrets retain existing fail-closed
+admission. Renames remain deletion plus addition. Each side MUST retain the
+existing 10,000-file, 8-MiB-per-file and 64-MiB-total bounds; transition metadata
+MAY contain up to 20,000 entries. Candidate paths MUST be safe relative paths.
+Review input and structured output retain their independent 1-MiB bounds and
+the v3 brief/context/criterion limits.
+
+**CW-PIN**: Before dispatch, Git scopes MUST resolve requested refs once to full
+object IDs. Range admission MUST bind both endpoint IDs, two-dot/three-dot mode,
+and the effective comparison base. A ref moving later MUST NOT change that
+selection. Historical candidate file contents and diffs MUST be read from those
+objects without checkout. Missing objects MUST fail as `REVIEW_TARGET_UNAVAILABLE`;
+current workspace contents cannot substitute. Staged admission MUST bind selected
+index entries, their blob IDs and modes, including deleted and absent sides.
+
+**CW-READ**: Candidate full-file reads and diff reads for staged/head/commit/range
+MUST pass through a checked target-reader bound to the admitted index or pinned
+objects. Each candidate read MUST produce an authoritative bounded receipt
+binding the review identity, target digest, side, relative path, content digest
+and returned range. Candidate evidence MUST bind a matching receipt and location;
+the coordinator MUST validate it against the admitted source. Live-workspace
+reads MUST be labelled separate context and cannot supply candidate evidence.
+Model-generated labels or claims that a read used Git are insufficient.
+
+Before dispatch, the selected runtime/tool configuration MUST establish that
+unmediated native or plugin tool reads cannot enter candidate provenance and
+that all candidate evidence is verifiable through the reader. This includes
+full-file context outside changed hunks. If it cannot establish that boundary,
+it MUST return `REVIEW_READING_BOUNDARY_UNSUPPORTED` before Reviewer allocation
+or source-bearing dispatch. No prompt-only or cwd-only implementation qualifies.
+Results with a violated or unverifiable boundary MUST return
+`REVIEW_CANDIDATE_PROVENANCE_INVALID`, even when refs and fingerprints are unchanged.
+The integration MUST NOT advertise checked object/index review until adversarial
+native-tool worktree reads and forged/missing receipts have been exercised.
+
+**CW-DRIFT**: Workspace, staged and dirty admission MUST capture bounded
+fingerprints before dispatch and recheck the same eligible scope before result
+acceptance. Staged checks MUST cover the admitted index and comparison base;
+irrelevant worktree edits cannot replace candidate bytes. Detected changes MUST
+return `REVIEW_TARGET_DRIFTED` with an inconclusive outcome, never an accepted
+clean verdict. Source-read instability also fails closed. These sampled checks
+can miss intervening edits. External writers also remain outside Dolgorae's
+control, so review does not provide snapshot isolation. Accepted mutable-scope
+results MUST disclose these limits. Object-backed review MAY retain separate live context;
+that context cannot inherit object-backed assurance.
+
+**CW-RESULT**: Review MUST use a fresh explicitly read-only Reviewer, separate
+task input and admitted Role, stable request/Run/thread/Turn identities, bounded
+ordered findings and exact criterion coverage. Unknown acceptance/outcome MUST
+preserve the original identities and forbid automatic replay. Validated technical
+verdict, criterion completion, source assurance, Reviewer/engagement closure and
+server cleanup remain separate facts. Direct review has no capture-settlement
+identity or immutable root. Read-only access protects source mutation; it does
+not establish hostile-process containment or repository secrecy.
+
+## Migration, projections and implementation handoffs
+
+**CW-MIGRATE**: Explicit migration MUST enumerate legacy common/project JSON
+Role inputs, destination names and collisions. Any collision MUST require an
+explicit source/name choice; migration MUST NOT choose a winner, merge bodies,
+overwrite destinations or rewrite accepted snapshots. It MUST retain original
+source bytes and generate successor authoring input separately. New source
+resolution MUST NOT fall back to JSON or project paths after cutover.
+
+**CW-PROJECT**: Observer-safe successor output MUST expose resolved requested
+access, current effective access/verification, transition and writer state,
+instruction identity and selected Role, and review target/drift/provenance
+assurance. It MUST omit source paths, instruction bodies, Controller credentials
+and private tool state. Controller-only persisted captures are not observer
+data. Capability output MUST distinguish `supported`, `unverified` and
+`unavailable` for managed instructions, modern startup and checked target reads;
+failure to qualify one guarantee cannot silently downgrade it. A schema's
+presence MUST NOT imply runtime support.
+
+| Successor error | Phase/outcome and required action |
+| --- | --- |
+| `SOURCE_ISOLATION_RETIRED` | Admission/not dispatched; migrate the request |
+| `ROLE_MIGRATION_REQUIRED` | Admission/not dispatched; explicitly migrate the Role input |
+| `INSTRUCTION_SOURCE_INVALID` | Admission/not dispatched; fix the selected source |
+| `INSTRUCTION_DISCOVERY_UNSUPPORTED` | Admission/not dispatched; select a qualified runtime |
+| `WORKSPACE_STARTUP_UNSUPPORTED` | Admission/not dispatched; select a qualified startup/policy mechanism |
+| `REVIEW_READING_BOUNDARY_UNSUPPORTED` | Admission/not dispatched; select a qualified runtime/tool boundary |
+| `REVIEW_CANDIDATE_PROVENANCE_INVALID` | Inconclusive; inspect the original review |
+| `REVIEW_TARGET_DRIFTED` | Inconclusive; explicitly submit a new review if desired |
+| `REVIEW_TARGET_UNAVAILABLE` | Failed or not dispatched; restore the pinned target without substituting live bytes |
+
+These errors MUST use the closed safe details in error v4 and exit status 4.
+Provenance-invalid and drift errors MUST bind the existing review identity so
+their inspect or resubmit action can refer to the original review.
+They are non-retryable for the same accepted operation. Existing writer,
+Controller, transition and idempotency errors retain their current semantics.
+
+The following cases are implementation obligations, not executed evidence.
+Each Task MUST map its actual production path and focused Rust/black-box tests
+to these IDs and obtain its independent read-only review. OS and external-runtime
+claims require empirical evidence in addition to deterministic fakes.
+
+| Task | Cases and success/failure checks |
+| --- | --- |
+| TASK-062 | CW-SOURCE/INIT/CAPTURE: exact bytes/digests; combined ceiling and UTF-8/NUL; missing and unsafe inputs; symlink ancestry/leaf, owner/mode, replacement and in-place race; no allocation on failure; init preserves existing files |
+| TASK-062 | CW-COMPOSE/SNAPSHOT/AMBIENT: separate task/Role; cwd versus CODEX_HOME; edited/deleted sources on retry/recovery; installed-policy and session captures; conflicting Profile/project/ancestor files plus explicit-body positive controls in separately approved pinned Codex probes |
+| TASK-063 | CW-START/WRITER/TRANSITION: defaults and explicit read-only; startup without Turn; competing controllers/Profiles; writer conflict before provider effects; no downgrade; same-Run acquire/release; pending interaction and descendants; crash before/after reservation, policy proof and publication; original receipt on retry/restart |
+| TASK-064 | CW-NOCOPY and cutover: every facade; retired copy/isolation pre-effect; accepted legacy completion/inspection/settlement; missing-resource recovery; failure/close/export/delete never remove caller roots; reassess shared launch-preparation responsibilities |
+| TASK-065 | CW-SCOPE/PIN: six scopes; non-Git rejection; root/first-parent and two-dot/three-dot ranges; moved refs; differing worktree/index/commit bytes; missing object; bounds, secrets and unsafe paths; no checkout |
+| TASK-065 | CW-READ/DRIFT/RESULT: full-file and diff receipts; deliberate native worktree read, forged/missing receipts and unsupported boundary; unchanged refs/fingerprints still reject bad provenance; index/dirty drift; fresh reviewer and original unknown-outcome recovery |
+| TASK-066 | CW-MIGRATE/PROJECT and activation: common/project/name collisions with explicit choice; no overwrite or snapshot rewrite; old receipts/readers; unchanged TASK-056 clients; synchronized help, examples, operations and packaged skill; complete pinned gate and separately approved integrated live probes |
+
+EPIC-009/TASK-027 consumes captured Role selectors and caller-workspace
+activation. EPIC-010/TASK-028 through TASK-031 consume safe access/review
+projections, deletion ownership and composition. EPIC-011/TASK-032 through
+TASK-034 extend deterministic, crash and separately approved live conformance.
+Their existing IDs, status and completion gates remain unchanged.

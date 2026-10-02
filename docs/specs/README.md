@@ -16,6 +16,12 @@ The cumulative `v0.1.x` milestone previews implement only the product boundary
 assigned to each version by the roadmap. They do not claim this complete target
 specification, Personal Alpha readiness, or customer support.
 
+The accepted [caller-workspace successor contract](caller-workspaces-v1.md)
+owns EPIC-017's modern startup, Markdown instruction admission and direct
+review behavior. Its version map scopes the older sections below to legacy
+interfaces and accepted records. TASK-061 defines these contracts; capability
+activation remains gated on TASK-062 through TASK-066 and their runtime evidence.
+
 The approved [Gul consumer contract v1](gul-consumer-v1.md) defines the v0.1.3
 consumer profile: complete prompt history, sequential human submission without
 queue/steering, two read-only aggregate/result queries, whole-session closure,
@@ -652,7 +658,11 @@ generations.
 
 ### Specialist Role Sources
 
-The following Role-source contract is active for Specialist Policy authoring.
+The following JSON Role-source contract is the legacy v2 policy-authoring
+contract. The [successor](caller-workspaces-v1.md#instructions-and-role-admission)
+uses explicitly selected global Markdown sources and policy v3. At integrated
+cutover, new legacy policy input requires explicit migration; accepted snapshots
+remain executable without reading either source generation.
 Role sources become executable input only when an explicitly authorized policy
 installation captures them into a checked immutable policy.
 
@@ -1285,9 +1295,9 @@ Run. The owner carrier and new-Run carrier are distinct protected inputs.
 Trusted MCP adapters call the same semantic facade and checked payload contract.
 V1 does not support in-place engagement-owner Controller transfer or rotation.
 
-`run start` creates an empty idle Run and MUST NOT allocate a Codex
+Legacy public-v1 startup creates an empty idle Run and MUST NOT allocate a Codex
 thread, acquire writer authority, start a physical Dedicated Lane Server, or
-start the first turn. Every newly allocated Run begins with no writer authority.
+start the first turn. Every legacy public-v1 Run begins with no writer authority.
 A dedicated Run publishes its logical lane with `server_lane.state=absent`,
 `thread_id=null`, and null physical generation/epoch/socket identity. First
 `send`/`submit` starts the selected physical generation when needed, allocates
@@ -2043,7 +2053,7 @@ This section owns workspace writer serialization and durable authority. Physical
 lane topology and thread residency are owned by SPEC-014; where older field
 names conflict, SPEC-014 is authoritative.
 
-Every newly allocated Run begins with no writer authority. A shared Run is
+Every legacy public-v1 Run begins with no writer authority. A shared Run is
 always read-effective. A dedicated Run is read-effective unless its first
 operation completes the durable first-write activation protocol. A resumed
 dedicated generation derives its effective policy from durable writer authority
@@ -2079,7 +2089,9 @@ MUST NOT queue, take over, or infer permission from its parent relationship.
 Editors and Codex processes operating outside Dolgorae remain outside this
 serialization guarantee.
 
-Writer acquisition is lazy and explicit. `run send|submit --write` MUST activate
+Legacy public-v1 writer acquisition is lazy and explicit. Modern startup uses
+the [successor startup transaction](caller-workspaces-v1.md#startup-and-access)
+and may initialize a thread without submitting a Turn. `run send|submit --write` MUST activate
 durable writer authority before submitting any prompt. `run acquire-write` is
 valid only after a thread is durably bound; a threadless run returns
 `THREADLESS_REQUIRES_WRITE_TURN`. It never
@@ -3049,6 +3061,12 @@ immediately before removal.
 
 Dolgorae composes two instruction layers.
 
+For the modern contract, the generation-immutable layer includes the explicitly
+admitted common and selected Markdown Role sources in the order defined by
+[instruction admission](caller-workspaces-v1.md#instructions-and-role-admission).
+Ambient AGENTS loading is suppressed and verified before modern admission.
+Legacy instruction snapshots retain their original composition and behavior.
+
 The **generation-immutable instruction contract** is installed whenever a
 thread generation is started, resumed, or forked. It contains the Run ID,
 canonical workspace, use-case role presentation, instruction-contract versions,
@@ -3442,7 +3460,7 @@ unchanged.
 
 Admission MUST check the immutable session policy, member access, current
 membership, and execution intent before reserving work or causing writer/Turn
-effects. All advertised access modes use the existing safety protocols;
+effects. All advertised legacy access modes use the existing safety protocols;
 `isolated_write` and `canonical_workspace_write` are not silently downgraded or
 left as accepted but unimplemented modes. A live Primary that cannot safely
 yield canonical writer authority while its Turn is active MUST receive a typed
@@ -3795,7 +3813,11 @@ case MUST NOT hire another first-class Dolgorae Specialist or address another
 Specialist through the Collaboration Plane in v1; the external control plane
 hires and coordinates additional roles directly.
 
-External Specialists default to read-only analysis or isolated change
+The following isolated launch and result rules describe the legacy Engagement
+contract. The [successor](caller-workspaces-v1.md#version-and-activation-map)
+rejects new isolated requests and uses explicit caller-workspace access.
+
+Legacy External Specialists default to read-only analysis or isolated change
 production. Direct writes to the canonical workspace are safe only when the
 external integration quiesces its own writer and participates in Dolgorae's
 writer protocol. Requesting `canonical_workspace_write` is the trusted host's
@@ -4230,6 +4252,12 @@ Live use requires separate explicit authorization. Missing live evidence
 prevents the readiness acceptance from passing.
 
 ### Immutable Review Targets and Scoped Specialist Review
+
+This section defines legacy capture-backed review and the meaning of accepted
+v1 through v3 records. New operations use
+[direct review](caller-workspaces-v1.md#direct-review-and-candidate-reading)
+after integrated cutover. Historical capture inspection and settlement remain
+available; new capture requests then receive a typed retirement error.
 
 EPIC-004 MUST add a versioned immutable review-target contract without changing
 the completed `working-tree` v1 request or result. The supported target kinds

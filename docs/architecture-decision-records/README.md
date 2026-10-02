@@ -114,7 +114,8 @@ model settings, recovery, audit causality, and access state ambiguous.
 
 ### Decision
 
-A run is one logical session. It has no Codex thread before its first turn;
+A run is one logical session. Legacy public-v1 starts have no Codex thread
+before their first turn;
 first `send`/`submit` durably reserves one intent, then performs `thread/start`
 and `turn/start`. A crash between those RPCs may abandon only the empty
 provisional thread and retry only after absence proof plus stable history proving
@@ -123,8 +124,13 @@ the first turn is accepted, the run is permanently bound to exactly one Codex
 thread. Restarting a worker connection changes run generation, not run or
 thread identity. History-copying branching creates its new thread immediately;
 a fresh branch creates a threadless run and allocates its thread when first used.
-This lazy boundary is required because pinned Codex does not persist a
-turnless `thread/start` across app-server restart.
+This legacy lazy boundary accounts for pinned Codex not persisting a turnless
+`thread/start` across app-server restart. Modern startup binds its initialized
+thread before success and never submits a synthetic Turn to persist it. If
+that turnless thread cannot be resumed after process loss, recovery reports
+the unavailable binding and preserves any unproven writer guard; it does not
+claim same-thread recovery through a replacement. Runtime qualification must
+exercise this loss boundary before modern startup is advertised.
 
 ### Consequences
 
@@ -156,9 +162,17 @@ simultaneous writers within that worktree conflict.
 
 Run Codex in the canonical workspace selected by the caller. A linked Git
 worktree is an independent canonical workspace and supported parallel writer
-lane. Start every Run with writer authority `none`: a shared Run starts as a
+lane. Legacy public-v1 starts begin with writer authority `none`: a shared Run
+starts as a
 verified reader, while a dedicated Run starts physically absent with unknown,
-unverified effective policy until its first turn. Allow concurrent readers and at most one
+unverified effective policy until its first turn. Modern starts follow the
+[caller-workspace startup contract](../specs/caller-workspaces-v1.md#startup-and-access):
+both access selections use a dedicated lane, omitted access means writable,
+and success requires an initialized thread and verified selected policy.
+Writable startup reserves and activates writer authority before success,
+including when no task Turn exists. Failure or ambiguity preserves the
+original Run receipt and any unproven guard. No new source copy or worktree
+is created. Allow concurrent readers and at most one
 Dolgorae writer across every profile in a canonical worktree. Persist one
 authority record whose states are `none`, `reserved`, `active`,
 `handoff_prepared`, `releasing`, and `blocked_unknown`; only explicit audited transitions may grant or remove
@@ -192,7 +206,8 @@ The exception is restricted to this admission path; all other transitions
 retain the global hierarchy and external-wait prohibition. Writer
 activation and release use revision-bound prepare/apply/verify/commit phases so
 no WebSocket or process wait occurs under a global file lock. A threadless
-`acquire-write` is rejected; only its first `send|submit --write` may create a
+legacy `acquire-write` is rejected; only its first `send|submit --write` may
+create a
 writer-configured thread and activate authority before `turn/start`.
 
 Codex 0.147.0 is the compatibility baseline. Under ADR-019, every dedicated Run
@@ -476,9 +491,18 @@ dynamic access context derived from durable writer and verified policy state.
 
 Do not describe every Dolgorae-managed agent as a subagent. Append immutable
 Run-specific instructions as subordinate context. Continue to respect profile
-AGENTS files, skills, plugins, apps, and checked MCP servers unless they conflict
-with enforced invariants. Their mutable contents are not part of Dolgorae's
-byte-immutable role claim. Native subagents require an explicit enabled profile
+AGENTS files on legacy instruction generations, and supported skills, plugins,
+apps and checked MCP servers unless they conflict with enforced invariants.
+Their mutable contents are not part of Dolgorae's
+byte-immutable role claim. The modern contract explicitly captures common and
+named Markdown Role instructions and suppresses ambient AGENTS discovery using
+empirically verified runtime configuration. Captured bodies are immutable
+developer input; current task input remains separate. Unsupported discovery
+control rejects modern admission before allocation. The caller workspace is
+cwd, while instruction home and CODEX_HOME have separate owners. Candidate
+reading restrictions for object/index review are checked independently of
+general Profile tool availability. Native subagents require an explicit enabled
+profile
 policy and a capability snapshot of `supported`; the corrected 0.147.0 campaign
 passes lifecycle observation while disable enforcement remains unavailable.
 
@@ -2075,37 +2099,39 @@ supervision, and Mulgae adjudication and publication.
 
 ### Decision
 
-Adopt the six common source scopes and immutable-capture direction recorded in
+Retain the six common source scopes recorded in
 [`review-strategy-analysis.md`](review-strategy-analysis.md): `workspace`,
 `staged`, `dirty`, `head`, `commit`, and `range`. Task, Epic, and special-request
 identities supply authority and focus but never replace the selected source
-scope. Patch and stdin remain Mulgae-only extensions.
+scope. Patch remains a Mulgae-only source extension; stdin carries checked
+task input and is not a source scope.
 
-Keep target semantics separate from backend supervision. EPIC-004 owns a
-versioned capture and settlement contract and a Specialist Review
-extension that does not reinterpret the completed `working-tree` v1 contract.
-Aquarium independent-review will use that Dolgorae path without an
-Orca terminal. Aquarium orca-review will use the same captured-target semantics
-while retaining Orca Run, Task, Dispatch, terminal, provider, acknowledgement,
-and recovery ownership. Mulgae will retain its native capture and run lifecycle
-and prove semantic conformance without code or storage coupling.
+Keep target semantics separate from backend supervision. EPIC-004's completed
+capture and settlement contract remains the owner of historical records.
+EPIC-017 replaces new Dolgorae captures with direct workspace and pinned-object
+reads under the [successor contract](../specs/caller-workspaces-v1.md#direct-review-and-candidate-reading).
+Mutable targets receive sampled drift checks; object/index candidate reads
+require checked full-file/diff provenance. Unsupported boundaries reject before
+dispatch, and unverifiable candidate evidence prevents acceptance. No new path
+prepares source copies or worktrees. Existing captures retain original meaning
+and owner-bound settlement without recreation of missing resources.
 
-Acceptance of this architecture is not runtime proof. Current product
-requirements, checked protocol, executable behavior, and active Aquarium skills
-remain unchanged until EPIC-004 implements, verifies, and activates them through
-its ordered Tasks and runtime Completed Confirm.
+Aquarium routes and Mulgae native capture, adjudication and publication remain
+owned by their tools and skills. Orca supervision is unchanged; consumer
+migration needs its own evidence. Dolgorae runtime availability requires
+EPIC-017 implementation and acceptance evidence.
 
 ### Consequences
 
 - Dirty and historical review will have one intended meaning across the three
   strategies without requiring one common orchestration engine.
-- A reviewer result will bind to immutable bytes even if the source
-  repository changes after capture.
+- Object/index candidate evidence binds checked source reads; mutable workspace
+  results disclose sampled drift assurance and its concurrency limits.
 - The source repository and index need not be modified to prepare a review.
-- Existing users retain the completed v1 Specialist Review and current Aquarium
-  behavior until EPIC-004's implementation and activation gate completes.
-- Runtime, compatibility, privacy, cleanup, and failure-path claims remain
-  unproven by this ADR and are mandatory EPIC-004 acceptance work.
+- Accepted legacy review and capture records retain their meaning; new legacy
+  source-isolation requests are rejected at EPIC-017's integrated cutover.
+- Runtime, compatibility, privacy, cleanup and failure-path claims require
+  EPIC-017 acceptance evidence; this ADR alone proves none of them.
 
 ### Rejected alternatives
 
@@ -2301,6 +2327,15 @@ inline contexts with declared provenance, ordered criteria, expected output,
 and deadline. Persist and digest the decoded request as JCS before dispatch;
 preserve string code points and line endings without trimming or Unicode
 normalization. Context is evidence and never changes the immutable candidate.
+
+EPIC-017's successor uses explicit common and named global Markdown Role
+sources, preserving raw bytes and individual digests in instruction v2.
+Policy v3 captures Role bodies at installation; aggregate bootstrap captures
+common once. New JSON/project-source resolution requires explicit migration,
+with collision selection and no overwrite or snapshot rewrite. The modern
+candidate may be mutable and drift-sensitive; task context never replaces the
+selected candidate source. Existing v1/v2/v3 review records keep their original
+meaning.
 
 Add v3 contracts rather than changing v1 or v2. The Machine CLI reads the v3
 one-shot request from non-TTY stdin while workspace, Profile, credentials, and

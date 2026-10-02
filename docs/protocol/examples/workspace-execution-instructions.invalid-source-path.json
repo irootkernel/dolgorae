@@ -1,0 +1,18 @@
+{
+  "schema": "dolgorae.instructions/v2",
+  "core_prefix_version": 2,
+  "core_prefix_sha256": "5c638d6dab74ab9bb8de4a5fe918c81127d98bd302d35f5f0c39cad83c5d6b0d",
+  "common": {
+    "body": "Follow the Controller and workspace access policy.\n",
+    "byte_length": 51,
+    "sha256": "1abd99d316f7b16b7a830496bae87597c465e7d7053006f64e86502064d4252b"
+  },
+  "role": {
+    "body": "Perform the assigned task within authorized access.\n",
+    "byte_length": 52,
+    "sha256": "7159bbfcb60e8933f7923ec81ad4d3352c0e8482e63e08949ea87493c42c5148",
+    "name": "general",
+    "source_path": "/private/role"
+  },
+  "composition_sha256": "07fdefbcb308c7f447f06eb8136ebe56a8747d9e05cbc1d34485cf56abee1e4b"
+}

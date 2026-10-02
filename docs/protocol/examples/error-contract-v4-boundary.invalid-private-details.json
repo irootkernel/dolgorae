@@ -1,0 +1,14 @@
+{
+  "code": "REVIEW_READING_BOUNDARY_UNSUPPORTED",
+  "message": "The selected candidate cannot be accepted.",
+  "retryable": false,
+  "details": {
+    "schema": "dolgorae-workspace-error-details/v1",
+    "required_action": "select_supported_runtime",
+    "phase": "admission",
+    "outcome": "not_dispatched",
+    "review_id": null,
+    "run_id": null,
+    "controller_credential": "private"
+  }
+}

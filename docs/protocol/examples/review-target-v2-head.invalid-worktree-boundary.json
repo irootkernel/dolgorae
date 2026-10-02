@@ -1,0 +1,29 @@
+{
+  "schema": "dolgorae-review-target/v2",
+  "kind": "head",
+  "requested_revision": null,
+  "workspace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "resolved_base": null,
+  "resolved_head": "cccccccccccccccccccccccccccccccccccccccc",
+  "range": null,
+  "assurance": "pinned_objects",
+  "reading_boundary": "checked_workspace",
+  "entries": [
+    {
+      "side": "current",
+      "path": "hello.py",
+      "source": "git_object",
+      "mode": "100644",
+      "byte_length": 22,
+      "sha256": "a0c22dc5d16db10ca0e3d99859ffccb2b4d536b21d6788cfbe2d2cfac60e8117",
+      "blob_oid": "f1a18139c84a82addbded8a7b5738c36fb02fce1"
+    }
+  ],
+  "excluded": [
+    "ignored_files",
+    "git_metadata",
+    "private_tool_state"
+  ],
+  "admission_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "target_sha256": "7239fd359a4e3202197ec3c47dd6b88c8e24bee3e1c9e8c87f65161236e6e35d"
+}

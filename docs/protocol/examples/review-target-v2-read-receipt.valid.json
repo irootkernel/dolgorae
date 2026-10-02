@@ -1,0 +1,11 @@
+{
+  "schema": "dolgorae-candidate-read-receipt/v1",
+  "receipt_id": "018f0000-0000-7000-8000-000000061002",
+  "review_id": "018f0000-0000-7000-8000-000000061001",
+  "target_sha256": "7239fd359a4e3202197ec3c47dd6b88c8e24bee3e1c9e8c87f65161236e6e35d",
+  "side": "current",
+  "path": "hello.py",
+  "sha256": "a0c22dc5d16db10ca0e3d99859ffccb2b4d536b21d6788cfbe2d2cfac60e8117",
+  "byte_offset": 0,
+  "byte_length": 22
+}

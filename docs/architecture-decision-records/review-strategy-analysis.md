@@ -6,6 +6,11 @@ does not advertise a runtime capability or a completed review. Current product
 behavior remains governed by the [specification](../specs/README.md) and the
 checked protocol artifacts.
 
+EPIC-017's accepted [caller-workspace contract](../specs/caller-workspaces-v1.md)
+supersedes the materialization direction for new Dolgorae operations. The dated
+investigation below remains the EPIC-004 baseline and does not prescribe the
+successor's direct reads, sampled drift assurance or candidate-reading boundary.
+
 ## Goal
 
 EPIC-004 makes Aquarium's `independent-review` use Dolgorae to run a fresh

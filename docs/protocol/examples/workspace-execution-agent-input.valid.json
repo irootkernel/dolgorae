@@ -1,0 +1,13 @@
+{
+  "schema_version": 3,
+  "selected_profile": "codex-default",
+  "model": null,
+  "default_effort": "high",
+  "purpose": "review",
+  "purpose_label": null,
+  "required_capabilities": [],
+  "execution_lane": "dedicated",
+  "required_assurance": "best_effort_personal_alpha",
+  "native_subagent_policy": "enabled",
+  "role": "reviewer"
+}

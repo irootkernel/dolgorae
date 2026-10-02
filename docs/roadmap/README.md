@@ -26,8 +26,9 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
-`EPIC-017` and `TASK-061` through `TASK-066` are `PLANNED` after EPIC-016
-and before EPIC-009. They introduce caller-owned workspaces, explicit common
+`EPIC-017` is `ACTIVE` and `TASK-061` is `COMPLETE`; `TASK-062` through
+`TASK-066` remain `PLANNED` after EPIC-016 and before EPIC-009.
+They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
 Machine CLI review path and lets Codex CLI invoke it through its ordinary shell
@@ -2117,7 +2118,7 @@ follow-up. No stable release, installation, or external publication is claimed.
 
 ## EPIC-017: Caller-Owned Workspaces and Explicit Agent Roles
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [execution dossier](../todo/TODO-caller-owned-workspaces-and-agent-roles.md)
 
@@ -2132,7 +2133,7 @@ the successor work to promote before implementation.
 
 ### TASK-061: Define Workspace, Access, Role, and Review Successor Contracts
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Reconcile the owning specification, architecture and ADRs before source changes.
 Define modern startup access and Role inputs, runtime transitions, explicit

@@ -42,7 +42,11 @@
       "tasks": [
         "TASK-000-H",
         "TASK-002",
-        "TASK-017"
+        "TASK-017",
+        "TASK-061",
+        "TASK-062",
+        "TASK-064",
+        "TASK-066"
       ],
       "catches": [
         "workspace discovery",
@@ -65,7 +69,10 @@
         "TASK-037",
         "TASK-038",
         "TASK-057",
-        "TASK-058"
+        "TASK-058",
+        "TASK-061",
+        "TASK-062",
+        "TASK-066"
       ],
       "catches": [
         "strict machine-local Runtime Profile registry schema and initial empty registry",
@@ -149,7 +156,10 @@
         "TASK-045",
         "TASK-046",
         "TASK-058",
-        "TASK-059"
+        "TASK-059",
+        "TASK-061",
+        "TASK-063",
+        "TASK-066"
       ],
       "catches": [
         "public CLI and RPC adapters",
@@ -218,7 +228,11 @@
         "TASK-051",
         "TASK-057",
         "TASK-058",
-        "TASK-060"
+        "TASK-060",
+        "TASK-061",
+        "TASK-063",
+        "TASK-065",
+        "TASK-066"
       ],
       "catches": [
         "machine and protobuf envelopes",
@@ -271,7 +285,9 @@
         "TASK-024",
         "TASK-029",
         "TASK-049",
-        "TASK-052"
+        "TASK-052",
+        "TASK-061",
+        "TASK-063"
       ],
       "catches": [
         "sandbox mapping",
@@ -311,7 +327,11 @@
         "TASK-051",
         "TASK-052",
         "TASK-058",
-        "TASK-060"
+        "TASK-060",
+        "TASK-061",
+        "TASK-063",
+        "TASK-064",
+        "TASK-066"
       ],
       "catches": [
         "lifecycle",
@@ -371,7 +391,10 @@
         "TASK-047",
         "TASK-049",
         "TASK-051",
-        "TASK-052"
+        "TASK-052",
+        "TASK-061",
+        "TASK-064",
+        "TASK-066"
       ],
       "catches": [
         "JSON ingest",
@@ -421,7 +444,10 @@
         "TASK-047",
         "TASK-049",
         "TASK-051",
-        "TASK-059"
+        "TASK-059",
+        "TASK-061",
+        "TASK-062",
+        "TASK-066"
       ],
       "catches": [
         "agent policy",
@@ -483,7 +509,12 @@
         "TASK-057",
         "TASK-058",
         "TASK-059",
-        "TASK-060"
+        "TASK-060",
+        "TASK-061",
+        "TASK-062",
+        "TASK-064",
+        "TASK-065",
+        "TASK-066"
       ],
       "catches": [
         "orchestration boundary",
@@ -630,7 +661,9 @@
         "TASK-049",
         "TASK-052",
         "TASK-058",
-        "TASK-060"
+        "TASK-060",
+        "TASK-061",
+        "TASK-063"
       ],
       "catches": [
         "control-mode compatibility",
@@ -680,7 +713,9 @@
         "TASK-049",
         "TASK-050",
         "TASK-051",
-        "TASK-052"
+        "TASK-052",
+        "TASK-061",
+        "TASK-066"
       ],
       "catches": [
         "RPC gateway lifecycle and socket ownership",
@@ -731,6 +766,32 @@
         "provider BH1-P eligibility does not certify actual-Gul BH1 integration",
         "historical BH1 method inventory keys remain unchanged across the provider-consumer split"
       ]
+    }
+  },
+  "successor_contracts": {
+    "docs/specs/caller-workspaces-v1.md": {
+      "epic": "EPIC-017",
+      "cases": [
+        "CW-START",
+        "CW-WRITER",
+        "CW-TRANSITION",
+        "CW-SOURCE",
+        "CW-INIT",
+        "CW-CAPTURE",
+        "CW-COMPOSE",
+        "CW-SNAPSHOT",
+        "CW-AMBIENT",
+        "CW-NOCOPY",
+        "CW-SCOPE",
+        "CW-PIN",
+        "CW-READ",
+        "CW-DRIFT",
+        "CW-RESULT",
+        "CW-MIGRATE",
+        "CW-PROJECT"
+      ],
+      "acceptance_owner": "docs/specs/caller-workspaces-v1.md#migration-projections-and-implementation-handoffs",
+      "runtime_evidence": "pending TASK-062 through TASK-066"
     }
   }
 }

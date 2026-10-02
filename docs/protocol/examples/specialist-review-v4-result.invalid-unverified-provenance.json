@@ -1,0 +1,109 @@
+{
+  "schema": "dolgorae-specialist-review-result/v4",
+  "operation": "review_target_result",
+  "review_id": "018f0000-0000-7000-8000-000000061001",
+  "target": {
+    "schema": "dolgorae-review-target/v2",
+    "kind": "head",
+    "requested_revision": null,
+    "workspace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "resolved_base": null,
+    "resolved_head": "cccccccccccccccccccccccccccccccccccccccc",
+    "range": null,
+    "assurance": "pinned_objects",
+    "reading_boundary": "checked_objects",
+    "entries": [
+      {
+        "side": "current",
+        "path": "hello.py",
+        "source": "git_object",
+        "mode": "100644",
+        "byte_length": 22,
+        "sha256": "a0c22dc5d16db10ca0e3d99859ffccb2b4d536b21d6788cfbe2d2cfac60e8117",
+        "blob_oid": "f1a18139c84a82addbded8a7b5738c36fb02fce1"
+      }
+    ],
+    "excluded": [
+      "ignored_files",
+      "git_metadata",
+      "private_tool_state"
+    ],
+    "admission_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "target_sha256": "7239fd359a4e3202197ec3c47dd6b88c8e24bee3e1c9e8c87f65161236e6e35d"
+  },
+  "reviewer": {
+    "profile": "reviewer",
+    "run_id": "018f0000-0000-7000-8000-000000000012",
+    "state": "closed",
+    "model": "gpt-5",
+    "effort": "high",
+    "executable": {
+      "version": "0.158.0",
+      "file_identity": {
+        "resolved_path": "/usr/local/bin/codex",
+        "device": 1,
+        "inode": 2,
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "capability_result": {
+        "compatibility_verdict": "tested",
+        "schema_bundle_sha256": "26c32e39dd56061a2758ca6317eb90e7020a91a16973f944a8827e0bf6ef56dc",
+        "launch_contract_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    "result_artifact_ref": "018f0000-0000-7000-8000-000000000013"
+  },
+  "verdict": {
+    "summary": "The pinned candidate omits the required comma.",
+    "findings": [
+      {
+        "severity": "P2",
+        "title": "Correct the greeting punctuation",
+        "description": "The program prints Hello world! while C-1 requires Hello, world!.",
+        "path": "hello.py",
+        "line_start": 1,
+        "line_end": 1,
+        "recommendation": "Add the comma after Hello.",
+        "confidence": "high",
+        "read_receipt_id": "018f0000-0000-7000-8000-000000061002"
+      }
+    ],
+    "criterion_assessments": [
+      {
+        "criterion_id": "C-1",
+        "status": "unmet",
+        "explanation": "The source prints the greeting without the comma.",
+        "evidence": [
+          {
+            "basis": "candidate",
+            "description": "Line 1 prints Hello world!.",
+            "path": "hello.py",
+            "line_start": 1,
+            "line_end": 1,
+            "context_id": null,
+            "read_receipt_id": "018f0000-0000-7000-8000-000000061002"
+          }
+        ],
+        "remaining_gap": "The required punctuation is absent."
+      }
+    ],
+    "evidence_limits": [
+      "Static candidate inspection did not execute the program."
+    ],
+    "overall_assessment": "requirements_not_met"
+  },
+  "engagement": {
+    "id": "018f0000-0000-7000-8000-000000000010",
+    "state": "closed"
+  },
+  "workflow_issued_source_mutation": false,
+  "source_assurance": {
+    "reading_boundary": "verified",
+    "candidate_provenance": "unverified",
+    "drift_check": "not_applicable",
+    "evidence_limits": [
+      "Live workspace context cannot supply candidate evidence."
+    ]
+  }
+}

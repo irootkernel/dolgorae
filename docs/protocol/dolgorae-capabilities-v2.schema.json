@@ -1,0 +1,462 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/capabilities/v2",
+  "title": "Dolgorae caller-workspace capabilities v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dolgorae_version",
+    "machine_protocol_version",
+    "event_protocol_version",
+    "rpc_protocol_version",
+    "timeline_protocol_version",
+    "event_projection_version",
+    "grpc_error_detail_version",
+    "minimum_rpc_client_version",
+    "maximum_rpc_client_version",
+    "rpc_descriptor_sha256",
+    "grpc_methods",
+    "controller_carrier_root",
+    "controller_credential",
+    "artifact_bounds",
+    "supported_transports",
+    "app_server_transport",
+    "profile_launch_mode",
+    "projection_profiles",
+    "control_modes",
+    "execution_lanes",
+    "assurance",
+    "lane_capabilities",
+    "independent_run_concurrency",
+    "features",
+    "interactions",
+    "access_policy_transition",
+    "background_execution_control",
+    "native_subagents",
+    "native_subagents_policy",
+    "profile",
+    "caller_workspace"
+  ],
+  "properties": {
+    "dolgorae_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/dolgorae_version"
+    },
+    "machine_protocol_version": {
+      "const": 4
+    },
+    "event_protocol_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/event_protocol_version"
+    },
+    "rpc_protocol_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/rpc_protocol_version"
+    },
+    "timeline_protocol_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/timeline_protocol_version"
+    },
+    "event_projection_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/event_projection_version"
+    },
+    "grpc_error_detail_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/grpc_error_detail_version"
+    },
+    "minimum_rpc_client_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/minimum_rpc_client_version"
+    },
+    "maximum_rpc_client_version": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/maximum_rpc_client_version"
+    },
+    "rpc_descriptor_sha256": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/rpc_descriptor_sha256"
+    },
+    "grpc_methods": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/grpc_methods"
+    },
+    "controller_carrier_root": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/controller_carrier_root"
+    },
+    "controller_credential": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/controller_credential"
+    },
+    "artifact_bounds": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/artifact_bounds"
+    },
+    "supported_transports": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/supported_transports"
+    },
+    "app_server_transport": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/app_server_transport"
+    },
+    "profile_launch_mode": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/profile_launch_mode"
+    },
+    "projection_profiles": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/projection_profiles"
+    },
+    "control_modes": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/control_modes"
+    },
+    "execution_lanes": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/execution_lanes"
+    },
+    "assurance": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/assurance"
+    },
+    "lane_capabilities": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/lane_capabilities",
+      "description": "Frozen public-v1 launch semantics only; caller_workspace owns modern startup semantics."
+    },
+    "independent_run_concurrency": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/independent_run_concurrency"
+    },
+    "features": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/features"
+    },
+    "interactions": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/interactions"
+    },
+    "access_policy_transition": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/access_policy_transition"
+    },
+    "background_execution_control": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/background_execution_control"
+    },
+    "native_subagents": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/native_subagents"
+    },
+    "native_subagents_policy": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/native_subagents_policy"
+    },
+    "profile": {
+      "$ref": "https://dolgorae.local/schema/capabilities/v1#/properties/profile"
+    },
+    "caller_workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "integrated",
+        "managed_instructions",
+        "modern_startup",
+        "checked_candidate_reads",
+        "source_materialization",
+        "physical_start"
+      ],
+      "properties": {
+        "contract": {
+          "const": "caller_workspace/v1"
+        },
+        "integrated": {
+          "type": "boolean"
+        },
+        "managed_instructions": {
+          "$ref": "#/$defs/guarantee"
+        },
+        "modern_startup": {
+          "$ref": "#/$defs/guarantee"
+        },
+        "checked_candidate_reads": {
+          "$ref": "#/$defs/guarantee"
+        },
+        "source_materialization": {
+          "const": "retired",
+          "description": "Retired on the successor surface. Before integrated cutover, new legacy requests remain governed by their existing surface and the cutover rule; this field does not advertise activation."
+        },
+        "physical_start": {
+          "const": "initialized_before_success",
+          "description": "Modern contract; availability requires supported modern_startup and integrated cutover."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "integrated": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "managed_instructions": {
+                "properties": {
+                  "state": {
+                    "const": "supported"
+                  }
+                }
+              },
+              "modern_startup": {
+                "properties": {
+                  "state": {
+                    "const": "supported"
+                  }
+                }
+              },
+              "checked_candidate_reads": {
+                "properties": {
+                  "state": {
+                    "const": "supported"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "access_policy_transition": {
+            "const": "supported"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "profile": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "background_execution_control": {
+            "properties": {
+              "support": {
+                "const": "supported"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "profile": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_subagents": {
+            "properties": {
+              "lifecycle_observation": {
+                "const": "supported"
+              },
+              "quiescence_tracking": {
+                "const": "supported"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "profile": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "profile": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "access_policy_transition": {
+            "const": "unverified"
+          },
+          "background_execution_control": {
+            "properties": {
+              "support": {
+                "const": "unverified"
+              },
+              "mechanism": {
+                "const": "dedicated_lane_process_census"
+              }
+            }
+          },
+          "native_subagents": {
+            "properties": {
+              "lifecycle_observation": {
+                "const": "unverified"
+              },
+              "quiescence_tracking": {
+                "const": "unverified"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "caller_workspace": {
+            "properties": {
+              "integrated": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "profile": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "profile": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "caller_workspace": {
+            "properties": {
+              "managed_instructions": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unverified",
+                      "unavailable"
+                    ]
+                  }
+                }
+              },
+              "modern_startup": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unverified",
+                      "unavailable"
+                    ]
+                  }
+                }
+              },
+              "checked_candidate_reads": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unverified",
+                      "unavailable"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "support": {
+      "enum": [
+        "supported",
+        "recognized_unsupported",
+        "unavailable"
+      ]
+    },
+    "guarantee": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason_code",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "supported",
+            "unverified",
+            "unavailable"
+          ]
+        },
+        "reason_code": {
+          "enum": [
+            "qualified",
+            "not_qualified",
+            "unsupported_runtime",
+            "unsupported_tool_boundary"
+          ]
+        },
+        "evidence_sha256": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "supported"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "const": "qualified"
+              },
+              "evidence_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "not_qualified",
+                  "unsupported_runtime",
+                  "unsupported_tool_boundary"
+                ]
+              },
+              "evidence_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-invariants": [
+    "integrated true requires all three guarantees supported for the selected Profile/runtime; null Profile cannot claim supported",
+    "evidence identities refer to checked qualification facts, never raw provider prose",
+    "rpc source, descriptor, method inventory and public-v1 consumer semantics remain frozen"
+  ]
+}

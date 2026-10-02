@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/error-contract/v4",
+  "title": "Dolgorae caller-workspace errors v4",
+  "oneOf": [
+    {
+      "$ref": "https://dolgorae.local/schema/error-contract/v3"
+    },
+    {
+      "$ref": "#/$defs/workspace_error"
+    }
+  ],
+  "x-exit-status": {
+    "SOURCE_ISOLATION_RETIRED": 4,
+    "ROLE_MIGRATION_REQUIRED": 4,
+    "INSTRUCTION_SOURCE_INVALID": 4,
+    "INSTRUCTION_DISCOVERY_UNSUPPORTED": 4,
+    "WORKSPACE_STARTUP_UNSUPPORTED": 4,
+    "REVIEW_READING_BOUNDARY_UNSUPPORTED": 4,
+    "REVIEW_CANDIDATE_PROVENANCE_INVALID": 4,
+    "REVIEW_TARGET_DRIFTED": 4,
+    "REVIEW_TARGET_UNAVAILABLE": 4
+  },
+  "x-invariants": [
+    "successor diagnostics contain no source paths, instruction bytes, credentials or raw provider text",
+    "non-retryable means do not replay the same accepted request; required_action identifies explicit correction or observation"
+  ],
+  "$defs": {
+    "workspace_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "SOURCE_ISOLATION_RETIRED",
+            "ROLE_MIGRATION_REQUIRED",
+            "INSTRUCTION_SOURCE_INVALID",
+            "INSTRUCTION_DISCOVERY_UNSUPPORTED",
+            "WORKSPACE_STARTUP_UNSUPPORTED",
+            "REVIEW_READING_BOUNDARY_UNSUPPORTED",
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID",
+            "REVIEW_TARGET_DRIFTED",
+            "REVIEW_TARGET_UNAVAILABLE"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "required_action",
+            "phase",
+            "outcome",
+            "review_id",
+            "run_id"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae-workspace-error-details/v1"
+            },
+            "required_action": {
+              "enum": [
+                "fix_instruction_source",
+                "inspect_review",
+                "migrate_request",
+                "migrate_role",
+                "restore_target",
+                "select_supported_runtime",
+                "submit_new_review"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "admission",
+                "startup",
+                "dispatch",
+                "acceptance",
+                "recovery"
+              ]
+            },
+            "outcome": {
+              "enum": [
+                "not_dispatched",
+                "failed",
+                "inconclusive",
+                "unknown"
+              ]
+            },
+            "review_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "SOURCE_ISOLATION_RETIRED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "migrate_request"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "ROLE_MIGRATION_REQUIRED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "migrate_role"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "INSTRUCTION_SOURCE_INVALID"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "fix_instruction_source"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "INSTRUCTION_DISCOVERY_UNSUPPORTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "select_supported_runtime"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "WORKSPACE_STARTUP_UNSUPPORTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "select_supported_runtime"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "select_supported_runtime"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "inspect_review"
+                  },
+                  "outcome": {
+                    "const": "inconclusive"
+                  },
+                  "review_id": {
+                    "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_TARGET_DRIFTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "submit_new_review"
+                  },
+                  "outcome": {
+                    "const": "inconclusive"
+                  },
+                  "review_id": {
+                    "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_TARGET_UNAVAILABLE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "restore_target"
+                  },
+                  "outcome": {
+                    "enum": [
+                      "failed",
+                      "not_dispatched"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

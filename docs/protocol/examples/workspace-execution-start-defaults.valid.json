@@ -1,0 +1,15 @@
+{
+  "schema": "dolgorae-run-start-request/v2",
+  "workspace": null,
+  "profile": "codex-default",
+  "control_mode": "managed_agent",
+  "model": null,
+  "effort": null,
+  "purpose": {
+    "kind": "other",
+    "external_label": null
+  },
+  "parent_ref": null,
+  "required_capabilities": [],
+  "idempotency_key": "example-start"
+}

@@ -218,8 +218,15 @@ persisted request JCS against that receipt's digest before inspecting schema or
 expected-output discriminators. Missing, ambiguous, or mismatched authority
 fails closed as engagement integrity corruption.
 
-An accepted hire initially publishes only a logical, threadless Run and records
-the member as `unstarted`. Assignment reconstructs a missing Worker from the Run
+The following provisioning and isolated-output structure is the legacy
+Engagement contract. New successor hires bind explicit Markdown Role and
+caller-workspace access; successful provisioning establishes the selected
+runtime policy. Retired isolated intent is rejected before new launch effects.
+Existing accepted isolated members retain their original resources and result
+meaning under original ownership.
+
+An accepted legacy hire initially publishes a logical, threadless Run and
+records the member as `unstarted`. Assignment reconstructs a missing Worker from the Run
 manifest plus the durable member configuration. The launch root and fixed
 session sandbox derive from the requested access: canonical writes reserve the
 workspace Writer before startup, isolated writes use the deterministic separate
@@ -435,7 +442,30 @@ only the package's local registry and rejects remote retrieval.
 TASK-057 and TASK-058 own the corresponding wire and CLI contracts. The Epic
 does not change public-v1 gRPC.
 
+### Direct Review Target Coordinator
+
+The accepted [caller-workspace contract](../specs/caller-workspaces-v1.md)
+replaces new source materialization at EPIC-017's integrated cutover. The
+Coordinator admits bounded source metadata, pins Git objects or index entries,
+serves checked candidate file/diff reads and validates their receipt provenance.
+It keeps live context distinct from candidate reads. Workspace/index/dirty
+fingerprints are sampled before dispatch and acceptance; they do not establish
+snapshot isolation. A missing runtime/tool boundary prevents dispatch.
+
+Source bytes stay in the caller workspace or existing Git object database.
+Persistent target metadata and read receipts are protected control state.
+They contain no source tree. The review coordinator retains request, Reviewer, task,
+Turn and result ownership independently of target assurance. Direct target v2
+and review v4 contain no capture root or settlement credential. Every new launch
+facade uses the canonical caller cwd; none owns that root for cleanup.
+
 ### Immutable Review Target Coordinator
+
+The following structure describes existing capture-backed records. Until
+integrated cutover the legacy implementation remains available. Afterwards,
+only accepted-record inspection, recovery and owner-bound settlement use it;
+new capture creation is rejected before effects. Missing historical resources
+are never recreated.
 
 The Immutable Review Target Coordinator introduced by EPIC-004 is a shared
 semantic subsystem beneath the scoped Specialist Review adapter and external
@@ -505,6 +535,20 @@ and rebuilds delivery receipts with nullable artifact references. These
 migrations preserve existing rows transactionally.
 
 ### Role Source and Policy Resolver
+
+EPIC-017's successor resolver explicitly reads one common Markdown body and
+one named global Role body through protected no-follow descriptors. It owns
+bounded admission and raw-byte captures; runtime configuration owns ambient
+AGENTS suppression. No Role text selects a Profile, cwd or access. The compiler
+stores Role captures in policy v3 and aggregate bootstrap captures common once
+for its children. Agent Configuration v3 and manifest v3 retain immutable
+instruction identity. Retry, generation recovery and child activation consume
+accepted bytes without reopening live sources.
+
+The existing JSON resolver below is the legacy v2 authoring path. Explicit
+migration produces new Markdown sources and policy input without replacing
+accepted snapshots or choosing collision winners. After integrated cutover,
+new JSON authoring is rejected with a migration requirement.
 
 A bounded resolver implements the specification's
 [Specialist Role Sources](../specs/README.md#specialist-role-sources).
@@ -1187,8 +1231,10 @@ A Dedicated Lane Server preflights both socket paths before spawn. Its
 unpublished-start cleanup uses the same deterministic path and owner checks
 only after the spawned group is proven absent; it never treats an unverified
 entry as a socket owned by that start.
-A dedicated Run first owns only a durable logical lane; its first input lazily
-starts that lane's physical App Server with the identical immutable launch
+A legacy public-v1 dedicated Run first owns only a durable logical lane; its
+first input lazily starts that lane's physical App Server. Modern starts
+initialize the physical server and thread before successful startup, as
+described below. Each dedicated generation uses the identical immutable launch
 contract and canonical `CODEX_HOME`, a distinct short socket, UUIDv7 lane ID,
 process generation, globally unique server epoch, process group, and log
 drainer. Each run worker performs HTTP Upgrade and becomes a distinct masked
@@ -1204,13 +1250,21 @@ and process generation. Internal state binds the compact name to the full preima
 path, device/inode, and process identity. Machine projection exposes only the
 resulting SHA-256 identity digest.
 
-Each connection performs its own `initialize`/`initialized`. A newly created
+Each connection performs its own `initialize`/`initialized`. A legacy public-v1
 run remains threadless until first turn; first input uses `thread/start`,
 recovery uses `thread/resume`, and history fork uses `thread/fork`. The worker
 owns only that client connection, one thread binding, correlation, lifecycle,
 audit and interactions. The connected App Server owns turn execution, commands,
 native subagents and its process tree. A narrowly tested user-input connection
 may advertise `experimentalApi`; no other experimental feature follows.
+
+Modern starts initialize a dedicated thread before successful startup and
+verify the selected runtime policy. Writable startup uses the existing
+prepare/apply/verify/commit writer transaction without a synthetic Turn.
+An unavailable turnless binding after process loss is an explicit recovery
+limit; recovery cannot report a replacement thread as the original. Accepted
+instruction captures and startup selection survive that failure independently
+of native thread persistence.
 
 The profile manager spawns the singleton suspended in a new process group.
 Its `posix_spawn` attributes use `SETSIGDEF` for every catchable signal and
@@ -1224,7 +1278,7 @@ CLI or command-substitution pipe. The drainer applies diagnostic redaction and
 maintains mode-0600 `server.log` and `server.log.1` at 1 MiB each. Its exact
 identity is part of profile state, and loss fences new attachment until a
 controlled restart. Run workers neither signal the singleton nor its drainer.
-The profile manager owns their lifecycle. A dedicated worker requests lazy
+The profile manager owns their lifecycle. A dedicated worker requests
 lane-generation startup through the same staged manager logic and owns only
 that generation's exact recorded lifecycle; it never signals an unrelated
 process or the shared server.
@@ -1241,9 +1295,11 @@ lineage-linked dedicated write continuation.
 
 Each dedicated lane has a UUIDv7 lane ID, append-only process-generation
 journal, globally unique server epochs, short socket identity, exact leader and
-log-drainer identity, and process census. A new Run publishes the logical lane
-with null thread and absent physical server; first input starts its initial
-generation. Its physical server may also be absent while the Run is paused.
+log-drainer identity, and process census. A new legacy public-v1 Run publishes
+the logical lane with null thread and absent physical server; first input
+starts its initial generation. Modern startup succeeds only after initializing
+the physical generation and thread and verifying the selected access policy.
+Its physical server may also be absent while the Run is paused.
 Resume starts a new generation only after exact old
 generation/descendant absence, five complete empty samples, no active or
 unknown turn/interaction/native descendant, and a durable-history barrier.
