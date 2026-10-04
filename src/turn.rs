@@ -84,6 +84,7 @@ pub enum SessionSafetyPolicy {
     #[default]
     Standard,
     ReviewerReadOnly,
+    CallerWorkspace,
 }
 
 /// Where an app-server transport failure happened.
@@ -180,6 +181,27 @@ pub enum TurnError {
 }
 
 impl TurnError {
+    pub(crate) fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::InvalidInput(_) => "InvalidInput",
+            Self::ModelMismatch { .. } => "ModelMismatch",
+            Self::EffortUnsupported { .. } => "EffortUnsupported",
+            Self::TurnBusy => "TurnBusy",
+            Self::IdempotencyConflict { .. } => "IdempotencyConflict",
+            Self::Transport { .. } => "Transport",
+            Self::AppServerRejected { .. } => "AppServerRejected",
+            Self::CorrelationMismatch => "CorrelationMismatch",
+            Self::DuplicateTerminal => "DuplicateTerminal",
+            Self::OutcomeUnknown => "OutcomeUnknown",
+            Self::InteractionNotFound { .. } => "InteractionNotFound",
+            Self::InteractionResponseInvalid { .. } => "InteractionResponseInvalid",
+            Self::InteractionAlreadyResolved { .. } => "InteractionAlreadyResolved",
+            Self::InteractionStale { .. } => "InteractionStale",
+            Self::Journal(_) => "Journal",
+            Self::Artifact(_) => "Artifact",
+        }
+    }
+
     /// A transport failure that names the stage it happened at.
     #[must_use]
     pub fn transport(stage: TransportStage, reason: impl Into<String>) -> Self {
@@ -589,6 +611,10 @@ pub struct AcceptedUserInput {
 #[derive(Clone, Debug, PartialEq)]
 pub enum JournalEntry {
     Intent(OperationIntent),
+    CallerNativeIntent {
+        operation_id: Uuid,
+        method: &'static str,
+    },
     ProvisionalThread {
         operation_id: Uuid,
         thread_id: String,
@@ -852,6 +878,17 @@ fn bounded_diagnostic_text(value: &str) -> String {
 fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> {
     let (kind, payload) = {
         match entry {
+            JournalEntry::CallerNativeIntent {
+                operation_id,
+                method,
+            } => (
+                AuditKind::TurnIntent,
+                serde_json::to_value(crate::conformance::CallerNativeIntent {
+                    schema: "dolgorae.caller-native-intent/v1".to_owned(),
+                    operation_id,
+                    method: method.to_owned(),
+                }),
+            ),
             JournalEntry::Intent(intent) => {
                 (AuditKind::IdempotencyReserved, serde_json::to_value(intent))
             }
@@ -1519,6 +1556,7 @@ pub struct TurnCoordinator<S, J, A> {
     active_turn_effort: Option<String>,
     active_operation_id: Option<Uuid>,
     recovery_turn_id: Option<String>,
+    recovery_lifecycle: Option<RunLifecycle>,
     terminal_turn_ids: BTreeSet<String>,
     pending: BTreeMap<u64, Interaction>,
     resolved_interactions: BTreeMap<u64, InteractionResolution>,
@@ -1550,6 +1588,10 @@ pub struct TurnCoordinator<S, J, A> {
     foreign_diagnostics: Box<dyn ForeignDiagnostics>,
     primary_tool: Option<PrimaryToolConfig>,
     pending_primary_tools: BTreeMap<String, PendingPrimaryToolCall>,
+    caller_runtime: Option<crate::worker::QualifiedCallerRuntime>,
+    last_effective_policy: Option<crate::domain::EffectivePolicy>,
+    caller_startup_phase: Option<&'static str>,
+    caller_startup_failure: Option<Value>,
 }
 
 pub struct CoordinatorConfig {
@@ -1594,6 +1636,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 "direct_interactive" | "managed_agent"
             )
             || !config.cwd.is_absolute()
+            || config.cwd.to_str().is_none()
         {
             return Err(TurnError::InvalidInput(
                 "coordinator configuration is incomplete",
@@ -1605,9 +1648,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 supported: config.supported_efforts.iter().cloned().collect(),
             });
         }
+        let experimental_api = config.primary_tool.is_some()
+            || config.safety_policy == SessionSafetyPolicy::CallerWorkspace;
         let initialized = server.request("initialize", serde_json::json!({
             "clientInfo": {"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},
-            "capabilities": {"experimentalApi":config.primary_tool.is_some(),"optOutNotificationMethods":[]}
+            "capabilities": {"experimentalApi":experimental_api,"optOutNotificationMethods":[]}
         }))?;
         if initialized.get("codexHome").and_then(Value::as_str) != Some(expected_codex_home) {
             return Err(TurnError::CorrelationMismatch);
@@ -1630,6 +1675,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             active_turn_effort: None,
             active_operation_id: None,
             recovery_turn_id: None,
+            recovery_lifecycle: None,
             terminal_turn_ids: BTreeSet::new(),
             pending: BTreeMap::new(),
             resolved_interactions: BTreeMap::new(),
@@ -1658,6 +1704,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             foreign_diagnostics: config.foreign_diagnostics,
             primary_tool: config.primary_tool,
             pending_primary_tools: BTreeMap::new(),
+            caller_runtime: None,
+            last_effective_policy: None,
+            caller_startup_phase: None,
+            caller_startup_failure: None,
         })
     }
 
@@ -1706,19 +1756,221 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.acceptance_controller.as_ref()
     }
 
-    fn next_unverified_policy(
+    pub(crate) fn qualify_caller_runtime(
+        &mut self,
+        mut runtime: crate::worker::QualifiedCallerRuntime,
+    ) -> Result<(), TurnError> {
+        if self.safety_policy != SessionSafetyPolicy::CallerWorkspace
+            || self.caller_runtime.is_some()
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        self.check_caller_configuration()?;
+        let mut diagnostic = Value::Null;
+        runtime
+            .prove_startup_quiescence_observed(Some(&mut diagnostic))
+            .map_err(|error| {
+                self.caller_startup_failure = Some(serde_json::json!({
+                    "substage": "post_configuration_startup_quiescence",
+                    "original_error": {"kind": "TurnBusy"},
+                    "process_proof": diagnostic, "worker_error_code": error.code(),
+                }));
+                TurnError::TurnBusy
+            })?;
+        self.caller_runtime = Some(runtime);
+        Ok(())
+    }
+
+    pub(crate) fn is_caller_workspace(&self) -> bool {
+        self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+    }
+
+    fn caller_startup_phase(&mut self, phase: &'static str) {
+        if self.caller_startup_phase.is_some() {
+            self.caller_startup_phase = Some(phase);
+        }
+    }
+
+    pub(crate) fn caller_startup_failure(&self) -> Option<&Value> {
+        self.caller_startup_failure.as_ref()
+    }
+
+    fn record_caller_startup_predicate(&mut self, predicate: &'static str) {
+        if self.caller_startup_phase.is_some() {
+            self.caller_startup_failure
+                .get_or_insert_with(|| serde_json::json!({}))["refused_predicate"] =
+                serde_json::json!(predicate);
+        }
+    }
+
+    fn record_caller_startup_failure(&mut self, error: &TurnError) {
+        let Some(phase) = self.caller_startup_phase else {
+            return;
+        };
+        let kind = error.diagnostic_kind();
+        let details = self
+            .caller_startup_failure
+            .get_or_insert_with(|| serde_json::json!({}));
+        details["substage"] = serde_json::json!(phase);
+        details["original_error"] = serde_json::json!({"kind": kind});
+        match error {
+            TurnError::Transport { stage, .. } => {
+                details["original_error"]["transport_stage"] = serde_json::json!(stage.as_str());
+            }
+            TurnError::AppServerRejected { code, .. } => {
+                details["original_error"]["rpc_code"] = serde_json::json!(code);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn quarantine_caller_policy(&mut self, operation_id: Uuid) {
+        let _ = self.mark_unknown(operation_id);
+    }
+
+    fn check_caller_configuration(&mut self) -> Result<(), TurnError> {
+        let result = self.server.request(
+            "config/read",
+            serde_json::json!({
+                "cwd": self.cwd, "includeLayers": true,
+            }),
+        )?;
+        let session_limit = result
+            .get("layers")
+            .and_then(Value::as_array)
+            .is_some_and(|layers| {
+                layers.iter().any(|layer| {
+                    layer.pointer("/name/type").and_then(Value::as_str) == Some("sessionFlags")
+                        && layer.get("disabledReason").is_none_or(Value::is_null)
+                        && layer
+                            .pointer("/config/project_doc_max_bytes")
+                            .and_then(Value::as_u64)
+                            == Some(0)
+                })
+            });
+        if !session_limit
+            || result
+                .pointer("/config/project_doc_max_bytes")
+                .and_then(Value::as_u64)
+                != Some(0)
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        Ok(())
+    }
+
+    fn check_caller_process_quiescence(&mut self) -> Result<(), TurnError> {
+        if self.caller_runtime.is_some() {
+            self.caller_startup_phase("configuration_readback");
+            self.check_caller_configuration()?;
+            self.caller_startup_phase("process_quiescence");
+            let mut diagnostic = Value::Null;
+            let result = self
+                .caller_runtime
+                .as_mut()
+                .expect("qualified runtime")
+                .prove_startup_quiescence_observed(
+                    self.caller_startup_phase
+                        .is_some()
+                        .then_some(&mut diagnostic),
+                );
+            if let Err(error) = result {
+                if self.caller_startup_phase.is_some() {
+                    self.caller_startup_failure = Some(serde_json::json!({
+                        "process_proof": diagnostic, "worker_error_code": error.code(),
+                    }));
+                }
+                return Err(TurnError::TurnBusy);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_caller_connection_startup(&mut self) {
+        if let Some(runtime) = self.caller_runtime.as_mut() {
+            runtime.finish_connection_startup();
+        }
+    }
+
+    pub(crate) fn complete_caller_runtime_startup(&self) -> Result<(), TurnError> {
+        if let Some(runtime) = &self.caller_runtime {
+            runtime
+                .complete_startup_witness()
+                .map_err(|_| TurnError::TurnBusy)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn caller_policy_proof(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<crate::worker::CallerPolicyProof>, TurnError> {
+        self.caller_runtime
+            .as_ref()
+            .map(|runtime| {
+                runtime
+                    .proof(
+                        operation_id,
+                        self.thread_id
+                            .as_deref()
+                            .ok_or(TurnError::CorrelationMismatch)?,
+                        self.last_effective_policy
+                            .clone()
+                            .ok_or(TurnError::CorrelationMismatch)?,
+                    )
+                    .map_err(|_| TurnError::OutcomeUnknown)
+            })
+            .transpose()
+    }
+
+    pub(crate) fn verify_caller_policy(
+        &mut self,
+        operation_id: Uuid,
+    ) -> Result<crate::worker::CallerPolicyProof, TurnError> {
+        if operation_id.get_version_num() != 7
+            || self.state != CoordinatorState::Idle
+            || !self.pending.is_empty()
+        {
+            return Err(TurnError::TurnBusy);
+        }
+        let thread_id = self
+            .thread_id
+            .clone()
+            .ok_or(TurnError::CorrelationMismatch)?;
+        self.check_caller_transition_quiescence(&thread_id)?;
+        self.check_caller_process_quiescence()?;
+        self.caller_policy_proof(operation_id)?
+            .ok_or(TurnError::CorrelationMismatch)
+    }
+
+    fn next_effective_policy(
         &self,
         writer_generation: Option<u64>,
+        thread_generation: u64,
+        write: bool,
     ) -> Result<crate::domain::EffectivePolicy, TurnError> {
+        let qualified = self.caller_runtime.is_some();
         Ok(crate::domain::EffectivePolicy {
-            access: crate::domain::Access::Unknown,
-            verification: crate::domain::PolicyVerification::Unverified,
+            access: if qualified {
+                if write {
+                    crate::domain::Access::Write
+                } else {
+                    crate::domain::Access::Read
+                }
+            } else {
+                crate::domain::Access::Unknown
+            },
+            verification: if qualified {
+                crate::domain::PolicyVerification::Verified
+            } else {
+                crate::domain::PolicyVerification::Unverified
+            },
             policy_epoch: crate::domain::PolicyEpoch(
                 self.policy_epoch
                     .checked_add(1)
                     .ok_or(TurnError::OutcomeUnknown)?,
             ),
-            thread_generation: (self.thread_generation != 0).then_some(self.thread_generation),
+            thread_generation: (thread_generation != 0).then_some(thread_generation),
             server_epoch: Some(self.server_epoch),
             writer_generation,
         })
@@ -1748,15 +2000,95 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 "Reviewer read-only policy cannot acquire writer access",
             ));
         }
-        let effective_policy = self.next_unverified_policy(write.then_some(writer_generation))?;
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            if self.state != CoordinatorState::Idle || !self.pending.is_empty() {
+                return Err(TurnError::TurnBusy);
+            }
+            let thread_id = self.thread_id.clone().ok_or(TurnError::TurnBusy)?;
+            self.check_caller_process_quiescence()?;
+            self.check_caller_transition_quiescence(&thread_id)?;
+            let sandbox = if write {
+                "workspace-write"
+            } else {
+                "read-only"
+            };
+            let approval = if write { "on-request" } else { "never" };
+            if self.caller_runtime.is_some() {
+                self.journal
+                    .append_and_sync(JournalEntry::CallerNativeIntent {
+                        operation_id: transaction_id,
+                        method: "thread/settings/update",
+                    })?;
+            }
+            let update = (|| {
+                self.server.request(
+                    "thread/settings/update",
+                    serde_json::json!({
+                        "threadId": thread_id,
+                        "sandboxPolicy": turn_sandbox(sandbox, &self.cwd),
+                        "approvalPolicy": approval,
+                    }),
+                )?;
+                // The native request response does not prove the applied settings.
+                // Bound and validate the corresponding same-thread notification.
+                for _ in 0..MAX_IGNORED_FOREIGN_REQUESTS {
+                    let message = self.server.next_message()?;
+                    if message.get("method").and_then(Value::as_str)
+                        == Some("thread/settings/updated")
+                    {
+                        let params = message
+                            .get("params")
+                            .ok_or(TurnError::CorrelationMismatch)?;
+                        if params.get("threadId").and_then(Value::as_str)
+                            != Some(thread_id.as_str())
+                        {
+                            return Err(TurnError::CorrelationMismatch);
+                        }
+                        self.check_workspace_settings(
+                            params
+                                .get("threadSettings")
+                                .ok_or(TurnError::CorrelationMismatch)?,
+                            sandbox,
+                            approval,
+                        )?;
+                        if self.caller_runtime.is_some() {
+                            self.check_caller_transition_quiescence(&thread_id)?;
+                            self.check_caller_process_quiescence()?;
+                        }
+                        return Ok(());
+                    }
+                    self.ingest(message)?;
+                    if self.state != CoordinatorState::Idle || !self.pending.is_empty() {
+                        return Err(TurnError::TurnBusy);
+                    }
+                }
+                Err(TurnError::CorrelationMismatch)
+            })();
+            if let Err(error) = update {
+                return Err(self.lost_after_write(transaction_id, error));
+            }
+        }
+        let effective_policy = self.next_effective_policy(
+            write.then_some(writer_generation),
+            self.thread_generation,
+            write,
+        )?;
+        self.last_effective_policy = Some(effective_policy.clone());
         let policy_epoch = effective_policy.policy_epoch.0;
-        self.journal
+        if let Err(error) = self
+            .journal
             .append_and_sync(JournalEntry::WriterAccessChanged {
                 write,
                 writer_generation,
                 transaction_id,
                 effective_policy,
-            })?;
+            })
+        {
+            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+                return Err(self.lost_after_write(transaction_id, error));
+            }
+            return Err(error);
+        }
         self.policy_epoch = policy_epoch;
         self.writer_generation = write.then_some(writer_generation);
         self.sandbox = if write {
@@ -1766,6 +2098,50 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         .to_owned();
         self.approval_policy = if write { "on-request" } else { "never" }.to_owned();
+        Ok(())
+    }
+
+    fn check_caller_transition_quiescence(&mut self, thread_id: &str) -> Result<(), TurnError> {
+        self.caller_startup_phase("loaded_root_before_status");
+        self.check_caller_loaded_root(thread_id)?;
+        self.caller_startup_phase("thread_status_readback");
+        let read = self.server.request(
+            "thread/read",
+            serde_json::json!({
+                "threadId": thread_id, "includeTurns": false,
+            }),
+        )?;
+        if nested_identity(&read, "thread", "id").as_deref() != Some(thread_id)
+            || read.pointer("/thread/parentThreadId") != Some(&Value::Null)
+        {
+            self.record_caller_startup_predicate("original_root_thread");
+            return Err(TurnError::CorrelationMismatch);
+        }
+        if read.pointer("/thread/status/type").and_then(Value::as_str) != Some("idle") {
+            self.record_caller_startup_predicate("idle_thread_status");
+            return Err(TurnError::TurnBusy);
+        }
+        self.caller_startup_phase("loaded_root_after_status");
+        self.check_caller_loaded_root(thread_id)
+    }
+
+    fn check_caller_loaded_root(&mut self, thread_id: &str) -> Result<(), TurnError> {
+        let loaded = self.server.request(
+            "thread/loaded/list",
+            serde_json::json!({
+                "cursor": null, "limit": 2,
+            }),
+        )?;
+        let ids = loaded
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        if loaded.get("nextCursor") != Some(&Value::Null)
+            || ids.as_slice() != [Value::String(thread_id.to_owned())]
+        {
+            self.record_caller_startup_predicate("exclusive_loaded_root");
+            return Err(TurnError::TurnBusy);
+        }
         Ok(())
     }
 
@@ -1782,6 +2158,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     ) {
         self.thread_id = thread_id;
         self.recovery_turn_id = active_turn_id.or(latest_turn_id);
+        self.recovery_lifecycle = Some(lifecycle);
         self.state = match lifecycle {
             RunLifecycle::Paused => CoordinatorState::Paused,
             RunLifecycle::Running
@@ -1805,7 +2182,46 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         records: Vec<(AuditKind, Value)>,
     ) -> Result<(), TurnError> {
+        let mut startup_intent = false;
+        let mut binding_complete = self.thread_id.is_some();
         for (kind, payload) in &records {
+            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+                && *kind == AuditKind::TurnIntent
+                && payload.get("schema").and_then(Value::as_str)
+                    == Some("dolgorae.caller-native-intent/v1")
+            {
+                let intent: crate::conformance::CallerNativeIntent =
+                    serde_json::from_value(payload.clone()).map_err(|_| {
+                        TurnError::Journal("caller native intent shape is invalid".to_owned())
+                    })?;
+                intent
+                    .validate()
+                    .map_err(|error| TurnError::Journal(error.to_string()))?;
+                startup_intent |= intent.method == "thread/start";
+            }
+            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+                && *kind == AuditKind::TurnIntent
+                && let Some(provisional) = payload.get("provisional_thread_id")
+            {
+                let thread = provisional
+                    .as_str()
+                    .filter(|value| {
+                        !value.is_empty() && value.len() <= 256 && !value.contains('\0')
+                    })
+                    .ok_or_else(|| {
+                        TurnError::Journal("durable provisional Thread is invalid".to_owned())
+                    })?;
+                if self
+                    .thread_id
+                    .as_deref()
+                    .is_some_and(|accepted| accepted != thread)
+                {
+                    return Err(TurnError::Journal(
+                        "caller recovery crossed the original Thread".to_owned(),
+                    ));
+                }
+                self.thread_id = Some(thread.to_owned());
+            }
             if *kind == AuditKind::ThreadBound
                 && let Some(generation) = payload.get("thread_generation")
             {
@@ -1817,6 +2233,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                             TurnError::Journal("durable thread generation is invalid".to_owned())
                         })?;
                 self.thread_generation = self.thread_generation.max(generation);
+                binding_complete = true;
             }
             if let Some(policy) = payload.get("effective_policy") {
                 let policy: crate::domain::EffectivePolicy = serde_json::from_value(policy.clone())
@@ -1832,6 +2249,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let restored = restore_turn_receipt_maps(records)?;
         self.idempotency = restored.accepted;
         self.unresolved_idempotency = restored.unresolved;
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            && !binding_complete
+            && (startup_intent || self.thread_id.is_some())
+            && self.state != CoordinatorState::OutcomeUnknown
+        {
+            self.mark_unknown(Uuid::now_v7())?;
+        }
         Ok(())
     }
 
@@ -1901,10 +2325,62 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// outcome-unknown. Transport and shape failures append nothing, so a
     /// transient read cannot manufacture a lifecycle transition.
     pub fn reconcile_history(&mut self) -> Result<bool, TurnError> {
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            && self.state == CoordinatorState::Idle
+            && self.caller_runtime.is_some()
+        {
+            // An explicitly recovered, previously idle generation has already
+            // attached its original Thread as a verified Reader before Ready.
+            // Reconciliation acknowledges that binding without replaying history.
+            let thread_id = self.thread_id.clone().ok_or(TurnError::OutcomeUnknown)?;
+            if self.last_effective_policy.as_ref().is_none_or(|policy| {
+                policy.access != crate::domain::Access::Read
+                    || policy.verification != crate::domain::PolicyVerification::Verified
+            }) || !self.pending.is_empty()
+            {
+                return Err(TurnError::OutcomeUnknown);
+            }
+            self.check_caller_transition_quiescence(&thread_id)?;
+            self.check_caller_process_quiescence()?;
+            return Ok(true);
+        }
         if self.state != CoordinatorState::OutcomeUnknown {
             return Err(TurnError::TurnBusy);
         }
         let thread_id = self.thread_id.clone().ok_or(TurnError::OutcomeUnknown)?;
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            && self.recovery_turn_id.is_none()
+        {
+            // A turnless startup has no accepted Turn to reconcile. Its exact
+            // retained Thread must be idle with empty history before recovery
+            // can leave uncertainty. This never restores Writer authority.
+            self.check_caller_transition_quiescence(&thread_id)?;
+            self.check_caller_process_quiescence()?;
+            let result = self.server.request(
+                "thread/read",
+                serde_json::json!({"threadId":thread_id,"includeTurns":true}),
+            )?;
+            if nested_identity(&result, "thread", "id").as_ref() != Some(&thread_id)
+                || result
+                    .pointer("/thread/turns")
+                    .and_then(Value::as_array)
+                    .is_none_or(|turns| !turns.is_empty())
+            {
+                return Err(TurnError::OutcomeUnknown);
+            }
+            self.journal
+                .append_and_sync(JournalEntry::LifecycleTransition {
+                    previous: self
+                        .recovery_lifecycle
+                        .unwrap_or(RunLifecycle::OutcomeUnknown),
+                    current: RunLifecycle::Paused,
+                    terminal_seal: false,
+                    interrupt_terminal_confirmed: false,
+                })?;
+            self.state = CoordinatorState::Paused;
+            self.recovery_lifecycle = None;
+            return Ok(true);
+        }
         let turn_id = self
             .recovery_turn_id
             .clone()
@@ -1992,6 +2468,14 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         lifecycle: RunLifecycle,
     ) -> Result<(), TurnError> {
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            && self.state == CoordinatorState::OutcomeUnknown
+        {
+            if self.thread_id.is_none() {
+                return Err(TurnError::OutcomeUnknown);
+            }
+            return self.rebind_retained_thread();
+        }
         match lifecycle {
             RunLifecycle::Starting => {
                 if self.state != CoordinatorState::Threadless {
@@ -2011,12 +2495,33 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 }
                 self.rebind_retained_thread()
             }
+            RunLifecycle::OutcomeUnknown | RunLifecycle::ReconciliationRequired
+                if self.safety_policy == SessionSafetyPolicy::CallerWorkspace =>
+            {
+                if self.thread_id.is_none() {
+                    // No durable native identity means no safe attach target.
+                    // Never replace a possibly accepted turnless Thread.
+                    return Err(TurnError::OutcomeUnknown);
+                }
+                self.rebind_retained_thread()
+            }
             _ => Ok(()),
         }
     }
 
     fn rebind_retained_thread(&mut self) -> Result<(), TurnError> {
+        let result = self.rebind_retained_thread_inner();
+        self.finish_caller_connection_startup();
+        result
+    }
+
+    fn rebind_retained_thread_inner(&mut self) -> Result<(), TurnError> {
         if let Some(previous_thread) = self.thread_id.clone() {
+            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+                self.sandbox = "read-only".to_owned();
+                self.approval_policy = "never".to_owned();
+                self.writer_generation = None;
+            }
             let generation = self
                 .thread_generation
                 .checked_add(1)
@@ -2026,14 +2531,31 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 thread_id: previous_thread.clone(),
             };
             self.thread_id = None;
+            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+                self.caller_startup_phase = Some("retained_thread_preparation");
+                self.caller_startup_failure = None;
+            }
             let rebound = (|| {
                 let thread_id = self.ensure_thread(operation_id)?;
+                self.caller_startup_phase("original_thread_binding");
                 if thread_id != previous_thread {
+                    self.record_caller_startup_predicate("original_thread_identity");
                     return Err(TurnError::CorrelationMismatch);
                 }
                 self.thread_generation = generation;
-                let effective_policy = self.next_unverified_policy(self.writer_generation)?;
+                if self.caller_runtime.is_some() {
+                    self.check_caller_transition_quiescence(&thread_id)?;
+                }
+                self.check_caller_process_quiescence()?;
+                self.caller_startup_phase("effective_policy");
+                let effective_policy = self.next_effective_policy(
+                    self.writer_generation,
+                    generation,
+                    self.sandbox == "workspace-write",
+                )?;
+                self.last_effective_policy = Some(effective_policy.clone());
                 let policy_epoch = effective_policy.policy_epoch.0;
+                self.caller_startup_phase("thread_bound_journal");
                 self.journal.append_and_sync(JournalEntry::ThreadBound {
                     operation_id,
                     thread_id,
@@ -2044,8 +2566,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 Ok(())
             })();
             if let Err(error) = rebound {
+                self.record_caller_startup_failure(&error);
+                self.caller_startup_phase = None;
                 return Err(self.lost_after_write(operation_id, error));
             }
+            self.caller_startup_phase = None;
         }
         Ok(())
     }
@@ -2266,7 +2791,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .thread_generation
                 .checked_add(1)
                 .ok_or(TurnError::OutcomeUnknown)?;
-            let effective_policy = self.next_unverified_policy(self.writer_generation)?;
+            let effective_policy = self.next_effective_policy(
+                self.writer_generation,
+                self.thread_generation,
+                self.sandbox == "workspace-write",
+            )?;
+            self.last_effective_policy = Some(effective_policy.clone());
             let policy_epoch = effective_policy.policy_epoch.0;
             self.journal.append_and_sync(JournalEntry::ThreadBound {
                 operation_id,
@@ -2281,14 +2811,16 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),
             effort: effort.clone(),
-            effective_policy: crate::domain::EffectivePolicy {
-                access: crate::domain::Access::Unknown,
-                verification: crate::domain::PolicyVerification::Unverified,
-                policy_epoch: crate::domain::PolicyEpoch(self.policy_epoch),
-                thread_generation: Some(self.thread_generation),
-                server_epoch: Some(self.server_epoch),
-                writer_generation: self.writer_generation,
-            },
+            effective_policy: self.last_effective_policy.clone().unwrap_or(
+                crate::domain::EffectivePolicy {
+                    access: crate::domain::Access::Unknown,
+                    verification: crate::domain::PolicyVerification::Unverified,
+                    policy_epoch: crate::domain::PolicyEpoch(self.policy_epoch),
+                    thread_generation: Some(self.thread_generation),
+                    server_epoch: Some(self.server_epoch),
+                    writer_generation: self.writer_generation,
+                },
+            ),
             controller: self.acceptance_controller.clone(),
         })?;
         self.active_turn_id = Some(turn_id.clone());
@@ -2424,57 +2956,238 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if !params.is_object() {
             return Err(TurnError::InvalidInput("thread parameters are invalid"));
         }
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            self.check_caller_process_quiescence()?;
+            params["config"] = serde_json::json!({
+                "project_doc_max_bytes": 0,
+                "sandbox_workspace_write": {
+                    "writable_roots": [self.cwd], "network_access": false,
+                    "exclude_slash_tmp": false, "exclude_tmpdir_env_var": false,
+                },
+            });
+        }
         if method == "thread/start"
             && let Some(primary_tool) = &self.primary_tool
         {
             params["dynamicTools"] = Value::Array(vec![primary_tool.contract.tool_spec()]);
         }
+        if method == "thread/start" && self.caller_runtime.is_some() {
+            self.caller_startup_phase("thread_dispatch_intent_journal");
+            self.journal
+                .append_and_sync(JournalEntry::CallerNativeIntent {
+                    operation_id,
+                    method: "thread/start",
+                })?;
+        }
+        self.caller_startup_phase(method);
         let result = self.server.request(method, params.take())?;
         let thread_id = nested_identity(&result, "thread", "id")
             .or_else(|| identity(&result, "threadId"))
             .ok_or(TurnError::CorrelationMismatch)?;
+        self.caller_startup_phase("provisional_thread_journal");
         self.journal
             .append_and_sync(JournalEntry::ProvisionalThread {
                 operation_id,
                 thread_id: thread_id.clone(),
             })?;
         self.thread_id = Some(thread_id.clone());
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            self.caller_startup_phase("thread_settings");
+            let sandbox = self.sandbox.clone();
+            let approval_policy = self.approval_policy.clone();
+            self.check_workspace_settings(
+                &serde_json::json!({
+                    "cwd": result.get("cwd"), "approvalPolicy": result.get("approvalPolicy"),
+                    "sandboxPolicy": result.get("sandbox"),
+                }),
+                &sandbox,
+                &approval_policy,
+            )?;
+            if result.get("model").and_then(Value::as_str) != Some(self.fixed_model.as_str()) {
+                self.record_caller_startup_predicate("thread_model");
+                return Err(TurnError::CorrelationMismatch);
+            }
+            if matches!(&self.attach, ThreadAttach::Resume { thread_id: expected } if expected != &thread_id)
+            {
+                self.record_caller_startup_predicate("resumed_thread_identity");
+                return Err(TurnError::CorrelationMismatch);
+            }
+            if matches!(self.attach, ThreadAttach::Start)
+                && result
+                    .pointer("/thread/turns")
+                    .and_then(Value::as_array)
+                    .is_none_or(|turns| !turns.is_empty())
+            {
+                self.record_caller_startup_predicate("empty_initial_thread_history");
+                return Err(TurnError::CorrelationMismatch);
+            }
+            if matches!(self.attach, ThreadAttach::Start) {
+                self.caller_startup_phase("thread/name/set");
+                let persisted = self.server.request(
+                    "thread/name/set",
+                    serde_json::json!({
+                        "threadId": thread_id, "name": format!("Dolgorae Run {}", self.run_id),
+                    }),
+                )?;
+                if persisted
+                    .as_object()
+                    .is_none_or(|fields| !fields.is_empty())
+                {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.caller_startup_phase("thread_persistence_readback");
+                let readback = self.server.request(
+                    "thread/read",
+                    serde_json::json!({
+                        "threadId": thread_id, "includeTurns": true,
+                    }),
+                )?;
+                if nested_identity(&readback, "thread", "id").as_ref() != Some(&thread_id)
+                    || readback
+                        .pointer("/thread/turns")
+                        .and_then(Value::as_array)
+                        .is_none_or(|turns| !turns.is_empty())
+                {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+            }
+        }
         Ok(thread_id)
+    }
+
+    fn check_workspace_settings(
+        &mut self,
+        settings: &Value,
+        sandbox: &str,
+        approval: &str,
+    ) -> Result<(), TurnError> {
+        let policy = settings
+            .get("sandboxPolicy")
+            .ok_or(TurnError::CorrelationMismatch)?;
+        let write = sandbox == "workspace-write";
+        let roots_match = policy.get("writableRoots").is_some_and(|roots| {
+            roots == &serde_json::json!([]) || roots == &serde_json::json!([self.cwd])
+        });
+        let predicates = [
+            (
+                "thread_settings_cwd",
+                settings.get("cwd").and_then(Value::as_str) != self.cwd.to_str(),
+            ),
+            (
+                "thread_settings_approval_policy",
+                settings.get("approvalPolicy").and_then(Value::as_str) != Some(approval),
+            ),
+            (
+                "thread_settings_sandbox_type",
+                policy.get("type").and_then(Value::as_str)
+                    != Some(if write { "workspaceWrite" } else { "readOnly" }),
+            ),
+            (
+                "thread_settings_network_access",
+                policy
+                    .get("networkAccess")
+                    .is_some_and(|value| value != &Value::Bool(false)),
+            ),
+            ("thread_settings_writable_roots", write && !roots_match),
+            (
+                "thread_settings_exclude_slash_tmp",
+                write
+                    && policy
+                        .get("excludeSlashTmp")
+                        .is_some_and(|value| value != &Value::Bool(false)),
+            ),
+            (
+                "thread_settings_exclude_tmpdir",
+                write
+                    && policy
+                        .get("excludeTmpdirEnvVar")
+                        .is_some_and(|value| value != &Value::Bool(false)),
+            ),
+        ];
+        if let Some((predicate, _)) = predicates.into_iter().find(|(_, refused)| *refused) {
+            self.record_caller_startup_predicate(predicate);
+            return Err(TurnError::CorrelationMismatch);
+        }
+        Ok(())
     }
 
     /// Create and durably bind a thread before the first task Turn. Brokered
     /// Specialist provisioning uses the spawn operation as the binding
     /// identity so a ready member never exposes a threadless publication gap.
     pub(crate) fn initialize_thread(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
+        let result = self.initialize_thread_inner(operation_id);
+        self.finish_caller_connection_startup();
+        result
+    }
+
+    fn initialize_thread_inner(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
+        if self.state == CoordinatorState::OutcomeUnknown {
+            return Err(TurnError::OutcomeUnknown);
+        }
         if self.thread_id.is_some() {
             return Ok(());
         }
         if self.state != CoordinatorState::Threadless {
             return Err(TurnError::TurnBusy);
         }
+        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            self.caller_startup_phase = Some("thread_preparation");
+            self.caller_startup_failure = None;
+        }
         let thread_id = match self.ensure_thread(operation_id) {
             Ok(thread_id) => thread_id,
-            Err(error) => return Err(self.lost_after_write(operation_id, error)),
+            Err(error) => {
+                self.record_caller_startup_failure(&error);
+                self.caller_startup_phase = None;
+                return Err(self.lost_after_write(operation_id, error));
+            }
         };
-        self.thread_generation = self
-            .thread_generation
-            .checked_add(1)
-            .ok_or(TurnError::OutcomeUnknown)?;
-        let effective_policy = self.next_unverified_policy(self.writer_generation)?;
-        self.policy_epoch = effective_policy.policy_epoch.0;
-        self.journal.append_and_sync(JournalEntry::ThreadBound {
-            operation_id,
-            thread_id,
-            thread_generation: self.thread_generation,
-            effective_policy,
-        })?;
+        let binding = (|| {
+            self.caller_startup_phase("thread_generation");
+            let thread_generation = self
+                .thread_generation
+                .checked_add(1)
+                .ok_or(TurnError::OutcomeUnknown)?;
+            if self.caller_runtime.is_some() {
+                self.check_caller_transition_quiescence(&thread_id)?;
+                self.check_caller_process_quiescence()?;
+            }
+            self.caller_startup_phase("effective_policy");
+            let effective_policy = self.next_effective_policy(
+                self.writer_generation,
+                thread_generation,
+                self.sandbox == "workspace-write",
+            )?;
+            self.last_effective_policy = Some(effective_policy.clone());
+            let policy_epoch = effective_policy.policy_epoch.0;
+            self.caller_startup_phase("thread_bound_journal");
+            self.journal.append_and_sync(JournalEntry::ThreadBound {
+                operation_id,
+                thread_id,
+                thread_generation,
+                effective_policy,
+            })?;
+            Ok((thread_generation, policy_epoch))
+        })();
+        let (thread_generation, policy_epoch) = match binding {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.record_caller_startup_failure(&error);
+                self.caller_startup_phase = None;
+                return Err(self.lost_after_write(operation_id, error));
+            }
+        };
+        self.caller_startup_phase = None;
+        self.thread_generation = thread_generation;
+        self.policy_epoch = policy_epoch;
         self.state = CoordinatorState::Idle;
         Ok(())
     }
 
     fn mark_unknown(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
-        self.journal
-            .append_and_sync(JournalEntry::OutcomeUnknown { operation_id })?;
+        if self.state == CoordinatorState::OutcomeUnknown {
+            return Ok(());
+        }
         if self.active_turn_id.is_some() {
             self.recovery_turn_id = self.active_turn_id.clone();
         }
@@ -2482,7 +3195,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.active_turn_effort = None;
         self.active_operation_id = None;
         self.state = CoordinatorState::OutcomeUnknown;
-        Ok(())
+        self.recovery_lifecycle = Some(RunLifecycle::OutcomeUnknown);
+        self.journal
+            .append_and_sync(JournalEntry::OutcomeUnknown { operation_id })
     }
 
     /// Record that an operation which had already written to the app-server
@@ -2495,18 +3210,23 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// reported fault is the same `outcome_unknown` the ledger now holds
     /// rather than a retryable transport hiccup.
     fn lost_after_write(&mut self, operation_id: Uuid, error: TurnError) -> TurnError {
-        // A refusal the app-server correlated to this request is not a lost
-        // write.  The app-server received it, decided it, and answered it, so
-        // the Run knows exactly what happened: nothing.  Quarantining here
-        // would spend a whole Run generation on an app-server saying "no".
-        if matches!(error, TurnError::AppServerRejected { .. }) {
+        // A correlated refusal before provisional caller startup is a known
+        // no-op. Once that Thread exists, refusal of its persistence barrier
+        // must still quarantine the partially completed startup.
+        if matches!(error, TurnError::AppServerRejected { .. })
+            && !(self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+                && self.thread_id.is_some()
+                && self.thread_generation == 0)
+        {
             return error;
         }
         if let Err(journal) = self.mark_unknown(operation_id) {
             return journal;
         }
         match error {
-            TurnError::Transport { .. } => TurnError::OutcomeUnknown,
+            TurnError::Transport { .. }
+            | TurnError::AppServerRejected { .. }
+            | TurnError::TurnBusy => TurnError::OutcomeUnknown,
             other => other,
         }
     }
@@ -2575,6 +3295,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Ok(None);
         }
         match method {
+            "thread/settings/updated"
+                if self.safety_policy == SessionSafetyPolicy::CallerWorkspace =>
+            {
+                // A settings notification outside the serialized update is stale
+                // or duplicated; never let it qualify a later transition.
+                Err(self.lost_after_write(Uuid::now_v7(), TurnError::CorrelationMismatch))
+            }
             "item/started" => {
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("fileChange") {
                     let item = params.get("item").ok_or(TurnError::CorrelationMismatch)?;
@@ -4206,10 +4933,21 @@ mod tests {
         calls: Vec<(String, Value)>,
         responses: Vec<(u64, Value)>,
         fail_response: bool,
+        experimental_api: bool,
     }
     impl AppServer for FakeServer {
         fn request(&mut self, method: &str, params: Value) -> Result<Value, TurnError> {
+            if method == "initialize" {
+                self.experimental_api =
+                    params.pointer("/capabilities/experimentalApi") == Some(&Value::Bool(true));
+            }
             self.calls.push((method.to_owned(), params));
+            if method == "thread/settings/update" && !self.experimental_api {
+                return Err(TurnError::AppServerRejected {
+                    code: -32600,
+                    message: "experimental API not enabled".to_owned(),
+                });
+            }
             self.replies.pop_front().unwrap_or(Err(TurnError::transport(
                 TransportStage::Read,
                 "missing fake reply",
@@ -4313,18 +5051,36 @@ mod tests {
     }
 
     fn coordinator_in_with_primary(
-        mut server: FakeServer,
+        server: FakeServer,
         attach: ThreadAttach,
         foreign_diagnostics: Box<dyn ForeignDiagnostics>,
         safety_policy: SessionSafetyPolicy,
         primary_tool: Option<PrimaryToolConfig>,
     ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
+        coordinator_with_journal(
+            server,
+            attach,
+            foreign_diagnostics,
+            safety_policy,
+            primary_tool,
+            MemoryJournal::default(),
+        )
+    }
+
+    fn coordinator_with_journal<J: DurableTurnJournal>(
+        mut server: FakeServer,
+        attach: ThreadAttach,
+        foreign_diagnostics: Box<dyn ForeignDiagnostics>,
+        safety_policy: SessionSafetyPolicy,
+        primary_tool: Option<PrimaryToolConfig>,
+        journal: J,
+    ) -> TurnCoordinator<FakeServer, J, MemoryArtifactStore> {
         server
             .replies
             .push_front(Ok(serde_json::json!({"codexHome":"/tmp/codex-home"})));
         TurnCoordinator::initialize(
             server,
-            MemoryJournal::default(),
+            journal,
             MemoryArtifactStore::default(),
             CoordinatorConfig {
                 attach,
@@ -4671,6 +5427,932 @@ mod tests {
             })
         );
         assert_eq!(params["approvalPolicy"], "on-request");
+    }
+
+    fn caller_coordinator() -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
+        let mut server = FakeServer::default();
+        server.replies.push_back(Ok(serde_json::json!({
+            "thread": {"id":"caller-thread", "turns":[]}, "model":"gpt-5",
+            "cwd":"/tmp/workspace", "approvalPolicy":"never",
+            "sandbox":turn_sandbox("read-only", Path::new("/tmp/workspace")),
+        })));
+        server.replies.push_back(Ok(serde_json::json!({})));
+        server.replies.push_back(Ok(serde_json::json!({
+            "thread":{"id":"caller-thread", "turns":[]},
+        })));
+        let mut coordinator = coordinator_in(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::CallerWorkspace,
+        );
+        coordinator.approval_policy = "never".to_owned();
+        coordinator
+    }
+
+    fn settings_notification(write: bool) -> Value {
+        serde_json::json!({"method":"thread/settings/updated", "params":{
+            "threadId":"caller-thread", "threadSettings":{
+                "cwd":"/tmp/workspace", "approvalPolicy":if write {"on-request"} else {"never"},
+                "sandboxPolicy":turn_sandbox(if write {"workspace-write"} else {"read-only"}, Path::new("/tmp/workspace")),
+            },
+        }})
+    }
+
+    #[test]
+    fn caller_connection_enables_settings_api_without_adding_dynamic_tools() {
+        let mut caller = caller_coordinator();
+        assert!(caller.server.experimental_api);
+        caller.initialize_thread(Uuid::now_v7()).unwrap();
+        let (_, params) = caller
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .unwrap();
+        assert!(params.get("dynamicTools").is_none());
+        for safety in [
+            SessionSafetyPolicy::Standard,
+            SessionSafetyPolicy::ReviewerReadOnly,
+        ] {
+            let other = coordinator_in(
+                FakeServer::default(),
+                ThreadAttach::Start,
+                Box::new(RecordingDiagnostics::default()),
+                safety,
+            );
+            assert!(!other.server.experimental_api);
+        }
+    }
+
+    #[test]
+    fn caller_provisional_thread_recovery_resumes_original_as_reader_without_task_replay() {
+        let mut caller = caller_coordinator();
+        caller.server.replies.clear();
+        caller.server.replies.push_back(Ok(serde_json::json!({
+            "thread":{"id":"caller-thread","turns":[]}, "model":"gpt-5",
+            "cwd":"/tmp/workspace", "approvalPolicy":"never",
+            "sandbox":turn_sandbox("read-only", Path::new("/tmp/workspace")),
+        })));
+        caller.restore_durable_state(RunLifecycle::OutcomeUnknown, None, None, None);
+        caller
+            .restore_turn_receipts(vec![(
+                AuditKind::TurnIntent,
+                serde_json::json!({
+                    "operation_id":Uuid::now_v7(), "provisional_thread_id":"caller-thread",
+                }),
+            )])
+            .unwrap();
+        caller.sandbox = "workspace-write".to_owned();
+        caller.writer_generation = Some(7);
+        let before_resume = caller.server.calls.len();
+        caller
+            .complete_connection_startup(RunLifecycle::OutcomeUnknown)
+            .unwrap();
+        assert_eq!(caller.state(), &CoordinatorState::OutcomeUnknown);
+        assert_eq!(caller.thread_id(), Some("caller-thread"));
+        assert!(caller.writer_generation.is_none());
+        assert_eq!(caller.server.calls.len(), before_resume + 1);
+        let (method, params) = caller.server.calls.last().unwrap();
+        assert_eq!(method, "thread/resume");
+        assert_eq!(params["threadId"], "caller-thread");
+        assert_eq!(params["sandbox"], "read-only");
+        assert_eq!(params["approvalPolicy"], "never");
+        prepend_caller_quiescence(&mut caller.server);
+        caller.server.replies.push_back(Ok(serde_json::json!({
+            "thread":{"id":"caller-thread","turns":[]},
+        })));
+        assert!(caller.reconcile_history().unwrap());
+        assert_eq!(caller.state(), &CoordinatorState::Paused);
+        assert!(!caller.server.calls.iter().any(|(method, _)| matches!(
+            method.as_str(),
+            "thread/start" | "turn/start" | "thread/settings/update"
+        )));
+    }
+
+    #[test]
+    fn caller_unknown_startup_without_durable_thread_never_creates_replacement() {
+        let mut caller = caller_coordinator();
+        caller.restore_durable_state(RunLifecycle::OutcomeUnknown, None, None, None);
+        let calls = caller.server.calls.len();
+        assert_eq!(
+            caller.complete_connection_startup(RunLifecycle::OutcomeUnknown),
+            Err(TurnError::OutcomeUnknown)
+        );
+        assert_eq!(caller.server.calls.len(), calls);
+        assert!(
+            caller
+                .restore_turn_receipts(vec![
+                    (
+                        AuditKind::TurnIntent,
+                        serde_json::json!({"provisional_thread_id":"original"})
+                    ),
+                    (
+                        AuditKind::TurnIntent,
+                        serde_json::json!({"provisional_thread_id":"replacement"})
+                    ),
+                ])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn caller_incomplete_startup_prefix_is_quarantined_even_without_recorded_unknown() {
+        for provisional in [false, true] {
+            let mut caller = caller_coordinator();
+            caller.server.replies.clear();
+            caller.restore_durable_state(RunLifecycle::Idle, None, None, None);
+            let mut records = vec![(
+                AuditKind::TurnIntent,
+                serde_json::json!({
+                    "schema":"dolgorae.caller-native-intent/v1", "operation_id":Uuid::now_v7(), "method":"thread/start",
+                }),
+            )];
+            if provisional {
+                records.push((
+                    AuditKind::TurnIntent,
+                    serde_json::json!({"provisional_thread_id":"caller-thread"}),
+                ));
+                caller.server.replies.push_back(Ok(serde_json::json!({
+                    "thread":{"id":"caller-thread","turns":[]},"model":"gpt-5","cwd":"/tmp/workspace",
+                    "approvalPolicy":"never", "sandbox":turn_sandbox("read-only",Path::new("/tmp/workspace")),
+                })));
+            }
+            caller.restore_turn_receipts(records).unwrap();
+            assert_eq!(caller.state(), &CoordinatorState::OutcomeUnknown);
+            let connected = caller.complete_connection_startup(RunLifecycle::Idle);
+            assert_eq!(connected.is_ok(), provisional);
+            assert_eq!(caller.state(), &CoordinatorState::OutcomeUnknown);
+            assert_eq!(caller.thread_id(), provisional.then_some("caller-thread"));
+            assert!(
+                !caller
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| matches!(method.as_str(), "thread/start" | "turn/start"))
+            );
+        }
+    }
+
+    #[test]
+    fn caller_discovery_requires_merged_zero_and_enabled_process_override() {
+        let valid = serde_json::json!({"config":{"project_doc_max_bytes":0},"layers":[{
+            "name":{"type":"sessionFlags"}, "config":{"project_doc_max_bytes":0}, "disabledReason":null,
+        }]});
+        for variant in [
+            "valid",
+            "managed_override",
+            "project_only",
+            "disabled",
+            "missing",
+            "float",
+        ] {
+            let mut reply = valid.clone();
+            match variant {
+                "managed_override" => {
+                    reply["config"]["project_doc_max_bytes"] = serde_json::json!(32768)
+                }
+                "project_only" => reply["layers"][0]["name"]["type"] = serde_json::json!("project"),
+                "disabled" => {
+                    reply["layers"][0]["disabledReason"] = serde_json::json!("managed policy")
+                }
+                "missing" => {
+                    reply["config"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("project_doc_max_bytes");
+                }
+                "float" => reply["config"]["project_doc_max_bytes"] = serde_json::json!(0.0),
+                _ => {}
+            }
+            let mut caller = caller_coordinator();
+            caller.server.replies.clear();
+            caller.server.replies.push_back(Ok(reply));
+            assert_eq!(
+                caller.check_caller_configuration().is_ok(),
+                variant == "valid",
+                "{variant}"
+            );
+            assert!(
+                !caller
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| matches!(method.as_str(), "thread/start" | "turn/start"))
+            );
+        }
+    }
+
+    fn prepend_caller_quiescence(server: &mut FakeServer) {
+        for reply in [
+            serde_json::json!({"data":["caller-thread"], "nextCursor":null}),
+            serde_json::json!({"thread":{"id":"caller-thread", "parentThreadId":null,
+                "status":{"type":"idle"}}}),
+            serde_json::json!({"data":["caller-thread"], "nextCursor":null}),
+        ]
+        .into_iter()
+        .rev()
+        {
+            server.replies.push_front(Ok(reply));
+        }
+    }
+
+    #[test]
+    fn caller_binding_and_settings_journal_failures_quarantine_without_recorded_unknown() {
+        struct FailAfterThreadBound {
+            fail_binding: bool,
+        }
+        impl DurableTurnJournal for FailAfterThreadBound {
+            fn append_and_sync(&mut self, entry: JournalEntry) -> Result<(), TurnError> {
+                if matches!(entry, JournalEntry::ProvisionalThread { .. })
+                    || (!self.fail_binding && matches!(entry, JournalEntry::ThreadBound { .. }))
+                {
+                    Ok(())
+                } else {
+                    Err(TurnError::Journal(
+                        "injected durable-write failure".to_owned(),
+                    ))
+                }
+            }
+        }
+        for fail_binding in [true, false] {
+            let mut server = FakeServer::default();
+            server.replies.push_back(Ok(serde_json::json!({
+                "thread":{"id":"caller-thread", "turns":[]}, "model":"gpt-5",
+                "cwd":"/tmp/workspace", "approvalPolicy":"never",
+                "sandbox":turn_sandbox("read-only", Path::new("/tmp/workspace")),
+            })));
+            server.replies.push_back(Ok(serde_json::json!({})));
+            server.replies.push_back(Ok(serde_json::json!({
+                "thread":{"id":"caller-thread", "turns":[]},
+            })));
+            let mut coordinator = coordinator_with_journal(
+                server,
+                ThreadAttach::Start,
+                Box::new(RecordingDiagnostics::default()),
+                SessionSafetyPolicy::CallerWorkspace,
+                None,
+                FailAfterThreadBound { fail_binding },
+            );
+            coordinator.approval_policy = "never".to_owned();
+            let initialized = coordinator.initialize_thread(Uuid::now_v7());
+            if fail_binding {
+                assert!(initialized.is_err());
+                assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+                assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+                let writes = coordinator.server.calls.len();
+                assert!(coordinator.initialize_thread(Uuid::now_v7()).is_err());
+                assert_eq!(coordinator.server.calls.len(), writes);
+                continue;
+            }
+            initialized.unwrap();
+            prepend_caller_quiescence(&mut coordinator.server);
+            coordinator
+                .server
+                .replies
+                .push_back(Ok(serde_json::json!({})));
+            coordinator
+                .server
+                .messages
+                .push_back(settings_notification(true));
+            assert!(
+                coordinator
+                    .set_writer_access(true, 7, Uuid::now_v7())
+                    .is_err()
+            );
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            let writes = coordinator.server.calls.len();
+            assert!(
+                coordinator
+                    .set_writer_access(false, 7, Uuid::now_v7())
+                    .is_err()
+            );
+            assert_eq!(coordinator.server.calls.len(), writes);
+        }
+    }
+
+    #[test]
+    fn caller_thread_and_native_settings_updates_need_no_task_turn() {
+        let mut coordinator = caller_coordinator();
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+        for (write, generation) in [(true, 7), (false, 7), (true, 8)] {
+            prepend_caller_quiescence(&mut coordinator.server);
+            coordinator
+                .server
+                .replies
+                .push_back(Ok(serde_json::json!({})));
+            coordinator
+                .server
+                .messages
+                .push_back(settings_notification(write));
+            coordinator
+                .set_writer_access(write, generation, Uuid::now_v7())
+                .unwrap();
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+            let Some(JournalEntry::WriterAccessChanged {
+                effective_policy, ..
+            }) = coordinator.journal.entries.last()
+            else {
+                panic!("missing durable policy observation");
+            };
+            // Metadata alone cannot promote empirical enforcement qualification.
+            assert_eq!(effective_policy.access, crate::domain::Access::Unknown);
+            assert_eq!(
+                effective_policy.verification,
+                crate::domain::PolicyVerification::Unverified
+            );
+            assert_eq!(
+                effective_policy.writer_generation,
+                write.then_some(generation)
+            );
+        }
+        let calls = &coordinator.server.calls;
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "thread/start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "thread/settings/update")
+                .count(),
+            3
+        );
+        assert!(!calls.iter().any(|(method, _)| method == "turn/start"));
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .take(5)
+                .collect::<Vec<_>>(),
+            [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/name/set",
+                "thread/read"
+            ]
+        );
+        let name = &calls
+            .iter()
+            .find(|(method, _)| method == "thread/name/set")
+            .unwrap()
+            .1;
+        assert_eq!(name["threadId"], "caller-thread");
+        assert_eq!(name["name"], format!("Dolgorae Run {}", coordinator.run_id));
+        let read = &calls
+            .iter()
+            .find(|(method, _)| method == "thread/read")
+            .unwrap()
+            .1;
+        assert_eq!(
+            read,
+            &serde_json::json!({"threadId":"caller-thread", "includeTurns":true})
+        );
+        let params = &calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .unwrap()
+            .1;
+        assert_eq!(params["config"]["project_doc_max_bytes"], 0);
+        assert_eq!(
+            params["config"]["sandbox_workspace_write"]["network_access"],
+            false
+        );
+    }
+
+    #[test]
+    fn caller_persistence_barrier_failure_retains_original_thread_and_fences_retry() {
+        for failure in [
+            "name_transport",
+            "name_refused",
+            "name_shape",
+            "read_transport",
+            "read_refused",
+            "read_identity",
+            "read_history",
+            "read_missing_history",
+        ] {
+            let mut coordinator = caller_coordinator();
+            match failure {
+                "name_transport" => {
+                    coordinator.server.replies[1] = Err(TurnError::transport(
+                        TransportStage::Read,
+                        "lost metadata response",
+                    ))
+                }
+                "name_refused" => {
+                    coordinator.server.replies[1] = Err(TurnError::AppServerRejected {
+                        code: -32601,
+                        message: "unsupported".to_owned(),
+                    })
+                }
+                "name_shape" => coordinator.server.replies[1] = Ok(Value::Null),
+                "read_transport" => {
+                    coordinator.server.replies[2] =
+                        Err(TurnError::transport(TransportStage::Read, "lost readback"))
+                }
+                "read_refused" => {
+                    coordinator.server.replies[2] = Err(TurnError::AppServerRejected {
+                        code: -32600,
+                        message: "not persisted".to_owned(),
+                    })
+                }
+                "read_identity" => {
+                    coordinator.server.replies[2] = Ok(serde_json::json!({
+                        "thread":{"id":"replacement-thread", "turns":[]},
+                    }))
+                }
+                "read_history" => {
+                    coordinator.server.replies[2] = Ok(serde_json::json!({
+                        "thread":{"id":"caller-thread", "turns":[{"id":"unexpected-turn"}]},
+                    }))
+                }
+                "read_missing_history" => {
+                    coordinator.server.replies[2] = Ok(serde_json::json!({
+                        "thread":{"id":"caller-thread"},
+                    }))
+                }
+                _ => unreachable!(),
+            }
+            let error = coordinator.initialize_thread(Uuid::now_v7()).unwrap_err();
+            let diagnostic = coordinator.caller_startup_failure().unwrap().clone();
+            assert_eq!(
+                diagnostic["substage"],
+                if failure.starts_with("name_") {
+                    "thread/name/set"
+                } else {
+                    "thread_persistence_readback"
+                },
+                "{failure}"
+            );
+            let expected_kind = if failure.ends_with("transport") {
+                "Transport"
+            } else if failure.ends_with("refused") {
+                "AppServerRejected"
+            } else {
+                "CorrelationMismatch"
+            };
+            assert_eq!(
+                diagnostic["original_error"]["kind"], expected_kind,
+                "{failure}"
+            );
+            if expected_kind == "Transport" {
+                assert_eq!(diagnostic["original_error"]["transport_stage"], "read");
+            }
+            for prose in [
+                "lost metadata response",
+                "unsupported",
+                "lost readback",
+                "not persisted",
+            ] {
+                assert!(!diagnostic.to_string().contains(prose), "{failure}");
+            }
+            assert!(coordinator.caller_startup_phase.is_none());
+            let machine = error.into_machine_error(&TurnFailureContext {
+                run_id: coordinator.run_id,
+                profile: "default".to_owned(),
+                thread_id: coordinator.thread_id().map(str::to_owned),
+                turn_id: None,
+            });
+            assert_eq!(machine.code, "OUTCOME_UNKNOWN", "{failure}");
+            assert!(!machine.retryable, "{failure}");
+            assert_eq!(
+                coordinator.state(),
+                &CoordinatorState::OutcomeUnknown,
+                "{failure}"
+            );
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"), "{failure}");
+            assert!(
+                coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry,
+                JournalEntry::ProvisionalThread { thread_id, .. } if thread_id == "caller-thread"))
+            );
+            assert!(
+                !coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, JournalEntry::ThreadBound { .. }))
+            );
+            let writes = coordinator.server.calls.len();
+            assert!(coordinator.initialize_thread(Uuid::now_v7()).is_err());
+            assert_eq!(coordinator.server.calls.len(), writes, "{failure}");
+            assert_eq!(coordinator.caller_startup_failure(), Some(&diagnostic));
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        }
+    }
+
+    #[test]
+    fn caller_startup_status_refusals_keep_the_original_substage_and_retry_fence() {
+        for (failure, phase) in [
+            (0, "loaded_root_before_status"),
+            (1, "thread_status_readback"),
+            (2, "loaded_root_after_status"),
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.caller_startup_phase = Some("thread_preparation");
+            let operation_id = Uuid::now_v7();
+            let original = coordinator.ensure_thread(operation_id).unwrap();
+            prepend_caller_quiescence(&mut coordinator.server);
+            if failure == 1 {
+                coordinator.server.replies[1] = Ok(serde_json::json!({
+                    "thread":{"id":"caller-thread", "parentThreadId":null,
+                        "status":{"type":"active"}},
+                }));
+            } else {
+                coordinator.server.replies[failure] = Ok(serde_json::json!({
+                    "data":["caller-thread", "native-child"], "nextCursor":null,
+                }));
+            }
+            let error = coordinator
+                .check_caller_transition_quiescence(&original)
+                .unwrap_err();
+            coordinator.record_caller_startup_failure(&error);
+            coordinator.caller_startup_phase = None;
+            assert_eq!(
+                coordinator.lost_after_write(operation_id, error),
+                TurnError::OutcomeUnknown
+            );
+            let diagnostic = coordinator.caller_startup_failure().unwrap();
+            assert_eq!(diagnostic["substage"], phase);
+            assert_eq!(diagnostic["original_error"]["kind"], "TurnBusy");
+            assert_eq!(coordinator.thread_id(), Some(original.as_str()));
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            assert!(
+                !coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, JournalEntry::ThreadBound { .. }))
+            );
+            let calls = coordinator.server.calls.len();
+            assert_eq!(
+                coordinator.initialize_thread(Uuid::now_v7()),
+                Err(TurnError::OutcomeUnknown)
+            );
+            assert_eq!(coordinator.server.calls.len(), calls);
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        }
+    }
+
+    #[test]
+    fn caller_native_child_or_unknown_census_blocks_policy_mutation_without_losing_state() {
+        for failure in [
+            "child",
+            "late_child",
+            "empty",
+            "paged",
+            "malformed",
+            "read_identity",
+            "read_parent",
+            "read_running",
+            "read_unknown",
+            "transport",
+            "unsupported",
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+            prepend_caller_quiescence(&mut coordinator.server);
+            match failure {
+                "child" => {
+                    coordinator.server.replies[0] = Ok(serde_json::json!({
+                        "data":["caller-thread", "idle-child"], "nextCursor":null,
+                    }))
+                }
+                "late_child" => {
+                    coordinator.server.replies[2] = Ok(serde_json::json!({
+                        "data":["caller-thread", "late-child"], "nextCursor":null,
+                    }))
+                }
+                "empty" => {
+                    coordinator.server.replies[0] = Ok(serde_json::json!({
+                        "data":[], "nextCursor":null,
+                    }))
+                }
+                "paged" => {
+                    coordinator.server.replies[0] = Ok(serde_json::json!({
+                        "data":["caller-thread"], "nextCursor":"hidden-child",
+                    }))
+                }
+                "malformed" => coordinator.server.replies[0] = Ok(Value::Null),
+                "transport" => {
+                    coordinator.server.replies[0] = Err(TurnError::transport(
+                        TransportStage::Read,
+                        "census unavailable",
+                    ))
+                }
+                "unsupported" => {
+                    coordinator.server.replies[0] = Err(TurnError::AppServerRejected {
+                        code: -32601,
+                        message: "unsupported census".to_owned(),
+                    })
+                }
+                field => {
+                    let mut read = serde_json::json!({"thread":{"id":"caller-thread",
+                        "parentThreadId":null, "status":{"type":"idle"}}});
+                    match field {
+                        "read_identity" => {
+                            read["thread"]["id"] = serde_json::json!("foreign-thread")
+                        }
+                        "read_parent" => {
+                            read["thread"]["parentThreadId"] = serde_json::json!("foreign-parent")
+                        }
+                        "read_running" => {
+                            read["thread"]["status"]["type"] = serde_json::json!("active")
+                        }
+                        "read_unknown" => {
+                            read["thread"].as_object_mut().unwrap().remove("status");
+                        }
+                        _ => unreachable!(),
+                    }
+                    coordinator.server.replies[1] = Ok(read);
+                }
+            }
+            let journal = coordinator.journal.entries.clone();
+            assert!(
+                coordinator
+                    .set_writer_access(true, 7, Uuid::now_v7())
+                    .is_err(),
+                "{failure}"
+            );
+            assert_eq!(coordinator.state(), &CoordinatorState::Idle, "{failure}");
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+            assert_eq!(coordinator.sandbox, "read-only");
+            assert!(coordinator.writer_generation.is_none());
+            assert_eq!(coordinator.journal.entries, journal);
+            assert!(!coordinator.server.calls.iter().any(|(method, _)|
+                method == "thread/settings/update" || method == "turn/start"));
+        }
+    }
+
+    #[test]
+    fn caller_post_write_busy_is_unknown_but_initial_native_refusal_is_retryable() {
+        let mut coordinator = caller_coordinator();
+        coordinator.server.replies[0] = Err(TurnError::AppServerRejected {
+            code: -32600,
+            message: "start declined".to_owned(),
+        });
+        let error = coordinator.initialize_thread(Uuid::now_v7()).unwrap_err();
+        let context = TurnFailureContext {
+            run_id: coordinator.run_id,
+            profile: "default".to_owned(),
+            thread_id: None,
+            turn_id: None,
+        };
+        assert!(error.into_machine_error(&context).retryable);
+        assert_eq!(coordinator.state(), &CoordinatorState::Threadless);
+        assert!(coordinator.thread_id().is_none());
+        assert!(coordinator.journal.entries.is_empty());
+
+        let mut coordinator = caller_coordinator();
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        let error = coordinator.lost_after_write(Uuid::now_v7(), TurnError::TurnBusy);
+        let context = TurnFailureContext {
+            run_id: coordinator.run_id,
+            profile: "default".to_owned(),
+            thread_id: Some("caller-thread".to_owned()),
+            turn_id: None,
+        };
+        let machine = error.into_machine_error(&context);
+        assert_eq!(machine.code, "OUTCOME_UNKNOWN");
+        assert!(!machine.retryable);
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+    }
+
+    #[test]
+    fn caller_settings_ambiguity_retains_unknown_outcome_without_local_policy_change() {
+        for failure in [
+            "missing", "foreign", "cwd", "approval", "sandbox", "roots", "network",
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+            prepend_caller_quiescence(&mut coordinator.server);
+            coordinator
+                .server
+                .replies
+                .push_back(Ok(serde_json::json!({})));
+            if failure != "missing" {
+                let mut message = settings_notification(true);
+                let params = message.get_mut("params").unwrap();
+                match failure {
+                    "foreign" => params["threadId"] = serde_json::json!("another-thread"),
+                    "cwd" => params["threadSettings"]["cwd"] = serde_json::json!("/tmp/another"),
+                    "approval" => {
+                        params["threadSettings"]["approvalPolicy"] = serde_json::json!("never")
+                    }
+                    "sandbox" => {
+                        params["threadSettings"]["sandboxPolicy"]["type"] =
+                            serde_json::json!("dangerFullAccess")
+                    }
+                    "roots" => {
+                        params["threadSettings"]["sandboxPolicy"]["writableRoots"] =
+                            serde_json::json!(["/"])
+                    }
+                    "network" => {
+                        params["threadSettings"]["sandboxPolicy"]["networkAccess"] =
+                            serde_json::json!(true)
+                    }
+                    _ => unreachable!(),
+                }
+                coordinator.server.messages.push_back(message);
+            }
+            assert!(
+                coordinator
+                    .set_writer_access(true, 7, Uuid::now_v7())
+                    .is_err(),
+                "{failure}"
+            );
+            assert_eq!(
+                coordinator.state(),
+                &CoordinatorState::OutcomeUnknown,
+                "{failure}"
+            );
+            assert_eq!(coordinator.sandbox, "read-only");
+            assert!(coordinator.writer_generation.is_none());
+            assert!(
+                !coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, JournalEntry::WriterAccessChanged { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn caller_startup_rejects_existing_turns_or_widened_policy() {
+        for mismatch in ["history", "model", "cwd", "network"] {
+            let mut coordinator = caller_coordinator();
+            let reply = coordinator
+                .server
+                .replies
+                .front_mut()
+                .unwrap()
+                .as_mut()
+                .unwrap();
+            match mismatch {
+                "history" => {
+                    reply["thread"]["turns"] = serde_json::json!([{"id":"unexpected-turn"}])
+                }
+                "model" => reply["model"] = serde_json::json!("other-model"),
+                "cwd" => reply["cwd"] = serde_json::json!("/tmp/another"),
+                "network" => reply["sandbox"]["networkAccess"] = serde_json::json!(true),
+                _ => unreachable!(),
+            }
+            assert!(coordinator.initialize_thread(Uuid::now_v7()).is_err());
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+            assert!(
+                !coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, JournalEntry::ThreadBound { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn caller_idle_guard_and_duplicate_notification_fail_closed() {
+        let mut coordinator = caller_coordinator();
+        assert!(
+            coordinator
+                .set_writer_access(true, 7, Uuid::now_v7())
+                .is_err()
+        );
+        assert!(
+            !coordinator
+                .server
+                .calls
+                .iter()
+                .any(|(method, _)| method == "thread/settings/update")
+        );
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        prepend_caller_quiescence(&mut coordinator.server);
+        coordinator
+            .server
+            .replies
+            .push_back(Ok(serde_json::json!({})));
+        coordinator
+            .server
+            .messages
+            .push_back(settings_notification(true));
+        coordinator
+            .set_writer_access(true, 7, Uuid::now_v7())
+            .unwrap();
+        assert!(coordinator.ingest(settings_notification(true)).is_err());
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        let before = coordinator.server.calls.len();
+        assert!(
+            coordinator
+                .set_writer_access(false, 7, Uuid::now_v7())
+                .is_err()
+        );
+        assert_eq!(coordinator.server.calls.len(), before);
+    }
+
+    #[test]
+    fn caller_release_with_loaded_child_retains_prior_writer_selection() {
+        let mut coordinator = caller_coordinator();
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        prepend_caller_quiescence(&mut coordinator.server);
+        coordinator
+            .server
+            .replies
+            .push_back(Ok(serde_json::json!({})));
+        coordinator
+            .server
+            .messages
+            .push_back(settings_notification(true));
+        coordinator
+            .set_writer_access(true, 7, Uuid::now_v7())
+            .unwrap();
+        let journal = coordinator.journal.entries.clone();
+        let effects = coordinator
+            .server
+            .calls
+            .iter()
+            .filter(|(method, _)| method == "thread/settings/update")
+            .count();
+        coordinator.server.replies.push_back(Ok(serde_json::json!({
+            "data":["caller-thread", "writable-child"], "nextCursor":null,
+        })));
+        assert!(
+            coordinator
+                .set_writer_access(false, 7, Uuid::now_v7())
+                .is_err()
+        );
+        assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+        assert_eq!(coordinator.writer_generation, Some(7));
+        assert_eq!(coordinator.sandbox, "workspace-write");
+        assert_eq!(coordinator.approval_policy, "on-request");
+        assert_eq!(coordinator.journal.entries, journal);
+        assert_eq!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .filter(|(method, _)| method == "thread/settings/update")
+                .count(),
+            effects
+        );
+    }
+
+    #[test]
+    fn caller_recovery_keeps_original_thread_and_drops_prior_write_selection() {
+        let mut coordinator = caller_coordinator();
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        coordinator.sandbox = "workspace-write".to_owned();
+        coordinator.approval_policy = "on-request".to_owned();
+        coordinator.writer_generation = Some(7);
+        coordinator.server.replies.push_back(Ok(serde_json::json!({
+            "thread":{"id":"caller-thread", "turns":[]}, "model":"gpt-5",
+            "cwd":"/tmp/workspace", "approvalPolicy":"never",
+            "sandbox":turn_sandbox("read-only", Path::new("/tmp/workspace")),
+        })));
+        coordinator
+            .complete_connection_startup(RunLifecycle::Idle)
+            .unwrap();
+        assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+        assert_eq!(coordinator.sandbox, "read-only");
+        assert!(coordinator.writer_generation.is_none());
+        let params = &coordinator
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/resume")
+            .unwrap()
+            .1;
+        assert_eq!(params["sandbox"], "read-only");
+        assert_eq!(params["config"]["project_doc_max_bytes"], 0);
+        assert!(
+            !coordinator
+                .server
+                .calls
+                .iter()
+                .any(|(method, _)| method == "turn/start")
+        );
     }
 
     #[test]
@@ -5869,6 +7551,77 @@ mod tests {
                 assert!(report.is_err());
             }
         }
+    }
+
+    #[test]
+    fn caller_retained_thread_startup_keeps_original_refusal_without_publishing_a_binding() {
+        for (field, predicate) in [
+            ("cwd", "thread_settings_cwd"),
+            ("approvalPolicy", "thread_settings_approval_policy"),
+            ("sandbox", "thread_settings_sandbox_type"),
+            ("network", "thread_settings_network_access"),
+            ("model", "thread_model"),
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+            coordinator.journal.entries.clear();
+            let mut response = serde_json::json!({
+                "thread":{"id":"caller-thread", "turns":[]}, "model":"gpt-5",
+                "cwd":"/tmp/workspace", "approvalPolicy":"never",
+                "sandbox":turn_sandbox("read-only", Path::new("/tmp/workspace")),
+            });
+            if field == "network" {
+                response["sandbox"]["networkAccess"] = Value::Bool(true);
+            } else {
+                response[field] = serde_json::json!("untrusted refusal content");
+            }
+            coordinator.server.replies.push_back(Ok(response));
+            let error = coordinator
+                .complete_connection_startup(RunLifecycle::Idle)
+                .unwrap_err();
+            assert_eq!(error, TurnError::CorrelationMismatch, "{field}");
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+            let diagnostic = coordinator.caller_startup_failure().unwrap();
+            assert_eq!(diagnostic["substage"], "thread_settings");
+            assert_eq!(diagnostic["original_error"]["kind"], "CorrelationMismatch");
+            assert_eq!(diagnostic["refused_predicate"], predicate);
+            assert!(!diagnostic.to_string().contains("untrusted refusal content"));
+            assert!(coordinator.caller_startup_phase.is_none());
+            assert!(
+                !coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, JournalEntry::ThreadBound { .. }))
+            );
+            let writes = coordinator.server.calls.len();
+            assert_eq!(
+                coordinator.initialize_thread(Uuid::now_v7()),
+                Err(TurnError::OutcomeUnknown)
+            );
+            assert_eq!(coordinator.server.calls.len(), writes);
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        }
+        let mut coordinator = caller_coordinator();
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        coordinator.server.replies.push_back(Ok(serde_json::json!({
+            "thread":{"id":"caller-thread", "turns":[]}, "model":"gpt-5",
+            "cwd":"/tmp/workspace", "approvalPolicy":"never",
+            "sandbox":turn_sandbox("read-only", Path::new("/tmp/workspace")),
+        })));
+        coordinator
+            .complete_connection_startup(RunLifecycle::Idle)
+            .unwrap();
+        assert!(coordinator.caller_startup_phase.is_none());
+        assert!(coordinator.caller_startup_failure().is_none());
+        assert_eq!(coordinator.thread_id(), Some("caller-thread"));
     }
 
     #[test]

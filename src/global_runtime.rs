@@ -245,6 +245,15 @@ impl ResolvedGlobalProfile {
 }
 
 impl GlobalProfileBinding {
+    /// Static admission for the empirically qualified native mechanism. Actual
+    /// process, socket and configuration evidence remains Worker-owned.
+    pub(crate) fn caller_workspace_supported(&self) -> bool {
+        self.validate_for_recovery().is_ok()
+            && self.launch_snapshot.codex_version == "0.159.3"
+            && self.launch_snapshot.executable_identity.sha256
+                == "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
+    }
+
     pub fn digest(&self) -> Result<String, MachineError> {
         canonical_digest(self)
     }

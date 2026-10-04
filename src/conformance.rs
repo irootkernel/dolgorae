@@ -508,6 +508,63 @@ struct ConformanceState {
     active_turn: Option<String>,
     pending: BTreeSet<String>,
     runtime_intents: BTreeMap<String, String>,
+    caller_native_intent_seen: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallerNativeIntent {
+    pub schema: String,
+    pub operation_id: Uuid,
+    pub method: String,
+}
+
+impl CallerNativeIntent {
+    pub(crate) fn validate(&self) -> Result<(), ConformanceError> {
+        if self.schema != "dolgorae.caller-native-intent/v1"
+            || self.operation_id.get_version_num() != 7
+            || !matches!(
+                self.method.as_str(),
+                "thread/start" | "thread/settings/update"
+            )
+        {
+            return Err(ConformanceError::InvalidHistory(
+                "caller native intent is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn caller_native_intent(record: &AuditRecord) -> Result<bool, ConformanceError> {
+    if record.kind() != AuditKind::TurnIntent {
+        return Ok(false);
+    }
+    let bytes = canonicalize(record.payload())
+        .map_err(|error| ConformanceError::InvalidHistory(error.to_string()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| ConformanceError::InvalidHistory(error.to_string()))?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("dolgorae.caller-native-intent/v1")
+    {
+        return Ok(false);
+    }
+    let intent: CallerNativeIntent = serde_json::from_value(value).map_err(|_| {
+        ConformanceError::InvalidHistory("caller native intent shape is invalid".to_owned())
+    })?;
+    intent.validate()?;
+    Ok(true)
+}
+
+fn checked_outcome_unknown(
+    previous: RunLifecycle,
+    caller_native_intent_seen: bool,
+) -> Result<RunLifecycle, ConformanceError> {
+    if previous == RunLifecycle::Idle && caller_native_intent_seen {
+        Ok(RunLifecycle::OutcomeUnknown)
+    } else {
+        checked_implicit_transition(previous, RunLifecycle::OutcomeUnknown)
+    }
 }
 
 impl ConformantLedger<SystemLedgerClock, NoFaults> {
@@ -1046,7 +1103,9 @@ impl ConformanceState {
         let mut active_turn = None;
         let mut pending = BTreeSet::new();
         let mut runtime_intents = BTreeMap::new();
+        let mut caller_native_intent_seen = false;
         for (index, record) in records.iter().enumerate() {
+            caller_native_intent_seen |= caller_native_intent(record)?;
             match record.kind() {
                 AuditKind::IdempotencyReserved => {
                     record_idempotency_intent(index, record, &mut runtime_intents)?;
@@ -1078,10 +1137,12 @@ impl ConformanceState {
             active_turn,
             pending,
             runtime_intents,
+            caller_native_intent_seen,
         })
     }
 
     fn apply(&mut self, record: &AuditRecord) -> Result<(), ConformanceError> {
+        self.caller_native_intent_seen |= caller_native_intent(record)?;
         let expected_sequence = self.report.record_count.saturating_add(1);
         if record.sequence() != expected_sequence
             || record.run_id() != self.report.run_id
@@ -1199,10 +1260,8 @@ impl ConformanceState {
                 )?;
             }
             AuditKind::OutcomeUnknown => {
-                self.report.lifecycle = checked_implicit_transition(
-                    self.report.lifecycle,
-                    RunLifecycle::OutcomeUnknown,
-                )?;
+                self.report.lifecycle =
+                    checked_outcome_unknown(self.report.lifecycle, self.caller_native_intent_seen)?;
                 self.active_turn = None;
             }
             AuditKind::StartFailed => {
@@ -1407,7 +1466,9 @@ fn verify_ledger_records_with_check(
     let mut active_turn: Option<String> = None;
     let mut pending = BTreeSet::new();
     let mut runtime_intents = BTreeMap::new();
+    let mut caller_native_intent_seen = false;
     for (index, record) in records.iter().enumerate() {
+        caller_native_intent_seen |= caller_native_intent(record)?;
         let expected_sequence = u64::try_from(index).unwrap_or(u64::MAX) + 1;
         if record.sequence() != expected_sequence
             || record.run_id() != run_id
@@ -1526,7 +1587,7 @@ fn verify_ledger_records_with_check(
                     checked_implicit_transition(lifecycle, RunLifecycle::ReconciliationRequired)?;
             }
             AuditKind::OutcomeUnknown => {
-                lifecycle = checked_implicit_transition(lifecycle, RunLifecycle::OutcomeUnknown)?;
+                lifecycle = checked_outcome_unknown(lifecycle, caller_native_intent_seen)?;
                 active_turn = None;
             }
             AuditKind::StartFailed => {
@@ -2149,6 +2210,95 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
     const TIMESTAMP: &str = "2026-08-21T12:34:56.123456Z";
+
+    #[test]
+    fn caller_native_intent_allows_idle_uncertainty_without_relaxing_legacy_history() {
+        for caller in [false, true] {
+            let run_id = Uuid::now_v7();
+            let root = std::env::temp_dir()
+                .join(format!("dolgorae-caller-conformance-{}", Uuid::now_v7()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(root.join("recovery"))
+                .unwrap();
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("audit.jsonl"))
+                .unwrap();
+            let mut ledger = ConformantLedger::open(&root, run_id).unwrap();
+            ledger
+                .bootstrap(&BootstrapRequest {
+                    timestamp: TIMESTAMP.to_owned(),
+                    workspace_id: "a".repeat(64),
+                    intent: IdempotencyIntent {
+                        schema_version: 1,
+                        operation: IdempotencyOperation::StartRun,
+                        idempotency_key: "caller".to_owned(),
+                        normalized_identity_sha256: "b".repeat(64),
+                        run_id,
+                    },
+                    record_kind: BootstrapRecordKind::RunCreated,
+                    initial_access: "unknown".to_owned(),
+                    default_effort: Some("low".to_owned()),
+                })
+                .unwrap();
+            let ready = ledger
+                .next_record(
+                    TIMESTAMP,
+                    AuditKind::LifecycleTransition,
+                    transition_payload(RunLifecycle::Starting, RunLifecycle::Idle, false),
+                )
+                .unwrap();
+            ledger.append(ready, AppendDurability::Required).unwrap();
+            if caller {
+                let intent = CallerNativeIntent {
+                    schema: "dolgorae.caller-native-intent/v1".to_owned(),
+                    operation_id: Uuid::now_v7(),
+                    method: "thread/start".to_owned(),
+                };
+                let record = ledger
+                    .next_record(
+                        TIMESTAMP,
+                        AuditKind::TurnIntent,
+                        parse(&serde_json::to_string(&intent).unwrap()).unwrap(),
+                    )
+                    .unwrap();
+                ledger.append(record, AppendDurability::Required).unwrap();
+            }
+            let unknown = ledger
+                .next_record(
+                    TIMESTAMP,
+                    AuditKind::OutcomeUnknown,
+                    object(&[("operation_id", string(&Uuid::now_v7().to_string()))]),
+                )
+                .unwrap();
+            let result = ledger.append(unknown, AppendDurability::Required);
+            assert_eq!(result.is_ok(), caller);
+            let expected = if caller {
+                RunLifecycle::OutcomeUnknown
+            } else {
+                RunLifecycle::Idle
+            };
+            assert_eq!(ledger.verify().unwrap().lifecycle, expected);
+            drop(ledger);
+            assert_eq!(
+                ConformantLedger::open(&root, run_id)
+                    .unwrap()
+                    .verify()
+                    .unwrap()
+                    .lifecycle,
+                expected
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert!(!lifecycle_transition_allowed(
+            RunLifecycle::Idle,
+            RunLifecycle::OutcomeUnknown
+        ));
+    }
 
     #[test]
     fn profile_interrupt_outcome_and_observation_are_idempotent_and_conflict_checked() {

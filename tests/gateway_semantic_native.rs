@@ -4241,6 +4241,183 @@ async fn native_close_and_pause_interrupt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_gateway_rejects_caller_manifest_before_effects() {
+    use dolgorae::domain::{Access, CallerWorkspaceAccess, ExecutionLane};
+    use dolgorae::instructions::{InstructionSnapshot, RoleCapture, SourceCapture};
+    use dolgorae::run::{CallerAgentConfigurationSnapshot, RunManifest};
+
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&["--execution-lane", "dedicated"]);
+    let root = fixture.state_root.join("runs").join(&id);
+    let path = root.join("manifest.json");
+    let original = fs::read(&path).unwrap();
+    let mut manifest: RunManifest = serde_json::from_slice(&original).unwrap();
+    let common = "Follow the captured common guidance.\n".to_owned();
+    let role = "Implement the assigned task.\n".to_owned();
+    let instructions = InstructionSnapshot::compose(
+        SourceCapture {
+            byte_length: common.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(common.as_bytes()),
+            body: common,
+        },
+        RoleCapture {
+            name: "general".to_owned(),
+            byte_length: role.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(role.as_bytes()),
+            body: role,
+        },
+    )
+    .unwrap();
+    manifest.schema_version = 3;
+    manifest.initial_access = Access::Read;
+    manifest.requested_access = Some(CallerWorkspaceAccess::ReadOnly);
+    manifest.selected_role = Some("general".to_owned());
+    manifest.start_contract = Some("caller_workspace/v1".to_owned());
+    manifest.agent_configuration = CallerAgentConfigurationSnapshot {
+        schema_version: 3,
+        selected_profile: manifest.profile.profile_name.clone(),
+        global_profile_binding_sha256: manifest
+            .global_profile_binding
+            .as_ref()
+            .unwrap()
+            .digest()
+            .unwrap(),
+        model: manifest.model.clone(),
+        default_effort: manifest.default_reasoning_effort.clone(),
+        purpose: manifest.purpose.clone(),
+        required_capabilities: manifest.required_capabilities.clone(),
+        role_reference: None,
+        instructions: instructions.clone(),
+        execution_lane: ExecutionLane::Dedicated,
+        required_assurance: manifest.requested_assurance,
+        native_subagent_policy: "enabled".to_owned(),
+    }
+    .try_into()
+    .unwrap();
+    manifest.instructions = instructions.into();
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let snapshot = dolgorae::snapshot::RunSnapshot::load(
+        &fixture.state_root,
+        Uuid::parse_str(&id).unwrap(),
+        0,
+    )
+    .unwrap();
+    let revision = snapshot.stamp.run_state_revision;
+    let audit = fs::read(root.join("audit.jsonl")).unwrap();
+    let state = fs::read(root.join("state.json")).unwrap();
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let mut writers = pb::writer_service_client::WriterServiceClient::new(channel);
+
+    let error = runs
+        .get_run(pb::GetRunRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&error, "CAPABILITY_UNSUPPORTED");
+    let error = runs
+        .submit_turn(pb::SubmitTurnRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            idempotency_key: Uuid::now_v7().to_string(),
+            write_intent: pb::WriteIntent::Write as i32,
+            message: "This adapter must reject before acquiring a writer or starting a Turn."
+                .into(),
+            images: vec![],
+            effort: None,
+            expected_state_revision: revision,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&error, "CAPABILITY_UNSUPPORTED");
+    let error = writers
+        .release_writer(pb::ReleaseWriterRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            expected_state_revision: revision,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&error, "CAPABILITY_UNSUPPORTED");
+    let error = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            interrupt: false,
+            expected_state_revision: revision,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&error, "CAPABILITY_UNSUPPORTED");
+
+    for verb in [
+        "status",
+        "submit",
+        "resume",
+        "pause",
+        "close",
+        "acquire-write",
+        "release-write",
+        "recover",
+        "reconcile",
+    ] {
+        let key = Uuid::now_v7().to_string();
+        let mut args = vec![
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            verb,
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ];
+        if verb == "submit" {
+            args.extend([
+                "--message",
+                "Reject the legacy write path before writer reservation.",
+                "--idempotency-key",
+                &key,
+                "--write",
+            ]);
+        }
+        let output = fixture.command(&args);
+        assert!(!output.status.success(), "{verb}");
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            envelope["error"]["code"], "CAPABILITY_UNSUPPORTED",
+            "{verb}: {envelope}"
+        );
+    }
+    let listed = fixture.command(&[
+        "run",
+        "list",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    assert!(!listed.status.success());
+    let envelope: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "CAPABILITY_UNSUPPORTED");
+    assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), audit);
+    assert_eq!(fs::read(root.join("state.json")).unwrap(), state);
+    assert_eq!(run_count(&fixture), 1);
+    let worker = dolgorae::worker::runtime_record_path(
+        &dolgorae::worker::runtime_root(&fixture.state_root),
+        Uuid::parse_str(&id).unwrap(),
+    )
+    .unwrap();
+    assert!(!worker.exists());
+    gateway.terminate();
+    // Restore the legacy fixture for its normal close-and-cleanup path.
+    fs::write(path, original).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_writer_release_and_reacquire() {
     // Writer release deliberately performs repeated executable-identity
     // hashing. Keep this isolated test under its wrapper deadline without

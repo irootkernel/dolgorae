@@ -446,7 +446,7 @@ fn durable_policy(
     Ok(policy)
 }
 
-fn policy_at_head(
+pub(crate) fn policy_at_head(
     projection: &RunStateProjection,
     ledger: Option<&ObservedLedger>,
     server_epoch: Option<u64>,

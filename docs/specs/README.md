@@ -849,6 +849,8 @@ Configuration fields are classified by a checked closed manifest as
 The `openai_base_url` and `experimental_realtime_webrtc_call_base_url`
 endpoint overrides are `process_static`: changing either value changes the
 server launch contract and requires a new physical generation.
+`cli_auth_credentials_store` is also `process_static`: a generation retains
+its credential storage policy, including an explicit file-only policy.
 Unknown fields and unclassified include mechanisms fail compatibility. Only
 normalized process-static and explicitly accepted migratable fields enter the
 launch contract. Runtime-mutated trust and operational state are recorded as an
@@ -2882,8 +2884,14 @@ also rejects either terminal-evidence record when it is not immediately followed
 by its matching seal, including a crash after fsyncing only `cleanup_result`.
 Implicit lifecycle effects of turn, interaction, reconciliation, and
 `outcome_unknown` records are checked against the same closed transition table;
-they cannot move a Run from `starting` into an active state. Verification
-reconstructs the lifecycle from the closed transition table and requires every
+they cannot move a Run from `starting` into an active state. For caller-workspace
+native operations, verification permits `idle -> outcome_unknown` only
+when a preceding checked `dolgorae.caller-native-intent/v1` record identifies
+the accepted Thread startup or policy update. The intent is fsynced before
+native dispatch. An unmatched startup intent forbids replacement Thread
+creation; recovery retains the provisional identity when available. Legacy
+histories without this successor intent retain the transition table above.
+Verification reconstructs the lifecycle and requires every
 stored record to survive parse, hash verification, and canonical serialization
 as an exact byte-for-byte fixed point.
 

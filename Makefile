@@ -19,7 +19,8 @@ INT_TESTS := \
 .PHONY: test test-prepare test-unit test-int test-e2e validate-agent-skills \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
-	test-live-instruction-discovery \
+	test-live-instruction-discovery test-live-workspace-startup test-live-workspace-policy \
+	test-native-workspace-policy-fixture test-native-caller-pipeline \
 	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
@@ -99,7 +100,11 @@ architecture:
 	$(CARGO) test --locked --test architecture_contract
 
 test-unit:
-	$(CARGO) test --locked --lib --bins -- --test-threads=$(TEST_THREADS)
+	$(CARGO) test --locked --lib --bins --examples -- --test-threads=$(TEST_THREADS) \
+		--skip worker::tests::startup_descendant_scopes_survive_reparenting_and_worker_loss \
+		--skip worker::tests::workload_absence_can_be_proved_inside_a_detached_worker_with_owned_server
+	$(CARGO) test --locked --lib worker::tests::startup_descendant_scopes_survive_reparenting_and_worker_loss -- --exact --test-threads=1
+	$(CARGO) test --locked --lib worker::tests::workload_absence_can_be_proved_inside_a_detached_worker_with_owned_server -- --exact --test-threads=1
 	@echo "[test-unit] completed"
 
 test-int:
@@ -107,7 +112,7 @@ test-int:
 	@echo "[test-int] completed"
 
 test-e2e:
-	$(CARGO) build --locked --bin dolgorae
+	$(CARGO) build --locked --bin dolgorae --example native_caller_pipeline
 	$(CARGO) test --locked --no-run --message-format=json --test gateway_native --test gateway_semantic_native --test gateway_configuration_native --test gateway_interaction_native > target/gateway-native-artifacts.json
 	@command -v git >/dev/null 2>&1 || { \
 		echo "Missing E2E dependency: Git 2.39 or later is required." >&2; \
@@ -147,6 +152,10 @@ test-e2e:
 		run_case tests/e2e/test_independent_review_acceptance.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_live_independent_review_admission.py; \
 		run_case tests/e2e/test_live_instruction_discovery.py; \
+		run_case tests/e2e/test_live_workspace_startup.py; \
+		run_case tests/e2e/test_live_workspace_policy.py; \
+		run_case tests/e2e/test_native_workspace_policy_fixture.py; \
+		run_case tests/e2e/test_native_caller_pipeline.py --driver "$(dir $(DOLGORAE_BIN))examples/native_caller_pipeline"; \
 		run_case tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
@@ -229,6 +238,30 @@ test-live-independent-review:
 		--codex-minimum "$${DOLGORAE_CODEX_MINIMUM_BIN}" \
 		--auth-file "$${DOLGORAE_LIVE_AUTH_FILE}"
 
+test-native-workspace-policy-fixture:
+	@test "$${DOLGORAE_RUN_NATIVE_WORKSPACE_POLICY_FIXTURE:-}" = 1 || { \
+		echo "DOLGORAE_RUN_NATIVE_WORKSPACE_POLICY_FIXTURE=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_CODEX_PINNED_VERSION:-}" && test -n "$${DOLGORAE_CODEX_PINNED_SHA256:-}" || { \
+		echo "DOLGORAE_CODEX_PINNED_VERSION and DOLGORAE_CODEX_PINNED_SHA256 are required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_native_workspace_policy_fixture.py \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--expected-version "$${DOLGORAE_CODEX_PINNED_VERSION}" \
+		--expected-sha256 "$${DOLGORAE_CODEX_PINNED_SHA256}"
+
+test-native-caller-pipeline:
+	@test "$${DOLGORAE_RUN_NATIVE_CALLER_PIPELINE:-}" = 1 || { \
+		echo "DOLGORAE_RUN_NATIVE_CALLER_PIPELINE=1 is required" >&2; \
+		exit 2; \
+	}
+	$(CARGO) build --locked --example native_caller_pipeline
+	$(PYTHON_BIN) tests/e2e/run_native_caller_pipeline.py \
+		--driver "$(CURDIR)/target/debug/examples/native_caller_pipeline" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
+
 test-live-access-safety:
 	@test "$${DOLGORAE_RUN_LIVE_ACCESS_SAFETY:-}" = 1 || { \
 		echo "DOLGORAE_RUN_LIVE_ACCESS_SAFETY=1 is required" >&2; \
@@ -257,4 +290,32 @@ test-live-instruction-discovery:
 	$(PYTHON_BIN) tests/e2e/run_live_instruction_discovery.py \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--expected-version "$${DOLGORAE_CODEX_PINNED_VERSION}" \
+		--auth-file "$${DOLGORAE_LIVE_AUTH_FILE}"
+
+test-live-workspace-startup:
+	@test "$${DOLGORAE_RUN_LIVE_WORKSPACE_STARTUP:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_WORKSPACE_STARTUP=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_CODEX_PINNED_VERSION:-}" || { \
+		echo "DOLGORAE_CODEX_PINNED_VERSION is required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_live_workspace_startup.py \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--expected-version "$${DOLGORAE_CODEX_PINNED_VERSION}"
+
+test-live-workspace-policy:
+	@test "$${DOLGORAE_RUN_LIVE_WORKSPACE_POLICY:-}" = 1 || { \
+		echo "DOLGORAE_RUN_LIVE_WORKSPACE_POLICY=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_CODEX_PINNED_VERSION:-}" && test -n "$${DOLGORAE_CODEX_PINNED_SHA256:-}" && test -n "$${DOLGORAE_LIVE_AUTH_FILE:-}" || { \
+		echo "DOLGORAE_CODEX_PINNED_VERSION, DOLGORAE_CODEX_PINNED_SHA256 and DOLGORAE_LIVE_AUTH_FILE are required" >&2; \
+		exit 2; \
+	}
+	$(PYTHON_BIN) tests/e2e/run_live_workspace_policy.py \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--expected-version "$${DOLGORAE_CODEX_PINNED_VERSION}" \
+		--expected-sha256 "$${DOLGORAE_CODEX_PINNED_SHA256}" \
 		--auth-file "$${DOLGORAE_LIVE_AUTH_FILE}"

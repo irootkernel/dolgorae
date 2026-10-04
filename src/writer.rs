@@ -216,6 +216,23 @@ impl WriterRecord {
         Ok(())
     }
 
+    /// Complete an ambiguous acquire only after the caller service validates
+    /// fresh, current qualified Write proof for this exact pending operation.
+    pub(crate) fn commit_verified_recovered_acquire(
+        &mut self,
+        transaction_id: Uuid,
+        generation: u64,
+    ) -> Result<(), MachineError> {
+        if self.state != WriterAuthorityState::BlockedUnknown
+            || self.transaction_id != Some(transaction_id)
+            || self.writer_generation != generation
+        {
+            return Err(invariant("writer recovery changed before acquire commit"));
+        }
+        self.state = WriterAuthorityState::Reserved;
+        self.commit_acquire(transaction_id, generation)
+    }
+
     pub fn bind_reserved_generation(
         &mut self,
         transaction_id: Uuid,
@@ -256,6 +273,26 @@ impl WriterRecord {
             self.handoff = None;
             self.recovery_action = Some("reverify_writer_policy".to_owned());
         }
+    }
+
+    /// The caller service invokes this only after fresh qualified Reader proof
+    /// or complete old-generation absence has been checked against this exact
+    /// guarded transaction under the lock.
+    pub(crate) fn retire_verified_reader_guard(
+        &mut self,
+        transaction_id: Uuid,
+    ) -> Result<(), MachineError> {
+        if !matches!(
+            self.state,
+            WriterAuthorityState::Reserved
+                | WriterAuthorityState::Releasing
+                | WriterAuthorityState::BlockedUnknown
+        ) || self.transaction_id != Some(transaction_id)
+        {
+            return Err(invariant("writer recovery guard changed before retirement"));
+        }
+        self.state = WriterAuthorityState::Releasing;
+        self.commit_release(transaction_id)
     }
 
     pub fn prepare_release(
@@ -1004,6 +1041,75 @@ mod tests {
             .unwrap();
         assert_eq!(record.authority_revision, 1);
         assert_eq!(store.load().unwrap(), record);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_guard_recovery_preserves_generation_and_rejects_stale_retirement() {
+        let root = root();
+        let workspace = "f".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+        let store = WriterStore::new(&root, &workspace, uid);
+        let run_id = Uuid::now_v7();
+        let acquire = Uuid::now_v7();
+        store
+            .transact(|record| {
+                let (_, generation) = record.prepare_acquire(run_id, holder(run_id), acquire)?;
+                record.commit_acquire(acquire, generation)
+            })
+            .unwrap();
+        let original = store.load().unwrap();
+        let pending = Uuid::now_v7();
+        store
+            .transact(|record| {
+                record.prepare_release(run_id, pending)?;
+                record.block_unknown(pending);
+                Ok(())
+            })
+            .unwrap();
+        let guarded = store.load().unwrap();
+        assert!(
+            store
+                .transact(|record| record
+                    .commit_verified_recovered_acquire(Uuid::now_v7(), original.writer_generation,))
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap(), guarded);
+        store
+            .transact(|record| {
+                record.commit_verified_recovered_acquire(pending, original.writer_generation)
+            })
+            .unwrap();
+        let recovered = store.load().unwrap();
+        assert_eq!(recovered.state, WriterAuthorityState::Active);
+        assert_eq!(recovered.holder, original.holder);
+        assert_eq!(recovered.writer_generation, original.writer_generation);
+        let retirement = Uuid::now_v7();
+        store
+            .transact(|record| {
+                record.prepare_release(run_id, retirement)?;
+                record.block_unknown(retirement);
+                record.retire_verified_reader_guard(retirement)
+            })
+            .unwrap();
+        let other_run = Uuid::now_v7();
+        let other_transaction = Uuid::now_v7();
+        store
+            .transact(|record| {
+                let (_, generation) =
+                    record.prepare_acquire(other_run, holder(other_run), other_transaction)?;
+                assert!(generation > original.writer_generation);
+                record.commit_acquire(other_transaction, generation)
+            })
+            .unwrap();
+        let current = store.load().unwrap();
+        assert!(
+            store
+                .transact(|record| record.retire_verified_reader_guard(retirement))
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap(), current);
         fs::remove_dir_all(root).unwrap();
     }
 

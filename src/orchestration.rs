@@ -6444,7 +6444,8 @@ mod tests {
                         normalized_sha256: sha256_hex(
                             b"Inspect the evidence and return a bounded result.",
                         ),
-                    },
+                    }
+                    .into(),
                     execution_lane: ExecutionLane::Dedicated,
                     required_assurance: Assurance::BestEffortPersonalAlpha,
                     native_subagent_policy: "enabled".to_owned(),

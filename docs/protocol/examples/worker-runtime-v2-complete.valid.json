@@ -1,0 +1,80 @@
+{
+  "schema_version": 2,
+  "identity": {
+    "workspace_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "run_id": "018f0000-0000-7000-8000-000000000001",
+    "run_generation": 1,
+    "boot_uuid": "018f0000-0000-4000-8000-000000000002",
+    "pid": 100,
+    "process_group_id": 100,
+    "session_id": 100,
+    "uid": 501,
+    "start_tvsec": 100000,
+    "start_tvusec": 1,
+    "executable_path": "/example/dolgorae",
+    "executable_device": 1,
+    "executable_inode": 2,
+    "executable_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "socket_path": "/tmp/example-worker.sock",
+  "socket_identity": {
+    "device": 1,
+    "inode": 4
+  },
+  "control_socket_epoch": 1,
+  "app_server_epoch": 1,
+  "control_recovery_required": false,
+  "dedicated_server_identity": {
+    "pid": 200,
+    "process_group_id": 200,
+    "session_id": 200,
+    "uid": 501,
+    "start_tvsec": 100000,
+    "start_tvusec": 1,
+    "executable_path": "/example/codex",
+    "executable_device": 1,
+    "executable_inode": 3,
+    "executable_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "dolgorae_version": "0.1.3",
+  "mutation_protocol_version": 1,
+  "binary_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "startup_scope": {
+    "worker_identity": {
+      "workspace_id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "run_id": "018f0000-0000-7000-8000-000000000001",
+      "run_generation": 1,
+      "boot_uuid": "018f0000-0000-4000-8000-000000000002",
+      "pid": 100,
+      "process_group_id": 100,
+      "session_id": 100,
+      "uid": 501,
+      "start_tvsec": 100000,
+      "start_tvusec": 1,
+      "executable_path": "/example/dolgorae",
+      "executable_device": 1,
+      "executable_inode": 2,
+      "executable_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "app_server_epoch": 1,
+    "dedicated_server_identity": {
+      "pid": 200,
+      "process_group_id": 200,
+      "session_id": 200,
+      "uid": 501,
+      "start_tvsec": 100000,
+      "start_tvusec": 1,
+      "executable_path": "/example/codex",
+      "executable_device": 1,
+      "executable_inode": 3,
+      "executable_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "app_server_socket_identity": {
+      "device": 1,
+      "inode": 5
+    },
+    "revision": 3,
+    "complete": true,
+    "children": []
+  }
+}

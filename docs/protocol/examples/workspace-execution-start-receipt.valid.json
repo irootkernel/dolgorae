@@ -1,0 +1,16 @@
+{
+  "schema": "dolgorae.caller-start-receipt/v1",
+  "run_id": "018f0000-0000-7000-8000-000000063001",
+  "accepted_intent_sha256": "7ead479d585067dec074ba5910a2f5cf731eff69f756252ebbbfffeb06d699a3",
+  "global_profile_binding_sha256": "f9ada56baffff5418b858c958c1ca2b240cab89d7a8aafcb4fdf85e5d159f831",
+  "original_thread_id": "example-original-thread",
+  "run_generation": 1,
+  "effective_policy": {
+    "access": "write",
+    "verification": "verified",
+    "policy_epoch": 2,
+    "thread_generation": 1,
+    "server_epoch": 2,
+    "writer_generation": 1
+  }
+}

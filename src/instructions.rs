@@ -499,9 +499,14 @@ pub fn validate_role_name(name: &str) -> Result<(), MachineError> {
     Ok(())
 }
 
-/// Until pinned-runtime qualification is integrated, modern activation fails
-/// before Run allocation. A config key or a passing fake server is not proof.
-pub fn require_discovery_control() -> Result<(), MachineError> {
+/// Admission requires the empirically qualified executable pin. The Worker
+/// separately verifies the owned process and its effective configuration.
+pub fn require_discovery_control(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<(), MachineError> {
+    if binding.caller_workspace_supported() {
+        return Ok(());
+    }
     Err(MachineError::new(
         "INSTRUCTION_DISCOVERY_UNSUPPORTED",
         "the selected runtime has no qualified automatic instruction discovery control",
@@ -729,8 +734,14 @@ mod tests {
         assert!(
             serde_json::from_value::<CallerAgentConfigurationSnapshot>(missing_nullable).is_err()
         );
+        let reservation: crate::run::CallerStartReservation = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+        ))
+        .unwrap();
         assert_eq!(
-            require_discovery_control().unwrap_err().code,
+            require_discovery_control(&reservation.accepted_intent.global_profile_binding)
+                .unwrap_err()
+                .code,
             "INSTRUCTION_DISCOVERY_UNSUPPORTED"
         );
     }

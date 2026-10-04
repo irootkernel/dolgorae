@@ -26,8 +26,9 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
-`EPIC-017` is `ACTIVE`; `TASK-061` and `TASK-062` are `COMPLETE`.
-`TASK-063` through `TASK-066` remain `PLANNED` after EPIC-016 and before EPIC-009.
+`EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-063` are `COMPLETE`.
+`TASK-064` through `TASK-066` remain `PLANNED`
+after EPIC-016 and before EPIC-009.
 They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
 Completing `EPIC-003` unlocks `MILESTONE-SR1`, which guarantees the one-shot
@@ -2159,8 +2160,9 @@ Implement `~/.dolgorae/home/AGENTS.md` and
 `~/.dolgorae/roles/<role-name>/AGENTS.md`, explicit initialization and
 bounded admission, captured instruction identity, and task/Role separation.
 Keep the selected workspace as the thread and command cwd and Profile
-CODEX_HOME separate. Verify control over Codex AGENTS discovery before enabling
-the new instruction contract.
+CODEX_HOME separate. Verify control over project and ancestor AGENTS discovery
+before enabling the new instruction contract; document native Profile guidance
+as separate user input outside the managed snapshot.
 
 Verification: accepted bytes match stored digests; missing/unsafe sources fail
 before Run allocation; source edits do not alter accepted Runs; conflicting
@@ -2169,7 +2171,20 @@ user files. Required Codex behavior has separately authorized empirical proof.
 
 ### TASK-063: Start and Transition Workspace Access
 
-Status: `PLANNED`
+Status: `COMPLETE`
+
+The bounded native fixture has qualified project/ancestor suppression,
+same-Thread access enforcement and retained turnless bindings on one executable
+pin. Internal startup now connects accepted captures, process configuration,
+Worker proof and Writer commit. The bounded native Dolgorae pipeline passed
+startup, same-Thread transitions, receipt replay, guarded recovery and normal
+cleanup without a user Turn or provider request. The original-manifest retry
+correction has focused checkpoint coverage and a passing complete repository
+gate. Independent review and exact final candidate approval remain required. The
+[execution readiness map](../todo/TODO-caller-owned-workspaces-and-agent-roles.md#execution-readiness-and-decision-boundary)
+separates observed native behavior from integrated acceptance and records
+the permitted Profile guidance alongside the remaining checks.
+Unsupported admission does not complete this Task.
 
 Add modern `run start --access read-only|writable --role <name>` inputs;
 omitted access resolves to writable. A successful writable start holds the

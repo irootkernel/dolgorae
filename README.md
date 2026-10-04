@@ -74,6 +74,21 @@ invalid files require correction before initialization succeeds. The
 integrated activation. Current policy commands continue to use the JSON sources
 described below.
 
+**Caution: Instruction precedence and Profile guidance**
+
+Codex may also load `AGENTS.override.md` or `AGENTS.md` from the selected
+Profile's `CODEX_HOME`. Dolgorae does not disable this Profile guidance.
+Under the successor contract, Dolgorae's core, common and selected Role
+instructions form the developer input; Profile guidance and the current task
+are user input. The developer instructions take precedence over both. Writer
+and Controller permissions remain enforced by Dolgorae and the runtime.
+
+Keep Profile guidance limited to general preferences. Its contents are outside
+Dolgorae's captured common/Role snapshot, so editing it can affect later runtime
+input even when the captured Role remains unchanged. Automatic project and
+ancestor instruction discovery is controlled separately by the successor
+contract. Integrated successor activation remains pending.
+
 Specialist Roles keep reusable instructions separate from account and execution
 configuration. Put an explicitly named Role source in either
 `~/.dolgorae/roles/<name>.json` for machine-local use or

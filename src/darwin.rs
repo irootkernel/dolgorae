@@ -14,7 +14,26 @@ use std::time::Duration;
 const F_SETLKWTIMEOUT: libc::c_int = 10;
 const DARWIN_NSIG: libc::c_int = 32;
 const PROC_PIDTBSDINFO: libc::c_int = 3;
+const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
 const SZOMB: u32 = 5;
+
+#[repr(C)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ProcBsdShortInfo {
+    pid: u32,
+    parent_pid: u32,
+    process_group_id: u32,
+    status: u32,
+    command: [libc::c_char; 16],
+    flags: u32,
+    uid: u32,
+    gid: u32,
+    real_uid: u32,
+    real_gid: u32,
+    saved_uid: u32,
+    saved_gid: u32,
+    reserved: u32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -92,6 +111,20 @@ pub struct BsdProcessIdentity {
     pub session_id: u32,
     pub start_tvsec: u64,
     pub start_tvusec: u64,
+    pub zombie: bool,
+}
+
+/// Scope metadata is readable across users; birth identity is required only
+/// when a census entry is used to recognize an exact owned generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessCensusEntry {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub uid: u32,
+    pub process_group_id: u32,
+    pub session_id: u32,
+    pub birth: Option<(u64, u64)>,
     pub zombie: bool,
 }
 
@@ -470,9 +503,7 @@ impl DarwinSystem {
         let read =
             unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), expected) };
         if read != expected {
-            return Err(if read == 0 {
-                std::io::Error::from_raw_os_error(libc::ESRCH)
-            } else if read < 0 {
+            return Err(if read <= 0 {
                 std::io::Error::last_os_error()
             } else {
                 std::io::Error::new(
@@ -565,7 +596,82 @@ impl DarwinSystem {
         }
     }
 
-    pub fn all_process_identities(self) -> Result<Vec<BsdProcessIdentity>, std::io::Error> {
+    fn process_census_entry(self, pid: u32) -> Result<ProcessCensusEntry, std::io::Error> {
+        let read_short = || {
+            let mut info = MaybeUninit::<ProcBsdShortInfo>::zeroed();
+            let size = std::mem::size_of::<ProcBsdShortInfo>() as libc::c_int;
+            // SAFETY: the buffer has the exact short-BSD size. No value is
+            // inspected until the kernel returns that complete size.
+            let read = unsafe {
+                proc_pidinfo(
+                    pid as libc::c_int,
+                    PROC_PIDT_SHORTBSDINFO,
+                    0,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            if read != size {
+                return Err(if read <= 0 {
+                    std::io::Error::last_os_error()
+                } else {
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "short process census entry",
+                    )
+                });
+            }
+            // SAFETY: all bytes were initialized by the exact-size read.
+            Ok(unsafe { info.assume_init() })
+        };
+        let before = read_short()?;
+        if before.pid != pid {
+            return Err(std::io::Error::other("process census PID changed"));
+        }
+        // SAFETY: getsid is a read-only kernel lookup.
+        let session_id = unsafe { libc::getsid(pid as libc::pid_t) };
+        if session_id < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let birth = if before.uid == self.current_uid() {
+            let full = self.bsd_process_identity(pid)?;
+            if full.pid != before.pid
+                || full.parent_pid != before.parent_pid
+                || full.uid != before.uid
+                || full.process_group_id != before.process_group_id
+                || full.session_id != session_id as u32
+                || full.zombie != (before.status == SZOMB)
+            {
+                return Err(std::io::Error::other("process census identity changed"));
+            }
+            Some((full.start_tvsec, full.start_tvusec))
+        } else {
+            None
+        };
+        let after = read_short()?;
+        // Scheduling status may change without an identity change.
+        if before.pid != after.pid
+            || before.parent_pid != after.parent_pid
+            || before.uid != after.uid
+            || before.process_group_id != after.process_group_id
+            || (before.status == SZOMB) != (after.status == SZOMB)
+            // SAFETY: this read-only lookup verifies the sampled session.
+            || unsafe { libc::getsid(pid as libc::pid_t) } != session_id
+        {
+            return Err(std::io::Error::other("process census identity changed"));
+        }
+        Ok(ProcessCensusEntry {
+            pid,
+            parent_pid: before.parent_pid,
+            uid: before.uid,
+            process_group_id: before.process_group_id,
+            session_id: session_id as u32,
+            birth,
+            zombie: before.status == SZOMB,
+        })
+    }
+
+    pub fn all_process_identities(self) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
         let mut capacity = 1_024_usize;
         loop {
             let mut pids = vec![0 as libc::pid_t; capacity];
@@ -594,7 +700,7 @@ impl DarwinSystem {
                 if pid <= 0 {
                     continue;
                 }
-                match self.bsd_process_identity(u32::try_from(pid).map_err(|_| {
+                match self.process_census_entry(u32::try_from(pid).map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid census PID")
                 })?) {
                     Ok(identity) => identities.push(identity),
@@ -604,6 +710,35 @@ impl DarwinSystem {
             }
             return Ok(identities);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_file_immutable(
+        self,
+        path: &Path,
+        immutable: bool,
+    ) -> Result<(), std::io::Error> {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.uid() != self.current_uid() {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        // SAFETY: file owns a checked fixture descriptor; no pathname lookup
+        // occurs here and the test restores the flag before asserting failure.
+        if unsafe {
+            libc::fchflags(
+                file.as_raw_fd(),
+                if immutable { libc::UF_IMMUTABLE } else { 0 },
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
     /// Take the command's inherited readiness descriptor before starting the runtime.
     pub fn take_ready_file(self, fd: RawFd) -> Result<File, std::io::Error> {
@@ -1666,5 +1801,30 @@ mod tests {
         assert!(members.binary_search(&pid).is_ok());
         assert!(DarwinSystem.process_group_pids(1).is_err());
         assert!(DarwinSystem.signal_process_group(1, 0).is_err());
+        let census = DarwinSystem.all_process_identities().unwrap();
+        let own = census.iter().find(|process| process.pid == pid).unwrap();
+        assert_eq!(
+            own.birth,
+            Some((identity.start_tvsec, identity.start_tvusec))
+        );
+        assert!(census.iter().any(|process| process.pid == 1));
+    }
+
+    #[test]
+    fn inaccessible_full_bsd_identity_preserves_the_kernel_error() {
+        let mut info = MaybeUninit::<ProcBsdInfo>::zeroed();
+        let size = std::mem::size_of::<ProcBsdInfo>() as libc::c_int;
+        // SAFETY: PID 1 is stable, and the output buffer has the exact size.
+        let read = unsafe { proc_pidinfo(1, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
+        if read <= 0 {
+            let expected = std::io::Error::last_os_error().raw_os_error();
+            assert_eq!(
+                DarwinSystem
+                    .bsd_process_identity(1)
+                    .unwrap_err()
+                    .raw_os_error(),
+                expected
+            );
+        }
     }
 }

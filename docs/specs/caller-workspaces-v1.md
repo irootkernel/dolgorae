@@ -87,6 +87,38 @@ silent access downgrade, source copy, or a second writer. Success MUST require
 active matching authority and positively verified writable policy for the same
 Run, process generation and thread. This includes startup without a task Turn.
 An internal thread initialization is allowed; a synthetic user Turn is not.
+Before publishing WorkerReady for each new physical Worker connection,
+initial runtime qualification, configuration
+readback and turnless Thread binding or original-Thread rebinding MAY wait for
+same-user Dedicated Server startup descendants to exit. These checks MUST share
+one monotonic budget for that connection, capped at ten seconds
+and the session transport budget. Every observed child
+MUST retain its exact PID and birth identity until kernel absence is verified;
+identity drift, scope escape, inaccessible census and Worker workload MUST fail
+closed. Success still requires five complete empty samples at 100-ms intervals.
+An initially different group or session MAY be admitted only after two complete
+kernel observations establish the stable PID/birth/UID ancestry to the exact
+owned Dedicated Server. Its admitted UID, birth, group and session MUST then
+remain fixed. Shared UID or group membership alone grants no ownership.
+New caller Worker generations MUST persist a version-2 runtime ownership
+witness before Dedicated launch and every child admission. Incomplete startup,
+including Worker death before any child observation, MUST NOT prove generation
+absence or retire Writer authority. Completed evidence MUST survive parent
+exit, Worker exit and normal control-socket replacement. Missing, corrupt,
+cross-generation or regressing evidence MUST fail closed. Version-1 runtime
+records retain their original shape and meaning; old readers reject version 2.
+The existing personal-alpha limit for deliberate escape wholly between census
+polls remains unchanged.
+A startup group/census mismatch MAY discard a sample only after every differing
+nonleader PID is either verified as a matching startup child or kernel-absent.
+All other identity and workload checks MUST still run. The discarded sample
+MUST reset the empty count and MUST NOT count toward success.
+The wait MUST end permanently on binding success or failure and before
+WorkerReady, including connections that do not eagerly bind a Thread. Diagnostic
+phase changes and later resumes MUST NOT recreate it. No task Turn or provider
+dispatch is permitted in this window. Failure MUST preserve the original or
+provisional Thread, unknown-state retry fence and Writer guard semantics.
+Policy proofs and later access transitions MUST NOT use this startup wait.
 Missing instruction sources and known unsupported required capabilities MUST
 fail before Run allocation. Post-allocation failures retain the original Run
 and idempotency receipt with truthful failure or unknown state; retries MUST
@@ -96,6 +128,10 @@ safe absence or a completed transition.
 An unqualified turnless startup/effective-policy mechanism MUST return
 `WORKSPACE_STARTUP_UNSUPPORTED` before allocation. Qualification cannot infer
 write access from a reservation, thread sandbox label or synthetic task.
+The existing shared Profile readiness/catalog check MAY precede allocation and
+Writer reservation. It MUST NOT create the caller Run's Dedicated Server,
+Thread or task Turn. The final Writer reservation remains authoritative after
+any earlier busy observation and MUST precede caller execution effects.
 
 **CW-TRANSITION**: Dedicated read-only startup MUST establish a verified reader
 thread. Controller-authorized acquire/release MUST retain the same Run and
@@ -106,6 +142,12 @@ absence of writable descendants are proven. A released reader MAY reacquire.
 Fixed legacy `shared_readonly` remains non-promotable. Review Runs and restricted
 Specialists retain their existing prohibitions on writer acquisition. Role text,
 task wording, Profile selection and peer mail MUST NOT grant writer authority.
+
+The successor policy proof MUST bind its operation, Workspace and Run, original
+Thread, current Worker and Dedicated Server identities, socket and server epochs,
+accepted Profile binding and effective policy. Writer commit MUST compare the
+proof with the durable policy and its prepared transaction. A legacy writer
+acknowledgement or an unverified or mismatched proof MUST NOT authorize commit.
 
 Generation recovery MUST preserve accepted instructions and resolved startup
 selection. A successor generation follows the existing conservative authority
@@ -118,14 +160,31 @@ its unavailable binding rather than inventing a replacement or replaying a
 task. Unproven writer authority remains guarded. Qualification MUST exercise
 this boundary and state the selected runtime's persistence limit.
 
+Explicit recovery MAY resume the original Thread as a reader and retire a
+pending writer guard only after current Controller, generation, original
+Thread, verified read-only policy and workload absence checks succeed. This
+MUST NOT acknowledge the interrupted writable startup as successful or
+automatically reacquire writer authority.
+
+If an idle Worker generation is lost, explicit recovery MAY acknowledge its
+verified reader attachment without changing logical Idle or replaying history.
+Retiring the verified absent generation MUST inspect its committed policy and
+guard under Writer serialization without requiring active Writer authority.
+It MUST retain the original guarded transaction, validate generation and
+server bindings, and compare the complete committed audit head before release.
+A lost policy response MAY be reconciled using fresh proof of the already
+durable policy for the same Controller, Thread and guarded transaction. It
+MUST NOT reissue the native policy operation to reconstruct that response.
+
 ## Instructions and Role admission
 
 **CW-SOURCE**: The common source MUST be `~/.dolgorae/home/AGENTS.md`, and the
 selected Role MUST be `~/.dolgorae/roles/<name>/AGENTS.md`. Names MUST match
-`^[a-z0-9][a-z0-9._-]{0,63}$`. There is no project, JSON, ancestor, include or
-environment fallback. Source text supplies instructions; execution configuration
-and policy display metadata remain separate. Ordinary omission selects `general`;
-standalone review omission selects `reviewer`. Engagement and broker policy
+`^[a-z0-9][a-z0-9._-]{0,63}$`. These managed sources have no project, JSON,
+ancestor, include or environment fallback. Source text supplies instructions;
+execution configuration and policy display metadata remain separate. Ordinary
+omission selects `general`; standalone review omission selects `reviewer`.
+Engagement and broker policy
 configuration MUST bind a Role explicitly.
 
 **CW-INIT**: Only explicit `init` or migration MAY create sources. Init MUST
@@ -167,11 +226,21 @@ It MUST recheck the combined ceiling before publishing bootstrap. Editing or
 removing source files after acceptance MUST NOT alter Run, policy or session
 bytes, trigger a source reload on retry, or invalidate accepted snapshots.
 
-**CW-AMBIENT**: Modern admission MUST suppress automatic AGENTS discovery from
-Profile, project and ancestor paths using supported runtime configuration.
-Capability proof MUST include the actual pinned Codex thread with conflicting
-files in each path and a positive control for the explicitly supplied bodies.
-Shell cwd changes or an instruction to ignore files do not establish suppression.
+**CW-AMBIENT**: The selected Profile's native `CODEX_HOME/AGENTS.override.md` or
+`CODEX_HOME/AGENTS.md` MAY contribute user instructions. This guidance is outside
+the captured common/Role bodies and their byte-immutability guarantee. The
+managed developer prefix takes precedence over both Profile guidance and task
+user input; neither grants Controller or writer authority. User-facing guidance
+MUST warn that Profile instruction edits can affect later runtime input without
+changing the captured Role.
+
+Modern admission MUST suppress automatic project and ancestor AGENTS discovery
+using supported runtime configuration. Capability proof MUST include the actual
+pinned Codex thread with conflicting project and ancestor files, an ambient
+positive control, and a positive control for the explicitly supplied bodies.
+Profile contributions MUST be observed separately and MUST NOT be treated as a
+failure of project/ancestor suppression. Shell cwd changes or an instruction to
+ignore files do not establish suppression.
 If the selected runtime cannot establish this guarantee, admission MUST return
 `INSTRUCTION_DISCOVERY_UNSUPPORTED` before allocation. Explicit project guidance
 MAY be supplied as task context; it cannot replace the admitted Role or grant

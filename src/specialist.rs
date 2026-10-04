@@ -160,7 +160,7 @@ impl ReviewerRuntimePlan {
             required_capabilities,
             role_reference: Some(REVIEWER_ROLE_REFERENCE.to_owned()),
             normalized_instructions,
-            instructions,
+            instructions: instructions.into(),
             execution_lane: ExecutionLane::SharedReadonly,
             required_assurance: Assurance::BestEffortPersonalAlpha,
             native_subagent_policy: "enabled".to_owned(),

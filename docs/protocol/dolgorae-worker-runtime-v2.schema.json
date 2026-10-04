@@ -1,0 +1,394 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/worker-runtime/v2",
+  "title": "Dolgorae private caller Worker runtime ownership v2",
+  "description": "New caller generations only. Typed ancestry, cross-field generation binding and monotonic persistence are checked in Rust; this is not a public activation contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "identity",
+    "socket_path",
+    "socket_identity",
+    "control_socket_epoch",
+    "app_server_epoch",
+    "control_recovery_required",
+    "startup_scope",
+    "dedicated_server_identity",
+    "dolgorae_version",
+    "mutation_protocol_version",
+    "binary_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "identity": {
+      "$ref": "#/$defs/worker"
+    },
+    "socket_path": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "socket_identity": {
+      "$ref": "#/$defs/socket"
+    },
+    "control_socket_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "app_server_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "control_recovery_required": {
+      "type": "boolean"
+    },
+    "startup_scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "dedicated_server_identity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/dedicated"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "dolgorae_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "mutation_protocol_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "binary_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "run_id",
+        "run_generation",
+        "boot_uuid",
+        "pid",
+        "process_group_id",
+        "session_id",
+        "uid",
+        "start_tvsec",
+        "start_tvusec",
+        "executable_path",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boot_uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_tvsec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_tvusec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1
+        },
+        "executable_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "dedicated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "process_group_id",
+        "session_id",
+        "uid",
+        "start_tvsec",
+        "start_tvusec",
+        "executable_path",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_tvsec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_tvusec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1
+        },
+        "executable_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "socket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "inode"
+      ],
+      "properties": {
+        "device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "parent_pid",
+        "uid",
+        "process_group_id",
+        "session_id",
+        "birth",
+        "zombie"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "parent_pid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "birth": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999999
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "zombie": {
+          "type": "boolean"
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker_identity",
+        "app_server_epoch",
+        "dedicated_server_identity",
+        "app_server_socket_identity",
+        "revision",
+        "complete",
+        "children"
+      ],
+      "properties": {
+        "worker_identity": {
+          "$ref": "#/$defs/worker"
+        },
+        "app_server_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dedicated_server_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/dedicated"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "app_server_socket_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/socket"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "identity",
+              "ancestry"
+            ],
+            "properties": {
+              "identity": {
+                "$ref": "#/$defs/entry"
+              },
+              "ancestry": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/$defs/entry"
+                }
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dedicated_server_identity": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "app_server_socket_identity": {
+                "type": "null"
+              },
+              "complete": {
+                "const": false
+              },
+              "children": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "app_server_socket_identity": {
+                "$ref": "#/$defs/socket"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

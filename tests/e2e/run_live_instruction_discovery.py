@@ -214,11 +214,13 @@ def qualify_inventory(result: dict[str, object], common: str, role: str,
 
 
 class ProbeServer(AppServer):
+    MAX_MODEL_TURNS = 2
+
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.failed_operation = method
         if method == "turn/start":
             used = getattr(self, "model_turns_requested", 0)
-            if used >= 2:
+            if used >= self.MAX_MODEL_TURNS:
                 raise ProbeCheckFailure("turn_budget_exhausted")
             self.model_turns_requested = used + 1
         try:

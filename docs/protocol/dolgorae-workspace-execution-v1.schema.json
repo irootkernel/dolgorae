@@ -21,6 +21,18 @@
     },
     {
       "$ref": "#/$defs/run_manifest"
+    },
+    {
+      "$ref": "#/$defs/caller_start_reservation"
+    },
+    {
+      "$ref": "#/$defs/caller_policy_proof"
+    },
+    {
+      "$ref": "#/$defs/caller_start_receipt"
+    },
+    {
+      "$ref": "#/$defs/caller_native_intent"
     }
   ],
   "$defs": {
@@ -886,6 +898,469 @@
         "role_ref uniqueness and existing activation, collaboration and approval constraints remain enforced"
       ],
       "$id": "https://dolgorae.local/schema/specialist-policy/v3"
+    },
+    "caller_start_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "created_at",
+        "workspace_id",
+        "canonical_workspace",
+        "workspace_mode",
+        "start_baseline",
+        "controller",
+        "global_profile_binding",
+        "request",
+        "instructions",
+        "readiness"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "created_at": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/created_at"
+        },
+        "workspace_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_id"
+        },
+        "canonical_workspace": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/canonical_workspace"
+        },
+        "workspace_mode": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_mode"
+        },
+        "start_baseline": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/start_baseline"
+        },
+        "controller": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/controller"
+        },
+        "global_profile_binding": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/global_profile_binding"
+        },
+        "request": {
+          "$ref": "#/$defs/resolved_start_request"
+        },
+        "instructions": {
+          "$ref": "#/$defs/instruction_snapshot"
+        },
+        "readiness": {
+          "$ref": "#/$defs/caller_profile_readiness"
+        }
+      },
+      "x-invariants": [
+        "The original UUIDv7 Run, canonical workspace and Controller are retained before manifest publication",
+        "Profile and Role selections agree with the immutable binding and exact instruction capture",
+        "No ready server epoch or advertised model default is invented",
+        "Observed readiness, resolved model and effort are immutable; retry identity still preserves the original omitted selections"
+      ]
+    },
+    "caller_start_reservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation",
+        "idempotency_key",
+        "normalized_identity_sha256",
+        "request_sha256",
+        "run_id",
+        "accepted_intent"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "operation": {
+          "const": "start_run"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "normalized_identity_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "accepted_intent": {
+          "$ref": "#/$defs/caller_start_intent"
+        }
+      },
+      "x-invariants": [
+        "Run identity and key agree with the accepted intent",
+        "request_sha256 binds the resolved request, canonical workspace and Controller independently of live sources; workspace aliases and the validated expected workspace ID are excluded",
+        "normalized_identity_sha256 binds the JCS representation of the full accepted intent",
+        "Caller and legacy reservations share one create-exclusive allocation key namespace; conflicting generations cannot allocate a second Run"
+      ]
+    },
+    "caller_worker_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "run_id",
+        "run_generation",
+        "boot_uuid",
+        "pid",
+        "process_group_id",
+        "session_id",
+        "uid",
+        "start_tvsec",
+        "start_tvusec",
+        "executable_path",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boot_uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_tvsec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_tvusec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1
+        },
+        "executable_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "caller_dedicated_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "process_group_id",
+        "session_id",
+        "uid",
+        "start_tvsec",
+        "start_tvusec",
+        "executable_path",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_tvsec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_tvusec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1
+        },
+        "executable_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "caller_policy_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_id",
+        "identity",
+        "control_socket_epoch",
+        "dedicated_server_identity",
+        "app_server_socket_identity",
+        "server_key",
+        "server_epoch",
+        "global_profile_binding_sha256",
+        "thread_id",
+        "effective_policy"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.caller-policy-proof/v1"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "identity": {
+          "$ref": "#/$defs/caller_worker_identity"
+        },
+        "control_socket_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dedicated_server_identity": {
+          "$ref": "#/$defs/caller_dedicated_identity"
+        },
+        "app_server_socket_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "device",
+            "inode"
+          ],
+          "properties": {
+            "device": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "inode": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "server_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "server_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "global_profile_binding_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "effective_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "access",
+            "verification",
+            "policy_epoch",
+            "thread_generation",
+            "server_epoch",
+            "writer_generation"
+          ],
+          "properties": {
+            "access": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "verification": {
+              "const": "verified"
+            },
+            "policy_epoch": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "thread_generation": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "server_epoch": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "writer_generation": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "all identities match the current immutable Profile binding, actual runtime and original Thread",
+        "policy equals the durable positively verified policy for the same server and Thread generation",
+        "a writer transition also matches the prepared transaction, holder, Controller and writer generation; legacy acknowledgements are not proof"
+      ]
+    },
+    "caller_profile_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "default_effort",
+        "profile_capability_snapshot"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "default_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "profile_capability_snapshot": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/profile_capability_snapshot"
+        }
+      }
+    },
+    "caller_start_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "accepted_intent_sha256",
+        "global_profile_binding_sha256",
+        "original_thread_id",
+        "run_generation",
+        "effective_policy"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.caller-start-receipt/v1"
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "accepted_intent_sha256": {
+          "$ref": "#/$defs/caller_start_reservation/properties/normalized_identity_sha256"
+        },
+        "global_profile_binding_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "original_thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "run_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "effective_policy": {
+          "$ref": "#/$defs/caller_policy_proof/properties/effective_policy"
+        }
+      },
+      "x-invariants": [
+        "Receipt is created only after positively verified reader startup or the matching Writer commit",
+        "Original policy access agrees with immutable requested_access; later mutable policy does not rewrite this receipt",
+        "Receipt binds the original accepted-intent digest, Run, Thread, generation and Profile binding",
+        "Missing or corrupt receipt is never reconstructed from current Role files or a replacement Run"
+      ]
+    },
+    "caller_native_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_id",
+        "method"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.caller-native-intent/v1"
+        },
+        "operation_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "method": {
+          "enum": [
+            "thread/start",
+            "thread/settings/update"
+          ]
+        }
+      },
+      "x-invariants": [
+        "Fsync before the qualified caller native request; unmatched startup intent never permits a replacement Thread."
+      ]
     }
   },
   "x-policy-contracts": {

@@ -6865,6 +6865,45 @@ mod tests {
     }
 
     #[test]
+    fn file_only_fixture_credentials_are_frozen_in_the_launch_contract() {
+        let root = std::env::temp_dir().join(format!("dolgorae-file-auth-{}", Uuid::now_v7()));
+        secure_dir(&root).unwrap();
+        let config = root.join("config.toml");
+        fs::write(
+            &config,
+            "model = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"low\"\n\
+             model_provider = \"bounded_fixture\"\ncli_auth_credentials_store = \"file\"\n\
+             [model_providers.bounded_fixture]\nname = \"Bounded local fixture\"\n\
+             base_url = \"http://127.0.0.1:12345/v1\"\nwire_api = \"responses\"\n\
+             requires_openai_auth = false\nsupports_websockets = false\n\
+             request_max_retries = 0\nstream_max_retries = 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let snapshot = configuration_snapshot("fixture", root.to_str().unwrap()).unwrap();
+        assert_eq!(snapshot.launch["cli_auth_credentials_store"], "file");
+        assert!(
+            !snapshot
+                .observation
+                .contains_key("cli_auth_credentials_store")
+        );
+        let file_contract =
+            canonical_sha256(&serde_json::to_value(&snapshot.launch).unwrap()).unwrap();
+        let config_text = fs::read_to_string(&config).unwrap();
+        fs::write(
+            &config,
+            config_text.replace("store = \"file\"", "store = \"keyring\""),
+        )
+        .unwrap();
+        let changed = configuration_snapshot("fixture", root.to_str().unwrap()).unwrap();
+        assert_ne!(
+            file_contract,
+            canonical_sha256(&serde_json::to_value(changed.launch).unwrap()).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn validate_arguments_checks_shape_without_executing() {
         assert!(validate_arguments(ProfileOperation::List, &[]).is_ok());
         let bogus = [OsString::from("--bogus")];

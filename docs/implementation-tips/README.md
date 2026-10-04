@@ -29,7 +29,11 @@ The Make targets define four ordered validation layers:
   duplicate-key and schema meta-validation, schema-example validation, Markdown-link validation,
   source-distributed agent-skill validation, Aquarium development-channel
   producer tests, and Git whitespace checks.
-- `make test-unit` runs Rust library and binary unit tests.
+- `make test-unit` runs Rust library, binary and example unit tests. The two
+  actual-kernel workload fixtures run sequentially after the parallel unit
+  suite because their complete process census also observes other tests'
+  child exits and reparenting. Both fixtures remain required, with their
+  original identity checks, empty samples and startup deadline.
 - `make test-int` runs the explicitly selected Rust integration suites using
   fakes, stubs, and isolated filesystem fixtures. It does not invoke the
   Dolgorae executable, Git, a database, the network, or another external
@@ -49,6 +53,143 @@ production state and the user's real home must never be reused.
 
 Do not commit virtual environments, caches, generated review material, local
 workflow state, credentials, or run/session identifiers.
+
+The TASK-063 turnless metadata probe is separately opt-in:
+
+```sh
+DOLGORAE_RUN_LIVE_WORKSPACE_STARTUP=1 \
+DOLGORAE_CODEX_PINNED_VERSION='codex-cli 0.159.3' \
+make PYTHON_BIN=.venv/bin/python test-live-workspace-startup
+```
+
+Run it only after explicit runtime authorization. It creates one thread in an
+isolated temporary HOME/CODEX_HOME, observes three same-thread access settings
+updates, restarts its own App Server and attempts to resume that binding. It
+reads no account credential and submits no model Turn. The output contains
+bounded structural observations rather than raw protocol or provider text.
+A `metadata_observed` result leaves effective-policy enforcement unverified;
+it cannot enable modern startup or replace empirical sandbox and recovery
+qualification. Its admission and response-order checks run offline in the
+default gate.
+
+The separate `test-live-workspace-policy` target uses one selected account and
+at most five model Turns on one thread. The first four check writable, read-only,
+writable, then read-only. It checks an actual shell attempt and file bytes at each step,
+updates thread settings between Turns, and omits access overrides from Turn
+requests. A missing attempt or unchanged file alone does not establish a
+read-only denial. It then restarts its App Server and checks the original thread,
+final read-only metadata, and accepted history. The fifth Turn checks an actual
+write denial after restart. No result changes a production Profile's capability
+status.
+
+Command evidence admits `agent` and `unifiedExecStartup` sources and literal
+quoting of the specified command. It rejects user-shell and follow-up interaction
+items, extra commands, substitutions, a different cwd, and plugin attribution.
+Mismatch output contains only known source categories and structural booleans.
+Turn completion and an `idle` status do not prove process quiescence; production
+startup and transitions still require their separate process-census proof.
+
+After explicit account/runtime authorization, set
+`DOLGORAE_RUN_LIVE_WORKSPACE_POLICY=1`, `DOLGORAE_CODEX_BIN`,
+`DOLGORAE_CODEX_PINNED_VERSION`, `DOLGORAE_CODEX_PINNED_SHA256`, and
+`DOLGORAE_LIVE_AUTH_FILE` before running
+`make PYTHON_BIN=.venv/bin/python test-live-workspace-policy`. The executable must
+match both pins before credential admission. Only the selected current-user
+0600 regular JSON credential is copied into the disposable file-backed Profile;
+the probe rejects a symlink and does not use the host keyring. It does not retry
+failed Turns or requests. The default gate runs only its offline admission,
+budget, cleanup, evidence, and notification-order checks.
+
+`test-native-workspace-policy-fixture` checks one ambient positive-control Turn
+and the same five access steps with a scripted loopback Responses endpoint.
+Each Turn receives one exact `exec_command`
+call. The fixture checks the matching call ID in the native tool return; it never
+supplies a tool result. Codex 0.159.3 can return a
+[sandbox error before creating a command-history item](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs),
+so this check can verify a terminal native return even without that item.
+Every fixture attempt, including the positive control, requires that return.
+When command history is also present, its exit code and output must agree with
+the correlated return. Conflicting evidence stops the campaign.
+The probe requires a file read canary, a zero exit code and matching bytes
+for each successful write. Each read-only step requires the read canary, a
+nonzero exit code, a known operating-system permission denial, and unchanged
+bytes. A generic tool error does not establish a read-only denial.
+On command-result verification failure, the probe reports the evidence source,
+whether the exit code was zero, the recognized command status, whether output contained a
+known permission denial, whether the read canary was present, and whether the
+file matched the expected bytes. The matcher ignores capitalization in
+"Permission denied", "Operation not permitted" and "Read-only file system",
+including lowercase zsh errors, and reports only the bounded error category.
+It also reports whether the correlated return is present and agrees with command
+history when both are available. It retains no tool output, commands, paths,
+or file contents. Missing observations
+cannot be reconstructed from an earlier campaign.
+
+The positive control uses a separate thread with project discovery enabled
+inside a Git root under the disposable HOME. It must observe common/Role and
+Profile/project/ancestor markers before that App Server closes. The controlled
+thread then checks the same sources with `project_doc_max_bytes=0`.
+Only booleans and counts are reported. Interpret the per-path observations
+against CW-AMBIENT: Profile markers are permitted user guidance; project or
+ancestor markers disprove the required suppression for that configuration.
+The result distinguishes Profile guidance from project/ancestor suppression.
+Missing positive-control markers stop the campaign; controlled instruction
+observations remain separate from access observations. Neither observation
+alone establishes modern-admission qualification.
+
+After explicit native-runtime authorization, set
+`DOLGORAE_RUN_NATIVE_WORKSPACE_POLICY_FIXTURE=1`, `DOLGORAE_CODEX_BIN`,
+`DOLGORAE_CODEX_PINNED_VERSION`, and `DOLGORAE_CODEX_PINNED_SHA256`, then run
+`make PYTHON_BIN=.venv/bin/python test-native-workspace-policy-fixture`.
+The v3 campaign matches the coordinator's approval settings: writable uses
+`on-request`, and read-only uses `never`. Its connection opts into
+`experimentalApi`, as the caller-workspace coordinator must for the pinned
+[settings request and notification](https://github.com/openai/codex/blob/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/app-server-protocol/src/protocol/common.rs#L651).
+That opt-in adds no dynamic tools and does not qualify the mechanism.
+Before the first controlled Turn, it
+calls `thread/name/set`, checks empty history, restarts the App Server and
+requires the original writable Thread with empty history. This tests the
+metadata persistence barrier independently of a task Turn. The pre-Turn resume
+supplies the frozen launch inputs explicitly, including discovery suppression
+and the selected approval and sandbox settings. Thread ID alone does not prove
+that startup settings survived; identity mismatches report separate booleans
+for the Thread, workspace, model, provider and approval policy. This writable
+mechanism probe does not authorize automatic writer acquisition during recovery.
+The later restart supplies those inputs again with explicit read-only policy
+and `never` approval, matching product recovery. It requires the original
+Thread's completed history and a fresh read-only attempt; it does not assume
+that the last settings update survived in native storage.
+The pinned [resume implementation](https://github.com/openai/codex/blob/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/app-server/src/request_processors/thread_processor.rs#L4033)
+honors explicit approval and permission overrides when loading persisted settings.
+Before each settings update, two complete loaded-Thread observations around
+an idle-status read must contain only the original Thread. This checks the
+native metadata API used by the conservative child guard; it does not prove
+operating-system process absence or child permission inheritance.
+
+One campaign allows at most six native Turns, four App Server processes, two
+threads, and twelve loopback Responses POSTs. One thread is the positive control;
+the other is the original access-test binding and must survive both restarts.
+
+The corrected v3 native campaign confirmed original-Thread recovery with empty
+history when the pre-Turn resume supplies the accepted launch inputs. It observed
+all six Turns and twelve loopback POSTs, including two writable file effects,
+three read-only denials and original completed history after read-only recovery.
+Its positive control loaded Profile, project and ancestor instructions; the
+controlled Thread retained Profile guidance and excluded project and ancestor
+guidance. These observations qualify the mechanism on the pinned executable.
+Complete Dolgorae startup, Writer commit and recovery need their own acceptance
+checks.
+
+The custom provider requires no account
+auth, disables WebSockets and retries, and accepts only its numeric loopback
+endpoint. The disposable home has no credential file; inherited account and
+proxy environment variables are excluded. Tool output and HTTP bodies remain
+in memory and results contain only bounded structural observations. The native
+runtime, endpoint, and disposable files are closed or removed on completion or
+failure. The default gate checks this machinery with offline clients. An opt-in
+result establishes native sandbox observations for the selected executable; real
+provider behavior, process quiescence, and production qualification still need
+their own evidence.
 
 For task-aware Specialist work, keep reusable Role behavior in the Agent
 Configuration and executable brief/context/criteria in `src/task_request.rs`.

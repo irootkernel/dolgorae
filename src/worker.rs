@@ -365,6 +365,8 @@ pub struct WorkerRuntimeRecord {
     pub app_server_epoch: Option<u64>,
     #[serde(default)]
     pub control_recovery_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_scope: Option<StartupScopeWitness>,
     #[serde(default)]
     pub dedicated_server_identity: Option<DedicatedServerIdentity>,
     pub dolgorae_version: String,
@@ -385,6 +387,570 @@ pub struct DedicatedServerIdentity {
     pub executable_device: u64,
     pub executable_inode: u64,
     pub executable_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupScopeWitness {
+    pub worker_identity: WorkerIdentity,
+    pub app_server_epoch: u64,
+    pub dedicated_server_identity: Option<DedicatedServerIdentity>,
+    pub app_server_socket_identity: Option<SocketIdentity>,
+    pub revision: u64,
+    pub complete: bool,
+    pub children: Vec<StartupOwnedChild>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupOwnedChild {
+    pub identity: crate::darwin::ProcessCensusEntry,
+    pub ancestry: Vec<crate::darwin::ProcessCensusEntry>,
+}
+
+impl StartupScopeWitness {
+    fn pending(worker_identity: WorkerIdentity, app_server_epoch: u64) -> Self {
+        Self {
+            worker_identity,
+            app_server_epoch,
+            dedicated_server_identity: None,
+            app_server_socket_identity: None,
+            revision: 1,
+            complete: false,
+            children: Vec::new(),
+        }
+    }
+
+    fn validate(&self, record: &WorkerRuntimeRecord) -> Result<(), WorkerProtocolError> {
+        if self.worker_identity != record.identity
+            || Some(self.app_server_epoch) != record.app_server_epoch
+            || self.app_server_epoch == 0
+            || self.revision == 0
+            || self.children.len() > 64
+            || self.dedicated_server_identity != record.dedicated_server_identity
+            || self.dedicated_server_identity.is_some() != self.app_server_socket_identity.is_some()
+            || (self.complete && self.dedicated_server_identity.is_none())
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        if let Some(socket) = &self.app_server_socket_identity
+            && (socket.device == 0 || socket.inode == 0)
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for child in &self.children {
+            let server = self
+                .dedicated_server_identity
+                .as_ref()
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+            if !seen.insert(child.identity.pid)
+                || child.ancestry.first() != Some(&child.identity)
+                || !(2..=32).contains(&child.ancestry.len())
+                || !child
+                    .ancestry
+                    .last()
+                    .is_some_and(|root| server_census_matches(root, server))
+                || child.ancestry.iter().any(|entry| {
+                    entry.uid != server.uid
+                        || entry.birth.is_none()
+                        || entry
+                            .birth
+                            .is_some_and(|(seconds, micros)| seconds == 0 || micros > 999_999)
+                        || entry.pid == 0
+                        || entry.process_group_id == 0
+                        || entry.session_id == 0
+                })
+                || child
+                    .ancestry
+                    .windows(2)
+                    .any(|pair| pair[0].parent_pid != pair[1].pid)
+                || child
+                    .ancestry
+                    .iter()
+                    .map(|entry| entry.pid)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != child.ancestry.len()
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn server_census_matches(
+    entry: &crate::darwin::ProcessCensusEntry,
+    server: &DedicatedServerIdentity,
+) -> bool {
+    entry.pid == server.pid
+        && entry.uid == server.uid
+        && entry.birth == Some((server.start_tvsec, server.start_tvusec))
+        && entry.process_group_id == server.process_group_id
+        && entry.session_id == server.session_id
+}
+
+fn same_owned_child(
+    left: &crate::darwin::ProcessCensusEntry,
+    right: &crate::darwin::ProcessCensusEntry,
+) -> bool {
+    left.pid == right.pid
+        && left.uid == right.uid
+        && left.birth.is_some()
+        && left.birth == right.birth
+        && left.process_group_id == right.process_group_id
+        && left.session_id == right.session_id
+}
+
+/// Successor evidence for one caller-workspace policy operation. Legacy writer
+/// acknowledgements intentionally cannot be deserialized as this envelope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerPolicyProof {
+    pub schema: String,
+    pub operation_id: Uuid,
+    pub identity: WorkerIdentity,
+    pub control_socket_epoch: u64,
+    pub dedicated_server_identity: DedicatedServerIdentity,
+    pub app_server_socket_identity: SocketIdentity,
+    pub server_key: String,
+    pub server_epoch: u64,
+    pub global_profile_binding_sha256: String,
+    pub thread_id: String,
+    #[serde(deserialize_with = "crate::domain::deserialize_caller_effective_policy")]
+    pub effective_policy: crate::domain::EffectivePolicy,
+}
+
+/// Current authorities supplied by the owner holding the writer transaction.
+/// These are checked state, not fields from the received proof.
+pub struct CallerPolicyExpectation<'a> {
+    pub operation_id: Uuid,
+    pub manifest: &'a crate::run::RunManifest,
+    pub runtime: &'a WorkerRuntimeRecord,
+    pub app_server_socket_identity: &'a SocketIdentity,
+    pub original_thread_id: &'a str,
+    pub durable_policy: &'a crate::domain::EffectivePolicy,
+    pub controller: &'a crate::run::ControllerBinding,
+    pub access: crate::domain::Access,
+    pub writer: Option<&'a crate::writer::WriterRecord>,
+    pub phase: CallerPolicyPhase,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum CallerPolicyPhase {
+    Prepared,
+    Committed,
+    Recovery,
+    RecoverAcquire,
+}
+
+/// Worker-owned evidence, deliberately without a wire or persisted constructor.
+/// Only the actual owned Dedicated Server and accepted manifest can supply it.
+pub(crate) struct QualifiedCallerRuntime {
+    runtime: WorkerRuntimeRecord,
+    runtime_path: PathBuf,
+    socket_path: PathBuf,
+    socket_identity: SocketIdentity,
+    server_key: String,
+    binding_sha256: String,
+    startup: Option<StartupWorkload>,
+    startup_deadline: Instant,
+}
+
+fn record_session_startup_failure(
+    session: &WorkerSessionBootstrap,
+    phase: &str,
+    error: WorkerProtocolError,
+    details: Option<&Value>,
+) {
+    let Some(server) = &session.dedicated_server else {
+        return;
+    };
+    append_private_diagnostic(
+        &server.log_path,
+        &serde_json::json!({
+            "schema": "dolgorae.worker-session-startup-failure/v1",
+            "phase": phase,
+            "error": format!("{error:?}"),
+            "details": details,
+        }),
+    );
+}
+
+fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
+    let Ok(mut log) = OpenOptions::new()
+        .append(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+    else {
+        return;
+    };
+    let Ok(metadata) = log.metadata() else {
+        return;
+    };
+    if !metadata.is_file()
+        || metadata.uid() != DarwinSystem.current_uid()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return;
+    }
+    if let Ok(mut bytes) = serde_json::to_vec(diagnostic)
+        && bytes.len() <= 65_536
+    {
+        bytes.push(b'\n');
+        let _ = log.write_all(&bytes);
+    }
+}
+
+impl QualifiedCallerRuntime {
+    fn from_owned_server(
+        manifest: &crate::run::RunManifest,
+        session: &WorkerSessionBootstrap,
+        owned: &OwnedDedicatedServer,
+        mut runtime: WorkerRuntimeRecord,
+        runtime_path: PathBuf,
+    ) -> Result<Self, WorkerProtocolError> {
+        let binding = manifest
+            .global_profile_binding
+            .as_ref()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        let mut argv = manifest.profile.normalized_argv.clone();
+        argv.extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
+        let prefix = manifest
+            .agent_configuration
+            .normalized_instructions
+            .as_str();
+        if !binding.caller_workspace_supported()
+            || manifest.schema_version != 3
+            || manifest.execution_lane != crate::domain::ExecutionLane::Dedicated
+            || session.safety_policy != SessionSafetyPolicy::CallerWorkspace
+            || session
+                .dedicated_server
+                .as_ref()
+                .is_none_or(|server| server.argv != argv)
+            || session.cwd
+                != manifest
+                    .canonical_workspace
+                    .to_path_buf()
+                    .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?
+            || session.developer_instructions != prefix
+            || session.canonical_codex_home != binding.launch_snapshot.canonical_codex_home
+            || session.server_key != binding.server_key
+            || session.controller_id != manifest.controller.identity.controller_id
+            || session.control_mode != manifest.control_mode.as_str()
+            || session.fixed_model != manifest.model
+            || runtime.identity.run_id != manifest.run_id
+            || runtime.identity.workspace_id != manifest.workspace_id
+            || owned.socket_path != session.app_server_socket
+            || owned.identity.executable_sha256
+                != binding.launch_snapshot.executable_identity.sha256
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        runtime.app_server_epoch = Some(session.server_epoch);
+        runtime.dedicated_server_identity = Some(owned.identity.clone());
+        let scope = runtime
+            .startup_scope
+            .as_mut()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        if scope.complete || scope.dedicated_server_identity.is_some() {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        scope.dedicated_server_identity = Some(owned.identity.clone());
+        scope.app_server_socket_identity = Some(owned.socket_identity.clone());
+        scope.revision = scope
+            .revision
+            .checked_add(1)
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        runtime.validate()?;
+        write_runtime_record(&runtime_path, &runtime)?;
+        let startup = StartupWorkload::new(
+            Duration::from_secs(session.transport_timeout_seconds),
+            owned.socket_path.clone(),
+            owned.socket_identity.clone(),
+            owned.identity.uid,
+        );
+        let mut qualification = Self {
+            runtime,
+            runtime_path: runtime_path.clone(),
+            socket_path: owned.socket_path.clone(),
+            socket_identity: owned.socket_identity.clone(),
+            server_key: binding.server_key.clone(),
+            binding_sha256: binding
+                .digest()
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?,
+            startup_deadline: startup.deadline,
+            startup: Some(startup),
+        };
+        qualification.startup.as_mut().unwrap().runtime_path = Some(runtime_path);
+        let mut details = Value::Null;
+        if let Err(error) = qualification.prove_startup_quiescence_observed(Some(&mut details)) {
+            record_session_startup_failure(session, "runtime_quiescence", error, Some(&details));
+            return Err(error);
+        }
+        Ok(qualification)
+    }
+
+    pub(crate) fn prove_startup_quiescence_observed(
+        &mut self,
+        mut diagnostic: Option<&mut Value>,
+    ) -> Result<(), WorkerProtocolError> {
+        if self.startup.is_none() {
+            return self.prove_quiescence_observed(diagnostic);
+        }
+        if let Err(error) = self.verify_socket() {
+            record_socket_refusal(diagnostic.as_deref_mut(), &self.socket_identity);
+            return Err(error);
+        }
+        let runtime = self.current_runtime()?;
+        prove_group_empty_samples(&runtime, true, false, diagnostic, self.startup.as_mut())
+            .map(|_| ())
+    }
+
+    pub(crate) fn finish_connection_startup(&mut self) {
+        self.startup.take();
+    }
+
+    pub(crate) fn complete_startup_witness(&self) -> Result<(), WorkerProtocolError> {
+        if self.startup.is_some() || Instant::now() >= self.startup_deadline {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        self.prove_quiescence()?;
+        if Instant::now() >= self.startup_deadline {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        update_runtime_record(&self.runtime_path, self.runtime.identity.uid, |record| {
+            if record.identity != self.runtime.identity
+                || record.dedicated_server_identity != self.runtime.dedicated_server_identity
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            let scope = record
+                .startup_scope
+                .as_mut()
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+            if scope.complete {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            scope.complete = true;
+            scope.revision = scope
+                .revision
+                .checked_add(1)
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn prove_quiescence(&self) -> Result<(), WorkerProtocolError> {
+        self.prove_quiescence_observed(None)
+    }
+
+    pub(crate) fn prove_quiescence_observed(
+        &self,
+        diagnostic: Option<&mut Value>,
+    ) -> Result<(), WorkerProtocolError> {
+        if let Err(error) = self.verify_socket() {
+            record_socket_refusal(diagnostic, &self.socket_identity);
+            return Err(error);
+        }
+        prove_group_empty_observed(&self.current_runtime()?, true, false, diagnostic).map(|_| ())
+    }
+
+    fn current_runtime(&self) -> Result<WorkerRuntimeRecord, WorkerProtocolError> {
+        let current = read_runtime_record(&self.runtime_path, self.runtime.identity.uid)?;
+        if current.identity != self.runtime.identity
+            || current.dedicated_server_identity != self.runtime.dedicated_server_identity
+            || current.app_server_epoch != self.runtime.app_server_epoch
+            || current
+                .startup_scope
+                .as_ref()
+                .and_then(|scope| scope.app_server_socket_identity.as_ref())
+                != Some(&self.socket_identity)
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        Ok(current)
+    }
+
+    fn verify_socket(&self) -> Result<(), WorkerProtocolError> {
+        let socket = crate::codex_socket::inspect(&self.socket_path, self.runtime.identity.uid)
+            .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
+        if socket.dev() != self.socket_identity.device || socket.ino() != self.socket_identity.inode
+        {
+            return Err(WorkerProtocolError::SocketIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn proof(
+        &self,
+        operation_id: Uuid,
+        thread_id: &str,
+        policy: crate::domain::EffectivePolicy,
+    ) -> Result<CallerPolicyProof, WorkerProtocolError> {
+        let current = self.current_runtime()?;
+        if policy.verification != crate::domain::PolicyVerification::Verified
+            || policy.server_epoch != current.app_server_epoch
+            || thread_id.is_empty()
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        self.prove_quiescence()?;
+        Ok(CallerPolicyProof {
+            schema: "dolgorae.caller-policy-proof/v1".to_owned(),
+            operation_id,
+            identity: current.identity.clone(),
+            control_socket_epoch: current.control_socket_epoch,
+            dedicated_server_identity: current
+                .dedicated_server_identity
+                .clone()
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+            app_server_socket_identity: self.socket_identity.clone(),
+            server_key: self.server_key.clone(),
+            server_epoch: current
+                .app_server_epoch
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+            global_profile_binding_sha256: self.binding_sha256.clone(),
+            thread_id: thread_id.to_owned(),
+            effective_policy: policy,
+        })
+    }
+}
+
+impl CallerPolicyProof {
+    pub fn validate_binding(
+        &self,
+        expected: &CallerPolicyExpectation<'_>,
+    ) -> Result<(), WorkerProtocolError> {
+        use crate::domain::{Access, ExecutionLane, PolicyVerification};
+        let manifest = expected.manifest;
+        let runtime = expected.runtime;
+        runtime.validate()?;
+        self.dedicated_server_identity.validate()?;
+        let binding = manifest
+            .global_profile_binding
+            .as_ref()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        let binding_digest = binding
+            .digest()
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        let policy = &self.effective_policy;
+        if self.schema != "dolgorae.caller-policy-proof/v1"
+            || self.operation_id.get_version_num() != 7
+            || self.operation_id != expected.operation_id
+            || manifest.schema_version != 3
+            || manifest.execution_lane != ExecutionLane::Dedicated
+            || manifest.run_id != self.identity.run_id
+            || manifest.workspace_id != self.identity.workspace_id
+            || self.identity != runtime.identity
+            || self.identity.run_generation == 0
+            || self.identity.start_tvsec == 0
+            || self.identity.start_tvusec > 999_999
+            || self.control_socket_epoch != runtime.control_socket_epoch
+            || runtime.control_recovery_required
+            || runtime.dedicated_server_identity.as_ref() != Some(&self.dedicated_server_identity)
+            || self.dedicated_server_identity.uid != self.identity.uid
+            || self.dedicated_server_identity.start_tvsec == 0
+            || self.dedicated_server_identity.start_tvusec > 999_999
+            || self.dedicated_server_identity.executable_sha256
+                != binding.launch_snapshot.executable_identity.sha256
+            || self.dedicated_server_identity.executable_device
+                != binding.launch_snapshot.executable_identity.device
+            || self.dedicated_server_identity.executable_inode
+                != binding.launch_snapshot.executable_identity.inode
+            || self.dedicated_server_identity.executable_path
+                != Path::new(&binding.launch_snapshot.executable_identity.resolved_path)
+            || self.app_server_socket_identity != *expected.app_server_socket_identity
+            || self.app_server_socket_identity.device == 0
+            || self.app_server_socket_identity.inode == 0
+            || self.server_key != binding.server_key
+            || self.server_epoch == 0
+            || runtime.app_server_epoch != Some(self.server_epoch)
+            || self.global_profile_binding_sha256 != binding_digest
+            || self.thread_id != expected.original_thread_id
+            || self.thread_id.is_empty()
+            || self.thread_id.len() > 256
+            || self.thread_id.contains('\0')
+            || !matches!(expected.access, Access::Read | Access::Write)
+            || policy.access != expected.access
+            || policy.verification != PolicyVerification::Verified
+            || policy.policy_epoch.0 == 0
+            || policy
+                .thread_generation
+                .is_none_or(|generation| generation == 0)
+            || policy.server_epoch != Some(self.server_epoch)
+            || policy != expected.durable_policy
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        match expected.writer {
+            Some(writer) => {
+                let holder = writer
+                    .holder
+                    .as_ref()
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                let state = if expected.phase == CallerPolicyPhase::RecoverAcquire {
+                    if expected.access != Access::Write {
+                        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+                    }
+                    crate::writer::WriterAuthorityState::BlockedUnknown
+                } else if expected.phase == CallerPolicyPhase::Recovery {
+                    if expected.access != Access::Read
+                        || !matches!(
+                            writer.state,
+                            crate::writer::WriterAuthorityState::Reserved
+                                | crate::writer::WriterAuthorityState::Releasing
+                                | crate::writer::WriterAuthorityState::BlockedUnknown
+                        )
+                    {
+                        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+                    }
+                    writer.state
+                } else if expected.access == Access::Write {
+                    if expected.phase == CallerPolicyPhase::Prepared {
+                        crate::writer::WriterAuthorityState::Reserved
+                    } else {
+                        crate::writer::WriterAuthorityState::Active
+                    }
+                } else {
+                    crate::writer::WriterAuthorityState::Releasing
+                };
+                if writer.workspace_id != manifest.workspace_id
+                    || writer.state != state
+                    || writer.transaction_id
+                        != if expected.phase != CallerPolicyPhase::Committed {
+                            Some(self.operation_id)
+                        } else {
+                            None
+                        }
+                    || writer.writer_generation == 0
+                    || policy.writer_generation
+                        != (expected.access == Access::Write).then_some(writer.writer_generation)
+                    || holder.run_id != manifest.run_id
+                    || holder.controller_id != expected.controller.identity.controller_id
+                    || holder.controller_generation != expected.controller.identity.generation
+                    || holder.profile != binding.selected_name
+                    || holder.run_generation != self.identity.run_generation
+                    || holder.worker_generation != self.identity.run_generation
+                    || holder.profile_server_key != self.server_key
+                    || holder.profile_server_epoch != self.server_epoch
+                    || holder
+                        .thread_id
+                        .as_deref()
+                        .is_some_and(|thread| thread != self.thread_id)
+                    || holder.active_turn_id.is_some()
+                    || holder.pending_interaction_count != 0
+                {
+                    return Err(WorkerProtocolError::InvalidRuntimeRecord);
+                }
+            }
+            None if expected.access == Access::Read && policy.writer_generation.is_none() => {}
+            None => return Err(WorkerProtocolError::InvalidRuntimeRecord),
+        }
+        Ok(())
+    }
 }
 
 impl DedicatedServerIdentity {
@@ -428,6 +994,32 @@ pub fn prove_worker_workload_absent(
     prove_group_empty(record, true, false)
 }
 
+pub(crate) fn prove_worker_workload_absent_with_diagnostic(
+    state_root: &Path,
+    record: &WorkerRuntimeRecord,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    let mut details = Value::Null;
+    let proof = prove_group_empty_observed(record, true, false, Some(&mut details));
+    if let Err(error) = &proof {
+        let log = state_root
+            .join("runs")
+            .join(record.identity.run_id.to_string())
+            .join(format!(
+                "dedicated-server-{}.log",
+                record.identity.run_generation
+            ));
+        append_private_diagnostic(
+            &log,
+            &serde_json::json!({
+                "schema": "dolgorae.writer-census-failure/v1",
+                "error": format!("{error:?}"),
+                "details": details,
+            }),
+        );
+    }
+    proof
+}
+
 /// Prove that a recorded worker generation and its entire process group are
 /// absent. This is the stronger recovery/reset predicate: a matching live
 /// leader is not absence, while PID reuse or unreadable identity is never
@@ -443,14 +1035,462 @@ fn prove_group_empty(
     allow_recorded_worker: bool,
     allow_recorded_dedicated_server: bool,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    prove_group_empty_observed(
+        record,
+        allow_recorded_worker,
+        allow_recorded_dedicated_server,
+        None,
+    )
+}
+
+fn record_socket_refusal(diagnostic: Option<&mut Value>, expected: &SocketIdentity) {
+    if let Some(details) = diagnostic {
+        *details = serde_json::json!({
+            "predicate": "app_server_socket_identity",
+            "observation": {"expected_identity": expected},
+        });
+    }
+}
+
+fn proof_refusal(
+    diagnostic: &mut Option<&mut Value>,
+    predicate: &str,
+    observation: Value,
+) -> WorkerProtocolError {
+    if let Some(details) = diagnostic.as_deref_mut() {
+        *details = serde_json::json!({"predicate": predicate, "observation": observation});
+    }
+    WorkerProtocolError::InvalidIdentity
+}
+
+fn scope_observation(process: &crate::darwin::ProcessCensusEntry) -> Value {
+    serde_json::json!({
+        "pid": process.pid, "parent_pid": process.parent_pid, "uid": process.uid,
+        "process_group_id": process.process_group_id, "session_id": process.session_id,
+        "birth": process.birth, "zombie": process.zombie,
+    })
+}
+
+fn group_observation(members: &[u32], enumerated: &[u32]) -> Value {
+    serde_json::json!({
+        "member_count": members.len(), "members": members.iter().take(16).collect::<Vec<_>>(),
+        "enumerated_count": enumerated.len(), "enumerated": enumerated.iter().take(16).collect::<Vec<_>>(),
+    })
+}
+
+struct StartupWorkload {
+    deadline: Instant,
+    children: BTreeMap<u32, crate::darwin::ProcessCensusEntry>,
+    socket_path: PathBuf,
+    socket_identity: SocketIdentity,
+    uid: u32,
+    dirty_sample: bool,
+    runtime_path: Option<PathBuf>,
+}
+
+fn startup_ancestry(
+    census: &[crate::darwin::ProcessCensusEntry],
+    child: &crate::darwin::ProcessCensusEntry,
+    server: &DedicatedServerIdentity,
+) -> Option<Vec<crate::darwin::ProcessCensusEntry>> {
+    let by_pid = census
+        .iter()
+        .map(|entry| (entry.pid, entry))
+        .collect::<BTreeMap<_, _>>();
+    if by_pid.get(&child.pid).copied() != Some(child) {
+        return None;
+    }
+    let mut chain = Vec::new();
+    let mut next = child;
+    loop {
+        if next.uid != server.uid
+            || next.birth.is_none()
+            || chain.len() >= 32
+            || chain
+                .iter()
+                .any(|entry: &crate::darwin::ProcessCensusEntry| entry.pid == next.pid)
+        {
+            return None;
+        }
+        chain.push(*next);
+        if next.pid == server.pid {
+            return (chain.len() > 1 && server_census_matches(next, server)).then_some(chain);
+        }
+        next = by_pid.get(&next.parent_pid).copied()?;
+    }
+}
+
+impl StartupWorkload {
+    fn new(
+        budget: Duration,
+        socket_path: PathBuf,
+        socket_identity: SocketIdentity,
+        uid: u32,
+    ) -> Self {
+        Self {
+            deadline: Instant::now() + budget.min(Duration::from_secs(10)),
+            children: BTreeMap::new(),
+            socket_path,
+            socket_identity,
+            uid,
+            dirty_sample: false,
+            runtime_path: None,
+        }
+    }
+
+    fn verify_socket(&self) -> Result<(), WorkerProtocolError> {
+        let socket = crate::codex_socket::inspect(&self.socket_path, self.uid)
+            .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
+        if socket.dev() != self.socket_identity.device || socket.ino() != self.socket_identity.inode
+        {
+            return Err(WorkerProtocolError::SocketIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    fn observe_owned(
+        &mut self,
+        process: &crate::darwin::ProcessCensusEntry,
+        server: &DedicatedServerIdentity,
+        census: &[crate::darwin::ProcessCensusEntry],
+        site: &'static str,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<(), WorkerProtocolError> {
+        self.dirty_sample = true;
+        if let Some(prior) = self.children.get(&process.pid) {
+            if !same_owned_child(prior, process) {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "startup_child_identity",
+                    serde_json::json!({"site":site,"expected":scope_observation(prior),"observed":scope_observation(process)}),
+                ));
+            }
+            return Ok(());
+        }
+        let Some(first) = startup_ancestry(census, process, server) else {
+            return Err(proof_refusal(
+                diagnostic,
+                "startup_child_ancestry",
+                serde_json::json!({"site":site,"observed":scope_observation(process),"expected_server":server}),
+            ));
+        };
+        let second_census = DarwinSystem.all_process_identities().map_err(|error| {
+            proof_refusal(
+                diagnostic,
+                "startup_ancestry_census",
+                serde_json::json!({"site":site,"os_error":error.raw_os_error()}),
+            )
+        })?;
+        if !second_census.iter().any(|entry| entry.pid == process.pid)
+            && matches!(DarwinSystem.bsd_process_identity(process.pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH))
+        {
+            return Ok(());
+        }
+        let second = second_census
+            .iter()
+            .find(|entry| entry.pid == process.pid)
+            .and_then(|entry| startup_ancestry(&second_census, entry, server));
+        let Some(ancestry) = Some(first).filter(|chain| Some(chain) == second.as_ref()) else {
+            return Err(proof_refusal(
+                diagnostic,
+                "startup_child_ancestry",
+                serde_json::json!({"site":site,"observed":scope_observation(process),
+                    "second_ancestry":second,"expected_server":server}),
+            ));
+        };
+        let owned = ancestry[..ancestry.len() - 1]
+            .iter()
+            .enumerate()
+            .map(|(index, identity)| StartupOwnedChild {
+                identity: *identity,
+                ancestry: ancestry[index..].to_vec(),
+            })
+            .collect::<Vec<_>>();
+        for child in &owned {
+            if self
+                .children
+                .get(&child.identity.pid)
+                .is_some_and(|prior| !same_owned_child(prior, &child.identity))
+            {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "startup_child_identity",
+                    scope_observation(&child.identity),
+                ));
+            }
+        }
+        if let Some(path) = &self.runtime_path {
+            update_runtime_record(path, self.uid, |record| {
+                let scope = record
+                    .startup_scope
+                    .as_mut()
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                if scope.complete || scope.dedicated_server_identity.as_ref() != Some(server) {
+                    return Err(WorkerProtocolError::InvalidRuntimeRecord);
+                }
+                for child in &owned {
+                    if let Some(prior) = scope
+                        .children
+                        .iter()
+                        .find(|prior| prior.identity.pid == child.identity.pid)
+                    {
+                        if !same_owned_child(&prior.identity, &child.identity) {
+                            return Err(WorkerProtocolError::InvalidIdentity);
+                        }
+                    } else {
+                        scope.children.push(child.clone());
+                    }
+                }
+                scope.children.sort_by_key(|child| child.identity.pid);
+                scope.revision = scope
+                    .revision
+                    .checked_add(1)
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                Ok(())
+            })?;
+        }
+        for child in owned {
+            self.children
+                .entry(child.identity.pid)
+                .or_insert(child.identity);
+        }
+        Ok(())
+    }
+
+    fn observe(
+        &mut self,
+        process: &crate::darwin::ProcessCensusEntry,
+        server: &DedicatedServerIdentity,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<(), WorkerProtocolError> {
+        if process.uid != server.uid
+            || process.birth.is_none()
+            || process.process_group_id != server.process_group_id
+            || process.session_id != server.session_id
+            || self
+                .children
+                .get(&process.pid)
+                .is_some_and(|prior| prior.birth != process.birth || prior.uid != process.uid)
+        {
+            let prior = self.children.get(&process.pid);
+            let mut observation = scope_observation(process);
+            observation["expected_server"] = serde_json::json!({
+                "pid": server.pid, "uid": server.uid,
+                "process_group_id": server.process_group_id, "session_id": server.session_id,
+            });
+            observation["prior"] = prior.map(scope_observation).unwrap_or(Value::Null);
+            observation["mismatches"] = serde_json::json!({
+                "uid": process.uid != server.uid,
+                "birth_missing": process.birth.is_none(),
+                "process_group": process.process_group_id != server.process_group_id,
+                "session": process.session_id != server.session_id,
+                "prior_identity": prior.is_some_and(|prior|
+                    prior.birth != process.birth || prior.uid != process.uid),
+            });
+            return Err(proof_refusal(
+                diagnostic,
+                "startup_child_identity",
+                observation,
+            ));
+        }
+        self.children.insert(process.pid, *process);
+        self.dirty_sample = true;
+        Ok(())
+    }
+
+    fn reconcile_membership(
+        &mut self,
+        server: &DedicatedServerIdentity,
+        members: &[u32],
+        enumerated: &[u32],
+        census: &[crate::darwin::ProcessCensusEntry],
+        diagnostic: &mut Option<&mut Value>,
+        lookup: impl Fn(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+    ) -> Result<(), WorkerProtocolError> {
+        self.dirty_sample = true;
+        let members = members
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let enumerated = enumerated
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        for pid in members.symmetric_difference(&enumerated).copied() {
+            if pid == server.pid {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "startup_membership_identity",
+                    serde_json::json!({"pid": pid, "reason": "leader_membership_changed"}),
+                ));
+            }
+            if let Some(process) = census.iter().find(|process| process.pid == pid) {
+                // Validate typed drift before disappearance can discard it.
+                if self.children.contains_key(&pid) {
+                    self.observe_owned(
+                        process,
+                        server,
+                        census,
+                        "dedicated_membership",
+                        diagnostic,
+                    )?;
+                } else if self.runtime_path.is_none() {
+                    self.observe(process, server, diagnostic)?;
+                } else {
+                    self.observe_owned(
+                        process,
+                        server,
+                        census,
+                        "dedicated_membership",
+                        diagnostic,
+                    )?;
+                }
+            }
+            match lookup(pid) {
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                    self.dirty_sample = true;
+                }
+                Ok(current) if current.pid == pid => {
+                    let observed = crate::darwin::ProcessCensusEntry {
+                        pid,
+                        parent_pid: current.parent_pid,
+                        uid: current.uid,
+                        process_group_id: current.process_group_id,
+                        session_id: current.session_id,
+                        birth: Some((current.start_tvsec, current.start_tvusec)),
+                        zombie: current.zombie,
+                    };
+                    if self.runtime_path.is_some() {
+                        let fresh = DarwinSystem
+                            .all_process_identities()
+                            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+                        self.observe_owned(
+                            &observed,
+                            server,
+                            &fresh,
+                            "dedicated_membership",
+                            diagnostic,
+                        )?;
+                    } else {
+                        self.observe(&observed, server, diagnostic)?;
+                    }
+                }
+                current => {
+                    return Err(proof_refusal(
+                        diagnostic,
+                        "startup_membership_identity",
+                        serde_json::json!({
+                            "pid": pid,
+                            "observed": current.as_ref().ok(),
+                            "os_error": current.as_ref().err().and_then(std::io::Error::raw_os_error),
+                        }),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn children_absent(
+        &self,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<bool, WorkerProtocolError> {
+        let mut absent = true;
+        for child in self.children.values() {
+            match DarwinSystem.bsd_process_identity(child.pid) {
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                Ok(current)
+                    if current.uid == child.uid
+                        && Some((current.start_tvsec, current.start_tvusec)) == child.birth
+                        && current.process_group_id == child.process_group_id
+                        && current.session_id == child.session_id =>
+                {
+                    absent = false;
+                }
+                current => {
+                    return Err(proof_refusal(
+                        diagnostic,
+                        "startup_child_identity",
+                        serde_json::json!({
+                            "expected": scope_observation(child),
+                            "observed": current.as_ref().ok(),
+                            "os_error": current.as_ref().err().and_then(std::io::Error::raw_os_error),
+                        }),
+                    ));
+                }
+            }
+        }
+        Ok(absent)
+    }
+}
+
+fn prove_group_empty_observed(
+    record: &WorkerRuntimeRecord,
+    allow_recorded_worker: bool,
+    allow_recorded_dedicated_server: bool,
+    diagnostic: Option<&mut Value>,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    prove_group_empty_samples(
+        record,
+        allow_recorded_worker,
+        allow_recorded_dedicated_server,
+        diagnostic,
+        None,
+    )
+}
+
+fn prove_group_empty_samples(
+    record: &WorkerRuntimeRecord,
+    allow_recorded_worker: bool,
+    allow_recorded_dedicated_server: bool,
+    mut diagnostic: Option<&mut Value>,
+    mut startup: Option<&mut StartupWorkload>,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    record.validate()?;
+    if !allow_recorded_worker
+        && record
+            .startup_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.complete)
+    {
+        return Err(proof_refusal(
+            &mut diagnostic,
+            "startup_ownership_incomplete",
+            Value::Null,
+        ));
+    }
     let expected = if allow_recorded_worker {
         ProcessIdentityVerdict::Match
     } else {
         ProcessIdentityVerdict::Absent
     };
-    for sample in 0..5_u8 {
-        if classify_worker_identity(record) != expected {
-            return Err(WorkerProtocolError::InvalidIdentity);
+    let mut empty_samples = 0_u8;
+    loop {
+        if let Some(wait) = startup.as_deref_mut() {
+            if Instant::now() >= wait.deadline {
+                return Err(proof_refusal(
+                    &mut diagnostic,
+                    "startup_quiescence_timeout",
+                    Value::Null,
+                ));
+            }
+            if let Err(error) = wait.verify_socket() {
+                record_socket_refusal(diagnostic.as_deref_mut(), &wait.socket_identity);
+                return Err(error);
+            }
+            wait.dirty_sample = false;
+        }
+        let observed = classify_worker_identity(record);
+        if observed != expected {
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "worker_identity",
+                serde_json::json!({
+                    "expected": expected.as_str(), "observed": observed.as_str(),
+                    "kernel_identity": DarwinSystem.bsd_process_identity(record.identity.pid).ok(),
+                    "live_executable": DarwinSystem.live_process_path(record.identity.pid),
+                }),
+            ));
         }
         if let Some(server) = &record.dedicated_server_identity {
             let expected_server = if allow_recorded_worker || allow_recorded_dedicated_server {
@@ -461,21 +1501,48 @@ fn prove_group_empty(
             let scope_verified = if allow_recorded_dedicated_server {
                 dedicated_group_safe_to_signal(server)
             } else {
-                dedicated_group_has_only_expected_leader(server, allow_recorded_worker)?
+                dedicated_group_has_only_expected_leader_sample(
+                    server,
+                    allow_recorded_worker,
+                    diagnostic.as_deref_mut(),
+                    startup.as_deref_mut(),
+                )?
             };
-            if classify_dedicated_server_identity(server) != expected_server || !scope_verified {
+            if !scope_verified {
                 return Err(WorkerProtocolError::InvalidIdentity);
+            }
+            let observed = classify_dedicated_server_identity(server);
+            if observed != expected_server {
+                return Err(proof_refusal(
+                    &mut diagnostic,
+                    "dedicated_identity",
+                    serde_json::json!({
+                        "expected": expected_server.as_str(), "observed": observed.as_str(),
+                        "kernel_identity": DarwinSystem.bsd_process_identity(server.pid).ok(),
+                        "live_executable": DarwinSystem.live_process_path(server.pid),
+                    }),
+                ));
             }
         }
         let mut members = DarwinSystem
             .process_group_pids(record.identity.process_group_id)
-            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+            .map_err(|error| {
+                proof_refusal(
+                    &mut diagnostic,
+                    "worker_group_read",
+                    serde_json::json!({"os_error": error.raw_os_error()}),
+                )
+            })?;
         if !allow_recorded_worker {
             members.retain(|pid| *pid != record.identity.pid);
         }
-        let census = DarwinSystem
-            .all_process_identities()
-            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        let census = DarwinSystem.all_process_identities().map_err(|error| {
+            proof_refusal(
+                &mut diagnostic,
+                "worker_census_read",
+                serde_json::json!({"os_error": error.raw_os_error(), "reason": error.to_string()}),
+            )
+        })?;
         let mut enumerated_group = census
             .iter()
             .filter(|identity| {
@@ -486,13 +1553,17 @@ fn prove_group_empty(
             .collect::<Vec<_>>();
         enumerated_group.sort_unstable();
         if enumerated_group != members {
-            return Err(WorkerProtocolError::InvalidIdentity);
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "worker_census_membership",
+                group_observation(&members, &enumerated_group),
+            ));
         }
         let by_pid = census
             .iter()
             .map(|identity| (identity.pid, identity.parent_pid))
             .collect::<std::collections::BTreeMap<_, _>>();
-        let unexpected = census.iter().any(|identity| {
+        let unexpected = census.iter().filter(|identity| {
             if allow_recorded_worker && identity.pid == record.identity.pid {
                 return false;
             }
@@ -509,8 +1580,8 @@ fn prove_group_empty(
                 && identity.uid == record.identity.uid
                 && identity.process_group_id == record.identity.process_group_id
                 && identity.session_id == record.identity.session_id
-                && identity.start_tvsec == record.identity.start_tvsec
-                && identity.start_tvusec == record.identity.start_tvusec
+                && identity.birth
+                    == Some((record.identity.start_tvsec, record.identity.start_tvusec))
             {
                 return false;
             }
@@ -523,12 +1594,166 @@ fn prove_group_empty(
             );
             same_scope || (!allow_recorded_worker && identity.pid == record.identity.pid)
         });
-        if unexpected {
-            return Err(WorkerProtocolError::InvalidIdentity);
+        for process in unexpected {
+            if let (Some(wait), Some(server)) =
+                (startup.as_deref_mut(), &record.dedicated_server_identity)
+                && process_is_in_scope(
+                    process,
+                    server.pid,
+                    server.process_group_id,
+                    server.session_id,
+                    &by_pid,
+                )
+            {
+                wait.observe_owned(process, server, &census, "worker_census", &mut diagnostic)?;
+                continue;
+            }
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "worker_scope",
+                scope_observation(process),
+            ));
         }
-        if sample < 4 {
-            std::thread::sleep(Duration::from_millis(100));
+        let recorded = record
+            .startup_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .children
+                    .iter()
+                    .map(|child| child.identity)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut tracked = recorded
+            .iter()
+            .map(|entry| (entry.pid, *entry))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(wait) = startup.as_deref() {
+            tracked.extend(wait.children.iter().map(|(pid, entry)| (*pid, *entry)));
         }
+        for group in tracked
+            .values()
+            .map(|child| child.process_group_id)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if group == record.identity.process_group_id
+                || record
+                    .dedicated_server_identity
+                    .as_ref()
+                    .is_some_and(|server| group == server.process_group_id)
+            {
+                continue;
+            }
+            let members = DarwinSystem.process_group_pids(group).map_err(|error| {
+                proof_refusal(
+                    &mut diagnostic,
+                    "startup_scope_membership_read",
+                    serde_json::json!({"group":group,"os_error":error.raw_os_error()}),
+                )
+            })?;
+            let mut enumerated = census
+                .iter()
+                .filter(|entry| entry.process_group_id == group)
+                .map(|entry| entry.pid)
+                .collect::<Vec<_>>();
+            enumerated.sort_unstable();
+            if members != enumerated {
+                match (startup.as_deref_mut(), &record.dedicated_server_identity) {
+                    (Some(wait), Some(server)) => wait.reconcile_membership(
+                        server,
+                        &members,
+                        &enumerated,
+                        &census,
+                        &mut diagnostic,
+                        |pid| DarwinSystem.bsd_process_identity(pid),
+                    )?,
+                    _ => {
+                        return Err(proof_refusal(
+                            &mut diagnostic,
+                            "startup_scope_membership",
+                            serde_json::json!({"group":group,"members":members,"enumerated":enumerated}),
+                        ));
+                    }
+                }
+            }
+        }
+        for entry in &census {
+            if tracked.values().any(|child| {
+                entry.process_group_id == child.process_group_id
+                    || entry.session_id == child.session_id
+            }) && entry.pid != record.identity.pid
+                && record
+                    .dedicated_server_identity
+                    .as_ref()
+                    .is_none_or(|server| entry.pid != server.pid)
+                && !tracked.contains_key(&entry.pid)
+            {
+                match (startup.as_deref_mut(), &record.dedicated_server_identity) {
+                    (Some(wait), Some(server)) => wait.observe_owned(
+                        entry,
+                        server,
+                        &census,
+                        "recorded_scope",
+                        &mut diagnostic,
+                    )?,
+                    _ => {
+                        return Err(proof_refusal(
+                            &mut diagnostic,
+                            "startup_scope_unowned_member",
+                            scope_observation(entry),
+                        ));
+                    }
+                }
+            }
+        }
+        let mut recorded_absent = true;
+        for child in tracked.values() {
+            match DarwinSystem.bsd_process_identity(child.pid) {
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                Ok(current)
+                    if current.uid == child.uid
+                        && Some((current.start_tvsec, current.start_tvusec)) == child.birth
+                        && current.process_group_id == child.process_group_id
+                        && current.session_id == child.session_id =>
+                {
+                    recorded_absent = false
+                }
+                current => {
+                    return Err(proof_refusal(
+                        &mut diagnostic,
+                        "startup_child_identity",
+                        serde_json::json!({"expected":child,"observed":current.as_ref().ok()}),
+                    ));
+                }
+            }
+        }
+        if startup.is_none() && !recorded_absent {
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "startup_owned_child_live",
+                Value::Null,
+            ));
+        }
+        if let Some(wait) = startup.as_deref_mut() {
+            if Instant::now() >= wait.deadline {
+                return Err(proof_refusal(
+                    &mut diagnostic,
+                    "startup_quiescence_timeout",
+                    Value::Null,
+                ));
+            }
+            if !recorded_absent || !wait.children_absent(&mut diagnostic)? || wait.dirty_sample {
+                empty_samples = 0;
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+        empty_samples += 1;
+        if empty_samples == 5 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     Ok(BackgroundAbsenceEvidence {
         census_revision: record.control_socket_epoch,
@@ -540,15 +1765,42 @@ fn dedicated_group_has_only_expected_leader(
     server: &DedicatedServerIdentity,
     allow_leader: bool,
 ) -> Result<bool, WorkerProtocolError> {
+    dedicated_group_has_only_expected_leader_observed(server, allow_leader, None)
+}
+
+fn dedicated_group_has_only_expected_leader_observed(
+    server: &DedicatedServerIdentity,
+    allow_leader: bool,
+    diagnostic: Option<&mut Value>,
+) -> Result<bool, WorkerProtocolError> {
+    dedicated_group_has_only_expected_leader_sample(server, allow_leader, diagnostic, None)
+}
+
+fn dedicated_group_has_only_expected_leader_sample(
+    server: &DedicatedServerIdentity,
+    allow_leader: bool,
+    mut diagnostic: Option<&mut Value>,
+    mut startup: Option<&mut StartupWorkload>,
+) -> Result<bool, WorkerProtocolError> {
     let mut members = DarwinSystem
         .process_group_pids(server.process_group_id)
-        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        .map_err(|error| {
+            proof_refusal(
+                &mut diagnostic,
+                "dedicated_group_read",
+                serde_json::json!({"os_error": error.raw_os_error()}),
+            )
+        })?;
     if !allow_leader {
         members.retain(|pid| *pid != server.pid);
     }
-    let census = DarwinSystem
-        .all_process_identities()
-        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    let census = DarwinSystem.all_process_identities().map_err(|error| {
+        proof_refusal(
+            &mut diagnostic,
+            "dedicated_census_read",
+            serde_json::json!({"os_error": error.raw_os_error(), "reason": error.to_string()}),
+        )
+    })?;
     let mut enumerated = census
         .iter()
         .filter(|identity| {
@@ -559,13 +1811,30 @@ fn dedicated_group_has_only_expected_leader(
         .collect::<Vec<_>>();
     enumerated.sort_unstable();
     if enumerated != members {
-        return Ok(false);
+        match startup.as_deref_mut() {
+            Some(wait) => wait.reconcile_membership(
+                server,
+                &members,
+                &enumerated,
+                &census,
+                &mut diagnostic,
+                |pid| DarwinSystem.bsd_process_identity(pid),
+            )?,
+            None => {
+                proof_refusal(
+                    &mut diagnostic,
+                    "dedicated_census_membership",
+                    group_observation(&members, &enumerated),
+                );
+                return Ok(false);
+            }
+        }
     }
     let by_pid = census
         .iter()
         .map(|identity| (identity.pid, identity.parent_pid))
         .collect::<std::collections::BTreeMap<_, _>>();
-    Ok(!census.iter().any(|identity| {
+    let unexpected = census.iter().filter(|identity| {
         if allow_leader && identity.pid == server.pid {
             return false;
         }
@@ -575,8 +1844,7 @@ fn dedicated_group_has_only_expected_leader(
             && identity.uid == server.uid
             && identity.process_group_id == server.process_group_id
             && identity.session_id == server.session_id
-            && identity.start_tvsec == server.start_tvsec
-            && identity.start_tvusec == server.start_tvusec
+            && identity.birth == Some((server.start_tvsec, server.start_tvusec))
         {
             return false;
         }
@@ -587,7 +1855,26 @@ fn dedicated_group_has_only_expected_leader(
             server.session_id,
             &by_pid,
         )
-    }))
+    });
+    for process in unexpected {
+        if let Some(wait) = startup.as_deref_mut() {
+            wait.observe_owned(
+                process,
+                server,
+                &census,
+                "dedicated_census",
+                &mut diagnostic,
+            )?;
+            continue;
+        }
+        proof_refusal(
+            &mut diagnostic,
+            "dedicated_scope",
+            scope_observation(process),
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -695,7 +1982,7 @@ fn process_descends_from(
 }
 
 fn process_is_in_scope(
-    identity: &crate::darwin::BsdProcessIdentity,
+    identity: &crate::darwin::ProcessCensusEntry,
     leader_pid: u32,
     process_group_id: u32,
     session_id: u32,
@@ -1089,7 +2376,8 @@ impl Drop for StartupByteGuard<'_> {
 impl WorkerRuntimeRecord {
     pub fn validate(&self) -> Result<(), WorkerProtocolError> {
         self.identity.validate()?;
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
+            || (self.schema_version == 2) != self.startup_scope.is_some()
             || self.control_socket_epoch == 0
             || self.app_server_epoch == Some(0)
             || self.socket_identity.device == 0
@@ -1109,6 +2397,9 @@ impl WorkerRuntimeRecord {
         }
         if let Some(identity) = &self.dedicated_server_identity {
             identity.validate()?;
+        }
+        if let Some(scope) = &self.startup_scope {
+            scope.validate(self)?;
         }
         Ok(())
     }
@@ -1388,6 +2679,12 @@ pub enum ControlRequestV1 {
         writer_generation: u64,
         transaction_id: Uuid,
     },
+    VerifyCallerPolicy {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        operation_id: Uuid,
+    },
     ExternalSetWriterAccess {
         expected: WorkerIdentity,
         #[serde(default)]
@@ -1446,6 +2743,7 @@ impl ControlRequestV1 {
             | Self::Close { expected, .. }
             | Self::ExternalClose { expected, .. }
             | Self::SetWriterAccess { expected, .. }
+            | Self::VerifyCallerPolicy { expected, .. }
             | Self::ExternalSetWriterAccess { expected, .. }
             | Self::ResetFence { expected, .. } => expected,
         }
@@ -1514,6 +2812,7 @@ impl ControlRequestV1 {
             | Self::Close { caller, .. }
             | Self::ExternalClose { caller, .. }
             | Self::SetWriterAccess { caller, .. }
+            | Self::VerifyCallerPolicy { caller, .. }
             | Self::ExternalSetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => caller.as_ref(),
         }
@@ -1548,6 +2847,7 @@ impl ControlRequestV1 {
             | Self::Close { caller, .. }
             | Self::ExternalClose { caller, .. }
             | Self::SetWriterAccess { caller, .. }
+            | Self::VerifyCallerPolicy { caller, .. }
             | Self::ExternalSetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => *caller = Some(build),
         }
@@ -1596,6 +2896,7 @@ impl ControlRequestV1 {
                 | Self::Close { .. }
                 | Self::ExternalClose { .. }
                 | Self::SetWriterAccess { .. }
+                | Self::VerifyCallerPolicy { .. }
                 | Self::ExternalSetWriterAccess { .. }
         )
     }
@@ -1645,6 +2946,7 @@ impl ControlRequestV1 {
             Self::ExternalClose { .. } => "engagement.release",
             Self::SetWriterAccess { write: true, .. } => "run.acquire_write",
             Self::SetWriterAccess { write: false, .. } => "run.release_write",
+            Self::VerifyCallerPolicy { .. } => "run.verify_caller_policy",
             Self::ExternalSetWriterAccess { write: true, .. } => "engagement.acquire_write",
             Self::ExternalSetWriterAccess { write: false, .. } => "engagement.release_write",
             Self::ResetFence { .. } => "run.controller.reset",
@@ -1985,6 +3287,9 @@ pub enum ControlResponseV1 {
         writer_generation: u64,
         thread_id: Option<String>,
     },
+    CallerPolicyVerified {
+        proof: Box<CallerPolicyProof>,
+    },
     /// A refusal the caller reads as a machine error.
     ///
     /// `details` is the code's own required members from the checked error
@@ -2178,6 +3483,9 @@ impl WorkerControlServer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if classify_worker_identity(&record) != ProcessIdentityVerdict::Match {
                     return Err(WorkerProtocolError::InvalidIdentity);
+                }
+                if record.startup_scope.is_some() {
+                    prove_worker_workload_absent(&record)?;
                 }
                 let replacement = bind_worker_socket(&record.identity, None)?;
                 replacement
@@ -2484,6 +3792,9 @@ pub const REMEMBERED_TERMINAL_TURNS: usize = 64;
 
 /// One mutation a control caller handed to the Run's drain thread.
 enum SessionCommand {
+    VerifyCallerPolicy {
+        operation_id: Uuid,
+    },
     Accept {
         request: TurnControlRequest,
         delivery: DeliveryMode,
@@ -3505,35 +4816,8 @@ impl WorkerSession {
             profile_root: profile_diagnostics_root(state_root, &session.server_key)?,
         });
         let artifacts = FileArtifactStore::open(&session.artifact_root, uid)?;
-        let mut dedicated_server = session
-            .dedicated_server
-            .as_ref()
-            .map(|config| start_dedicated_server(config, &facts))
-            .transpose()?;
-        let wire = match DuplexConnection::connect(
-            &session.app_server_socket,
-            Duration::from_secs(session.transport_timeout_seconds),
-        ) {
-            Ok(wire) => Arc::new(wire),
-            Err(_) => {
-                let _ = stop_dedicated_server(&mut dedicated_server);
-                return Err(WorkerProtocolError::AppServerUnavailable);
-            }
-        };
-        let attach = match &session.attach {
-            SessionAttach::Start => ThreadAttach::Start,
-            SessionAttach::Resume { thread_id } => ThreadAttach::Resume {
-                thread_id: thread_id.clone(),
-            },
-            SessionAttach::Fork {
-                source_thread_id,
-                last_turn_id,
-            } => ThreadAttach::Fork {
-                source_thread_id: source_thread_id.clone(),
-                last_turn_id: last_turn_id.clone(),
-            },
-        };
         let mailbox = Arc::new(SessionMailbox::new(facts.clone()));
+        // Resolve durable authorities before starting an owned server.
         let manifest = RunStore::new(SystemWorkspacePlatform, state_root)
             .load_manifest(facts.run_id)
             .map_err(|_| WorkerProtocolError::LedgerReplay)?;
@@ -3556,6 +4840,40 @@ impl WorkerSession {
                 })
             })
             .transpose()?;
+        let mut dedicated_server = session
+            .dedicated_server
+            .as_ref()
+            .map(|config| start_dedicated_server(config, &facts))
+            .transpose()?;
+        let wire = match DuplexConnection::connect(
+            &session.app_server_socket,
+            Duration::from_secs(session.transport_timeout_seconds),
+        ) {
+            Ok(wire) => Arc::new(wire),
+            Err(_) => {
+                record_session_startup_failure(
+                    session,
+                    "connection",
+                    WorkerProtocolError::AppServerUnavailable,
+                    None,
+                );
+                let _ = stop_dedicated_server(&mut dedicated_server);
+                return Err(WorkerProtocolError::AppServerUnavailable);
+            }
+        };
+        let attach = match &session.attach {
+            SessionAttach::Start => ThreadAttach::Start,
+            SessionAttach::Resume { thread_id } => ThreadAttach::Resume {
+                thread_id: thread_id.clone(),
+            },
+            SessionAttach::Fork {
+                source_thread_id,
+                last_turn_id,
+            } => ThreadAttach::Fork {
+                source_thread_id: source_thread_id.clone(),
+                last_turn_id: last_turn_id.clone(),
+            },
+        };
         // The reader starts before the handshake so `initialize` correlates its
         // own reply through the same mailbox every later request uses.
         let reader = thread::spawn({
@@ -3563,6 +4881,8 @@ impl WorkerSession {
             let mailbox = Arc::clone(&mailbox);
             move || read_app_server(&wire, &mailbox)
         });
+        let mut startup_phase = "ledger_replay";
+        let mut startup_details = None;
         let coordinator = (|| {
             let (replayed, interaction_decisions, turn_receipts) = {
                 let ledger = ledger
@@ -3582,6 +4902,7 @@ impl WorkerSession {
                         matches!(
                             record.kind(),
                             crate::audit::AuditKind::IdempotencyReserved
+                                | crate::audit::AuditKind::TurnIntent
                                 | crate::audit::AuditKind::ThreadBound
                                 | crate::audit::AuditKind::TurnStarted
                                 | crate::audit::AuditKind::TurnTerminal
@@ -3599,6 +4920,7 @@ impl WorkerSession {
                     .collect::<Result<Vec<_>, WorkerProtocolError>>()?;
                 (replayed, interaction_decisions, turn_receipts)
             };
+            startup_phase = "initialization";
             let mut coordinator = TurnCoordinator::initialize(
                 SessionServer::new(
                     Arc::clone(&wire),
@@ -3637,7 +4959,35 @@ impl WorkerSession {
                 },
                 &session.canonical_codex_home,
             )
-            .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+            .map_err(|error| {
+                startup_details =
+                    Some(serde_json::json!({"coordinator_error": format!("{error:?}")}));
+                WorkerProtocolError::AppServerUnavailable
+            })?;
+            if manifest.schema_version == 3
+                && session.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            {
+                startup_phase = "runtime_qualification";
+                let owned = dedicated_server
+                    .as_ref()
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                let path = runtime_record_path(&runtime_root(state_root), facts.run_id)?;
+                let runtime = read_runtime_record(&path, uid)?;
+                let qualification = QualifiedCallerRuntime::from_owned_server(
+                    &manifest, session, owned, runtime, path,
+                )?;
+                startup_phase = "configuration_qualification";
+                coordinator
+                    .qualify_caller_runtime(qualification)
+                    .map_err(|error| {
+                        startup_details = Some(serde_json::json!({
+                            "coordinator_error": error.diagnostic_kind(),
+                            "caller_startup_failure": coordinator.caller_startup_failure(),
+                        }));
+                        WorkerProtocolError::AppServerUnavailable
+                    })?;
+            }
+            startup_phase = "state_restore";
             coordinator.restore_durable_state(
                 replayed.lifecycle,
                 replayed.thread_id,
@@ -3650,19 +5000,64 @@ impl WorkerSession {
             coordinator
                 .restore_interaction_resolutions(interaction_decisions)
                 .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            let startup_error = |state: &CoordinatorState| {
+                if session.safety_policy == crate::turn::SessionSafetyPolicy::CallerWorkspace
+                    && *state == CoordinatorState::OutcomeUnknown
+                {
+                    WorkerProtocolError::ThreadStartupOutcomeUnknown
+                } else {
+                    WorkerProtocolError::AppServerUnavailable
+                }
+            };
+            startup_phase = "connection_startup";
             coordinator
                 .complete_connection_startup(replayed.lifecycle)
-                .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
-            if let Some(operation_id) = session.eager_thread_operation_id {
+                .map_err(|error| {
+                    startup_details = Some(serde_json::json!({
+                        "coordinator_error": error.diagnostic_kind(),
+                        "caller_startup_failure": coordinator.caller_startup_failure(),
+                    }));
+                    startup_error(coordinator.state())
+                })?;
+            if let Some(operation_id) = session.eager_thread_operation_id
+                && *coordinator.state() != CoordinatorState::OutcomeUnknown
+                && !matches!(
+                    replayed.lifecycle,
+                    crate::domain::RunLifecycle::OutcomeUnknown
+                        | crate::domain::RunLifecycle::ReconciliationRequired
+                )
+            {
+                startup_phase = "thread_start";
                 coordinator
                     .initialize_thread(operation_id)
-                    .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+                    .map_err(|error| {
+                        startup_details = Some(serde_json::json!({
+                            "coordinator_error": error.diagnostic_kind(),
+                            "caller_startup_failure": coordinator.caller_startup_failure(),
+                        }));
+                        startup_error(coordinator.state())
+                    })?;
             }
+            coordinator.finish_caller_connection_startup();
+            startup_phase = "startup_ownership_commit";
+            coordinator
+                .complete_caller_runtime_startup()
+                .map_err(|error| {
+                    startup_details =
+                        Some(serde_json::json!({"coordinator_error": error.diagnostic_kind()}));
+                    WorkerProtocolError::InvalidIdentity
+                })?;
             Ok(coordinator)
         })();
         let coordinator = match coordinator {
             Ok(coordinator) => coordinator,
             Err(error) => {
+                record_session_startup_failure(
+                    session,
+                    startup_phase,
+                    error,
+                    startup_details.as_ref(),
+                );
                 mailbox.stop();
                 wire.shutdown();
                 let _ = reader.join();
@@ -4222,41 +5617,53 @@ fn start_dedicated_server(
         .open(&config.log_path)
         .map_err(|_| WorkerProtocolError::Io)?;
     let stderr = log.try_clone().map_err(|_| WorkerProtocolError::Io)?;
-    let owner_root = crate::paths::DolgoraeHome::system()
-        .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
-    let mut registration = crate::process_inventory::Registration::prepare(
-        "dedicated_server",
-        owner_root.root(),
-        executable,
-        format!("unix://{}", config.socket_path.display()),
-        Some(&config.socket_path),
-        Some(&facts.profile),
-        Some(facts.run_id),
-    )
-    .map_err(|_| WorkerProtocolError::Io)?;
-    let mut command = Command::new(executable);
-    command
-        .args(&config.argv[1..])
-        .args(["app-server", "--listen"])
-        .arg(format!("unix://{}", config.socket_path.display()))
-        .current_dir(&config.cwd)
-        .env_clear()
-        .envs(&config.environment)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log))
-        .stderr(std::process::Stdio::from(stderr));
-    let mut child = DarwinSystem
-        .spawn_detached(&mut command)
-        .map_err(|_| WorkerProtocolError::WorkerStartFailed)?;
-    registration.mark_spawned(child.id());
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(10))
-        .unwrap_or_else(Instant::now);
-    loop {
-        if fs::symlink_metadata(&config.socket_path).is_ok() {
-            let socket_metadata =
-                match crate::codex_socket::inspect(&config.socket_path, DarwinSystem.current_uid())
-                {
+    let mut diagnostic_log = log.try_clone().map_err(|_| WorkerProtocolError::Io)?;
+    let mut phase = "registration";
+    let mut failure_details = None;
+    let result = (|| {
+        let owner_root = crate::paths::DolgoraeHome::system()
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        let mut registration = crate::process_inventory::Registration::prepare(
+            "dedicated_server",
+            owner_root.root(),
+            executable,
+            format!("unix://{}", config.socket_path.display()),
+            Some(&config.socket_path),
+            Some(&facts.profile),
+            Some(facts.run_id),
+        )
+        .map_err(|error| {
+            failure_details = Some(serde_json::to_value(error).unwrap_or_default());
+            WorkerProtocolError::Io
+        })?;
+        phase = "spawn";
+        let mut command = Command::new(executable);
+        command
+            .args(&config.argv[1..])
+            .args(["app-server", "--listen"])
+            .arg(format!("unix://{}", config.socket_path.display()))
+            .current_dir(&config.cwd)
+            .env_clear()
+            .envs(&config.environment)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(stderr));
+        let mut child = DarwinSystem.spawn_detached(&mut command).map_err(|error| {
+            failure_details = Some(serde_json::json!({"os_error": error.raw_os_error()}));
+            WorkerProtocolError::WorkerStartFailed
+        })?;
+        registration.mark_spawned(child.id());
+        phase = "socket_publication";
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now);
+        loop {
+            if fs::symlink_metadata(&config.socket_path).is_ok() {
+                phase = "socket_identity";
+                let socket_metadata = match crate::codex_socket::inspect(
+                    &config.socket_path,
+                    DarwinSystem.current_uid(),
+                ) {
                     Ok(metadata) => metadata,
                     Err(_) => {
                         terminate_unpublished_child(
@@ -4267,81 +5674,110 @@ fn start_dedicated_server(
                         return Err(WorkerProtocolError::SocketIdentityMismatch);
                     }
                 };
-            if !socket_metadata.file_type().is_socket()
-                || socket_metadata.uid() != DarwinSystem.current_uid()
-            {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::SocketIdentityMismatch);
-            }
-            if fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)).is_err()
-            {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::Io);
-            }
-            let process = match DarwinSystem.bsd_process_identity(child.id()) {
-                Ok(process) => process,
-                Err(_) => {
+                if !socket_metadata.file_type().is_socket()
+                    || socket_metadata.uid() != DarwinSystem.current_uid()
+                {
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
+                    return Err(WorkerProtocolError::SocketIdentityMismatch);
+                }
+                if fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))
+                    .is_err()
+                {
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
+                    return Err(WorkerProtocolError::Io);
+                }
+                let process = match DarwinSystem.bsd_process_identity(child.id()) {
+                    Ok(process) => process,
+                    Err(_) => {
+                        terminate_unpublished_child(
+                            &mut child,
+                            &mut registration,
+                            &config.socket_path,
+                        );
+                        return Err(WorkerProtocolError::InvalidIdentity);
+                    }
+                };
+                if process.zombie
+                    || process.process_group_id != child.id()
+                    || process.session_id != child.id()
+                    || process.uid != DarwinSystem.current_uid()
+                {
                     terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                     return Err(WorkerProtocolError::InvalidIdentity);
                 }
-            };
-            if process.zombie
-                || process.process_group_id != child.id()
-                || process.session_id != child.id()
-                || process.uid != DarwinSystem.current_uid()
-            {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::InvalidIdentity);
-            }
-            let executable_path = match DarwinSystem.realpath(executable) {
-                Ok(path) => path,
-                Err(_) => {
+                let executable_path = match DarwinSystem.realpath(executable) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        terminate_unpublished_child(
+                            &mut child,
+                            &mut registration,
+                            &config.socket_path,
+                        );
+                        return Err(WorkerProtocolError::InvalidIdentity);
+                    }
+                };
+                phase = "activation";
+                if let Err(error) = registration.activate(child.id()) {
+                    failure_details = Some(serde_json::to_value(error).unwrap_or_default());
                     terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
                     return Err(WorkerProtocolError::InvalidIdentity);
                 }
-            };
-            if registration.activate(child.id()).is_err() {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::InvalidIdentity);
+                return Ok(OwnedDedicatedServer {
+                    child,
+                    identity: DedicatedServerIdentity {
+                        pid: process.pid,
+                        process_group_id: process.process_group_id,
+                        session_id: process.session_id,
+                        uid: process.uid,
+                        start_tvsec: process.start_tvsec,
+                        start_tvusec: process.start_tvusec,
+                        executable_path,
+                        executable_device: executable_metadata.dev(),
+                        executable_inode: executable_metadata.ino(),
+                        executable_sha256: config.executable_sha256.clone(),
+                    },
+                    socket_path: config.socket_path.clone(),
+                    socket_identity: SocketIdentity {
+                        device: socket_metadata.dev(),
+                        inode: socket_metadata.ino(),
+                    },
+                });
             }
-            return Ok(OwnedDedicatedServer {
-                child,
-                identity: DedicatedServerIdentity {
-                    pid: process.pid,
-                    process_group_id: process.process_group_id,
-                    session_id: process.session_id,
-                    uid: process.uid,
-                    start_tvsec: process.start_tvsec,
-                    start_tvusec: process.start_tvusec,
-                    executable_path,
-                    executable_device: executable_metadata.dev(),
-                    executable_inode: executable_metadata.ino(),
-                    executable_sha256: config.executable_sha256.clone(),
-                },
-                socket_path: config.socket_path.clone(),
-                socket_identity: SocketIdentity {
-                    device: socket_metadata.dev(),
-                    inode: socket_metadata.ino(),
-                },
-            });
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    failure_details = Some(serde_json::json!({"exit_code": status.code()}));
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
+                    return Err(WorkerProtocolError::WorkerStartFailed);
+                }
+                Err(error) => {
+                    failure_details = Some(serde_json::json!({"os_error": error.raw_os_error()}));
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
+                    return Err(WorkerProtocolError::Io);
+                }
+                Ok(None) if Instant::now() >= deadline => {
+                    terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
+                    return Err(WorkerProtocolError::WorkerStartFailed);
+                }
+                Ok(None) => {}
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::WorkerStartFailed);
-            }
-            Err(_) => {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::Io);
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                terminate_unpublished_child(&mut child, &mut registration, &config.socket_path);
-                return Err(WorkerProtocolError::WorkerStartFailed);
-            }
-            Ok(None) => {}
+    })();
+    if let Err(error) = &result {
+        let diagnostic = serde_json::json!({
+            "schema": "dolgorae.dedicated-startup-failure/v1",
+            "phase": phase,
+            "error": format!("{error:?}"),
+            "details": failure_details,
+        });
+        if let Ok(mut bytes) = serde_json::to_vec(&diagnostic)
+            && bytes.len() <= 65_536
+        {
+            bytes.push(b'\n');
+            let _ = diagnostic_log.write_all(&bytes);
         }
-        thread::sleep(Duration::from_millis(10));
     }
+    result
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -4462,7 +5898,7 @@ fn dedicated_group_safe_to_signal(identity: &DedicatedServerIdentity) -> bool {
 fn dedicated_scope_is_owned(
     identity: &DedicatedServerIdentity,
     members: &[u32],
-    census: &[crate::darwin::BsdProcessIdentity],
+    census: &[crate::darwin::ProcessCensusEntry],
 ) -> bool {
     let mut enumerated = census
         .iter()
@@ -4476,8 +5912,7 @@ fn dedicated_scope_is_owned(
                 && process.uid == identity.uid
                 && process.process_group_id == identity.process_group_id
                 && process.session_id == identity.session_id
-                && process.start_tvsec == identity.start_tvsec
-                && process.start_tvusec == identity.start_tvusec
+                && process.birth == Some((identity.start_tvsec, identity.start_tvusec))
                 && !process.zombie
         })
     {
@@ -4843,6 +6278,32 @@ fn perform(
         with_admission_ledger(coordinator, identity, authority, |ledger, writer| {
             let binding =
                 load_reconciled_controller_binding(&authority.state_root, authority.run_id)?;
+            if coordinator.is_caller_workspace()
+                && matches!(
+                    writer.state,
+                    crate::writer::WriterAuthorityState::Reserved
+                        | crate::writer::WriterAuthorityState::Releasing
+                        | crate::writer::WriterAuthorityState::BlockedUnknown
+                )
+                && writer
+                    .holder
+                    .as_ref()
+                    .is_some_and(|holder| holder.run_id == identity.run_id)
+                && !matches!(
+                    mutation.command,
+                    SessionCommand::SetWriterAccess { .. }
+                        | SessionCommand::VerifyCallerPolicy { .. }
+                        | SessionCommand::Reconcile
+                        | SessionCommand::Resume
+                )
+            {
+                return Ok(Some(run_state_conflict(
+                    &progress.facts,
+                    &coordinator_control_state(coordinator, progress.is_closed()).lifecycle,
+                    operation,
+                    "caller Writer transition is still guarded".to_owned(),
+                )));
+            }
             if let SessionCommand::SetWriterAccess {
                 writer_generation,
                 transaction_id,
@@ -5182,13 +6643,30 @@ fn perform_command(
             writer_generation,
             transaction_id,
         } => match coordinator.set_writer_access(write, writer_generation, transaction_id) {
-            Ok(()) => ControlResponseV1::WriterAccessChanged {
-                write,
-                writer_generation,
-                thread_id: coordinator.thread_id().map(str::to_owned),
+            Ok(()) => match coordinator.caller_policy_proof(transaction_id) {
+                Ok(Some(proof)) => ControlResponseV1::CallerPolicyVerified {
+                    proof: Box::new(proof),
+                },
+                Ok(None) => ControlResponseV1::WriterAccessChanged {
+                    write,
+                    writer_generation,
+                    thread_id: coordinator.thread_id().map(str::to_owned),
+                },
+                Err(error) => {
+                    coordinator.quarantine_caller_policy(transaction_id);
+                    failed(&error, &context)
+                }
             },
             Err(error) => failed(&error, &context),
         },
+        SessionCommand::VerifyCallerPolicy { operation_id } => {
+            match coordinator.verify_caller_policy(operation_id) {
+                Ok(proof) => ControlResponseV1::CallerPolicyVerified {
+                    proof: Box::new(proof),
+                },
+                Err(error) => failed(&error, &context),
+            }
+        }
         // Answered above, before any Controller revalidation.
         SessionCommand::ResetFence { .. }
         | SessionCommand::ShutdownInterrupt
@@ -5724,6 +7202,7 @@ pub enum WorkerProtocolError {
     LedgerReplay,
     WorkerStartFailed,
     AppServerUnavailable,
+    ThreadStartupOutcomeUnknown,
     Io,
 }
 
@@ -5739,6 +7218,7 @@ impl WorkerProtocolError {
             | Self::InvalidOwnerRecord => "RUNTIME_PATH_COLLISION",
             Self::ControlRecoveryRequired { .. } => "RECOVERY_REQUIRED",
             Self::StartupBusy => "RUN_BUSY",
+            Self::ThreadStartupOutcomeUnknown => "OUTCOME_UNKNOWN",
             Self::LedgerReplay => "AUDIT_INTEGRITY_FAILURE",
             Self::WorkerStartFailed
             | Self::AppServerUnavailable
@@ -5823,6 +7303,14 @@ impl WorkerProtocolError {
                 "worker could not own the profile app-server session",
                 transport_details("connect"),
             ),
+            Self::ThreadStartupOutcomeUnknown => {
+                return TurnError::OutcomeUnknown.into_machine_error(&TurnFailureContext {
+                    run_id,
+                    profile: String::new(),
+                    thread_id: None,
+                    turn_id: None,
+                });
+            }
             Self::MalformedFrame => (
                 "private worker transport failed",
                 transport_details("decode"),
@@ -6095,6 +7583,7 @@ pub fn read_ready_handoff(
 
 fn startup_handoff_error(code: &str) -> WorkerProtocolError {
     match code {
+        "OUTCOME_UNKNOWN" => WorkerProtocolError::ThreadStartupOutcomeUnknown,
         "AUDIT_INTEGRITY_FAILURE" => WorkerProtocolError::LedgerReplay,
         "RUNTIME_PATH_COLLISION" => WorkerProtocolError::InvalidRuntimeRecord,
         _ => WorkerProtocolError::WorkerStartFailed,
@@ -6232,11 +7721,25 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
             .as_ref()
             .map(|session| session.server_epoch),
         control_recovery_required: false,
+        startup_scope: None,
         dedicated_server_identity: None,
         dolgorae_version: bootstrap.dolgorae_version,
         mutation_protocol_version: bootstrap.mutation_protocol_version,
         binary_sha256: bootstrap.executable_sha256,
     };
+    if bootstrap
+        .session
+        .as_ref()
+        .is_some_and(|session| session.safety_policy == SessionSafetyPolicy::CallerWorkspace)
+    {
+        record.schema_version = 2;
+        record.startup_scope = Some(StartupScopeWitness::pending(
+            record.identity.clone(),
+            record
+                .app_server_epoch
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+        ));
+    }
     write_runtime_record(&bootstrap.runtime_record_path, &record)?;
     write_startup_handoff(&StartupHandoff::Bound {
         record: record.clone(),
@@ -6307,6 +7810,7 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
                     &bootstrap.state_root,
                     &bootstrap.workspace_id,
                 )?;
+                record = read_runtime_record(&bootstrap.runtime_record_path, uid)?;
                 record.dedicated_server_identity = owned.dedicated_server_identity();
                 write_runtime_record(&bootstrap.runtime_record_path, &record)?;
                 control.replace_state(owned.control_state())?;
@@ -6655,7 +8159,69 @@ pub fn write_runtime_record(
     path: &Path,
     record: &WorkerRuntimeRecord,
 ) -> Result<(), WorkerProtocolError> {
+    let _guard = RUNTIME_RECORD_WRITER
+        .lock()
+        .map_err(|_| WorkerProtocolError::Io)?;
+    write_runtime_record_locked(path, record)
+}
+
+// The startup owner is exclusive across processes; this also serializes that
+// Worker's connection, control-recovery and locator maintenance writes.
+static RUNTIME_RECORD_WRITER: Mutex<()> = Mutex::new(());
+
+fn update_runtime_record(
+    path: &Path,
+    uid: u32,
+    update: impl FnOnce(&mut WorkerRuntimeRecord) -> Result<(), WorkerProtocolError>,
+) -> Result<WorkerRuntimeRecord, WorkerProtocolError> {
+    let _guard = RUNTIME_RECORD_WRITER
+        .lock()
+        .map_err(|_| WorkerProtocolError::Io)?;
+    let mut record = read_runtime_record(path, uid)?;
+    update(&mut record)?;
+    write_runtime_record_locked(path, &record)?;
+    read_runtime_record(path, uid)
+}
+
+fn write_runtime_record_locked(
+    path: &Path,
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
     record.validate()?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let prior = read_runtime_record(path, record.identity.uid)?;
+            if let Some(old) = &prior.startup_scope {
+                let new = record
+                    .startup_scope
+                    .as_ref()
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                if prior.identity != record.identity
+                    || new.worker_identity != old.worker_identity
+                    || new.app_server_epoch != old.app_server_epoch
+                    || new.revision < old.revision
+                    || (old.complete && new != old)
+                    || (old.dedicated_server_identity.is_some()
+                        && old.dedicated_server_identity != new.dedicated_server_identity)
+                    || (old.app_server_socket_identity.is_some()
+                        && old.app_server_socket_identity != new.app_server_socket_identity)
+                    || old
+                        .children
+                        .iter()
+                        .any(|child| !new.children.contains(child))
+                    || (new != old && new.revision <= old.revision)
+                    || record.control_socket_epoch < prior.control_socket_epoch
+                    || (record.control_socket_epoch == prior.control_socket_epoch
+                        && record.socket_identity != prior.socket_identity)
+                    || (prior.control_recovery_required && !record.control_recovery_required)
+                {
+                    return Err(WorkerProtocolError::InvalidRuntimeRecord);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(WorkerProtocolError::InvalidRuntimeRecord),
+    }
     let parent = path
         .parent()
         .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
@@ -6668,6 +8234,9 @@ pub fn write_runtime_record(
     }
     let bytes =
         serde_json::to_vec(record).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+    if bytes.len() + 1 > 64 * 1024 {
+        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+    }
     let temporary = parent.join(format!(".dolgorae-worker-{}", Uuid::now_v7()));
     let mut file = OpenOptions::new()
         .write(true)
@@ -7569,6 +9138,11 @@ fn serve_run_operation(
             writer_generation,
             transaction_id,
         ),
+        ControlRequestV1::VerifyCallerPolicy { operation_id, .. } => session.dispatch(
+            operation,
+            credential,
+            SessionCommand::VerifyCallerPolicy { operation_id },
+        ),
         ControlRequestV1::Hello { .. }
         | ControlRequestV1::Status { .. }
         | ControlRequestV1::RunStatus { .. }
@@ -7592,6 +9166,78 @@ mod tests {
     use std::process::{Command, Stdio};
     #[cfg(target_os = "macos")]
     use std::time::Instant;
+
+    #[test]
+    fn executable_hash_matches_reference_digests_across_read_boundaries() {
+        let root = std::env::temp_dir().join(format!("dolgorae-hash-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("image");
+        for (length, expected) in [
+            (
+                0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                3,
+                "9834876dcfb05cb167a5c24953eba58c4ac89b1adf57f28f2f9d09af107ee8f0",
+            ),
+            (
+                65535,
+                "6e1bebca6a8229364a162a72ef064826c4cd7457bf54f190ef782bd9deff3e42",
+            ),
+            (
+                65536,
+                "bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a",
+            ),
+            (
+                65537,
+                "008ffc88d3c96a9f307524eb361e47c5222a887fc45fa0c1fb8d429c5c23b430",
+            ),
+            (
+                131073,
+                "7e009ea4ef882e385b3c0bcbbfa8d009bb0a633bdd764415c09182ee0e75da73",
+            ),
+        ] {
+            let mut bytes = vec![b'a'; length];
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(file_sha256(&path).unwrap(), expected, "{length}");
+            if let Some(last) = bytes.last_mut() {
+                *last ^= 1;
+                fs::write(&path, &bytes).unwrap();
+                assert_ne!(file_sha256(&path).unwrap(), expected, "{length}");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_diagnostics_append_only_to_existing_private_regular_files() {
+        let root = std::env::temp_dir().join(format!("dolgorae-diagnostics-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path = root.join("log");
+        let diagnostic = serde_json::json!({"predicate": "worker_scope"});
+        append_private_diagnostic(&path, &diagnostic);
+        assert!(!path.exists());
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"existing\n").unwrap();
+        append_private_diagnostic(&path, &diagnostic);
+        let accepted = fs::read(&path).unwrap();
+        assert_eq!(accepted, b"existing\n{\"predicate\":\"worker_scope\"}\n");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        append_private_diagnostic(&path, &diagnostic);
+        assert_eq!(fs::read(&path).unwrap(), accepted);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        append_private_diagnostic(&link, &diagnostic);
+        assert_eq!(fs::read(&path).unwrap(), accepted);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn identity() -> WorkerIdentity {
         WorkerIdentity {
@@ -7896,6 +9542,7 @@ mod tests {
             control_socket_epoch: 1,
             app_server_epoch: None,
             control_recovery_required: false,
+            startup_scope: None,
             dedicated_server_identity: None,
             dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
             mutation_protocol_version: WORKER_PROTOCOL_VERSION,
@@ -7985,6 +9632,7 @@ mod tests {
                 control_socket_epoch: 1,
                 app_server_epoch: Some(1),
                 control_recovery_required: false,
+                startup_scope: None,
                 dedicated_server_identity: Some(dedicated.clone()),
                 dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
                 mutation_protocol_version: WORKER_PROTOCOL_VERSION,
@@ -8038,20 +9686,19 @@ mod tests {
 
     #[test]
     fn process_scope_does_not_trust_effective_uid_changes() {
-        let identity = crate::darwin::BsdProcessIdentity {
+        let identity = crate::darwin::ProcessCensusEntry {
             pid: 44,
             parent_pid: 43,
             uid: 0,
             process_group_id: 42,
             session_id: 42,
-            start_tvsec: 1,
-            start_tvusec: 0,
+            birth: Some((1, 0)),
             zombie: false,
         };
         let parents = [(44, 43), (43, 42)].into_iter().collect();
         assert!(process_is_in_scope(&identity, 42, 42, 42, &parents));
 
-        let detached = crate::darwin::BsdProcessIdentity {
+        let detached = crate::darwin::ProcessCensusEntry {
             process_group_id: 99,
             session_id: 99,
             parent_pid: 1,
@@ -8064,6 +9711,958 @@ mod tests {
             42,
             &[(44, 1)].into_iter().collect()
         ));
+    }
+
+    #[test]
+    fn startup_child_tracking_rejects_scope_escape_and_pid_reuse() {
+        let worker = identity();
+        let server = DedicatedServerIdentity {
+            pid: worker.pid,
+            process_group_id: worker.process_group_id,
+            session_id: worker.session_id,
+            uid: worker.uid,
+            start_tvsec: worker.start_tvsec,
+            start_tvusec: worker.start_tvusec,
+            executable_path: worker.executable_path,
+            executable_device: worker.executable_device,
+            executable_inode: worker.executable_inode,
+            executable_sha256: worker.executable_sha256,
+        };
+        let child = crate::darwin::ProcessCensusEntry {
+            pid: 44,
+            parent_pid: server.pid,
+            uid: server.uid,
+            process_group_id: server.process_group_id,
+            session_id: server.session_id,
+            birth: Some((2, 0)),
+            zombie: false,
+        };
+        let mut wait = StartupWorkload::new(
+            Duration::from_secs(900),
+            PathBuf::from("/unused"),
+            SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            server.uid,
+        );
+        assert!(wait.deadline.duration_since(Instant::now()) <= Duration::from_secs(10));
+        wait.observe(&child, &server, &mut None).unwrap();
+        for (changed, mismatch) in [
+            (crate::darwin::ProcessCensusEntry { uid: 0, ..child }, "uid"),
+            (
+                crate::darwin::ProcessCensusEntry {
+                    process_group_id: 99,
+                    ..child
+                },
+                "process_group",
+            ),
+            (
+                crate::darwin::ProcessCensusEntry {
+                    session_id: 99,
+                    ..child
+                },
+                "session",
+            ),
+            (
+                crate::darwin::ProcessCensusEntry {
+                    birth: None,
+                    ..child
+                },
+                "birth_missing",
+            ),
+            (
+                crate::darwin::ProcessCensusEntry {
+                    birth: Some((2, 1)),
+                    ..child
+                },
+                "prior_identity",
+            ),
+        ] {
+            let mut diagnostic = Value::Null;
+            assert_eq!(
+                wait.observe(&changed, &server, &mut Some(&mut diagnostic)),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(wait.children[&child.pid], child);
+            assert_eq!(diagnostic["predicate"], "startup_child_identity");
+            let observed = &diagnostic["observation"];
+            assert_eq!(observed["pid"], child.pid);
+            assert_eq!(observed["prior"], scope_observation(&child));
+            assert_eq!(observed["expected_server"]["pid"], server.pid);
+            assert_eq!(observed["expected_server"]["uid"], server.uid);
+            assert_eq!(
+                observed["expected_server"]["process_group_id"],
+                server.process_group_id
+            );
+            assert_eq!(observed["expected_server"]["session_id"], server.session_id);
+            assert_eq!(observed["mismatches"][mismatch], true);
+        }
+    }
+
+    #[test]
+    fn startup_membership_reconciliation_discards_races_and_preserves_identity_guards() {
+        let worker = identity();
+        let server = DedicatedServerIdentity {
+            pid: worker.pid,
+            process_group_id: worker.process_group_id,
+            session_id: worker.session_id,
+            uid: worker.uid,
+            start_tvsec: worker.start_tvsec,
+            start_tvusec: worker.start_tvusec,
+            executable_path: worker.executable_path,
+            executable_device: worker.executable_device,
+            executable_inode: worker.executable_inode,
+            executable_sha256: worker.executable_sha256,
+        };
+        let child = crate::darwin::ProcessCensusEntry {
+            pid: 44,
+            parent_pid: server.pid,
+            uid: server.uid,
+            process_group_id: server.process_group_id,
+            session_id: server.session_id,
+            birth: Some((2, 0)),
+            zombie: false,
+        };
+        let current = crate::darwin::BsdProcessIdentity {
+            pid: child.pid,
+            parent_pid: child.parent_pid,
+            uid: child.uid,
+            process_group_id: child.process_group_id,
+            session_id: child.session_id,
+            start_tvsec: 2,
+            start_tvusec: 0,
+            zombie: false,
+        };
+        let new_wait = || {
+            StartupWorkload::new(
+                Duration::from_secs(10),
+                PathBuf::from("/unused"),
+                SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                server.uid,
+            )
+        };
+        let leader = [server.pid];
+        let with_child = [server.pid, child.pid];
+
+        let mut wait = new_wait();
+        let deadline = wait.deadline;
+        wait.reconcile_membership(&server, &with_child, &leader, &[], &mut None, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        })
+        .unwrap();
+        assert!(wait.dirty_sample);
+        assert!(wait.children.is_empty());
+        assert_eq!(wait.deadline, deadline);
+
+        let mut wait = new_wait();
+        wait.reconcile_membership(&server, &with_child, &leader, &[], &mut None, |_| {
+            Ok(current)
+        })
+        .unwrap();
+        assert!(wait.dirty_sample);
+        assert_eq!(wait.children[&child.pid], child);
+
+        let mut wait = new_wait();
+        wait.reconcile_membership(&server, &leader, &with_child, &[child], &mut None, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        })
+        .unwrap();
+        assert!(wait.dirty_sample);
+        assert_eq!(wait.children[&child.pid], child);
+
+        for changed in [
+            crate::darwin::BsdProcessIdentity { pid: 45, ..current },
+            crate::darwin::BsdProcessIdentity { uid: 0, ..current },
+            crate::darwin::BsdProcessIdentity {
+                process_group_id: 99,
+                ..current
+            },
+            crate::darwin::BsdProcessIdentity {
+                session_id: 99,
+                ..current
+            },
+        ] {
+            assert_eq!(
+                new_wait().reconcile_membership(
+                    &server,
+                    &with_child,
+                    &leader,
+                    &[],
+                    &mut None,
+                    |_| Ok(changed),
+                ),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+        }
+        for code in [libc::EPERM, libc::EACCES, libc::EIO] {
+            assert_eq!(
+                new_wait().reconcile_membership(
+                    &server,
+                    &with_child,
+                    &leader,
+                    &[],
+                    &mut None,
+                    |_| Err(std::io::Error::from_raw_os_error(code)),
+                ),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+        }
+        assert_eq!(
+            new_wait().reconcile_membership(
+                &server,
+                &with_child,
+                &leader,
+                &[],
+                &mut None,
+                |_| Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "short identity"
+                )),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+        assert_eq!(
+            new_wait().reconcile_membership(&server, &leader, &[], &[], &mut None, |_| panic!(
+                "leader membership drift must refuse before lookup"
+            ),),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        for changed in [
+            crate::darwin::ProcessCensusEntry { uid: 0, ..child },
+            crate::darwin::ProcessCensusEntry {
+                process_group_id: 99,
+                ..child
+            },
+            crate::darwin::ProcessCensusEntry {
+                session_id: 99,
+                ..child
+            },
+            crate::darwin::ProcessCensusEntry {
+                birth: None,
+                ..child
+            },
+        ] {
+            assert_eq!(
+                new_wait().reconcile_membership(
+                    &server,
+                    &leader,
+                    &with_child,
+                    &[changed],
+                    &mut None,
+                    |_| panic!("typed identity violations must refuse before lookup"),
+                ),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+        }
+        let mut wait = new_wait();
+        wait.observe(&child, &server, &mut None).unwrap();
+        assert_eq!(
+            wait.reconcile_membership(&server, &with_child, &leader, &[], &mut None, |_| Ok(
+                crate::darwin::BsdProcessIdentity {
+                    start_tvusec: 1,
+                    ..current
+                }
+            ),),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+        assert_eq!(wait.children[&child.pid], child);
+
+        assert_eq!(
+            new_wait().reconcile_membership(
+                &server,
+                &[server.pid, child.pid, 45],
+                &leader,
+                &[],
+                &mut None,
+                |pid| {
+                    if pid == child.pid {
+                        Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+                    } else {
+                        Ok(crate::darwin::BsdProcessIdentity {
+                            pid,
+                            uid: 0,
+                            ..current
+                        })
+                    }
+                },
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(
+        clippy::zombie_processes,
+        reason = "This fixture intentionally reparents children; the outer process verifies their kernel absence"
+    )]
+    fn startup_descendant_scopes_survive_reparenting_and_worker_loss() {
+        const ROOT: &str = "DOLGORAE_TEST_STARTUP_SCOPE_ROOT";
+        const ROLE: &str = "DOLGORAE_TEST_STARTUP_SCOPE_ROLE";
+        const MODE: &str = "DOLGORAE_TEST_STARTUP_SCOPE_MODE";
+        const NAME: &str =
+            "worker::tests::startup_descendant_scopes_survive_reparenting_and_worker_loss";
+        fn wait_for(root: &Path, name: &str) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !root.join(name).exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture timed out waiting for {name}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        fn command(root: &Path, role: &str) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", NAME, "--test-threads=1"])
+                .env(ROOT, root)
+                .env(ROLE, role)
+                .env("HOME", root)
+                .stdin(Stdio::null());
+            command
+        }
+        fn pid(root: &Path, name: &str) -> u32 {
+            wait_for(root, name);
+            fs::read_to_string(root.join(name))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        fn absent(pid: u32) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match DarwinSystem.bsd_process_identity(pid) {
+                    Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return,
+                    Ok(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                    other => panic!("fixture PID {pid} did not become absent: {other:?}"),
+                }
+            }
+        }
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = PathBuf::from(root);
+            match std::env::var(ROLE).unwrap().as_str() {
+                "leaf" => {
+                    fs::write(root.join("leaf.pid"), std::process::id().to_string()).unwrap();
+                    wait_for(&root, "leaf.release");
+                }
+                "parent" => {
+                    let _leaf = DarwinSystem
+                        .spawn_detached(&mut command(&root, "leaf"))
+                        .unwrap();
+                    wait_for(&root, "leaf.pid");
+                    fs::write(root.join("parent.pid"), std::process::id().to_string()).unwrap();
+                    wait_for(&root, "parent.release");
+                }
+                "server" => {
+                    let mut parent = command(&root, "parent").spawn().unwrap();
+                    wait_for(&root, "parent.pid");
+                    fs::write(root.join("server.ready"), b"ready").unwrap();
+                    parent.wait().unwrap();
+                    wait_for(&root, "server.release");
+                }
+                "worker" => {
+                    let owner = current_startup_owner(&"11".repeat(32), Uuid::now_v7(), 1).unwrap();
+                    let _server = DarwinSystem
+                        .spawn_detached(&mut command(&root, "server"))
+                        .unwrap();
+                    let server_pid = _server.id();
+                    wait_for(&root, "server.ready");
+                    let leaf_pid = pid(&root, "leaf.pid");
+                    let parent_pid = pid(&root, "parent.pid");
+                    let process = DarwinSystem.bsd_process_identity(server_pid).unwrap();
+                    let path = DarwinSystem.live_process_path(server_pid).unwrap();
+                    let metadata = fs::metadata(&path).unwrap();
+                    let server = DedicatedServerIdentity {
+                        pid: process.pid,
+                        uid: process.uid,
+                        process_group_id: process.process_group_id,
+                        session_id: process.session_id,
+                        start_tvsec: process.start_tvsec,
+                        start_tvusec: process.start_tvusec,
+                        executable_device: metadata.dev(),
+                        executable_inode: metadata.ino(),
+                        executable_sha256: file_sha256(&path).unwrap(),
+                        executable_path: path,
+                    };
+                    let socket_path = root.join("s");
+                    let _socket = UnixListener::bind(&socket_path).unwrap();
+                    let metadata = fs::symlink_metadata(&socket_path).unwrap();
+                    let socket_identity = SocketIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    };
+                    let mut witness = StartupScopeWitness::pending(owner.identity.clone(), 1);
+                    witness.dedicated_server_identity = Some(server.clone());
+                    witness.app_server_socket_identity = Some(socket_identity.clone());
+                    let runtime = WorkerRuntimeRecord {
+                        schema_version: 2,
+                        socket_path: worker_socket_path(
+                            owner.identity.uid,
+                            &owner.identity.workspace_id,
+                            owner.identity.run_id,
+                        )
+                        .unwrap(),
+                        socket_identity: SocketIdentity {
+                            device: 1,
+                            inode: 1,
+                        },
+                        control_socket_epoch: 1,
+                        app_server_epoch: Some(1),
+                        control_recovery_required: false,
+                        startup_scope: Some(witness),
+                        dedicated_server_identity: Some(server.clone()),
+                        dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+                        mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                        binary_sha256: owner.identity.executable_sha256.clone(),
+                        identity: owner.identity,
+                    };
+                    let runtime_path = root.join("runtime.json");
+                    write_runtime_record(&runtime_path, &runtime).unwrap();
+                    fs::write(
+                        root.join("pending.json"),
+                        serde_json::to_vec(&runtime).unwrap(),
+                    )
+                    .unwrap();
+                    if std::env::var(MODE).unwrap() == "unobserved" {
+                        fs::write(root.join("worker.kill-ready"), b"ready").unwrap();
+                        wait_for(&root, "worker.release");
+                        return;
+                    }
+                    let mut wait = StartupWorkload::new(
+                        Duration::from_secs(10),
+                        socket_path,
+                        socket_identity,
+                        runtime.identity.uid,
+                    );
+                    wait.runtime_path = Some(runtime_path.clone());
+                    let census = DarwinSystem.all_process_identities().unwrap();
+                    let leaf = census.iter().find(|entry| entry.pid == leaf_pid).unwrap();
+                    assert_ne!(leaf.session_id, server.session_id);
+                    assert_ne!(leaf.process_group_id, server.process_group_id);
+                    DarwinSystem
+                        .fixture_file_immutable(&runtime_path, true)
+                        .unwrap();
+                    let failed = wait.observe_owned(
+                        leaf,
+                        &server,
+                        &census,
+                        "fixture-write-failure",
+                        &mut None,
+                    );
+                    DarwinSystem
+                        .fixture_file_immutable(&runtime_path, false)
+                        .unwrap();
+                    assert_eq!(failed, Err(WorkerProtocolError::Io));
+                    assert!(wait.children.is_empty());
+                    assert!(
+                        read_runtime_record(&runtime_path, runtime.identity.uid)
+                            .unwrap()
+                            .startup_scope
+                            .unwrap()
+                            .children
+                            .is_empty()
+                    );
+                    wait.observe_owned(leaf, &server, &census, "fixture", &mut None)
+                        .unwrap();
+                    for observed in [
+                        crate::darwin::ProcessCensusEntry {
+                            uid: leaf.uid + 1,
+                            ..*leaf
+                        },
+                        crate::darwin::ProcessCensusEntry {
+                            birth: Some((leaf.birth.unwrap().0 + 1, 0)),
+                            ..*leaf
+                        },
+                        crate::darwin::ProcessCensusEntry {
+                            process_group_id: server.process_group_id,
+                            ..*leaf
+                        },
+                        crate::darwin::ProcessCensusEntry {
+                            session_id: server.session_id,
+                            ..*leaf
+                        },
+                    ] {
+                        assert_eq!(
+                            wait.observe_owned(
+                                &observed,
+                                &server,
+                                &census,
+                                "fixture-negative",
+                                &mut None
+                            ),
+                            Err(WorkerProtocolError::InvalidIdentity)
+                        );
+                    }
+                    let worker_entry = census
+                        .iter()
+                        .find(|entry| entry.pid == runtime.identity.pid)
+                        .unwrap();
+                    assert_eq!(
+                        wait.observe_owned(
+                            worker_entry,
+                            &server,
+                            &census,
+                            "fixture-unrelated",
+                            &mut None
+                        ),
+                        Err(WorkerProtocolError::InvalidIdentity)
+                    );
+                    let mut reused = census.clone();
+                    reused
+                        .iter_mut()
+                        .find(|entry| entry.pid == parent_pid)
+                        .unwrap()
+                        .birth = None;
+                    assert!(startup_ancestry(&reused, leaf, &server).is_none());
+                    let open = read_runtime_record(&runtime_path, runtime.identity.uid).unwrap();
+                    assert_eq!(
+                        open.startup_scope
+                            .as_ref()
+                            .unwrap()
+                            .children
+                            .iter()
+                            .find(|child| child.identity.pid == leaf_pid)
+                            .unwrap()
+                            .identity,
+                        *leaf
+                    );
+                    let mut corrupt = open.clone();
+                    corrupt.startup_scope = None;
+                    assert!(corrupt.validate().is_err());
+                    corrupt = open.clone();
+                    corrupt
+                        .startup_scope
+                        .as_mut()
+                        .unwrap()
+                        .worker_identity
+                        .run_generation += 1;
+                    assert!(write_runtime_record(&runtime_path, &corrupt).is_err());
+                    corrupt = open.clone();
+                    corrupt.startup_scope.as_mut().unwrap().children[0]
+                        .ancestry
+                        .clear();
+                    assert!(write_runtime_record(&runtime_path, &corrupt).is_err());
+                    let encoded = serde_json::to_value(&open).unwrap();
+                    let mut frozen_v1 = encoded.clone();
+                    frozen_v1.as_object_mut().unwrap().remove("startup_scope");
+                    let frozen: WorkerRuntimeRecord =
+                        serde_json::from_value(frozen_v1.clone()).unwrap();
+                    assert!(
+                        frozen.validate().is_err(),
+                        "v2 cannot be accepted without ownership evidence"
+                    );
+                    frozen_v1["schema_version"] = serde_json::json!(1);
+                    let frozen: WorkerRuntimeRecord =
+                        serde_json::from_value(frozen_v1.clone()).unwrap();
+                    frozen.validate().unwrap();
+                    assert_eq!(serde_json::to_value(frozen).unwrap(), frozen_v1);
+                    fs::write(root.join("open.json"), serde_json::to_vec(&open).unwrap()).unwrap();
+                    assert!(
+                        write_runtime_record(&runtime_path, &runtime).is_err(),
+                        "stale startup copy must not erase a child"
+                    );
+                    fs::write(root.join("parent.release"), b"release").unwrap();
+                    absent(parent_pid);
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let mut reparented = DarwinSystem.bsd_process_identity(leaf_pid).unwrap();
+                    while reparented.parent_pid == parent_pid {
+                        assert!(Instant::now() < deadline, "fixture child did not reparent");
+                        thread::sleep(Duration::from_millis(10));
+                        reparented = DarwinSystem.bsd_process_identity(leaf_pid).unwrap();
+                    }
+                    assert_ne!(reparented.parent_pid, parent_pid);
+                    let mut details = Value::Null;
+                    assert_eq!(
+                        prove_group_empty_observed(&open, true, false, Some(&mut details)),
+                        Err(WorkerProtocolError::InvalidIdentity)
+                    );
+                    assert_eq!(details["predicate"], "startup_owned_child_live");
+                    if std::env::var(MODE).unwrap() == "interrupted" {
+                        fs::write(root.join("worker.kill-ready"), b"ready").unwrap();
+                        wait_for(&root, "worker.release");
+                        return;
+                    }
+                    fs::write(root.join("leaf.release"), b"release").unwrap();
+                    absent(leaf_pid);
+                    prove_group_empty_samples(
+                        &open,
+                        true,
+                        false,
+                        Some(&mut details),
+                        Some(&mut wait),
+                    )
+                    .unwrap_or_else(|error| panic!("startup fixture proof: {error:?}; {details}"));
+                    let completed =
+                        update_runtime_record(&runtime_path, runtime.identity.uid, |record| {
+                            let scope = record.startup_scope.as_mut().unwrap();
+                            scope.complete = true;
+                            scope.revision += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                    prove_worker_workload_absent(&completed).unwrap();
+                    let mut same_epoch = completed.clone();
+                    same_epoch.socket_identity.inode += 1;
+                    assert!(write_runtime_record(&runtime_path, &same_epoch).is_err());
+                    let mut replacement = completed.clone();
+                    replacement.control_socket_epoch += 1;
+                    replacement.socket_identity.inode += 1;
+                    write_runtime_record(&runtime_path, &replacement).unwrap();
+                    assert_eq!(
+                        read_runtime_record(&runtime_path, runtime.identity.uid)
+                            .unwrap()
+                            .startup_scope,
+                        completed.startup_scope
+                    );
+                    thread::scope(|scope| {
+                        for _ in 0..2 {
+                            scope.spawn(|| {
+                                for _ in 0..3 {
+                                    update_runtime_record(
+                                        &runtime_path,
+                                        runtime.identity.uid,
+                                        |record| {
+                                            record.control_socket_epoch += 1;
+                                            record.socket_identity.inode += 1;
+                                            Ok(())
+                                        },
+                                    )
+                                    .unwrap();
+                                }
+                            });
+                        }
+                    });
+                    let latest = read_runtime_record(&runtime_path, runtime.identity.uid).unwrap();
+                    assert_eq!(
+                        latest.control_socket_epoch,
+                        completed.control_socket_epoch + 7
+                    );
+                    assert_eq!(latest.startup_scope, completed.startup_scope);
+                    assert!(
+                        write_runtime_record(&runtime_path, &completed).is_err(),
+                        "stale locator epoch must be refused"
+                    );
+                }
+                other => panic!("unknown fixture role {other}"),
+            }
+            return;
+        }
+        for mode in ["complete", "unobserved", "interrupted"] {
+            let root = std::env::temp_dir().join(format!("dsw-{}", Uuid::now_v7().simple()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let mut worker = DarwinSystem
+                .spawn_detached(command(&root, "worker").env(MODE, mode))
+                .unwrap();
+            if mode == "complete" {
+                assert!(worker.wait().unwrap().success());
+            } else {
+                wait_for(&root, "worker.kill-ready");
+                worker.kill().unwrap();
+                assert!(!worker.wait().unwrap().success());
+            }
+            let completed =
+                read_runtime_record(&root.join("runtime.json"), DarwinSystem.current_uid())
+                    .unwrap();
+            if mode != "complete" {
+                assert!(!completed.startup_scope.as_ref().unwrap().complete);
+                assert_eq!(
+                    completed
+                        .startup_scope
+                        .as_ref()
+                        .unwrap()
+                        .children
+                        .is_empty(),
+                    mode == "unobserved"
+                );
+                assert!(prove_worker_generation_absent(&completed).is_err());
+                assert!(
+                    remove_verified_absent_runtime(
+                        &root.join("runtime.json"),
+                        DarwinSystem.current_uid()
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    read_runtime_record(&root.join("runtime.json"), DarwinSystem.current_uid())
+                        .unwrap(),
+                    completed
+                );
+                fs::write(root.join("parent.release"), b"release").unwrap();
+                fs::write(root.join("leaf.release"), b"release").unwrap();
+                absent(pid(&root, "parent.pid"));
+                absent(pid(&root, "leaf.pid"));
+                fs::write(root.join("server.release"), b"release").unwrap();
+                absent(completed.dedicated_server_identity.as_ref().unwrap().pid);
+                assert!(prove_worker_generation_absent(&completed).is_err());
+                fs::remove_dir_all(root).unwrap();
+                continue;
+            }
+            for name in ["pending.json", "open.json"] {
+                let interrupted: WorkerRuntimeRecord =
+                    serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+                let mut details = Value::Null;
+                assert_eq!(
+                    prove_group_empty_observed(&interrupted, false, false, Some(&mut details)),
+                    Err(WorkerProtocolError::InvalidIdentity)
+                );
+                assert_eq!(details["predicate"], "startup_ownership_incomplete");
+            }
+            fs::write(root.join("server.release"), b"release").unwrap();
+            absent(completed.dedicated_server_identity.as_ref().unwrap().pid);
+            prove_worker_generation_absent(&completed).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn workload_absence_can_be_proved_inside_a_detached_worker_with_owned_server() {
+        const CHILD_ROOT: &str = "DOLGORAE_TEST_SELF_CENSUS_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let owner = current_startup_owner(&"11".repeat(32), Uuid::now_v7(), 1).unwrap();
+            let identity = owner.identity;
+            assert_eq!(identity.pid, identity.process_group_id);
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "printf 'ready\\n'; while read launch; do [ \"$launch\" = shutdown ] && break; /bin/sh -c 'read release; /bin/sleep 0.6' <&0 & printf '%s\\n' \"$!\"; wait; done",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let mut server = DarwinSystem.spawn_detached(&mut command).unwrap();
+            let mut server_output = BufReader::new(server.stdout.take().unwrap());
+            let mut readiness = String::new();
+            server_output.read_line(&mut readiness).unwrap();
+            assert_eq!(readiness, "ready\n");
+            let process = DarwinSystem.bsd_process_identity(server.id()).unwrap();
+            let path = DarwinSystem.live_process_path(server.id()).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            let record = WorkerRuntimeRecord {
+                schema_version: 1,
+                socket_path: worker_socket_path(
+                    identity.uid,
+                    &identity.workspace_id,
+                    identity.run_id,
+                )
+                .unwrap(),
+                socket_identity: SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: None,
+                dedicated_server_identity: Some(DedicatedServerIdentity {
+                    pid: process.pid,
+                    process_group_id: process.process_group_id,
+                    session_id: process.session_id,
+                    uid: process.uid,
+                    start_tvsec: process.start_tvsec,
+                    start_tvusec: process.start_tvusec,
+                    executable_device: metadata.dev(),
+                    executable_inode: metadata.ino(),
+                    executable_sha256: file_sha256(&path).unwrap(),
+                    executable_path: path,
+                }),
+                dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+                mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                binary_sha256: identity.executable_sha256.clone(),
+                identity,
+            };
+            let socket_path = root.join("s");
+            let socket = UnixListener::bind(&socket_path).unwrap();
+            let metadata = fs::symlink_metadata(&socket_path).unwrap();
+            let mut startup = StartupWorkload::new(
+                Duration::from_secs(10),
+                socket_path.clone(),
+                SocketIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+                record.identity.uid,
+            );
+            let deadline = startup.deadline;
+            let mut initial_details = Value::Null;
+            let initial = prove_group_empty_samples(
+                &record,
+                true,
+                false,
+                Some(&mut initial_details),
+                Some(&mut startup),
+            );
+            assert!(initial.is_ok(), "{initial:?}: {initial_details}");
+            assert!(startup.children.is_empty());
+            server.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+            let mut child_pid = String::new();
+            server_output.read_line(&mut child_pid).unwrap();
+            let child_pid = child_pid.trim().parse::<u32>().unwrap();
+            let observed = DarwinSystem.bsd_process_identity(child_pid).unwrap();
+            startup
+                .observe(
+                    &crate::darwin::ProcessCensusEntry {
+                        pid: observed.pid,
+                        parent_pid: observed.parent_pid,
+                        uid: observed.uid,
+                        process_group_id: observed.process_group_id,
+                        session_id: observed.session_id,
+                        birth: Some((observed.start_tvsec, observed.start_tvusec)),
+                        zombie: observed.zombie,
+                    },
+                    record.dedicated_server_identity.as_ref().unwrap(),
+                    &mut None,
+                )
+                .unwrap();
+            assert_eq!(
+                prove_worker_workload_absent(&record),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            let mut refusal = Value::Null;
+            assert_eq!(
+                prove_group_empty_observed(&record, true, false, Some(&mut refusal)),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(refusal["predicate"], "dedicated_scope");
+            assert_eq!(refusal["observation"]["pid"], child_pid);
+            server
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"release\n")
+                .unwrap();
+            let mut details = Value::Null;
+            let result = prove_group_empty_samples(
+                &record,
+                true,
+                false,
+                Some(&mut details),
+                Some(&mut startup),
+            );
+            assert!(result.is_ok(), "{result:?}: {details}");
+            assert!(startup.children.contains_key(&child_pid));
+            assert!(startup.children_absent(&mut None).unwrap());
+            assert!(prove_worker_workload_absent(&record).is_ok());
+            let repeated = prove_group_empty_samples(
+                &record,
+                true,
+                false,
+                Some(&mut details),
+                Some(&mut startup),
+            );
+            assert!(repeated.is_ok(), "{repeated:?}: {details}");
+            assert_eq!(startup.deadline, deadline);
+            // Once the connection window closes, the same real server's next
+            // held child is an immediate refusal, even with startup time left.
+            server.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+            let mut later_child_pid = String::new();
+            server_output.read_line(&mut later_child_pid).unwrap();
+            let later_child_pid = later_child_pid.trim().parse::<u32>().unwrap();
+            assert_eq!(
+                prove_group_empty_samples(&record, true, false, Some(&mut details), None),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(details["predicate"], "dedicated_scope");
+            assert_eq!(details["observation"]["pid"], later_child_pid);
+            assert!(!startup.children.contains_key(&later_child_pid));
+            assert_eq!(startup.deadline, deadline);
+            server
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"release\n")
+                .unwrap();
+            loop {
+                match DarwinSystem.bsd_process_identity(later_child_pid) {
+                    Err(error) if error.raw_os_error() == Some(libc::ESRCH) => break,
+                    Ok(_) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    other => panic!("later child did not become kernel-absent: {other:?}"),
+                }
+            }
+            let proof = prove_group_empty_observed(&record, true, false, Some(&mut details));
+            assert!(proof.is_ok(), "strict fixture proof: {proof:?}; {details}");
+            startup.deadline = Instant::now();
+            assert_eq!(
+                prove_group_empty_samples(
+                    &record,
+                    true,
+                    false,
+                    Some(&mut details),
+                    Some(&mut startup)
+                ),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(details["predicate"], "startup_quiescence_timeout");
+            assert!(prove_worker_workload_absent(&record).is_ok());
+            startup.deadline = Instant::now() + Duration::from_secs(1);
+            fs::remove_file(&socket_path).unwrap();
+            assert_eq!(
+                prove_group_empty_samples(
+                    &record,
+                    true,
+                    false,
+                    Some(&mut details),
+                    Some(&mut startup)
+                ),
+                Err(WorkerProtocolError::SocketIdentityMismatch)
+            );
+            assert_eq!(details["predicate"], "app_server_socket_identity");
+            assert_eq!(
+                details["observation"]["expected_identity"]["device"],
+                metadata.dev()
+            );
+            assert_eq!(
+                details["observation"]["expected_identity"]["inode"],
+                metadata.ino()
+            );
+            drop(socket);
+            let diagnostic = serde_json::json!({
+                "worker": classify_worker_identity(&record).as_str(),
+                "server": classify_dedicated_server_identity(record.dedicated_server_identity.as_ref().unwrap()).as_str(),
+                "result": format!("{result:?}"),
+            });
+            let mut proof_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("proof.json"))
+                .unwrap();
+            proof_file
+                .write_all(&serde_json::to_vec(&diagnostic).unwrap())
+                .unwrap();
+            assert_eq!(
+                classify_dedicated_server_identity(
+                    record.dedicated_server_identity.as_ref().unwrap()
+                ),
+                ProcessIdentityVerdict::Match
+            );
+            DarwinSystem
+                .signal_process_group(server.id(), libc::SIGTERM)
+                .unwrap();
+            server.wait().unwrap();
+            assert!(result.is_ok(), "{diagnostic}");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("dqs-{}", Uuid::now_v7().simple()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "worker::tests::workload_absence_can_be_proved_inside_a_detached_worker_with_owned_server", "--test-threads=1"])
+            .env(CHILD_ROOT, &root).env("HOME", &root).stdin(Stdio::null());
+        let mut child = DarwinSystem.spawn_detached(&mut command).unwrap();
+        let status = child.wait().unwrap();
+        let diagnostic = fs::read_to_string(root.join("proof.json")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(status.success(), "{diagnostic}");
     }
 
     #[cfg(target_os = "macos")]
@@ -8126,6 +10725,7 @@ mod tests {
             control_socket_epoch: 1,
             app_server_epoch: Some(1),
             control_recovery_required: false,
+            startup_scope: None,
             dedicated_server_identity: Some(DedicatedServerIdentity {
                 pid: server_process.pid,
                 process_group_id: server_process.process_group_id,
@@ -8158,6 +10758,13 @@ mod tests {
                 prove_worker_workload_absent(&record),
                 Err(WorkerProtocolError::InvalidIdentity)
             );
+            let mut diagnostic = Value::Null;
+            assert_eq!(
+                prove_group_empty_observed(&record, true, false, Some(&mut diagnostic)),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(diagnostic["predicate"], "worker_scope");
+            assert_ne!(diagnostic["observation"]["pid"], record.identity.pid);
         });
 
         let _ = DarwinSystem.signal_process_group(worker.id(), libc::SIGKILL);
@@ -8243,24 +10850,23 @@ mod tests {
             executable_inode: 2,
             executable_sha256: "11".repeat(32),
         };
-        let leader = crate::darwin::BsdProcessIdentity {
+        let leader = crate::darwin::ProcessCensusEntry {
             pid: 42,
             parent_pid: 1,
             uid: 501,
             process_group_id: 42,
             session_id: 42,
-            start_tvsec: 10,
-            start_tvusec: 20,
+            birth: Some((10, 20)),
             zombie: false,
         };
-        let helper = crate::darwin::BsdProcessIdentity {
+        let helper = crate::darwin::ProcessCensusEntry {
             pid: 43,
             parent_pid: 42,
             process_group_id: 43,
-            start_tvsec: 11,
+            birth: Some((11, 20)),
             ..leader
         };
-        let descendant = crate::darwin::BsdProcessIdentity {
+        let descendant = crate::darwin::ProcessCensusEntry {
             pid: 44,
             parent_pid: 43,
             process_group_id: 44,
@@ -8277,8 +10883,11 @@ mod tests {
             assert!(!dedicated_scope_is_owned(&server, &[42], &foreign));
         }
         let mut reused = census;
-        reused[0].start_tvusec += 1;
+        reused[0].birth = Some((10, 21));
         assert!(!dedicated_scope_is_owned(&server, &[42], &reused));
+        let mut missing_birth = census;
+        missing_birth[0].birth = None;
+        assert!(!dedicated_scope_is_owned(&server, &[42], &missing_birth));
         assert!(!dedicated_scope_is_owned(
             &server,
             &[],
@@ -8411,6 +11020,7 @@ mod tests {
             control_socket_epoch: 1,
             app_server_epoch: Some(1),
             control_recovery_required: false,
+            startup_scope: None,
             dedicated_server_identity: Some(server_identity.clone()),
             dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
             mutation_protocol_version: WORKER_PROTOCOL_VERSION,
@@ -8425,6 +11035,17 @@ mod tests {
                     && process.process_group_id != server_identity.process_group_id
             }));
             assert!(!dedicated_group_has_only_expected_leader(&server_identity, true).unwrap());
+            let mut diagnostic = Value::Null;
+            assert!(
+                !dedicated_group_has_only_expected_leader_observed(
+                    &server_identity,
+                    true,
+                    Some(&mut diagnostic)
+                )
+                .unwrap()
+            );
+            assert_eq!(diagnostic["predicate"], "dedicated_scope");
+            assert_ne!(diagnostic["observation"]["pid"], server_identity.pid);
             assert!(dedicated_group_safe_to_signal(&server_identity));
             assert_eq!(
                 classify_worker_identity(&record),
@@ -8518,6 +11139,61 @@ mod tests {
     }
 
     #[test]
+    fn session_preparation_failure_precedes_dedicated_executable_lookup() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-session-preparation-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let ledger_root = root.join("ledger");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&ledger_root)
+            .unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(ledger_root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(ledger_root.join("audit.jsonl"))
+            .unwrap();
+        let run_id = Uuid::now_v7();
+        let ledger = Arc::new(Mutex::new(Ledger::open(&ledger_root, run_id).unwrap()));
+        let mut session = reviewer_bootstrap();
+        session.artifact_root = root.join("artifacts");
+        session.dedicated_server = Some(DedicatedServerBootstrap {
+            socket_path: session.app_server_socket.clone(),
+            argv: vec![root.join("missing-executable").display().to_string()],
+            cwd: root.clone(),
+            environment: BTreeMap::new(),
+            log_path: root.join("dedicated.log"),
+            executable_device: 1,
+            executable_inode: 2,
+            executable_sha256: "11".repeat(32),
+            server_epoch: session.server_epoch,
+        });
+        let error = WorkerSession::connect(
+            &session,
+            RunFacts {
+                run_id,
+                profile: "default".to_owned(),
+            },
+            Arc::clone(&ledger),
+            1,
+            DarwinSystem.current_uid(),
+            &root,
+            &"11".repeat(32),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, WorkerProtocolError::LedgerReplay);
+        assert!(!root.join("dedicated.log").exists());
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reviewer_bootstrap_requires_read_only_never_and_accepts_the_exact_pair() {
         let valid = reviewer_bootstrap();
         assert_eq!(valid.validate(), Ok(()));
@@ -8538,6 +11214,35 @@ mod tests {
     }
 
     #[test]
+    fn startup_unknown_survives_both_handoff_phases_without_retry_authority() {
+        for ready_phase in [false, true] {
+            let (parent, mut child) = UnixStream::pair().unwrap();
+            write_frame(
+                &mut child,
+                &StartupHandoff::Failed {
+                    code: WorkerProtocolError::ThreadStartupOutcomeUnknown
+                        .code()
+                        .to_owned(),
+                },
+            )
+            .unwrap();
+            let error = if ready_phase {
+                read_ready_handoff(&mut BufReader::new(parent)).unwrap_err()
+            } else {
+                read_bound_handoff(parent).unwrap_err()
+            };
+            assert_eq!(error, WorkerProtocolError::ThreadStartupOutcomeUnknown);
+            let run_id = Uuid::now_v7();
+            let machine = error.machine_error(run_id, Path::new("/tmp/unused-record"));
+            assert_eq!(machine.code, "OUTCOME_UNKNOWN");
+            assert!(!machine.retryable);
+            assert_eq!(machine.details["run_id"], run_id.to_string());
+            assert!(machine.details["thread_id"].is_null());
+            assert!(machine.details["turn_id"].is_null());
+        }
+    }
+
+    #[test]
     fn the_bind_budget_is_separate_from_the_larger_replay_budget() {
         assert!(
             STARTUP_BOUND_TIMEOUT < STARTUP_READY_TIMEOUT,
@@ -8555,6 +11260,7 @@ mod tests {
             control_socket_epoch: 1,
             app_server_epoch: None,
             control_recovery_required: false,
+            startup_scope: None,
             dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,
@@ -8966,6 +11672,7 @@ mod tests {
             control_socket_epoch: base.control_socket_epoch,
             app_server_epoch: None,
             control_recovery_required: false,
+            startup_scope: None,
             dedicated_server_identity: None,
             dolgorae_version: base.dolgorae_version.clone(),
             mutation_protocol_version: base.mutation_protocol_version,
@@ -9159,6 +11866,7 @@ mod tests {
             control_socket_epoch: 1,
             app_server_epoch: None,
             control_recovery_required: false,
+            startup_scope: None,
             dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,
@@ -9193,6 +11901,7 @@ mod tests {
             control_socket_epoch: 7,
             app_server_epoch: None,
             control_recovery_required: true,
+            startup_scope: None,
             dedicated_server_identity: None,
             dolgorae_version: "0.1.0".to_owned(),
             mutation_protocol_version: 1,

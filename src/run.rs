@@ -14,6 +14,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -98,7 +99,7 @@ pub struct AgentConfigurationSnapshot {
     pub required_capabilities: Vec<String>,
     pub role_reference: Option<String>,
     pub normalized_instructions: String,
-    pub instructions: InstructionSnapshot,
+    pub instructions: RunInstructionSnapshot,
     pub execution_lane: ExecutionLane,
     pub required_assurance: Assurance,
     pub native_subagent_policy: String,
@@ -219,8 +220,9 @@ struct AgentConfigurationWire {
     required_capabilities: Vec<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     role_reference: Option<String>,
-    normalized_instructions: String,
-    instructions: InstructionSnapshot,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
+    normalized_instructions: Option<String>,
+    instructions: RunInstructionSnapshot,
     execution_lane: ExecutionLane,
     required_assurance: Assurance,
     native_subagent_policy: String,
@@ -252,8 +254,9 @@ impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
                     })?,
                 )
             }
-            2 if wire.runtime_profile.is_none()
-                && wire.runtime_profile_snapshot_sha256.is_none() =>
+            2 | 3
+                if wire.runtime_profile.is_none()
+                    && wire.runtime_profile_snapshot_sha256.is_none() =>
             {
                 (
                     wire.selected_profile
@@ -269,6 +272,23 @@ impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
                 ));
             }
         };
+        let normalized_instructions = match (&wire.instructions, wire.schema_version) {
+            (RunInstructionSnapshot::Legacy(_), 1 | 2) => wire
+                .normalized_instructions
+                .ok_or_else(|| serde::de::Error::missing_field("normalized_instructions"))?,
+            (RunInstructionSnapshot::Caller(capture), 3)
+                if wire.normalized_instructions.is_none() =>
+            {
+                capture.developer_prefix().map_err(|_| {
+                    serde::de::Error::custom("captured instruction integrity failed")
+                })?
+            }
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "instruction generation does not match Agent Configuration",
+                ));
+            }
+        };
         Ok(Self {
             schema_version: wire.schema_version,
             runtime_profile,
@@ -278,7 +298,7 @@ impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
             purpose: wire.purpose,
             required_capabilities: wire.required_capabilities,
             role_reference: wire.role_reference,
-            normalized_instructions: wire.normalized_instructions,
+            normalized_instructions,
             instructions: wire.instructions,
             execution_lane: wire.execution_lane,
             required_assurance: wire.required_assurance,
@@ -312,7 +332,9 @@ impl Serialize for AgentConfigurationSnapshot {
         state.serialize_field("purpose", &self.purpose)?;
         state.serialize_field("required_capabilities", &self.required_capabilities)?;
         state.serialize_field("role_reference", &self.role_reference)?;
-        state.serialize_field("normalized_instructions", &self.normalized_instructions)?;
+        if self.schema_version != 3 {
+            state.serialize_field("normalized_instructions", &self.normalized_instructions)?;
+        }
         state.serialize_field("instructions", &self.instructions)?;
         state.serialize_field("execution_lane", &self.execution_lane)?;
         state.serialize_field("required_assurance", &self.required_assurance)?;
@@ -346,6 +368,88 @@ pub struct InstructionSnapshot {
     pub purpose_prefix_version: u32,
     pub normalized_byte_length: u64,
     pub normalized_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunInstructionSnapshot {
+    Legacy(InstructionSnapshot),
+    Caller(crate::instructions::InstructionSnapshot),
+}
+
+impl From<InstructionSnapshot> for RunInstructionSnapshot {
+    fn from(value: InstructionSnapshot) -> Self {
+        Self::Legacy(value)
+    }
+}
+
+impl From<crate::instructions::InstructionSnapshot> for RunInstructionSnapshot {
+    fn from(value: crate::instructions::InstructionSnapshot) -> Self {
+        Self::Caller(value)
+    }
+}
+
+impl RunInstructionSnapshot {
+    #[must_use]
+    pub fn legacy(&self) -> Option<&InstructionSnapshot> {
+        match self {
+            Self::Legacy(value) => Some(value),
+            Self::Caller(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn caller(&self) -> Option<&crate::instructions::InstructionSnapshot> {
+        match self {
+            Self::Caller(value) => Some(value),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        match self {
+            Self::Legacy(value) => &value.normalized_sha256,
+            Self::Caller(value) => &value.composition_sha256,
+        }
+    }
+
+    #[must_use]
+    pub fn contract(&self) -> serde_json::Value {
+        match self {
+            Self::Legacy(value) => serde_json::json!({
+                "schema": value.schema, "common_prefix_version": value.common_prefix_version,
+                "mode_prefix_version": value.mode_prefix_version, "purpose_prefix_version": value.purpose_prefix_version,
+            }),
+            Self::Caller(value) => serde_json::json!({
+                "schema": value.schema, "core_prefix_version": value.core_prefix_version,
+                "core_prefix_sha256": value.core_prefix_sha256, "composition_sha256": value.composition_sha256,
+            }),
+        }
+    }
+}
+
+impl TryFrom<CallerAgentConfigurationSnapshot> for AgentConfigurationSnapshot {
+    type Error = MachineError;
+
+    fn try_from(value: CallerAgentConfigurationSnapshot) -> Result<Self, Self::Error> {
+        value.validate()?;
+        Ok(Self {
+            schema_version: value.schema_version,
+            runtime_profile: value.selected_profile,
+            runtime_profile_snapshot_sha256: value.global_profile_binding_sha256,
+            model: value.model,
+            default_effort: value.default_effort,
+            purpose: value.purpose,
+            required_capabilities: value.required_capabilities,
+            role_reference: value.role_reference,
+            normalized_instructions: value.instructions.developer_prefix()?,
+            instructions: value.instructions.into(),
+            execution_lane: value.execution_lane,
+            required_assurance: value.required_assurance,
+            native_subagent_policy: value.native_subagent_policy,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -453,7 +557,7 @@ pub struct RunManifest {
     pub model: String,
     pub initial_reasoning_effort: String,
     pub default_reasoning_effort: String,
-    pub instructions: InstructionSnapshot,
+    pub instructions: RunInstructionSnapshot,
     pub controller: ControllerBinding,
     pub purpose: Purpose,
     pub parent_ref: Option<ParentReference>,
@@ -465,6 +569,48 @@ pub struct RunManifest {
     pub aggregate_binding: Option<AggregateBinding>,
     pub audit: AuditPolicy,
     pub compatibility: CompatibilityVerdict,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_startup_access"
+    )]
+    pub requested_access: Option<crate::domain::CallerWorkspaceAccess>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_profile_field"
+    )]
+    pub selected_role: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_profile_field"
+    )]
+    pub start_contract: Option<String>,
+}
+
+fn deserialize_startup_access<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::domain::CallerWorkspaceAccess>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::domain::CallerWorkspaceAccess::deserialize(deserializer).map(Some)
+}
+
+impl RunManifest {
+    pub(crate) fn require_legacy_adapter(&self) -> Result<(), MachineError> {
+        if self.schema_version != 3 {
+            return Ok(());
+        }
+        Err(MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "the frozen legacy adapter cannot reinterpret a caller-workspace Run",
+            false,
+            serde_json::json!({"profile": self.profile.profile_name,
+                "capability_name": "caller_workspace_legacy_adapter", "support": "unavailable"}),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -491,6 +637,447 @@ pub struct StartReservation {
     pub idempotency_key: String,
     pub normalized_identity_sha256: String,
     pub run_id: Uuid,
+}
+
+fn default_caller_role() -> String {
+    "general".to_owned()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerRunStartRequest {
+    pub schema: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub workspace: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_binding",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expected_workspace_id: Option<String>,
+    pub profile: String,
+    pub control_mode: ControlMode,
+    #[serde(default)]
+    pub access: crate::domain::CallerWorkspaceAccess,
+    #[serde(default = "default_caller_role")]
+    pub role: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub model: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub effort: Option<String>,
+    #[serde(deserialize_with = "deserialize_start_purpose")]
+    pub purpose: Purpose,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub parent_ref: Option<ParentReference>,
+    pub required_capabilities: Vec<String>,
+    pub idempotency_key: String,
+}
+
+fn deserialize_start_purpose<'de, D>(deserializer: D) -> Result<Purpose, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CheckedPurpose {
+        kind: crate::domain::PurposeKind,
+        #[serde(deserialize_with = "deserialize_required_option")]
+        external_label: Option<String>,
+    }
+    let purpose = CheckedPurpose::deserialize(deserializer)?;
+    Ok(Purpose {
+        kind: purpose.kind,
+        external_label: purpose.external_label,
+    })
+}
+
+impl CallerRunStartRequest {
+    /// Resolve the checked private request without observing workspace/Profile
+    /// state or granting runtime authority. Explicit null is not omission.
+    pub fn resolve(mut self) -> Result<Self, MachineError> {
+        if self.schema != "dolgorae-run-start-request/v2" {
+            return Err(MachineError::invalid_argument(
+                "schema",
+                "unsupported start request",
+            ));
+        }
+        for (field, body, limit) in [
+            ("workspace", self.workspace.as_deref(), 8192),
+            ("profile", Some(self.profile.as_str()), 128),
+            ("model", self.model.as_deref(), 128),
+            ("effort", self.effort.as_deref(), 64),
+            (
+                "purpose.external_label",
+                self.purpose.external_label.as_deref(),
+                128,
+            ),
+            ("idempotency_key", Some(self.idempotency_key.as_str()), 128),
+        ] {
+            if body.is_some_and(|value| {
+                value.is_empty() || value.len() > limit || value.contains('\0')
+            }) {
+                return Err(MachineError::invalid_argument(
+                    field,
+                    "invalid bounded startup value",
+                ));
+            }
+        }
+        if self.expected_workspace_id.as_ref().is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(MachineError::invalid_argument(
+                "expected_workspace_id",
+                "expected lowercase SHA-256",
+            ));
+        }
+        crate::instructions::validate_role_name(&self.role)?;
+        if self.required_capabilities.len() > 64
+            || self
+                .required_capabilities
+                .iter()
+                .any(|value| value.is_empty() || value.len() > 128 || value.contains('\0'))
+            || self
+                .required_capabilities
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.required_capabilities.len()
+        {
+            return Err(MachineError::invalid_argument(
+                "required_capabilities",
+                "expected unique bounded capabilities",
+            ));
+        }
+        if self
+            .purpose
+            .external_label
+            .as_ref()
+            .is_some_and(|value| value.chars().any(char::is_control))
+        {
+            return Err(MachineError::invalid_argument(
+                "purpose",
+                "invalid purpose label",
+            ));
+        }
+        if let Some(parent) = &self.parent_ref
+            && (self.control_mode == ControlMode::DirectInteractive
+                || [
+                    (parent.namespace.as_str(), 128),
+                    (parent.kind.as_str(), 64),
+                    (parent.id.as_str(), 256),
+                ]
+                .iter()
+                .any(|(value, limit)| {
+                    value.is_empty() || value.len() > *limit || value.chars().any(char::is_control)
+                })
+                || matches!(
+                    parent.namespace.as_str(),
+                    "dolgorae.orchestrated-session.v1"
+                        | "dolgorae.external-specialist-engagement.v1"
+                ))
+        {
+            return Err(MachineError::invalid_argument(
+                "parent_ref",
+                "invalid caller parent provenance",
+            ));
+        }
+        self.required_capabilities.sort();
+        self.schema = "dolgorae-run-start-resolved/v2".to_owned();
+        Ok(self)
+    }
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+fn deserialize_present_binding<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+/// Accepted caller startup input survives a crash before manifest publication.
+/// No ready server epoch or advertised default is fabricated during admission.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerStartIntent {
+    pub run_id: Uuid,
+    pub created_at: String,
+    pub workspace_id: String,
+    pub canonical_workspace: LosslessPath,
+    pub workspace_mode: WorkspaceMode,
+    pub start_baseline: GitBaseline,
+    #[serde(deserialize_with = "deserialize_accepted_caller_request")]
+    pub request: CallerRunStartRequest,
+    pub controller: ControllerBinding,
+    pub global_profile_binding: GlobalProfileBinding,
+    pub instructions: crate::instructions::InstructionSnapshot,
+    pub readiness: CallerProfileReadiness,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerProfileReadiness {
+    pub model: String,
+    pub default_effort: String,
+    pub profile_capability_snapshot: ProfileCapabilitySnapshot,
+}
+
+/// Original startup acceptance, independent of later mutable Run policy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerStartReceipt {
+    pub schema: String,
+    pub run_id: Uuid,
+    pub accepted_intent_sha256: String,
+    pub global_profile_binding_sha256: String,
+    pub original_thread_id: String,
+    pub run_generation: u64,
+    #[serde(deserialize_with = "crate::domain::deserialize_caller_effective_policy")]
+    pub effective_policy: crate::domain::EffectivePolicy,
+}
+
+impl CallerStartReceipt {
+    fn validate(&self, manifest: &RunManifest, intent_sha256: &str) -> Result<(), MachineError> {
+        let policy = &self.effective_policy;
+        let access = match manifest.requested_access {
+            Some(crate::domain::CallerWorkspaceAccess::Writable) => Access::Write,
+            Some(crate::domain::CallerWorkspaceAccess::ReadOnly) => Access::Read,
+            None => {
+                return Err(reservation_invalid(
+                    "caller receipt requires successor provenance",
+                ));
+            }
+        };
+        if self.schema != "dolgorae.caller-start-receipt/v1"
+            || manifest.schema_version != 3
+            || self.run_id != manifest.run_id
+            || self.accepted_intent_sha256 != intent_sha256
+            || !is_sha256(intent_sha256)
+            || self.global_profile_binding_sha256
+                != manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .ok_or_else(|| reservation_invalid("caller receipt has no Profile binding"))?
+                    .digest()?
+            || !bounded_identity(&self.original_thread_id, 256)
+            || self.run_generation == 0
+            || policy.access != access
+            || policy.verification != crate::domain::PolicyVerification::Verified
+            || policy.policy_epoch.0 == 0
+            || policy
+                .thread_generation
+                .is_none_or(|generation| generation == 0)
+            || policy.server_epoch.is_none_or(|epoch| epoch == 0)
+            || if access == Access::Write {
+                policy
+                    .writer_generation
+                    .is_none_or(|generation| generation == 0)
+            } else {
+                policy.writer_generation.is_some()
+            }
+        {
+            return Err(reservation_invalid(
+                "caller startup receipt is inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn deserialize_accepted_caller_request<'de, D>(
+    deserializer: D,
+) -> Result<CallerRunStartRequest, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("dolgorae-run-start-resolved/v2")
+        || value.get("access").is_none()
+        || value.get("role").is_none()
+    {
+        return Err(serde::de::Error::custom(
+            "accepted caller selections must be explicit",
+        ));
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+impl CallerStartIntent {
+    fn validate(&self) -> Result<(), MachineError> {
+        let path = self.canonical_workspace.to_path_buf()?;
+        caller_start_request_digest(&self.request, &self.canonical_workspace, &self.controller)?;
+        if self.run_id.get_version_num() != 7
+            || !is_microsecond_utc_timestamp(&self.created_at)
+            || crate::workspace::workspace_id(&path) != self.workspace_id
+            || self.request.profile != self.global_profile_binding.selected_name
+            || self.request.role != self.instructions.role.name
+        {
+            return Err(reservation_invalid(
+                "caller startup identity is inconsistent",
+            ));
+        }
+        self.global_profile_binding.validate_for_recovery()?;
+        self.instructions.developer_prefix()?;
+        let ready = &self.readiness;
+        let caps = &ready.profile_capability_snapshot;
+        if !bounded_identity(&ready.model, 128)
+            || !bounded_identity(&ready.default_effort, 64)
+            || self
+                .request
+                .model
+                .as_ref()
+                .is_some_and(|model| model != &ready.model)
+            || self
+                .request
+                .effort
+                .as_ref()
+                .is_some_and(|effort| effort != &ready.default_effort)
+            || caps.schema_version != 1
+            || caps.profile_name != self.request.profile
+            || caps.server_key != self.global_profile_binding.server_key
+            || caps.server_epoch == 0
+            || caps.app_server_version != self.global_profile_binding.launch_snapshot.codex_version
+            || caps.schema_sha256
+                != self
+                    .global_profile_binding
+                    .launch_snapshot
+                    .schema_bundle_sha256
+            || self.request.required_capabilities.iter().any(|capability| {
+                caps.capabilities.get(capability) != Some(&CapabilityState::Supported)
+            })
+        {
+            return Err(reservation_invalid(
+                "caller readiness does not match accepted launch input",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Retry identity excludes mutable files and path aliases, while retaining
+    /// every semantic request choice and the authenticated Controller binding.
+    pub fn request_digest(&self) -> Result<String, MachineError> {
+        self.validate()?;
+        caller_start_request_digest(&self.request, &self.canonical_workspace, &self.controller)
+    }
+}
+
+/// Compute retry identity before loading instruction files or Profile state.
+/// The request must already contain checked, resolved startup selections.
+pub fn caller_start_request_digest(
+    request: &CallerRunStartRequest,
+    canonical_workspace: &LosslessPath,
+    controller: &ControllerBinding,
+) -> Result<String, MachineError> {
+    let path = canonical_workspace.to_path_buf()?;
+    let workspace_id = crate::workspace::workspace_id(&path);
+    let mut checked = request.clone();
+    checked.schema = "dolgorae-run-start-request/v2".to_owned();
+    if &checked.resolve()? != request
+        || !path.is_absolute()
+        || path.as_os_str().as_bytes().contains(&0)
+        || request
+            .expected_workspace_id
+            .as_ref()
+            .is_some_and(|id| id != &workspace_id)
+        || controller.identity.controller_id.get_version_num() != 7
+        || controller.identity.generation == 0
+        || !bounded_identity(&controller.identity.instance_id, 128)
+        || controller
+            .identity
+            .subject_id
+            .as_deref()
+            .is_some_and(|id| !bounded_identity(id, 256))
+        || !is_sha256(&controller.capability_sha256)
+    {
+        return Err(reservation_invalid(
+            "caller startup request identity is inconsistent",
+        ));
+    }
+    let mut request = request.clone();
+    request.workspace = None;
+    request.expected_workspace_id = None;
+    caller_start_digest(&serde_json::json!({
+        "request": request, "workspace_id": workspace_id,
+        "canonical_workspace": canonical_workspace, "controller": controller,
+    }))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerStartReservation {
+    pub schema_version: u32,
+    pub operation: String,
+    pub idempotency_key: String,
+    pub normalized_identity_sha256: String,
+    pub request_sha256: String,
+    pub run_id: Uuid,
+    pub accepted_intent: CallerStartIntent,
+}
+
+impl CallerStartReservation {
+    pub fn new(intent: CallerStartIntent) -> Result<Self, MachineError> {
+        let request_sha256 = intent.request_digest()?;
+        Ok(Self {
+            schema_version: 2,
+            operation: "start_run".to_owned(),
+            idempotency_key: intent.request.idempotency_key.clone(),
+            normalized_identity_sha256: caller_start_digest(&intent)?,
+            request_sha256,
+            run_id: intent.run_id,
+            accepted_intent: intent,
+        })
+    }
+
+    fn validate(&self) -> Result<(), MachineError> {
+        if self.schema_version != 2
+            || self.operation != "start_run"
+            || self.idempotency_key != self.accepted_intent.request.idempotency_key
+            || self.run_id != self.accepted_intent.run_id
+            || self.request_sha256 != self.accepted_intent.request_digest()?
+            || self.normalized_identity_sha256 != caller_start_digest(&self.accepted_intent)?
+        {
+            return Err(reservation_invalid(
+                "caller reservation differs from accepted input",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn caller_start_digest(value: &impl Serialize) -> Result<String, MachineError> {
+    if !canonical_round_trip_preserves(value)
+        .map_err(|_| reservation_invalid("caller startup input is unrepresentable"))?
+    {
+        return Err(reservation_invalid(
+            "caller startup input is not lossless JSON",
+        ));
+    }
+    let text = serde_json::to_string(value)
+        .map_err(|_| reservation_invalid("caller startup input is unrepresentable"))?;
+    let bytes = canonicalize(
+        &parse(&text)
+            .map_err(|_| reservation_invalid("caller startup input is unrepresentable"))?,
+    )
+    .map_err(|_| reservation_invalid("caller startup input is unrepresentable"))?;
+    Ok(sha256_hex(&bytes))
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AllocationReservation {
+    Legacy(StartReservation),
+    Caller(Box<CallerStartReservation>),
 }
 
 /// The workspace's durable index of `run start` allocation keys.
@@ -608,22 +1195,30 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         operation: &str,
         idempotency_key: &str,
     ) -> Result<Option<StartReservation>, MachineError> {
-        let path = self.path(directory, idempotency_key);
-        if fs::symlink_metadata(&path).is_err() {
+        let Some(decoded) = self.load_record(directory, idempotency_key)? else {
             return Ok(None);
-        }
-        verify_secure_file(&path, self.platform.current_uid())?;
-        let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;
-        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
-            return Err(reservation_invalid("reservation exceeds its bound"));
-        }
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| reservation_invalid("reservation is not UTF-8"))?;
-        let canonical =
-            canonicalize(&parse(text).map_err(|_| reservation_invalid("reservation is not JSON"))?)
-                .map_err(|_| reservation_invalid("reservation is not canonicalizable"))?;
-        let reservation: StartReservation = serde_json::from_slice(&canonical)
-            .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+        };
+        let reservation = match decoded {
+            AllocationReservation::Legacy(reservation) => reservation,
+            AllocationReservation::Caller(reservation) => {
+                reservation.validate()?;
+                if directory != "run-start"
+                    || operation != "start_run"
+                    || reservation.idempotency_key != idempotency_key
+                {
+                    return Err(reservation_invalid(
+                        "caller reservation does not describe this key",
+                    ));
+                }
+                return Err(MachineError::new(
+                    "CAPABILITY_UNSUPPORTED",
+                    "legacy allocation cannot reinterpret a caller startup reservation",
+                    false,
+                    serde_json::json!({"profile": reservation.accepted_intent.request.profile,
+                        "capability_name": "caller_workspace_start_reservation", "support": "unavailable"}),
+                ));
+            }
+        };
         if reservation.schema_version != 1
             || reservation.operation != operation
             || reservation.idempotency_key != idempotency_key
@@ -635,6 +1230,119 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             ));
         }
         Ok(Some(reservation))
+    }
+
+    fn load_record(
+        &self,
+        directory: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<AllocationReservation>, MachineError> {
+        let path = self.path(directory, idempotency_key);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(run_path_error(&path, error.to_string())),
+            Ok(_) => {}
+        }
+        verify_secure_file(&path, self.platform.current_uid())?;
+        let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;
+        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+            return Err(reservation_invalid("reservation exceeds its bound"));
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| reservation_invalid("reservation is not UTF-8"))?;
+        let canonical =
+            canonicalize(&parse(text).map_err(|_| reservation_invalid("reservation is not JSON"))?)
+                .map_err(|_| reservation_invalid("reservation is not canonicalizable"))?;
+        let decoded: AllocationReservation = serde_json::from_slice(&canonical)
+            .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+        if let AllocationReservation::Caller(reservation) = &decoded {
+            let original: serde_json::Value = serde_json::from_slice(&canonical)
+                .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+            let retained = serde_json::to_value(reservation)
+                .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+            if original != retained {
+                return Err(reservation_invalid(
+                    "caller reservation contains omitted or unknown fields",
+                ));
+            }
+        }
+        Ok(Some(decoded))
+    }
+
+    /// Inspect the original accepted input before consulting live sources.
+    /// A legacy key remains owned by its legacy Run and is never shadowed.
+    pub fn load_caller(
+        &self,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<Option<CallerStartReservation>, MachineError> {
+        if !is_sha256(request_sha256) {
+            return Err(reservation_invalid("caller request digest is invalid"));
+        }
+        let Some(decoded) = self.load_record("run-start", idempotency_key)? else {
+            return Ok(None);
+        };
+        let reservation = match decoded {
+            AllocationReservation::Legacy(legacy) => {
+                if legacy.schema_version != 1
+                    || legacy.operation != "start_run"
+                    || legacy.idempotency_key != idempotency_key
+                    || !is_sha256(&legacy.normalized_identity_sha256)
+                    || legacy.run_id.get_version_num() != 7
+                {
+                    return Err(reservation_invalid(
+                        "legacy reservation does not describe this key",
+                    ));
+                }
+                return Err(idempotency_conflict(
+                    legacy.run_id,
+                    &legacy.normalized_identity_sha256,
+                    request_sha256,
+                ));
+            }
+            AllocationReservation::Caller(reservation) => *reservation,
+        };
+        reservation.validate()?;
+        if reservation.idempotency_key != idempotency_key {
+            return Err(reservation_invalid(
+                "caller reservation does not describe this key",
+            ));
+        }
+        if reservation.request_sha256 != request_sha256 {
+            return Err(idempotency_conflict(
+                reservation.run_id,
+                &reservation.request_sha256,
+                request_sha256,
+            ));
+        }
+        Ok(Some(reservation))
+    }
+
+    pub fn reserve_caller(
+        &self,
+        reservation: &CallerStartReservation,
+    ) -> Result<CallerStartReservation, MachineError> {
+        reservation.validate()?;
+        self.ensure_root("run-start")?;
+        let path = self.path("run-start", &reservation.idempotency_key);
+        let text = serde_json::to_string(reservation)
+            .map_err(|_| reservation_invalid("caller reservation is unrepresentable"))?;
+        let mut bytes = canonicalize(
+            &parse(&text)
+                .map_err(|_| reservation_invalid("caller reservation is unrepresentable"))?,
+        )
+        .map_err(|_| reservation_invalid("caller reservation is unrepresentable"))?;
+        bytes.push(b'\n');
+        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+            return Err(reservation_invalid("reservation exceeds its bound"));
+        }
+        match atomic_create(&self.platform, &path, &bytes, 0o600) {
+            Ok(()) => Ok(reservation.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self
+                .load_caller(&reservation.idempotency_key, &reservation.request_sha256)?
+                .ok_or_else(|| reservation_invalid("reservation vanished")),
+            Err(error) => Err(run_path_error(&path, error.to_string())),
+        }
     }
 
     /// Reserve one key for one Run, before that Run is published.
@@ -755,6 +1463,58 @@ impl<P: WorkspacePlatform> RunStore<P> {
         result
     }
 
+    pub fn load_caller_start_receipt(
+        &self,
+        run_id: Uuid,
+        intent_sha256: &str,
+    ) -> Result<Option<CallerStartReceipt>, MachineError> {
+        let manifest = self.load_manifest(run_id)?;
+        let path = run_root(&self.state_root, run_id).join("caller-start-receipt.json");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(run_path_error(&path, error.to_string())),
+            Ok(_) => {}
+        }
+        verify_secure_file(&path, self.platform.current_uid())?;
+        let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;
+        if bytes.len() > 8192 {
+            return Err(reservation_invalid("caller receipt exceeds its bound"));
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| reservation_invalid("caller receipt is not UTF-8"))?;
+        let canonical = canonicalize(
+            &parse(text).map_err(|_| reservation_invalid("caller receipt is invalid"))?,
+        )
+        .map_err(|_| reservation_invalid("caller receipt is invalid"))?;
+        let receipt: CallerStartReceipt = serde_json::from_slice(&canonical)
+            .map_err(|_| reservation_invalid("caller receipt shape is invalid"))?;
+        receipt.validate(&manifest, intent_sha256)?;
+        Ok(Some(receipt))
+    }
+
+    pub fn publish_caller_start_receipt(
+        &self,
+        receipt: &CallerStartReceipt,
+    ) -> Result<CallerStartReceipt, MachineError> {
+        let manifest = self.load_manifest(receipt.run_id)?;
+        receipt.validate(&manifest, &receipt.accepted_intent_sha256)?;
+        let path = run_root(&self.state_root, receipt.run_id).join("caller-start-receipt.json");
+        let text = serde_json::to_string(receipt)
+            .map_err(|_| reservation_invalid("caller receipt is unrepresentable"))?;
+        let mut bytes = canonicalize(
+            &parse(&text).map_err(|_| reservation_invalid("caller receipt is unrepresentable"))?,
+        )
+        .map_err(|_| reservation_invalid("caller receipt is unrepresentable"))?;
+        bytes.push(b'\n');
+        match atomic_create(&self.platform, &path, &bytes, 0o600) {
+            Ok(()) => Ok(receipt.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self
+                .load_caller_start_receipt(receipt.run_id, &receipt.accepted_intent_sha256)?
+                .ok_or_else(|| reservation_invalid("caller receipt vanished")),
+            Err(error) => Err(run_path_error(&path, error.to_string())),
+        }
+    }
+
     pub fn load_manifest(&self, run_id: Uuid) -> Result<RunManifest, MachineError> {
         verify_secure_directory(&self.state_root, self.platform.current_uid())?;
         let runs = self.state_root.join("runs");
@@ -799,6 +1559,33 @@ impl<P: WorkspacePlatform> RunStore<P> {
                 "run manifest is not canonicalizable",
             )
         })?;
+        let shape: serde_json::Value = serde_json::from_slice(&canonical).map_err(|_| {
+            run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
+                "run manifest schema is invalid",
+            )
+        })?;
+        if shape["schema_version"] == 3
+            && [
+                "/parent_ref",
+                "/thread_id",
+                "/fork_provenance",
+                "/write_continuation_provenance",
+                "/aggregate_binding",
+                "/purpose/external_label",
+                "/agent_configuration/purpose/external_label",
+                "/agent_configuration/role_reference",
+            ]
+            .iter()
+            .any(|pointer| shape.pointer(pointer).is_none())
+        {
+            return Err(run_state_invariant(
+                run_id,
+                RunStateInvariant::StateVariantMismatch,
+                "caller-workspace manifest is missing a required nullable field",
+            ));
+        }
         let manifest: RunManifest = serde_json::from_slice(&canonical).map_err(|_| {
             run_state_invariant(
                 run_id,
@@ -1085,7 +1872,7 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
             reason,
         )
     };
-    if !matches!(manifest.schema_version, 1 | 2) || manifest.run_id.get_version_num() != 7 {
+    if !matches!(manifest.schema_version, 1..=3) || manifest.run_id.get_version_num() != 7 {
         return Err(invalid(
             "schema_version and UUIDv7 run identity are required",
         ));
@@ -1098,7 +1885,7 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
     if !is_sha256(&manifest.workspace_id)
         || !is_sha256(&manifest.dolgorae.binary_sha256)
         || !is_sha256(&manifest.controller.capability_sha256)
-        || !is_sha256(&manifest.instructions.normalized_sha256)
+        || !is_sha256(manifest.instructions.digest())
         || !is_sha256(&manifest.profile_capability_snapshot.schema_sha256)
     {
         return Err(invalid("all fixed digests must be lowercase SHA-256"));
@@ -1135,7 +1922,7 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
     validate_profile_snapshot(&manifest.profile).map_err(invalid)?;
     match (manifest.schema_version, &manifest.global_profile_binding) {
         (1, None) => {}
-        (2, Some(binding)) => {
+        (2 | 3, Some(binding)) => {
             binding.validate_for_recovery().map_err(|_| {
                 invalid("global Profile binding is incomplete or internally inconsistent")
             })?;
@@ -1148,9 +1935,11 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
             }
         }
         _ => {
-            return Err(invalid(
-                "schema v1 excludes and schema v2 requires a global Profile binding",
-            ));
+            return Err(invalid(if manifest.schema_version == 3 {
+                "schema v3 requires a global Profile binding"
+            } else {
+                "schema v1 excludes and schema v2 requires a global Profile binding"
+            }));
         }
     }
     validate_agent_configuration(manifest).map_err(invalid)?;
@@ -1232,14 +2021,44 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
         || manifest.model.is_empty()
         || manifest.initial_reasoning_effort.is_empty()
         || manifest.default_reasoning_effort.is_empty()
-        || manifest.instructions.schema != "dolgorae.instructions/v1"
-        || manifest.instructions.common_prefix_version != 1
-        || manifest.instructions.mode_prefix_version != 1
-        || manifest.instructions.purpose_prefix_version != 1
     {
         return Err(invalid(
             "fixed build, model, or instruction metadata is invalid",
         ));
+    }
+    match (&manifest.instructions, manifest.schema_version) {
+        (RunInstructionSnapshot::Legacy(value), 1 | 2)
+            if value.schema == "dolgorae.instructions/v1"
+                && value.common_prefix_version == 1
+                && value.mode_prefix_version == 1
+                && value.purpose_prefix_version == 1
+                && manifest.requested_access.is_none()
+                && manifest.selected_role.is_none()
+                && manifest.start_contract.is_none() => {}
+        (RunInstructionSnapshot::Caller(value), 3) => {
+            value
+                .developer_prefix()
+                .map_err(|_| invalid("captured instruction integrity failed"))?;
+            let expected_access = match manifest.requested_access {
+                Some(crate::domain::CallerWorkspaceAccess::ReadOnly) => Access::Read,
+                Some(crate::domain::CallerWorkspaceAccess::Writable) => Access::Write,
+                None => return Err(invalid("modern startup access is missing")),
+            };
+            if manifest.execution_lane != ExecutionLane::Dedicated
+                || manifest.initial_access != expected_access
+                || manifest.selected_role.as_deref() != Some(value.role.name.as_str())
+                || manifest.start_contract.as_deref() != Some("caller_workspace/v1")
+            {
+                return Err(invalid(
+                    "modern startup selection disagrees with the captured Run",
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "instruction or startup generation does not match manifest",
+            ));
+        }
     }
     if manifest
         .thread_id
@@ -1324,7 +2143,7 @@ fn validate_agent_configuration(manifest: &RunManifest) -> Result<(), &'static s
     let agent = &manifest.agent_configuration;
     let expected_binding_sha256 = match manifest.schema_version {
         1 => canonical_digest(&manifest.profile)?,
-        2 => manifest
+        2 | 3 => manifest
             .global_profile_binding
             .as_ref()
             .ok_or("global Profile binding is missing")?
@@ -1345,13 +2164,45 @@ fn validate_agent_configuration(manifest: &RunManifest) -> Result<(), &'static s
         || agent.required_assurance != manifest.requested_assurance
         || agent.native_subagent_policy != "enabled"
         || agent.normalized_instructions.is_empty()
-        || agent.normalized_instructions.len() > 65_536
-        || agent.instructions.normalized_byte_length
-            != u64::try_from(agent.normalized_instructions.len()).unwrap_or(u64::MAX)
-        || agent.instructions.normalized_sha256
-            != sha256_hex(agent.normalized_instructions.as_bytes())
     {
         return Err("Agent Configuration snapshot disagrees with fixed Run identity");
+    }
+    match (&agent.instructions, manifest.schema_version) {
+        (RunInstructionSnapshot::Legacy(value), 1 | 2) => {
+            if agent.normalized_instructions.len() > 65_536
+                || value.normalized_byte_length != agent.normalized_instructions.len() as u64
+                || value.normalized_sha256 != sha256_hex(agent.normalized_instructions.as_bytes())
+            {
+                return Err("legacy instruction metadata disagrees with its body");
+            }
+        }
+        (RunInstructionSnapshot::Caller(value), 3) => {
+            let configuration = CallerAgentConfigurationSnapshot {
+                schema_version: 3,
+                selected_profile: agent.runtime_profile.clone(),
+                global_profile_binding_sha256: agent.runtime_profile_snapshot_sha256.clone(),
+                model: agent.model.clone(),
+                default_effort: agent.default_effort.clone(),
+                purpose: agent.purpose.clone(),
+                required_capabilities: agent.required_capabilities.clone(),
+                role_reference: agent.role_reference.clone(),
+                instructions: value.clone(),
+                execution_lane: agent.execution_lane,
+                required_assurance: agent.required_assurance,
+                native_subagent_policy: agent.native_subagent_policy.clone(),
+            };
+            configuration
+                .validate()
+                .map_err(|_| "modern Agent Configuration is invalid")?;
+            if value
+                .developer_prefix()
+                .map_err(|_| "captured instruction integrity failed")?
+                != agent.normalized_instructions
+            {
+                return Err("modern developer prefix disagrees with accepted captures");
+            }
+        }
+        _ => return Err("instruction generation disagrees with Agent Configuration"),
     }
     Ok(())
 }
@@ -1716,7 +2567,8 @@ mod tests {
                 purpose_prefix_version: 1,
                 normalized_byte_length: 6,
                 normalized_sha256: "b".repeat(64),
-            },
+            }
+            .into(),
             execution_lane: ExecutionLane::SharedReadonly,
             required_assurance: Assurance::BestEffortPersonalAlpha,
             native_subagent_policy: "enabled".to_owned(),

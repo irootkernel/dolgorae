@@ -71,6 +71,7 @@ impl CoreGatewayBackend {
         let run_id = uuid(&reference.run_id, "run.run_id")?;
         let root = self.home.workspace_root(&view.workspace_id);
         let (snapshot, observation) = RunSnapshot::observe(&root, run_id, 0)?;
+        snapshot.manifest.require_legacy_adapter()?;
         if snapshot.manifest.workspace_id != view.workspace_id {
             return Err(invalid("run.run_id", "Run belongs to another workspace"));
         }
@@ -82,6 +83,7 @@ impl CoreGatewayBackend {
         let view = self.workspace(required(reference.workspace.as_ref(), "run.workspace")?)?;
         let root = self.home.workspace_root(&view.workspace_id);
         let snapshot = RunSnapshot::load(&root, uuid(&reference.run_id, "run.run_id")?, 0)?;
+        snapshot.manifest.require_legacy_adapter()?;
         if snapshot.manifest.workspace_id != view.workspace_id {
             return Err(invalid("run.run_id", "Run belongs to another workspace"));
         }
@@ -162,6 +164,12 @@ impl CoreGatewayBackend {
         if binding.identity.generation != controller.expected_controller_generation {
             return Err(controller_mismatch(run_id));
         }
+        crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            self.home.workspace_root(&view.workspace_id),
+        )
+        .load_manifest(run_id)?
+        .require_legacy_adapter()?;
         CoreSemanticService.mutate_run(RunMutationInput {
             workspace: view.canonical_path.to_path_buf()?,
             expected_workspace_id: view.workspace_id,
@@ -1280,6 +1288,7 @@ impl GatewayBackend for CoreGatewayBackend {
             .list_runs(&view, controller)?
             .into_iter()
             .map(|(snapshot, observation)| {
+                snapshot.manifest.require_legacy_adapter()?;
                 let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
                 project::run_projection(&snapshot, &facts)
             })

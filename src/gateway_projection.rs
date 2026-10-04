@@ -189,12 +189,18 @@ pub fn reconciliation_action(
     })
 }
 
-pub fn configuration(snapshot: &RunSnapshot) -> pb::RunConfigurationProjection {
+pub fn configuration(
+    snapshot: &RunSnapshot,
+) -> Result<pb::RunConfigurationProjection, MachineError> {
     let manifest = &snapshot.manifest;
+    let instructions = manifest
+        .instructions
+        .legacy()
+        .ok_or_else(|| missing("public-v1 legacy instruction contract"))?;
     let mut required_capabilities = manifest.required_capabilities.clone();
     required_capabilities.sort();
     required_capabilities.dedup();
-    pb::RunConfigurationProjection {
+    Ok(pb::RunConfigurationProjection {
         profile_name: manifest.profile.profile_name.clone(),
         purpose: purpose(manifest.purpose.kind) as i32,
         purpose_label: manifest.purpose.external_label.clone(),
@@ -214,14 +220,14 @@ pub fn configuration(snapshot: &RunSnapshot) -> pb::RunConfigurationProjection {
                 id: value.id.clone(),
             }),
         instruction_contract: Some(pb::InstructionContractProjection {
-            schema_id: manifest.instructions.schema.clone(),
-            common_prefix_version: manifest.instructions.common_prefix_version,
-            mode_prefix_version: manifest.instructions.mode_prefix_version,
-            purpose_prefix_version: manifest.instructions.purpose_prefix_version,
+            schema_id: instructions.schema.clone(),
+            common_prefix_version: instructions.common_prefix_version,
+            mode_prefix_version: instructions.mode_prefix_version,
+            purpose_prefix_version: instructions.purpose_prefix_version,
         }),
-        controller_instructions_byte_length: manifest.instructions.normalized_byte_length,
-        controller_instructions_sha256: manifest.instructions.normalized_sha256.clone(),
-    }
+        controller_instructions_byte_length: instructions.normalized_byte_length,
+        controller_instructions_sha256: instructions.normalized_sha256.clone(),
+    })
 }
 
 pub fn lineage(
@@ -534,7 +540,7 @@ pub fn run_projection(
             .as_ref()
             .map(lineage)
             .transpose()?,
-        configuration: Some(configuration(snapshot)),
+        configuration: Some(configuration(snapshot)?),
         stamp: Some(stamp(&snapshot.stamp)),
     })
 }

@@ -576,7 +576,12 @@ pub(crate) fn validate_installed_policy(
             ));
         }
         let configuration = &role.agent_configuration;
-        let instructions = &configuration.instructions;
+        let instructions = configuration.instructions.legacy().ok_or_else(|| {
+            config(
+                "specialist-policy",
+                "legacy policy requires legacy instruction metadata",
+            )
+        })?;
         if configuration.schema_version != 2
             || !bounded(&configuration.runtime_profile, 128)
             || !is_sha256(&configuration.runtime_profile_snapshot_sha256)
@@ -1005,7 +1010,8 @@ mod tests {
                         purpose_prefix_version: 1,
                         normalized_byte_length: normalized.len() as u64,
                         normalized_sha256: sha256_hex(normalized.as_bytes()),
-                    },
+                    }
+                    .into(),
                     execution_lane: ExecutionLane::Dedicated,
                     required_assurance: Assurance::BestEffortPersonalAlpha,
                     native_subagent_policy: "enabled".to_owned(),

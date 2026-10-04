@@ -543,8 +543,10 @@ migrations preserve existing rows transactionally.
 
 EPIC-017's successor resolver explicitly reads one common Markdown body and
 one named global Role body through protected no-follow descriptors. It owns
-bounded admission and raw-byte captures; runtime configuration owns ambient
-AGENTS suppression. No Role text selects a Profile, cwd or access. The compiler
+bounded admission and raw-byte captures; runtime configuration owns project and
+ancestor AGENTS suppression. Native Profile guidance may coexist as user input
+outside those captures, subordinate to the managed developer prefix. No Role
+text selects a Profile, cwd or access. The compiler
 stores Role captures in policy v3 and aggregate bootstrap captures common once
 for its children. Agent Configuration v3 and manifest v3 retain immutable
 instruction identity. Retry, generation recovery and child activation consume
@@ -558,13 +560,122 @@ bounded read and acceptance for standalone, policy and bootstrap admission.
 The successor configuration reader is separate
 from the legacy v1/v2 reader. `markdown_policy` prepares policy v3 captures and
 bootstrap instructions for the later integrated adapters. These internal APIs
-do not activate modern starts or advertise ambient-discovery support. The
-successor configuration preparation checks discovery qualification before Profile
-observation and returns `INSTRUCTION_DISCOVERY_UNSUPPORTED` before Run allocation
-until pinned-runtime qualification is integrated. A project instruction byte limit
-alone does not qualify suppression of Profile guidance. Retained capture readback
-and legacy preparation remain available. Thread startup and manifest v3 wiring
-remain with TASK-063; the public adapter cutover remains with TASK-066.
+do not activate public modern starts. Successor configuration preparation checks
+the selected executable against the qualified pin before shared Profile readiness
+or Run allocation; unsupported pins return `INSTRUCTION_DISCOVERY_UNSUPPORTED`.
+Project instruction byte limits
+do not suppress native Profile guidance; the contract permits that separate user
+contribution and does not include it in the immutable Role claim. Retained
+capture readback and legacy preparation remain available. Connecting manifest
+v3 to thread startup remains with TASK-063; the public adapter cutover remains
+with TASK-066.
+
+The Run reader distinguishes legacy instruction metadata from successor source
+captures. Manifest v3 retains the exact common/Role snapshot and explicit
+requested access and selected Role; its Agent Configuration reconstructs the
+developer prefix from those accepted bytes. Legacy manifests keep their original
+wire fields. Recovery validates cross-field identity before using either
+generation and does not reopen instruction sources.
+
+Caller-workspace coordinator sessions use native same-thread settings updates
+and matching settings notifications rather than changing only local sandbox
+labels. Thread creation controls project/ancestor instruction discovery and
+checks the returned model, cwd, approval and sandbox policy. These metadata
+checks remain distinct from empirical enforcement qualification: without that
+qualification, policy stays unverified and modern admission remains unavailable.
+The coordinator journals the returned provisional Thread identity before
+checking those startup observations. For a new caller Thread, it then calls
+`thread/name/set` with a bounded Run label and reads the same Thread with
+`includeTurns: true`. Startup binding requires the original identity and an
+empty Turn list. This metadata operation is the persistence barrier for the
+pinned native implementation: its
+[`thread/name/set` handler](https://github.com/openai/codex/blob/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/app-server/src/request_processors/thread_processor.rs#L1848)
+updates the Thread store, whose
+[`persist_thread` operation](https://github.com/openai/codex/blob/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/thread-store/src/local/live_writer.rs#L291)
+writes the initial metadata without a task Turn. A failure after Thread
+creation quarantines startup while retaining that provisional identity; a
+retry cannot create a replacement. Matching readback remains separate from
+the required empirical process-loss persistence qualification.
+
+Before a caller policy update, the dedicated connection requires two bounded
+`thread/loaded/list` observations containing only its original Thread, with no
+continuation cursor, around a same-Thread idle-status read. Another loaded
+Thread, including an idle native child, blocks the update before mutation.
+Unknown or incomplete observations also block it. The guard permits native
+child execution but refuses transitions whose effect on a loaded child's
+permissions is unproven.
+These reads do not replace the independent operating-system workload census
+or qualify filesystem enforcement.
+
+Caller policy evidence has a separate checked successor envelope. It binds the
+operation, original Run and Thread, Worker identity and control-socket epoch,
+Dedicated Server identity and socket, server key and epoch, immutable Profile
+binding digest and effective policy. Acceptance compares these facts with the
+current runtime record, durable policy and prepared writer transaction. An
+unverified policy, mismatched generation or missing original binding cannot
+commit writer authority. The frozen `WriterAccessChanged` response retains its
+legacy meaning and cannot serve as this proof.
+While holding the workspace Writer lock, the coordinator reads the committed
+Run projection and its exact audit prefix through the read-only observer.
+The prefix must match the projection's head hash, and the projection must
+remain unchanged across the read. The live Worker retains exclusive ledger
+ownership; policy verification never opens a second ledger writer.
+Exact startup retries use the same observer to validate history beyond the
+three-record bootstrap prefix. They retain conformance validation and never
+reopen a live Run for bootstrap repair. Only the bootstrap prefix
+uses the exclusive bootstrap writer.
+Runtime qualification is a separate prerequisite. The supported native policy
+mechanism is pinned to the observed executable, with explicit thread sandbox,
+approval and project-document controls.
+`global_runtime` owns the static accepted-binding pin check, which instruction
+admission and Worker qualification share. The Worker owns process qualification.
+The Dedicated Server also receives the
+project-document limit as a process override; merged configuration must confirm
+that managed settings have not overridden it before thread initialization.
+The Worker derives a private qualification witness from its actual process and
+socket identities and the accepted launch inputs. A bootstrap flag or received
+proof cannot construct that witness. Five empty operating-system workload
+samples are required before and after each startup or policy effect.
+Supported skills, plugins, apps and MCP remain available under the existing
+trusted-Profile boundary; qualification concerns native execution enforcement.
+
+`run` owns the checked caller startup request used by reservation storage;
+`semantic` composes admission from that request without a reverse dependency
+from persistence to the service. TASK-063's transport-neutral successor
+reservation also retains the observed model, default effort and Profile
+capability snapshot. Retries do not resolve omitted launch choices against a
+later catalog. A separate immutable startup receipt records the original
+verified Thread and policy after reader readiness or Writer commit; a manifest
+alone does not prove successful startup.
+Successor admission resolves writable and general defaults into explicit private
+selections. It remains separate from the frozen legacy start service and its
+lazy thread allocation. Unsupported executable pins return
+`WORKSPACE_STARTUP_UNSUPPORTED` before Run reservation or caller execution.
+For the qualified pin, shared Profile readiness precedes immutable intent
+acceptance, and authoritative Writer reservation precedes caller Dedicated
+startup. The Worker establishes the original Thread as a reader without a
+task Turn; writable startup applies verified policy before Writer commit and
+receipt publication. Public adapter activation remains TASK-066 work.
+
+Recovery restores provisional Thread identities from the durable operation
+chain. A checked native intent is fsynced before caller Thread startup or
+settings dispatch. Ledger verification permits caller `Idle -> OutcomeUnknown`
+only after that successor intent; legacy transition rules remain unchanged.
+An unmatched startup intent quarantines replay. An unknown startup attaches
+only that original Thread as a reader and retains uncertainty until explicit
+reconciliation proves idle empty history.
+Explicit resume can retire a pending writer guard with current qualified
+Reader proof. It cannot turn interrupted writable startup into success or
+reacquire Writer authority. Without a retained native identity, recovery
+reports the unavailable original binding. Pre-execution Writer contention
+seals the original Starting Run as StartFailed under the startup lock.
+After the entire old generation is verified absent, caller Writer retirement
+reads the committed projection and audit prefix under the Writer lock. It uses
+the snapshot owner's Thread-generation and policy-epoch selection without
+requiring the guard to be Active. The public snapshot still requires Active
+authority for a Write policy. Retirement verifies the holder's generation and
+server binding, retains the guarded transaction, compares both audit-head
+sequence and hash, and records Unknown policy before releasing authority.
 
 `OrchestrationStore` owns durable acceptance of the prepared successor captures
 in its workspace database. Its private
@@ -1270,6 +1381,41 @@ A Dedicated Lane Server preflights both socket paths before spawn. Its
 unpublished-start cleanup uses the same deterministic path and owner checks
 only after the spawned group is proven absent; it never treats an unverified
 entry as a socket owned by that start.
+A failed Dedicated launch records its bounded startup phase and failure
+classification in the private Dedicated log. The Worker reports its failure
+code through the startup handoff even when it exits before readiness.
+Connection, initialization, qualification and thread-start failures also record
+their phase and error classification there before the owned server is stopped.
+Caller qualification, Thread startup, and retained-Thread connection startup
+retain the failing substage and original typed error before uncertain
+acceptance is quarantined. A rejected settings or Thread observation identifies
+the checked predicate without retaining the returned content. These diagnostics omit RPC
+payloads and error prose. A process-quiescence refusal includes its checked
+predicate and bounded kernel observation; a socket refusal identifies the
+failed socket-identity check. Diagnostic detail never changes the returned
+error, durable provisional Thread, or retry fence.
+A startup-child refusal also records the expected Dedicated leader scope,
+the prior observation for that PID, and the failed identity comparisons. These
+values come from the refused check; diagnostics add no kernel lookup or wait.
+Initial descendant admission additionally identifies its census call site and
+bounded typed ancestor chain. It uses two complete kernel observations to bind
+every ancestor PID, birth and UID to the actual Dedicated leader. A differing
+initial group/session is frozen at admission; later drift remains a refusal.
+The post-configuration startup proof preserves its predicate before mapping a
+refusal to the coordinator's busy error. Both the entry and repeated startup
+socket checks preserve socket-identity refusal details.
+Runtime qualification failures identify the failed process-proof predicate and
+its bounded kernel observation in that private log. These observations explain
+the refusal and do not replace or weaken the required proof.
+On AArch64, executable integrity checks use the SHA-256 library's CPU-checked
+hardware backend with its software fallback. Every identity sample still hashes
+the complete executable. This reduces qualification cost without extending the
+shared startup deadline or substituting cached digests for content verification.
+Writer pre-effect census failures record the same predicate and observation in
+the existing private Dedicated log before cancelling the prepared transition.
+Manifest loading and Primary tool preparation finish before Dedicated startup,
+so a preparation failure leaves no server to stop.
+
 A legacy public-v1 dedicated Run first owns only a durable logical lane; its
 first input lazily starts that lane's physical App Server. Modern starts
 initialize the physical server and thread before successful startup, as
@@ -1295,15 +1441,67 @@ recovery uses `thread/resume`, and history fork uses `thread/fork`. The worker
 owns only that client connection, one thread binding, correlation, lifecycle,
 audit and interactions. The connected App Server owns turn execution, commands,
 native subagents and its process tree. A narrowly tested user-input connection
-may advertise `experimentalApi`; no other experimental feature follows.
+may advertise `experimentalApi`. Caller-workspace connections also advertise
+it for the pinned `thread/settings/update` request and
+`thread/settings/updated` notification. This opt-in does not add dynamic tools
+or authorize other experimental methods.
 
 Modern starts initialize a dedicated thread before successful startup and
 verify the selected runtime policy. Writable startup uses the existing
 prepare/apply/verify/commit writer transaction without a synthetic Turn.
+Initial runtime qualification, configuration readback and turnless Thread
+binding or original-Thread rebinding share one monotonic process-census deadline
+for each new physical Worker connection, capped at ten seconds and the session
+transport budget. They may wait for same-user Dedicated startup
+descendants, retaining each observed PID and BSD birth until exact kernel
+absence. Every sample revalidates both leaders, socket identity and complete
+scope membership. Identity drift, scope escape, unreadable census and Worker
+workload fail immediately. Live startup children reset the empty count;
+qualification still requires five complete empty samples 100 milliseconds
+apart. Only the actual owned Dedicated Server creates this in-memory startup
+window. Binding success or failure consumes it permanently; connection startup
+also closes it before WorkerReady when no eager Thread binding is requested.
+Diagnostic phases and later resumes cannot restore it. No task Turn or provider
+dispatch occurs inside the window. Failure retains the original or provisional
+Thread, unknown-state retry fence and Writer guard. Policy proofs and access
+transitions retain their immediate refusal.
+New caller Worker generations publish [private runtime schema version 2](../protocol/dolgorae-worker-runtime-v2.schema.json) before
+Dedicated launch. Its bounded startup ownership witness binds the immutable
+Worker generation, app-server epoch, Dedicated identity and physical socket.
+The control locator and its replaceable socket epoch remain separate. Every
+admitted child and each verified nonleader ancestor are durably recorded before use; the
+witness becomes complete only after binding and final empty-scope verification,
+before WorkerReady. An incomplete witness cannot prove generation absence,
+even with no recorded children. Version 1 remains unchanged; frozen readers
+reject version 2 rather than ignore its ownership evidence.
+Worker startup ownership serializes all runtime writes. Rewrites preserve the
+latest witness revision, children and completion state; connection completion
+reloads the committed record instead of overwriting it with a startup copy.
+Normal control-socket replacement revalidates the generation and recorded
+scopes without reopening startup. Strict quiescence, stale-runtime cleanup and
+Writer retirement consume the same recorded identities and complete scope
+censuses. Unknown members never become owned through a shared UID or scope;
+signals require exact revalidated ownership. This does not remove the existing
+between-poll escape limitation of the trusted personal-alpha model.
+A startup-only group/census mismatch discards its sample after each differing
+nonleader PID has a matching Dedicated identity or an exact `ESRCH` lookup.
+Typed observations are validated before the lookup; disappearance cannot erase
+an observed violation. Every other scope, leader, socket, Worker and tracked-child
+check still runs before discarding the sample. The discarded sample resets the
+empty count without extending the deadline or satisfying qualification.
 An unavailable turnless binding after process loss is an explicit recovery
 limit; recovery cannot report a replacement thread as the original. Accepted
 instruction captures and startup selection survive that failure independently
 of native thread persistence.
+Thread identity and empty-history storage do not prove that native startup
+settings survive process loss. Rebinding supplies the frozen launch inputs and
+the recovery-selected read-only policy, then checks the returned binding and
+settings. A bounded writable-resume mechanism probe may supply its accepted
+startup settings explicitly; that probe does not authorize automatic writer
+reacquisition during product recovery.
+Partial caller-thread startup keeps its nonretryable `OUTCOME_UNKNOWN` result
+through Worker startup handoff and Dedicated startup error projection. Cleanup
+does not turn an accepted, uncertain native effect into a retryable no-op.
 
 The profile manager spawns the singleton suspended in a new process group.
 Its `posix_spawn` attributes use `SETSIGDEF` for every catchable signal and
@@ -2044,8 +2242,31 @@ record, named by the same key digest and scoped to the allocation operation,
 serializes reservation lookup, publication, membership admission or failure
 cleanup, and receipt capture. The shared semantic core holds it across that
 whole allocation; a concurrent identical caller rechecks the published Run
-before performing effects. Different allocation keys remain independent. This
-lock is distinct from Writer authority and POSIX worker startup locks. Both the canonical workspace and its Dolgorae-home
+before performing effects. Different allocation keys remain independent.
+
+The index also admits a strict generation-2 caller-start reservation in the same
+key space. It records the original Run identity, canonical workspace, Controller
+metadata, resolved startup request, immutable Profile launch binding, exact
+instruction captures, acceptance time, and Git baseline. A request digest binds
+the canonical workspace, Controller, and resolved request independently of live
+instruction or Profile files; a separate digest binds the entire accepted intent.
+Retries compare the request first and reuse that intent before consulting live
+sources. Legacy and caller reservations cannot own the same key. A corrupt
+accepted intent fails closed rather than being reconstructed from current files.
+Shared Profile readiness supplies the server epoch, advertised model default
+and capability snapshot before intent acceptance. Those accepted facts enter
+the immutable manifest; retries retain the original resolved model and effort.
+Known unsupported admission still fails before reserving a new Run.
+
+Under startup serialization, a retry validates and reuses an already published
+manifest, including one whose lifecycle is still `Starting`. Only a missing
+manifest is published. Bootstrap and Writer reconciliation continue from the
+original durable state; an existing Run is never republished or replaced. A
+second lifecycle observation handles a Worker that finishes startup while the
+retry checks shared Profile readiness.
+
+The allocation lock is distinct from Writer authority and POSIX worker startup
+locks. Both the canonical workspace and its Dolgorae-home
 state root must satisfy the v1 local-APFS requirement. The state root is
 current-uid-owned mode 0700, mutable files are mode 0600, and no path below it
 is included in a Codex writable root or model-visible projection.
@@ -2570,6 +2791,10 @@ empty censuses within a ten-second total budget. PID reuse, truncated or failed
 enumeration, unreadable identities, unregistered survivors, and detected escape
 create durable `background_execution:unverified` and block release, handoff,
 close, or generation replacement.
+The all-PID census uses short BSD metadata for parent, group, UID and session
+coverage across users. Exact generation checks still require full BSD birth
+identity. Access denial is never process absence; unavailable birth identity
+cannot exempt a recorded zombie or authorize a signal.
 Deliberate fork/setsid/reparent escape wholly between 100-millisecond polls and
 remote side effects remain outside the trusted same-user personal-alpha model;
 the prompt discourages them only as defense in depth. A native Codex terminal

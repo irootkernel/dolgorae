@@ -2,6 +2,34 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_JCS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
+// Successor evidence requires every policy field while retaining the older
+// DTO's permissive reader for accepted legacy records.
+pub(crate) fn deserialize_caller_effective_policy<'de, D>(
+    deserializer: D,
+) -> Result<EffectivePolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let fields = [
+        "access",
+        "verification",
+        "policy_epoch",
+        "thread_generation",
+        "server_epoch",
+        "writer_generation",
+    ];
+    let object = value
+        .as_object()
+        .ok_or_else(|| serde::de::Error::custom("caller effective policy must be an object"))?;
+    if object.len() != fields.len() || fields.iter().any(|field| !object.contains_key(*field)) {
+        return Err(serde::de::Error::custom(
+            "caller effective policy shape is invalid",
+        ));
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
 /// A durable Run-scoped capture boundary shared by all public projections.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +107,15 @@ string_enum!(Access {
     Unsupported => "unsupported",
     Unknown => "unknown"
 });
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CallerWorkspaceAccess {
+    #[serde(rename = "read-only")]
+    ReadOnly,
+    #[default]
+    #[serde(rename = "writable")]
+    Writable,
+}
 
 string_enum!(PolicyVerification {
     Verified => "verified",

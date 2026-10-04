@@ -3123,7 +3123,8 @@ mod tests {
                 purpose_prefix_version: 1,
                 normalized_byte_length: 19,
                 normalized_sha256: "c".repeat(64),
-            },
+            }
+            .into(),
             execution_lane: ExecutionLane::Dedicated,
             required_assurance: Assurance::BestEffortPersonalAlpha,
             native_subagent_policy: "enabled".to_owned(),
@@ -3595,7 +3596,8 @@ mod tests {
                 purpose_prefix_version: 1,
                 normalized_byte_length: 16,
                 normalized_sha256: "c".repeat(64),
-            },
+            }
+            .into(),
             execution_lane: ExecutionLane::Dedicated,
             required_assurance: Assurance::BestEffortPersonalAlpha,
             native_subagent_policy: "enabled".to_owned(),

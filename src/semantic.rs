@@ -168,6 +168,7 @@ pub fn run_list(args: &[OsString]) -> Result<Value, MachineError> {
     let observations = CoreSemanticService.list_runs(&workspace, None)?;
     let mut items = Vec::new();
     for (snapshot, _) in observations {
+        snapshot.manifest.require_legacy_adapter()?;
         let verdict = projection_identity_verdict(&state_root, snapshot.manifest.run_id);
         let terminal = durable_last_terminal(&state_root, snapshot.manifest.run_id, &snapshot)?;
         items.push(snapshot.run_value(verdict, terminal));
@@ -476,7 +477,6 @@ pub(crate) fn prepare_caller_agent_configuration_read_only(
             "unsupported successor Agent Configuration contract",
         ));
     }
-    crate::instructions::require_discovery_control()?;
     let prepared = prepare_external_specialist_read_only(
         workspace,
         role_ref.unwrap_or(&input.role),
@@ -497,6 +497,7 @@ pub(crate) fn prepare_caller_agent_configuration_read_only(
             native_subagent_policy: input.native_subagent_policy,
         },
     )?;
+    crate::instructions::require_discovery_control(&prepared.global_profile_binding)?;
     let legacy = prepared.agent_configuration;
     let instruction_home = DolgoraeHome::system()?.root().join("home");
     let cwd = prepared.view.canonical_path.to_path_buf()?;
@@ -840,7 +841,7 @@ fn prepare_external_specialist_with(
         required_capabilities: capabilities,
         role_reference: Some(role_ref.to_owned()),
         normalized_instructions: input.instructions,
-        instructions,
+        instructions: instructions.into(),
         execution_lane,
         required_assurance: Assurance::BestEffortPersonalAlpha,
         native_subagent_policy: "enabled".to_owned(),
@@ -977,6 +978,27 @@ pub struct RunStartReceipt {
     pub exact_replay: bool,
 }
 
+/// Successor startup selection, distinct from mutable effective access.
+pub use crate::domain::CallerWorkspaceAccess;
+
+pub use crate::run::CallerRunStartRequest;
+
+fn workspace_startup_unsupported() -> MachineError {
+    MachineError::new(
+        "WORKSPACE_STARTUP_UNSUPPORTED",
+        "the selected runtime has no qualified turnless startup and effective-policy mechanism",
+        false,
+        json!({
+            "schema": "dolgorae-workspace-error-details/v1",
+            "required_action": "select_supported_runtime",
+            "phase": "admission",
+            "outcome": "not_dispatched",
+            "review_id": null,
+            "run_id": null,
+        }),
+    )
+}
+
 pub enum RunMutationOperation {
     Submit {
         request: TurnControlRequest,
@@ -1016,6 +1038,89 @@ pub struct RunMutationReceipt {
 }
 
 impl CoreSemanticService {
+    /// Internal successor access entrypoint. Frozen public-v1 adapters continue
+    /// to use mutate_run and cannot reinterpret a manifest-v3 Run.
+    pub fn mutate_caller_run(
+        &self,
+        input: RunMutationInput,
+    ) -> Result<RunMutationReceipt, MachineError> {
+        let view = WorkspaceService::system()?.discover(Some(&input.workspace))?;
+        require_workspace_identity(&view, Some(&input.expected_workspace_id))?;
+        let state_root = workspace_state_root(&view)?;
+        let manifest =
+            RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(input.run_id)?;
+        require_caller_runtime(&manifest)?;
+        match input.operation {
+            RunMutationOperation::AcquireWriter => acquire_writer_authorized(
+                &view,
+                &state_root,
+                input.run_id,
+                &input.carrier,
+                false,
+                None,
+                input.expected_state_revision,
+                None,
+            )?,
+            RunMutationOperation::ReleaseWriter => release_writer_authorized(
+                &view,
+                &state_root,
+                input.run_id,
+                &input.carrier,
+                None,
+                input.expected_state_revision,
+            )?,
+            RunMutationOperation::Recover | RunMutationOperation::Reconcile => {
+                history_reconciliation_admitted(
+                    &view,
+                    &state_root,
+                    input.run_id,
+                    &input.carrier,
+                    "run.recover",
+                    input.expected_state_revision,
+                )?;
+            }
+            RunMutationOperation::Resume => {
+                run_control_admitted(
+                    &view,
+                    &state_root,
+                    input.run_id,
+                    RunVerb::Resume,
+                    Some(&input.carrier),
+                    Prepared::Plain,
+                    false,
+                    input.expected_state_revision,
+                )?;
+                retire_caller_reader_guard(&state_root, &view, input.run_id, &input.carrier)?;
+            }
+            RunMutationOperation::Close { interrupt } => {
+                run_control_admitted(
+                    &view,
+                    &state_root,
+                    input.run_id,
+                    RunVerb::Close,
+                    Some(&input.carrier),
+                    Prepared::Close { interrupt },
+                    false,
+                    input.expected_state_revision,
+                )?;
+            }
+            _ => {
+                return Err(MachineError::invalid_argument(
+                    "operation",
+                    "caller entrypoint requires access transition, recovery, resume or close",
+                ));
+            }
+        }
+        Ok(RunMutationReceipt {
+            snapshot: RunSources::load(
+                &state_root,
+                input.run_id,
+                observed_control_socket_epoch(&state_root, input.run_id),
+            )?,
+            response: None,
+        })
+    }
+
     pub fn list_runs(
         &self,
         workspace: &WorkspaceView,
@@ -1157,6 +1262,865 @@ impl CoreSemanticService {
             WorkspaceService::system()?.discover_for_run_start(input.workspace.as_deref())?;
         start_run_typed(input, view, None, None, None, None, None)
     }
+
+    /// Modern admission is gated independently of frozen public-v1 allocation.
+    /// Qualification must precede any workspace, Profile, Run or writer effect.
+    pub fn start_caller_run(
+        &self,
+        request: CallerRunStartRequest,
+        carrier: CredentialCarrier,
+    ) -> Result<RunStartReceipt, MachineError> {
+        start_caller_run_typed(request.resolve()?, carrier)
+    }
+}
+
+fn start_caller_run_typed(
+    request: CallerRunStartRequest,
+    carrier: CredentialCarrier,
+) -> Result<RunStartReceipt, MachineError> {
+    let view = WorkspaceService::system()?
+        .discover_for_run_start(request.workspace.as_deref().map(Path::new))?;
+    require_workspace_identity(&view, request.expected_workspace_id.as_deref())?;
+    let presented = presented_controller_from_carrier(&carrier, 1)?;
+    if presented.orchestration_launch.is_some() {
+        return Err(MachineError::invalid_argument(
+            "orchestration_launch",
+            "caller startup requires a separately admitted aggregate",
+        ));
+    }
+    let controller = presented.binding;
+    let state_root = workspace_state_root(&view)?;
+    let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    let _allocation = reservations.lock_allocation("run-start", &request.idempotency_key)?;
+    let request_digest =
+        crate::run::caller_start_request_digest(&request, &view.canonical_path, &controller)?;
+    let prior = reservations.load_caller(&request.idempotency_key, &request_digest)?;
+    let replay = prior.is_some();
+    let home = DolgoraeHome::system()?;
+    let (reservation, state) = match prior {
+        Some(reservation) => {
+            // A retry reaches immutable accepted bytes before any live Role or
+            // registry access. A published Run is returned without replay.
+            let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+            match store.load_manifest(reservation.run_id) {
+                Ok(manifest) => {
+                    validate_caller_manifest_intent(&manifest, &reservation.accepted_intent)?;
+                    {
+                        let _startup = ProcessRunStartup::acquire(&state_root, reservation.run_id)?;
+                        ensure_caller_bootstrap(&state_root, &manifest, &reservation)?;
+                    }
+                    if let Some(receipt) = replay_published_caller_start(
+                        &state_root,
+                        &view,
+                        &reservation,
+                        &manifest,
+                        &carrier,
+                    )? {
+                        return Ok(receipt);
+                    }
+                }
+                Err(error) if error.code == "RUN_NOT_FOUND" => {}
+                Err(error) => return Err(error),
+            }
+            let binding = &reservation.accepted_intent.global_profile_binding;
+            if !binding.caller_workspace_supported() {
+                return Err(workspace_startup_unsupported());
+            }
+            let state = crate::profile::ensure_global_server(binding)?;
+            (reservation, state)
+        }
+        None => {
+            let instructions =
+                crate::instructions::InstructionSourceStore::new(&home).capture(&request.role)?;
+            let binding =
+                ResolvedGlobalProfile::resolve(&home, &request.profile)?.prepare(&home)?;
+            if !binding.caller_workspace_supported() {
+                return Err(workspace_startup_unsupported());
+            }
+            let candidate = Uuid::now_v7();
+            if request.access == crate::domain::CallerWorkspaceAccess::Writable {
+                let writer = crate::writer::WriterStore::new(
+                    &state_root,
+                    &view.workspace_id,
+                    DarwinSystem.current_uid(),
+                )
+                .load()?;
+                if writer.state != crate::writer::WriterAuthorityState::None {
+                    return Err(crate::writer::writer_busy(&writer, candidate));
+                }
+            }
+            // Shared Profile readiness is pre-allocation evidence, never this
+            // caller's Dedicated Server, Thread or task dispatch.
+            let state = crate::profile::ensure_global_server(&binding)?;
+            let (model, effort) = validate_caller_start_catalog(&request, &state)?;
+            let profile_snapshot = run_profile_snapshot(&binding.launch_snapshot)?;
+            let capability_snapshot = run_capability_snapshot(&profile_snapshot, &state);
+            let intent = crate::run::CallerStartIntent {
+                run_id: candidate,
+                created_at: SystemLedgerClock::default().timestamp(),
+                workspace_id: view.workspace_id.clone(),
+                canonical_workspace: view.canonical_path.clone(),
+                workspace_mode: view.mode,
+                start_baseline: WorkspaceService::system()?.capture_run_baseline(&view)?,
+                request,
+                controller,
+                global_profile_binding: binding,
+                instructions,
+                readiness: crate::run::CallerProfileReadiness {
+                    model,
+                    default_effort: effort,
+                    profile_capability_snapshot: capability_snapshot,
+                },
+            };
+            (
+                reservations.reserve_caller(&crate::run::CallerStartReservation::new(intent)?)?,
+                state,
+            )
+        }
+    };
+    let intent = &reservation.accepted_intent;
+    let model = intent.readiness.model.clone();
+    let effort = intent.readiness.default_effort.clone();
+    let mut checked = intent.request.clone();
+    checked.model = Some(model.clone());
+    checked.effort = Some(effort.clone());
+    validate_caller_start_catalog(&checked, &state)?;
+    let run_id = intent.run_id;
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let _process_startup = ProcessRunStartup::acquire(&state_root, run_id)?;
+    let manifest = load_or_publish_caller_manifest(&store, intent, &view, &state)?;
+    let writer = crate::writer::WriterStore::new(
+        &state_root,
+        &view.workspace_id,
+        DarwinSystem.current_uid(),
+    );
+    ensure_caller_bootstrap(&state_root, &manifest, &reservation)?;
+    if replay {
+        // The original Worker may have finished while Profile readiness was
+        // checked. Reconcile that outcome rather than applying startup again.
+        if let Some(receipt) =
+            replay_published_caller_start(&state_root, &view, &reservation, &manifest, &carrier)?
+        {
+            return Ok(receipt);
+        }
+    }
+    crate::profile::admit_global_run(
+        &intent.global_profile_binding,
+        &state,
+        &view.workspace_id,
+        run_id,
+    )?;
+    drop(_process_startup);
+    // Physical startup always establishes a reader. Writable intent is realized
+    // only by the prepared, proof-checked transaction below.
+    let start = if intent.request.access == crate::domain::CallerWorkspaceAccess::Writable {
+        start_caller_writer(&view, &state_root, &manifest, &carrier)
+    } else {
+        ensure_run_worker(&view, &state_root, run_id).and_then(|_| {
+            let proof = call_caller_policy_proof(&state_root, run_id, &carrier, run_id)?;
+            writer.observe_locked(|_| {
+                validate_caller_policy_commit(
+                    &state_root,
+                    run_id,
+                    &carrier,
+                    run_id,
+                    Access::Read,
+                    None,
+                    &proof,
+                )
+            })??;
+            Ok(proof)
+        })
+    };
+    let proof = match start {
+        Ok(proof) => proof,
+        Err(mut error) => {
+            // Every post-allocation refusal names the original identity. It never
+            // allocates another Run or converts writable intent to reader success.
+            if let Some(details) = error.details.as_object_mut() {
+                details.insert("run_id".to_owned(), json!(run_id));
+            }
+            return Err(error);
+        }
+    };
+    publish_caller_start_receipt(&state_root, &reservation, &proof)?;
+    Ok(RunStartReceipt {
+        snapshot: RunSources::load(
+            &state_root,
+            run_id,
+            observed_control_socket_epoch(&state_root, run_id),
+        )?,
+        exact_replay: replay,
+    })
+}
+
+/// The allocation and process-startup serializers are held by the caller.
+fn load_or_publish_caller_manifest(
+    store: &RunStore<SystemWorkspacePlatform>,
+    intent: &crate::run::CallerStartIntent,
+    view: &WorkspaceView,
+    state: &ServerState,
+) -> Result<RunManifest, MachineError> {
+    match store.load_manifest(intent.run_id) {
+        Ok(manifest) => {
+            validate_caller_manifest_intent(&manifest, intent)?;
+            Ok(manifest)
+        }
+        Err(error) if error.code == "RUN_NOT_FOUND" => {
+            let manifest = build_caller_manifest(
+                intent,
+                view,
+                state,
+                &intent.readiness.model,
+                &intent.readiness.default_effort,
+            )?;
+            store.publish(&manifest)?;
+            Ok(manifest)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn replay_published_caller_start(
+    state_root: &Path,
+    view: &WorkspaceView,
+    reservation: &crate::run::CallerStartReservation,
+    manifest: &RunManifest,
+    carrier: &CredentialCarrier,
+) -> Result<Option<RunStartReceipt>, MachineError> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let projection = store.load_state_projection(reservation.run_id)?;
+    if projection.lifecycle == RunLifecycle::StartFailed {
+        return Err(MachineError::new(
+            "RUN_STATE_CONFLICT",
+            "the original caller startup was sealed before execution",
+            false,
+            json!({"run_id":reservation.run_id,"lifecycle":"start_failed","outcome":"not_dispatched","required_action":"use_new_start_key"}),
+        ));
+    }
+    if projection.lifecycle == RunLifecycle::Starting {
+        return Ok(None);
+    }
+    if store
+        .load_caller_start_receipt(reservation.run_id, &reservation.normalized_identity_sha256)?
+        .is_none()
+    {
+        reconcile_caller_start_receipt(state_root, view, reservation, manifest, carrier)?;
+    }
+    Ok(Some(RunStartReceipt {
+        snapshot: RunSources::load(
+            state_root,
+            reservation.run_id,
+            observed_control_socket_epoch(state_root, reservation.run_id),
+        )?,
+        exact_replay: true,
+    }))
+}
+
+fn validate_caller_manifest_intent(
+    manifest: &RunManifest,
+    intent: &crate::run::CallerStartIntent,
+) -> Result<(), MachineError> {
+    if manifest.schema_version != 3
+        || manifest.run_id != intent.run_id
+        || manifest.workspace_id != intent.workspace_id
+        || manifest.canonical_workspace != intent.canonical_workspace
+        || manifest.workspace_mode != intent.workspace_mode
+        || manifest.start_baseline != intent.start_baseline
+        || manifest.created_at != intent.created_at
+        || manifest.controller != intent.controller
+        || manifest.model != intent.readiness.model
+        || manifest.default_reasoning_effort != intent.readiness.default_effort
+        || manifest.profile_capability_snapshot != intent.readiness.profile_capability_snapshot
+        || manifest.requested_access != Some(intent.request.access)
+        || manifest.selected_role.as_deref() != Some(intent.request.role.as_str())
+        || manifest.global_profile_binding.as_ref() != Some(&intent.global_profile_binding)
+        || manifest.instructions.caller() != Some(&intent.instructions)
+        || manifest.purpose != intent.request.purpose
+        || manifest.parent_ref != intent.request.parent_ref
+        || manifest.required_capabilities != intent.request.required_capabilities
+    {
+        return Err(internal(
+            "published caller Run differs from its original accepted startup",
+        ));
+    }
+    Ok(())
+}
+
+/// Complete only the exact original bootstrap prefix. Beyond that prefix,
+/// startup retries may observe verified history but never rebuild it.
+fn ensure_caller_bootstrap(
+    state_root: &Path,
+    manifest: &RunManifest,
+    reservation: &crate::run::CallerStartReservation,
+) -> Result<(), MachineError> {
+    let run_id = manifest.run_id;
+    crate::writer::WriterStore::new(
+        state_root,
+        &manifest.workspace_id,
+        DarwinSystem.current_uid(),
+    )
+    .observe_locked(|record| {
+        let root = run_root(state_root, run_id);
+        if caller_bootstrap_is_complete(state_root, run_id)? {
+            return Ok(());
+        }
+        let ledger = crate::ledger::Ledger::open(&root, run_id)
+            .map_err(|error| internal(error.to_string()))?;
+        let count = ledger
+            .durable_records()
+            .map_err(|error| internal(error.to_string()))?
+            .len();
+        drop(ledger);
+        if count > 3 {
+            ConformantLedger::open(root, run_id).map_err(|error| internal(error.to_string()))?;
+            return Ok(());
+        }
+        let mut ledger = ConformantLedger::open_for_bootstrap(root, run_id)
+            .map_err(|error| internal(error.to_string()))?;
+        ledger.with_event_context(bootstrap_event_context(manifest, record), |ledger| {
+            ledger
+                .bootstrap(&BootstrapRequest {
+                    timestamp: reservation.accepted_intent.created_at.clone(),
+                    workspace_id: manifest.workspace_id.clone(),
+                    intent: IdempotencyIntent {
+                        schema_version: 1,
+                        operation: IdempotencyOperation::StartRun,
+                        idempotency_key: reservation.idempotency_key.clone(),
+                        normalized_identity_sha256: reservation.normalized_identity_sha256.clone(),
+                        run_id,
+                    },
+                    record_kind: BootstrapRecordKind::RunCreated,
+                    initial_access: Access::Unknown.as_str().to_owned(),
+                    default_effort: Some(
+                        reservation.accepted_intent.readiness.default_effort.clone(),
+                    ),
+                })
+                .map(|_| ())
+                .map_err(|error| internal(error.to_string()))
+        })
+    })?
+}
+
+fn caller_bootstrap_is_complete(state_root: &Path, run_id: Uuid) -> Result<bool, MachineError> {
+    if RunStore::new(SystemWorkspacePlatform, state_root)
+        .load_state_projection(run_id)?
+        .ledger_head
+        .sequence
+        <= 3
+    {
+        return Ok(false);
+    }
+    let (_, ledger) = observe_caller_ledger(state_root, run_id)?;
+    crate::conformance::verify_ledger_records(run_id, ledger.records())
+        .map_err(|error| internal(error.to_string()))?;
+    Ok(true)
+}
+
+fn validate_caller_start_catalog(
+    request: &CallerRunStartRequest,
+    state: &ServerState,
+) -> Result<(String, String), MachineError> {
+    for capability in &request.required_capabilities {
+        if state.capabilities.get(capability)
+            != Some(&crate::profile::ProfileCapabilityState::Supported)
+        {
+            return Err(MachineError::new(
+                "CAPABILITY_UNSUPPORTED",
+                "the selected Profile does not provide a required capability",
+                false,
+                json!({"profile":request.profile,"capability_name":capability,"support":"unavailable"}),
+            ));
+        }
+    }
+    let model = request
+        .model
+        .clone()
+        .unwrap_or_else(|| state.default_model.clone());
+    if !state.models.contains(&model) {
+        return Err(compatibility_rejected(
+            &request.profile,
+            "model",
+            json!(state.models),
+            json!(model),
+            "requested model is not advertised",
+        ));
+    }
+    let efforts = advertised_efforts(state, &request.profile, &model)?;
+    let effort = request
+        .effort
+        .clone()
+        .unwrap_or_else(|| default_effort(&efforts));
+    if !efforts.contains(&effort) {
+        return Err(compatibility_rejected(
+            &request.profile,
+            "reasoning_effort",
+            json!(efforts),
+            json!(effort),
+            "requested effort is not advertised",
+        ));
+    }
+    Ok((model, effort))
+}
+
+fn build_caller_manifest(
+    intent: &crate::run::CallerStartIntent,
+    view: &WorkspaceView,
+    state: &ServerState,
+    model: &str,
+    effort: &str,
+) -> Result<RunManifest, MachineError> {
+    let prefix = intent.instructions.developer_prefix()?;
+    let mut manifest = build_manifest(
+        intent.run_id,
+        view,
+        state,
+        run_profile_snapshot(&intent.global_profile_binding.launch_snapshot)?,
+        intent.global_profile_binding.clone(),
+        model,
+        effort,
+        &prefix,
+        intent.request.purpose.clone(),
+        intent.request.parent_ref.clone(),
+        intent.request.control_mode,
+        ExecutionLane::Dedicated,
+        Assurance::BestEffortPersonalAlpha,
+        intent.controller.clone(),
+        intent.request.required_capabilities.clone(),
+        intent.start_baseline.clone(),
+    )?;
+    manifest.schema_version = 3;
+    manifest.created_at = intent.created_at.clone();
+    manifest.initial_access =
+        if intent.request.access == crate::domain::CallerWorkspaceAccess::Writable {
+            Access::Write
+        } else {
+            Access::Read
+        };
+    manifest.requested_access = Some(intent.request.access);
+    manifest.selected_role = Some(intent.request.role.clone());
+    manifest.start_contract = Some("caller_workspace/v1".to_owned());
+    manifest.instructions = intent.instructions.clone().into();
+    manifest.profile_capability_snapshot = intent.readiness.profile_capability_snapshot.clone();
+    manifest.agent_configuration = crate::run::CallerAgentConfigurationSnapshot {
+        schema_version: 3,
+        selected_profile: intent.request.profile.clone(),
+        global_profile_binding_sha256: intent.global_profile_binding.digest()?,
+        model: model.to_owned(),
+        default_effort: effort.to_owned(),
+        purpose: intent.request.purpose.clone(),
+        required_capabilities: intent.request.required_capabilities.clone(),
+        role_reference: None,
+        instructions: intent.instructions.clone(),
+        execution_lane: ExecutionLane::Dedicated,
+        required_assurance: Assurance::BestEffortPersonalAlpha,
+        native_subagent_policy: "enabled".to_owned(),
+    }
+    .try_into()?;
+    Ok(manifest)
+}
+
+fn start_caller_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    manifest: &RunManifest,
+    carrier: &CredentialCarrier,
+) -> Result<crate::worker::CallerPolicyProof, MachineError> {
+    let run_id = manifest.run_id;
+    let uid = DarwinSystem.current_uid();
+    let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
+    let holder = crate::writer::WriterStore::holder(
+        run_id,
+        manifest.profile.profile_name.clone(),
+        &manifest.controller,
+        1,
+        manifest.profile_capability_snapshot.server_key.clone(),
+        manifest.profile_capability_snapshot.server_epoch,
+        None,
+        RunLifecycle::Starting,
+    );
+    let (_, (_, generation)) = match writer.transact(|record| {
+        if record.state == crate::writer::WriterAuthorityState::Reserved
+            && record.transaction_id == Some(run_id)
+            && record.holder.as_ref() == Some(&holder)
+        {
+            return Ok((true, record.writer_generation));
+        }
+        record.prepare_acquire(run_id, holder, run_id)
+    }) {
+        Ok(prepared) => prepared,
+        Err(error) if error.code == "WRITER_BUSY" => {
+            seal_caller_start_not_dispatched(state_root, manifest)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    // A failure after the startup request may have applied policy/process
+    // effects. Keep this exact guard until recovery proves safe absence.
+    let result = (|| {
+        ensure_run_worker(view, state_root, run_id)?;
+        let path =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+                .map_err(|error| error.machine_error(run_id, state_root))?;
+        let runtime = crate::worker::read_runtime_record(&path, uid)
+            .map_err(|error| error.machine_error(run_id, &path))?;
+        writer.transact(|record| {
+            record.bind_reserved_generation(
+                run_id,
+                runtime.identity.run_generation,
+                runtime
+                    .app_server_epoch
+                    .ok_or_else(|| internal("caller server epoch is unavailable"))?,
+            )
+        })?;
+        let proof = match crate::worker::call_run_worker(
+            state_root,
+            run_id,
+            uid,
+            Some(carrier.raw_fd()),
+            |expected| ControlRequestV1::SetWriterAccess {
+                expected,
+                caller: None,
+                write: true,
+                writer_generation: generation,
+                transaction_id: run_id,
+            },
+        )
+        .map_err(|error| error.machine_error(run_id, &path))?
+        {
+            ControlResponseV1::CallerPolicyVerified { proof } => proof,
+            ControlResponseV1::Failed {
+                code,
+                message,
+                retryable,
+                details,
+            } => return Err(MachineError::new(code, message, retryable, details)),
+            _ => return Err(internal("caller startup requires qualified Writer proof")),
+        };
+        writer.transact(|record| {
+            validate_caller_policy_commit(
+                state_root,
+                run_id,
+                carrier,
+                run_id,
+                Access::Write,
+                Some(record),
+                &proof,
+            )?;
+            if let Some(holder) = record.holder.as_mut() {
+                holder.thread_id = Some(proof.thread_id.clone());
+                holder.lifecycle = RunLifecycle::Idle;
+            }
+            record.commit_acquire(run_id, generation)
+        })?;
+        Ok(*proof)
+    })();
+    if result.is_err() {
+        writer.transact(|record| {
+            record.block_unknown(run_id);
+            Ok(())
+        })?;
+    }
+    result
+}
+
+fn publish_caller_start_receipt(
+    state_root: &Path,
+    reservation: &crate::run::CallerStartReservation,
+    proof: &crate::worker::CallerPolicyProof,
+) -> Result<(), MachineError> {
+    RunStore::new(SystemWorkspacePlatform, state_root)
+        .publish_caller_start_receipt(&crate::run::CallerStartReceipt {
+            schema: "dolgorae.caller-start-receipt/v1".to_owned(),
+            run_id: reservation.run_id,
+            accepted_intent_sha256: reservation.normalized_identity_sha256.clone(),
+            global_profile_binding_sha256: proof.global_profile_binding_sha256.clone(),
+            original_thread_id: proof.thread_id.clone(),
+            run_generation: proof.identity.run_generation,
+            effective_policy: proof.effective_policy.clone(),
+        })
+        .map(|_| ())
+}
+
+/// Called only at the authoritative reservation refusal, before Worker or
+/// Dedicated startup. The startup lock and absent runtime fence the seal.
+fn seal_caller_start_not_dispatched(
+    state_root: &Path,
+    manifest: &RunManifest,
+) -> Result<(), MachineError> {
+    let run_id = manifest.run_id;
+    let startup = RunStartupLock::open(state_root, run_id)?;
+    startup.acquire()?;
+    let result = (|| {
+        let uid = DarwinSystem.current_uid();
+        let runtime =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+                .map_err(|error| error.machine_error(run_id, state_root))?;
+        let socket = crate::worker::dedicated_server_socket_path(uid, run_id, 1)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+        if runtime
+            .try_exists()
+            .map_err(|error| internal(error.to_string()))?
+            || socket
+                .try_exists()
+                .map_err(|error| internal(error.to_string()))?
+        {
+            return Err(internal(
+                "caller reservation refusal found physical startup evidence",
+            ));
+        }
+        let mut ledger = ConformantLedger::open(run_root(state_root, run_id), run_id)
+            .map_err(|error| internal(error.to_string()))?;
+        let authority =
+            crate::conformance::StartFailureAuthority::from_verified_bootstrap_election(
+                run_id,
+                crate::conformance::GenerationVerdict::Absent,
+                false,
+                true,
+            )
+            .map_err(|error| internal(error.to_string()))?;
+        ledger
+            .seal_start_failed(
+                &SystemLedgerClock::default().timestamp(),
+                "authoritative Writer reservation refused before physical startup",
+                authority,
+            )
+            .map_err(|error| internal(error.to_string()))?;
+        Ok(())
+    })();
+    startup.release();
+    result
+}
+
+fn reconcile_caller_start_receipt(
+    state_root: &Path,
+    view: &WorkspaceView,
+    reservation: &crate::run::CallerStartReservation,
+    manifest: &RunManifest,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    let run_id = manifest.run_id;
+    require_caller_runtime(manifest)?;
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let snapshot = RunSources::load(
+        state_root,
+        run_id,
+        observed_control_socket_epoch(state_root, run_id),
+    )?;
+    if snapshot.projection.lifecycle != RunLifecycle::Idle || snapshot.runtime_record.is_none() {
+        return Err(MachineError::new(
+            "OUTCOME_UNKNOWN",
+            "the original caller startup has no completed receipt",
+            false,
+            json!({"run_id":run_id,"required_action":"recover_original_run"}),
+        ));
+    }
+    let proof = call_caller_policy_proof(state_root, run_id, carrier, run_id)?;
+    writer.transact(|record| {
+        match manifest.requested_access {
+            Some(crate::domain::CallerWorkspaceAccess::Writable) => {
+                if record.state == crate::writer::WriterAuthorityState::Reserved
+                    && record.transaction_id == Some(run_id)
+                {
+                    validate_caller_policy_commit(
+                        state_root,
+                        run_id,
+                        carrier,
+                        run_id,
+                        Access::Write,
+                        Some(record),
+                        &proof,
+                    )?;
+                    if let Some(holder) = record.holder.as_mut() {
+                        holder.thread_id = Some(proof.thread_id.clone());
+                    }
+                    record.commit_acquire(run_id, record.writer_generation)?;
+                } else if record.state == crate::writer::WriterAuthorityState::BlockedUnknown
+                    && record.transaction_id == Some(run_id)
+                {
+                    validate_caller_policy_current(
+                        state_root,
+                        run_id,
+                        carrier,
+                        run_id,
+                        Access::Write,
+                        Some(record),
+                        &proof,
+                        crate::worker::CallerPolicyPhase::RecoverAcquire,
+                    )?;
+                    if let Some(holder) = record.holder.as_mut() {
+                        holder.thread_id = Some(proof.thread_id.clone());
+                        holder.lifecycle = RunLifecycle::Idle;
+                    }
+                    record.commit_verified_recovered_acquire(run_id, record.writer_generation)?;
+                } else {
+                    validate_caller_policy_current(
+                        state_root,
+                        run_id,
+                        carrier,
+                        run_id,
+                        Access::Write,
+                        Some(record),
+                        &proof,
+                        crate::worker::CallerPolicyPhase::Committed,
+                    )?;
+                }
+            }
+            Some(crate::domain::CallerWorkspaceAccess::ReadOnly) => validate_caller_policy_commit(
+                state_root,
+                run_id,
+                carrier,
+                run_id,
+                Access::Read,
+                None,
+                &proof,
+            )?,
+            None => return Err(workspace_startup_unsupported()),
+        }
+        Ok(())
+    })?;
+    publish_caller_start_receipt(state_root, reservation, &proof)
+}
+
+fn call_caller_policy_proof(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation_id: Uuid,
+) -> Result<crate::worker::CallerPolicyProof, MachineError> {
+    match crate::worker::call_run_worker(
+        state_root,
+        run_id,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::VerifyCallerPolicy {
+            expected,
+            caller: None,
+            operation_id,
+        },
+    )
+    .map_err(|error| error.machine_error(run_id, state_root))?
+    {
+        ControlResponseV1::CallerPolicyVerified { proof } => Ok(*proof),
+        ControlResponseV1::Failed {
+            code,
+            message,
+            retryable,
+            details,
+        } => Err(MachineError::new(code, message, retryable, details)),
+        _ => Err(internal(
+            "caller Worker did not return qualified policy proof",
+        )),
+    }
+}
+
+fn recover_caller_writer_transaction(
+    state_root: &Path,
+    view: &WorkspaceView,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    expected_state_revision: Option<u64>,
+) -> Result<bool, MachineError> {
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let record = writer.load()?;
+    if record.state != crate::writer::WriterAuthorityState::BlockedUnknown
+        || record
+            .holder
+            .as_ref()
+            .is_none_or(|holder| holder.run_id != run_id)
+    {
+        return Ok(false);
+    }
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, "run.recover", &binding, carrier)?;
+    let operation_id = record
+        .transaction_id
+        .ok_or_else(|| internal("pending caller writer has no operation identity"))?;
+    let proof = call_caller_policy_proof(state_root, run_id, carrier, operation_id)?;
+    let access = proof.effective_policy.access;
+    let phase = if access == Access::Write {
+        crate::worker::CallerPolicyPhase::RecoverAcquire
+    } else {
+        crate::worker::CallerPolicyPhase::Recovery
+    };
+    writer.transact(|current| {
+        require_mutation_revision(
+            state_root,
+            run_id,
+            carrier,
+            "run.recover",
+            expected_state_revision,
+        )?;
+        validate_caller_policy_current(
+            state_root,
+            run_id,
+            carrier,
+            operation_id,
+            access,
+            Some(current),
+            &proof,
+            phase,
+        )?;
+        if access == Access::Write {
+            if let Some(holder) = current.holder.as_mut() {
+                holder.thread_id = Some(proof.thread_id.clone());
+                holder.lifecycle = RunLifecycle::Idle;
+            }
+            current.commit_verified_recovered_acquire(operation_id, current.writer_generation)
+        } else {
+            current.retire_verified_reader_guard(operation_id)
+        }
+    })?;
+    Ok(true)
+}
+
+fn retire_caller_reader_guard(
+    state_root: &Path,
+    view: &WorkspaceView,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let record = writer.load()?;
+    if !record
+        .holder
+        .as_ref()
+        .is_some_and(|holder| holder.run_id == run_id)
+        || !matches!(
+            record.state,
+            crate::writer::WriterAuthorityState::Reserved
+                | crate::writer::WriterAuthorityState::Releasing
+                | crate::writer::WriterAuthorityState::BlockedUnknown
+        )
+    {
+        return Ok(());
+    }
+    let operation_id = record
+        .transaction_id
+        .ok_or_else(|| internal("caller recovery has no original writer transaction"))?;
+    // Resume has just established this same Thread as Reader. No policy update
+    // or reacquisition occurs while the current guard is inspected.
+    let proof = call_caller_policy_proof(state_root, run_id, carrier, operation_id)?;
+    writer.transact(|current| {
+        if current.state != record.state || current.transaction_id != Some(operation_id) {
+            return Err(crate::writer::writer_busy(current, run_id));
+        }
+        validate_caller_policy_current(
+            state_root,
+            run_id,
+            carrier,
+            operation_id,
+            Access::Read,
+            Some(current),
+            &proof,
+            crate::worker::CallerPolicyPhase::Recovery,
+        )?;
+        current.retire_verified_reader_guard(operation_id)
+    })?;
+    Ok(())
 }
 
 impl SemanticService for CoreSemanticService {
@@ -1228,6 +2192,7 @@ fn run_create_write_continuation(args: &[OsString]) -> Result<Value, MachineErro
     };
     let runs = RunStore::new(SystemWorkspacePlatform, &state_root);
     let source = runs.load_manifest(source_run_id)?;
+    source.require_legacy_adapter()?;
     let source_projection = runs.load_state_projection(source_run_id)?;
     if source_projection.active_turn_id.is_some()
         || !source_projection.pending_requests.is_empty()
@@ -1432,6 +2397,7 @@ fn run_fork(args: &[OsString]) -> Result<Value, MachineError> {
     let source_run_id = parse_uuid_flag(args, "--from")?;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     let source = store.load_manifest(source_run_id)?;
+    source.require_legacy_adapter()?;
     let projection = store.load_state_projection(source_run_id)?;
     let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
     let source_binding = store.load_controller_binding(source_run_id)?;
@@ -1764,21 +2730,63 @@ fn history_reconciliation_typed(
     expected_state_revision: Option<u64>,
 ) -> Result<Value, MachineError> {
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    store.load_manifest(run_id)?.require_legacy_adapter()?;
+    history_reconciliation_admitted(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        operation,
+        expected_state_revision,
+    )
+}
+
+fn history_reconciliation_admitted(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation: &'static str,
+    expected_state_revision: Option<u64>,
+) -> Result<Value, MachineError> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
     let runtime_path =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
-    let control_recovery =
-        crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid())
-            .is_ok_and(|record| record.control_recovery_required);
+    let runtime =
+        crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid()).ok();
+    if projection.lifecycle == RunLifecycle::Idle
+        && store.load_manifest(run_id)?.schema_version == 3
+        && runtime.as_ref().is_some_and(|record| {
+            !record.control_recovery_required
+                && crate::worker::classify_worker_identity(record)
+                    == crate::worker::ProcessIdentityVerdict::Match
+        })
+        && recover_caller_writer_transaction(
+            state_root,
+            view,
+            run_id,
+            carrier,
+            expected_state_revision,
+        )?
+    {
+        let sources = RunSources::load(
+            state_root,
+            run_id,
+            observed_control_socket_epoch(state_root, run_id),
+        )?;
+        return Ok(sources.run_value("Match", Value::Null));
+    }
+    let control_recovery = runtime
+        .as_ref()
+        .is_some_and(|record| record.control_recovery_required);
     let idle_worker_lost = projection.lifecycle == RunLifecycle::Idle
         && projection.thread_id.is_some()
-        && crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid()).is_ok_and(
-            |record| {
-                crate::worker::classify_worker_identity(&record)
-                    == crate::worker::ProcessIdentityVerdict::Absent
-            },
-        );
+        && runtime.as_ref().is_some_and(|record| {
+            crate::worker::classify_worker_identity(record)
+                == crate::worker::ProcessIdentityVerdict::Absent
+        });
     let paused_primary_unknown = if projection.lifecycle == RunLifecycle::Paused {
         let snapshot = crate::snapshot::RunSnapshot::load(state_root, run_id, 0)?;
         primary_close_reconciliation_required(state_root, &snapshot)?
@@ -3740,6 +4748,32 @@ fn run_control_typed(
     run_id: Uuid,
     verb: RunVerb,
     carrier: Option<&CredentialCarrier>,
+    prepared: Prepared,
+    write: bool,
+    expected_state_revision: Option<u64>,
+) -> Result<(SemanticResult, Option<ControlResponseV1>), MachineError> {
+    RunStore::new(SystemWorkspacePlatform, state_root)
+        .load_manifest(run_id)?
+        .require_legacy_adapter()?;
+    run_control_admitted(
+        view,
+        state_root,
+        run_id,
+        verb,
+        carrier,
+        prepared,
+        write,
+        expected_state_revision,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_control_admitted(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+    carrier: Option<&CredentialCarrier>,
     mut prepared: Prepared,
     write: bool,
     expected_state_revision: Option<u64>,
@@ -4114,93 +5148,161 @@ fn retire_absent_generation_writer(
     let run_id = record.identity.run_id;
     crate::worker::prove_worker_generation_absent(record)
         .map_err(|error| error.machine_error(run_id, state_root))?;
-    let snapshot = RunSources::load(state_root, run_id, record.control_socket_epoch)?;
-    if snapshot.writer.state != crate::writer::WriterAuthorityState::Active
-        || snapshot
-            .writer
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    let caller = manifest.schema_version == 3;
+    if manifest.workspace_id != record.identity.workspace_id {
+        return Err(internal("absent generation crossed the manifest workspace"));
+    }
+    let legacy = if caller {
+        None
+    } else {
+        Some(RunSources::load(
+            state_root,
+            run_id,
+            record.control_socket_epoch,
+        )?)
+    };
+    let retirable = |state| {
+        state == crate::writer::WriterAuthorityState::Active
+            || (caller
+                && matches!(
+                    state,
+                    crate::writer::WriterAuthorityState::Reserved
+                        | crate::writer::WriterAuthorityState::Releasing
+                        | crate::writer::WriterAuthorityState::BlockedUnknown
+                ))
+    };
+    let writers = crate::writer::WriterStore::new(
+        state_root,
+        &record.identity.workspace_id,
+        record.identity.uid,
+    );
+    let current = writers.load()?;
+    if !retirable(current.state)
+        || current
             .holder
             .as_ref()
             .is_none_or(|holder| holder.run_id != run_id)
     {
         return Ok(());
     }
-    crate::writer::WriterStore::new(
-        state_root,
-        &record.identity.workspace_id,
-        record.identity.uid,
-    )
-    .transact(|writer| {
-        if writer.state != crate::writer::WriterAuthorityState::Active
-            || writer
-                .holder
-                .as_ref()
-                .is_none_or(|holder| holder.run_id != run_id)
-        {
-            return Ok(());
-        }
-        let holder = writer.holder.as_ref().expect("active Writer holder");
-        if holder.run_generation != record.identity.run_generation
-            || holder.worker_generation != record.identity.run_generation
-            || Some(holder.profile_server_epoch) != record.app_server_epoch
-        {
-            return Err(MachineError::new(
-                "RECOVERY_REQUIRED",
-                "Writer authority does not name the verified absent generation",
-                false,
-                json!({"run_id": run_id, "generation": record.identity.run_generation,
-                    "identity_verdict": "Absent", "reason": "writer_generation_mismatch"}),
-            ));
-        }
-        let transaction_id = Uuid::now_v7();
-        if snapshot.projection.lifecycle != RunLifecycle::Closed
-            && snapshot.projection.thread_id.is_some()
-        {
-            let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
-                .map_err(|error| internal(error.to_string()))?;
-            if ledger
-                .head()
-                .map_err(|error| internal(error.to_string()))?
-                .sequence
-                != snapshot.projection.ledger_head.sequence
+    writers
+        .transact(|writer| {
+            if !retirable(writer.state)
+                || writer
+                    .holder
+                    .as_ref()
+                    .is_none_or(|holder| holder.run_id != run_id)
             {
-                return Err(run_state_conflict_error(
-                    run_id,
-                    snapshot.projection.lifecycle,
-                    "run.release_write",
+                return Ok(());
+            }
+            let (projection, mut policy, server_epoch) = if let Some(snapshot) = &legacy {
+                (
+                    snapshot.projection.clone(),
+                    snapshot.captured_effective_policy.clone(),
+                    snapshot.server_epoch(),
+                )
+            } else {
+                let (projection, ledger) = observe_caller_ledger(state_root, run_id)?;
+                let policy = crate::snapshot::policy_at_head(
+                    &projection,
+                    Some(&ledger),
+                    record.app_server_epoch,
+                )?;
+                if projection.thread_id.is_some()
+                    && (record
+                        .app_server_epoch
+                        .is_some_and(|epoch| policy.server_epoch != Some(epoch))
+                        || (policy.access == Access::Write
+                            && policy.writer_generation != Some(writer.writer_generation)))
+                {
+                    return Err(run_state_conflict_error(
+                        run_id,
+                        projection.lifecycle,
+                        "run.release_write",
+                    ));
+                }
+                (
+                    projection,
+                    policy,
+                    record
+                        .app_server_epoch
+                        .unwrap_or(manifest.profile_capability_snapshot.server_epoch),
+                )
+            };
+            let holder = writer.holder.as_ref().expect("retained Writer holder");
+            let unbound_caller_start = caller
+                && writer.transaction_id == Some(run_id)
+                && holder.thread_id.is_none()
+                && holder.profile_server_epoch == manifest.profile_capability_snapshot.server_epoch
+                && holder.profile_server_key == manifest.profile.initial_server_key;
+            if holder.run_generation != record.identity.run_generation
+                || holder.worker_generation != record.identity.run_generation
+                || (Some(holder.profile_server_epoch) != record.app_server_epoch
+                    && !unbound_caller_start)
+            {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "Writer authority does not name the verified absent generation",
+                    false,
+                    json!({"run_id": run_id, "generation": record.identity.run_generation,
+                    "identity_verdict": "Absent", "reason": "writer_generation_mismatch"}),
                 ));
             }
-            let mut policy = snapshot.captured_effective_policy.clone();
-            policy.access = crate::domain::Access::Unknown;
-            policy.verification = crate::domain::PolicyVerification::Unverified;
-            policy.writer_generation = None;
-            policy.policy_epoch.0 = policy
-                .policy_epoch
-                .0
-                .checked_add(1)
-                .ok_or_else(|| internal("effective policy epoch exhausted"))?;
-            ledger
-                .with_event_context(
-                    crate::event::EventAppendContext {
-                        workspace_id: record.identity.workspace_id.clone(),
-                        server_key: snapshot.manifest.profile.initial_server_key.clone(),
-                        server_epoch: record.app_server_epoch.unwrap_or(snapshot.server_epoch()),
-                        writer_state_revision: writer.authority_revision,
-                    },
-                    |ledger| {
-                        ledger.append_required_payload(
-                            AuditKind::WriterReleased,
-                            &json!({"writer_generation": writer.writer_generation,
+            let transaction_id = if writer.state == crate::writer::WriterAuthorityState::Active {
+                Uuid::now_v7()
+            } else {
+                writer
+                    .transaction_id
+                    .ok_or_else(|| internal("absent caller guard has no original transaction"))?
+            };
+            if projection.lifecycle != RunLifecycle::Closed && projection.thread_id.is_some() {
+                let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
+                    .map_err(|error| internal(error.to_string()))?;
+                if ledger.head().map_err(|error| internal(error.to_string()))?
+                    != projection.ledger_head
+                {
+                    return Err(run_state_conflict_error(
+                        run_id,
+                        projection.lifecycle,
+                        "run.release_write",
+                    ));
+                }
+                policy.access = crate::domain::Access::Unknown;
+                policy.verification = crate::domain::PolicyVerification::Unverified;
+                policy.writer_generation = None;
+                policy.policy_epoch.0 = policy
+                    .policy_epoch
+                    .0
+                    .checked_add(1)
+                    .ok_or_else(|| internal("effective policy epoch exhausted"))?;
+                ledger
+                    .with_event_context(
+                        crate::event::EventAppendContext {
+                            workspace_id: record.identity.workspace_id.clone(),
+                            server_key: manifest.profile.initial_server_key.clone(),
+                            server_epoch,
+                            writer_state_revision: writer.authority_revision,
+                        },
+                        |ledger| {
+                            ledger.append_required_payload(
+                                AuditKind::WriterReleased,
+                                &json!({"writer_generation": writer.writer_generation,
                         "transaction_id": transaction_id, "effective_policy": policy}),
-                            record.identity.run_generation,
-                        )
-                    },
-                )
-                .map_err(|error| internal(error.to_string()))?;
-        }
-        writer.prepare_release(run_id, transaction_id)?;
-        writer.commit_release(transaction_id)
-    })
-    .map(|_| ())
+                                record.identity.run_generation,
+                            )
+                        },
+                    )
+                    .map_err(|error| internal(error.to_string()))?;
+            }
+            if writer.state == crate::writer::WriterAuthorityState::Active {
+                writer.prepare_release(run_id, transaction_id)?;
+                writer.commit_release(transaction_id)
+            } else {
+                writer.retire_verified_reader_guard(transaction_id)
+            }
+        })
+        .map(|_| ())
 }
 
 pub(crate) fn finish_external_run_close(
@@ -4716,6 +5818,11 @@ fn acquire_writer_authorized(
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
+    if manifest.schema_version == 3 {
+        require_caller_runtime(&manifest)?;
+    } else {
+        manifest.require_legacy_adapter()?;
+    }
     let projection = store.load_state_projection(run_id)?;
     if manifest.execution_lane != ExecutionLane::Dedicated {
         return Err(write_forbidden(state_root, run_id));
@@ -4729,6 +5836,13 @@ fn acquire_writer_authorized(
         ));
     }
     if !writer_acquire_lifecycle_allowed(projection.lifecycle) {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            "run.acquire_write",
+        ));
+    }
+    if manifest.schema_version == 3 && projection.lifecycle != RunLifecycle::Idle {
         return Err(run_state_conflict_error(
             run_id,
             projection.lifecycle,
@@ -4766,6 +5880,21 @@ fn acquire_writer_authorized(
         record.prepare_acquire(run_id, holder.clone(), transaction_id)
     })?;
     if replayed {
+        if manifest.schema_version == 3 {
+            let proof = call_caller_policy_proof(state_root, run_id, carrier, transaction_id)?;
+            writer.observe_locked(|record| {
+                validate_caller_policy_current(
+                    state_root,
+                    run_id,
+                    carrier,
+                    transaction_id,
+                    Access::Write,
+                    Some(record),
+                    &proof,
+                    crate::worker::CallerPolicyPhase::Committed,
+                )
+            })??;
+        }
         return Ok(());
     }
     let runtime_record =
@@ -4811,7 +5940,7 @@ fn acquire_writer_authorized(
         &writer,
         transaction_id,
         WriterPreEffectTransition::Acquire,
-        || crate::worker::prove_worker_workload_absent(&worker_record),
+        || crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, &worker_record),
     )?
     .is_err()
     {
@@ -4855,12 +5984,15 @@ fn acquire_writer_authorized(
             }
         },
     );
-    match response {
+    let caller_proof = match response {
+        Ok(ControlResponseV1::CallerPolicyVerified { proof }) if manifest.schema_version == 3 => {
+            Some(proof)
+        }
         Ok(ControlResponseV1::WriterAccessChanged {
             write: true,
             writer_generation,
             ..
-        }) if writer_generation == next_generation => {}
+        }) if manifest.schema_version != 3 && writer_generation == next_generation => None,
         Ok(ControlResponseV1::Failed {
             code,
             message,
@@ -4889,8 +6021,31 @@ fn acquire_writer_authorized(
                 "worker returned an invalid writer transition response",
             ));
         }
+    };
+    let committed = writer.transact(|record| {
+        if let Some(proof) = caller_proof.as_ref() {
+            validate_caller_policy_commit(
+                state_root,
+                run_id,
+                carrier,
+                transaction_id,
+                Access::Write,
+                Some(record),
+                proof,
+            )?;
+            if let Some(holder) = record.holder.as_mut() {
+                holder.thread_id = Some(proof.thread_id.clone());
+            }
+        }
+        record.commit_acquire(transaction_id, next_generation)
+    });
+    if let Err(error) = committed {
+        writer.transact(|record| {
+            record.block_unknown(transaction_id);
+            Ok(())
+        })?;
+        return Err(error);
     }
-    writer.transact(|record| record.commit_acquire(transaction_id, next_generation))?;
     Ok(())
 }
 
@@ -4960,6 +6115,12 @@ fn release_writer_authorized(
 ) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = store.load_manifest(run_id)?;
+    if manifest.schema_version == 3 {
+        require_caller_runtime(&manifest)?;
+    } else {
+        manifest.require_legacy_adapter()?;
+    }
     let projection = store.load_state_projection(run_id)?;
     let externally_closed = external_writer_release_can_bypass_lifecycle(
         projection.lifecycle,
@@ -4995,6 +6156,21 @@ fn release_writer_authorized(
         record.prepare_release(run_id, transaction_id)
     })?;
     let Some(generation) = generation else {
+        if manifest.schema_version == 3 {
+            let proof = call_caller_policy_proof(state_root, run_id, carrier, transaction_id)?;
+            writer.observe_locked(|_| {
+                validate_caller_policy_current(
+                    state_root,
+                    run_id,
+                    carrier,
+                    transaction_id,
+                    Access::Read,
+                    None,
+                    &proof,
+                    crate::worker::CallerPolicyPhase::Committed,
+                )
+            })??;
+        }
         return Ok(());
     };
     let runtime_record =
@@ -5022,7 +6198,7 @@ fn release_writer_authorized(
         &writer,
         transaction_id,
         WriterPreEffectTransition::Release,
-        || crate::worker::prove_worker_workload_absent(&worker_record),
+        || crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, &worker_record),
     )?
     .is_err()
     {
@@ -5059,12 +6235,15 @@ fn release_writer_authorized(
             )
         },
     );
-    match response {
+    let caller_proof = match response {
+        Ok(ControlResponseV1::CallerPolicyVerified { proof }) if manifest.schema_version == 3 => {
+            Some(proof)
+        }
         Ok(ControlResponseV1::WriterAccessChanged {
             write: false,
             writer_generation,
             ..
-        }) if writer_generation == generation => {}
+        }) if manifest.schema_version != 3 && writer_generation == generation => None,
         Ok(ControlResponseV1::Failed {
             code,
             message,
@@ -5072,7 +6251,11 @@ fn release_writer_authorized(
             details,
         }) => {
             writer.transact(|record| {
-                record.rollback_release(transaction_id);
+                if manifest.schema_version == 3 {
+                    record.block_unknown(transaction_id);
+                } else {
+                    record.rollback_release(transaction_id);
+                }
                 Ok(())
             })?;
             return Err(MachineError::new(code, message, retryable, details));
@@ -5093,9 +6276,186 @@ fn release_writer_authorized(
                 "worker returned an invalid writer transition response",
             ));
         }
+    };
+    let committed = writer.transact(|record| {
+        if let Some(proof) = caller_proof.as_ref() {
+            validate_caller_policy_commit(
+                state_root,
+                run_id,
+                carrier,
+                transaction_id,
+                Access::Read,
+                Some(record),
+                proof,
+            )?;
+        }
+        record.commit_release(transaction_id)
+    });
+    if let Err(error) = committed {
+        writer.transact(|record| {
+            record.block_unknown(transaction_id);
+            Ok(())
+        })?;
+        return Err(error);
     }
-    writer.transact(|record| record.commit_release(transaction_id))?;
     Ok(())
+}
+
+fn require_caller_runtime(manifest: &RunManifest) -> Result<(), MachineError> {
+    if manifest.schema_version != 3
+        || manifest
+            .global_profile_binding
+            .as_ref()
+            .is_none_or(|binding| !binding.caller_workspace_supported())
+    {
+        return Err(workspace_startup_unsupported());
+    }
+    Ok(())
+}
+
+/// Called under the workspace Writer lock. Re-read the durable policy and
+/// current runtime rather than accepting a generation-only acknowledgement.
+fn validate_caller_policy_commit(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation_id: Uuid,
+    access: Access,
+    writer: Option<&crate::writer::WriterRecord>,
+    proof: &crate::worker::CallerPolicyProof,
+) -> Result<(), MachineError> {
+    validate_caller_policy_current(
+        state_root,
+        run_id,
+        carrier,
+        operation_id,
+        access,
+        writer,
+        proof,
+        crate::worker::CallerPolicyPhase::Prepared,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_caller_policy_current(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation_id: Uuid,
+    access: Access,
+    writer: Option<&crate::writer::WriterRecord>,
+    proof: &crate::worker::CallerPolicyProof,
+    phase: crate::worker::CallerPolicyPhase,
+) -> Result<(), MachineError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    require_caller_runtime(&manifest)?;
+    let controller = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, "run.verify_caller_policy", &controller, carrier)?;
+    let uid = DarwinSystem.current_uid();
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    let runtime = crate::worker::read_runtime_record(&path, uid)
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    crate::worker::prove_worker_workload_absent(&runtime)
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    let socket_path =
+        crate::worker::dedicated_server_socket_path(uid, run_id, runtime.identity.run_generation)
+            .map_err(|error| error.machine_error(run_id, &path))?;
+    let socket = crate::codex_socket::inspect(&socket_path, uid)
+        .map_err(|_| internal("caller App Server socket cannot be verified"))?;
+    let socket_identity = crate::worker::SocketIdentity {
+        device: socket.dev(),
+        inode: socket.ino(),
+    };
+    let (projection, policy) = observe_caller_policy(state_root, run_id)?;
+    let original_thread = projection
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| internal("caller original Thread is unavailable"))?;
+    if projection.lifecycle != RunLifecycle::Idle
+        || !projection.pending_requests.is_empty()
+        || projection.active_turn_id.is_some()
+        || projection.run_generation != runtime.identity.run_generation
+    {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            "run.verify_caller_policy",
+        ));
+    }
+    proof
+        .validate_binding(&crate::worker::CallerPolicyExpectation {
+            operation_id,
+            manifest: &manifest,
+            runtime: &runtime,
+            app_server_socket_identity: &socket_identity,
+            original_thread_id: original_thread,
+            durable_policy: &policy,
+            controller: &controller,
+            access,
+            writer,
+            phase,
+        })
+        .map_err(|error| error.machine_error(run_id, &path))
+}
+
+fn observe_caller_policy(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<
+    (
+        crate::projection::RunStateProjection,
+        crate::domain::EffectivePolicy,
+    ),
+    MachineError,
+> {
+    let (projection, ledger) = observe_caller_ledger(state_root, run_id)?;
+    let policy = ledger
+        .records()
+        .iter()
+        .rev()
+        .find_map(|record| {
+            crate::jcs::canonicalize(record.payload())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| value.get("effective_policy").cloned())
+        })
+        .ok_or_else(|| internal("caller durable effective policy is unavailable"))?;
+    let policy = serde_json::from_value(policy)
+        .map_err(|_| internal("caller durable effective policy is invalid"))?;
+    Ok((projection, policy))
+}
+
+fn observe_caller_ledger(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<
+    (
+        crate::projection::RunStateProjection,
+        crate::ledger::ObservedLedger,
+    ),
+    MachineError,
+> {
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let projection = store.load_state_projection(run_id)?;
+    let head = projection.ledger_head.sequence;
+    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
+    if ledger.records().last().map(crate::audit::AuditRecord::hash)
+        != Some(projection.ledger_head.hash.as_str())
+    {
+        return Err(audit_integrity(
+            run_id,
+            head,
+            "caller audit prefix disagrees with the committed projection",
+        ));
+    }
+    if store.load_state_projection(run_id)? != projection {
+        return Err(internal(
+            "caller committed projection changed during audit observation",
+        ));
+    }
+    Ok((projection, ledger))
 }
 
 fn run_state_conflict_error(run_id: Uuid, state: RunLifecycle, operation: &str) -> MachineError {
@@ -5346,6 +6706,8 @@ fn prepare_writer_handoff(
     }
     let source_manifest = runs.load_manifest(source)?;
     let destination_manifest = runs.load_manifest(destination)?;
+    source_manifest.require_legacy_adapter()?;
+    destination_manifest.require_legacy_adapter()?;
     ensure_writer_handoff_lanes(
         source,
         source_manifest.execution_lane,
@@ -5441,6 +6803,8 @@ fn commit_writer_handoff(
     )?;
     let source_manifest = runs.load_manifest(handoff.source_run_id)?;
     let destination_manifest = runs.load_manifest(handoff.destination_run_id)?;
+    source_manifest.require_legacy_adapter()?;
+    destination_manifest.require_legacy_adapter()?;
     ensure_writer_handoff_lanes(
         handoff.source_run_id,
         source_manifest.execution_lane,
@@ -6526,12 +7890,7 @@ impl RunSources {
             },
             "requested_assurance": manifest.requested_assurance.as_str(),
             "achieved_assurance": manifest.achieved_assurance.as_str(),
-            "instruction_contract": {
-                "schema": manifest.instructions.schema,
-                "common_prefix_version": manifest.instructions.common_prefix_version,
-                "mode_prefix_version": manifest.instructions.mode_prefix_version,
-                "purpose_prefix_version": manifest.instructions.purpose_prefix_version,
-            },
+            "instruction_contract": manifest.instructions.contract(),
             "lineage": lineage,
             "server_epoch": self.server_epoch(),
             "run_generation": projection.run_generation,
@@ -6562,6 +7921,7 @@ impl RunSources {
 
 pub(crate) fn writer_run_status(state_root: &Path, run_id: Uuid) -> Result<Value, MachineError> {
     let sources = RunSources::load(state_root, run_id, 0)?;
+    sources.manifest.require_legacy_adapter()?;
     let verdict = sources.runtime_record.as_ref().map_or("Absent", |record| {
         match crate::worker::classify_worker_identity(record) {
             crate::worker::ProcessIdentityVerdict::Match => "Match",
@@ -7209,6 +8569,31 @@ fn observed_control_socket_epoch(state_root: &Path, run_id: Uuid) -> u64 {
         .map_or(1, |record| record.control_socket_epoch)
 }
 
+fn run_capability_snapshot(
+    profile: &ProfileSnapshot,
+    state: &ServerState,
+) -> ProfileCapabilitySnapshot {
+    ProfileCapabilitySnapshot {
+        schema_version: 1,
+        profile_name: profile.profile_name.clone(),
+        server_key: profile.initial_server_key.clone(),
+        server_epoch: state.server_epoch,
+        app_server_version: profile.codex_version.clone(),
+        schema_sha256: profile.app_server_schema_sha256.clone(),
+        capabilities: state
+            .capabilities
+            .iter()
+            .map(|(name, value)| {
+                let support = serde_json::to_value(value)
+                    .ok()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or(crate::run::CapabilityState::Unverified);
+                (name.clone(), support)
+            })
+            .collect(),
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "a Run manifest pins every start-time decision at once"
@@ -7249,7 +8634,7 @@ fn build_manifest(
         required_capabilities: required_capabilities.clone(),
         role_reference: None,
         normalized_instructions: instructions_text.to_owned(),
-        instructions: instructions.clone(),
+        instructions: instructions.clone().into(),
         execution_lane,
         required_assurance: assurance,
         native_subagent_policy: "enabled".to_owned(),
@@ -7263,29 +8648,14 @@ fn build_manifest(
         start_baseline,
         created_at: SystemLedgerClock::default().timestamp(),
         initial_access: Access::Read,
+        requested_access: None,
+        selected_role: None,
+        start_contract: None,
         control_mode,
         execution_lane,
         requested_assurance: assurance,
         achieved_assurance: assurance,
-        profile_capability_snapshot: ProfileCapabilitySnapshot {
-            schema_version: 1,
-            profile_name: profile.profile_name.clone(),
-            server_key: profile.initial_server_key.clone(),
-            server_epoch: state.server_epoch,
-            app_server_version: profile.codex_version.clone(),
-            schema_sha256: profile.app_server_schema_sha256.clone(),
-            capabilities: state
-                .capabilities
-                .iter()
-                .map(|(name, value)| {
-                    let state = serde_json::to_value(value)
-                        .ok()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or(crate::run::CapabilityState::Unverified);
-                    (name.clone(), state)
-                })
-                .collect(),
-        },
+        profile_capability_snapshot: run_capability_snapshot(&profile, state),
         app_server: AppServerFacts {
             version: Some(profile.codex_version.clone()),
             schema_status: Some("accepted".to_owned()),
@@ -7299,7 +8669,7 @@ fn build_manifest(
         model: model.to_owned(),
         initial_reasoning_effort: effort.to_owned(),
         default_reasoning_effort: effort.to_owned(),
-        instructions,
+        instructions: instructions.into(),
         controller,
         purpose,
         parent_ref,
@@ -7447,9 +8817,13 @@ fn ensure_run_worker(
     state_root: &Path,
     run_id: Uuid,
 ) -> Result<u64, MachineError> {
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    if manifest.schema_version == 3 {
+        require_caller_runtime(&manifest)?;
+    }
     let mut startup = Some(RunStartupLock::open(state_root, run_id)?);
     startup.as_ref().expect("startup lock").acquire()?;
-    let result = ensure_run_worker_locked(view, state_root, run_id, &mut startup);
+    let result = ensure_run_worker_locked(view, state_root, run_id, manifest, &mut startup);
     if let Some(startup) = startup {
         let release = startup
             .lock
@@ -7467,6 +8841,7 @@ fn ensure_run_worker_locked(
     view: &WorkspaceView,
     state_root: &Path,
     run_id: Uuid,
+    manifest: RunManifest,
     startup: &mut Option<RunStartupLock>,
 ) -> Result<u64, MachineError> {
     let uid = DarwinSystem.current_uid();
@@ -7512,7 +8887,6 @@ fn ensure_run_worker_locked(
     }
 
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
-    let manifest = store.load_manifest(run_id)?;
     let projection = store.load_state_projection(run_id)?;
     ensure_worker_spawn_lifecycle(run_id, projection.lifecycle)?;
     let run_generation = projection.run_generation.saturating_add(1).max(1);
@@ -7556,10 +8930,11 @@ fn ensure_run_worker_locked(
     let owns_write = matches!(
         writer.state,
         crate::writer::WriterAuthorityState::Reserved | crate::writer::WriterAuthorityState::Active
-    ) && writer
-        .holder
-        .as_ref()
-        .is_some_and(|holder| holder.run_id == run_id);
+    ) && manifest.schema_version != 3
+        && writer
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == run_id);
     let control_socket_epoch = observed_control_socket_epoch(state_root, run_id)
         .saturating_add(1)
         .max(1);
@@ -7574,7 +8949,13 @@ fn ensure_run_worker_locked(
             .allocate_server_epoch(state.server_epoch)?;
         Some(DedicatedServerBootstrap {
             socket_path,
-            argv: manifest.profile.normalized_argv.clone(),
+            argv: {
+                let mut argv = manifest.profile.normalized_argv.clone();
+                if manifest.schema_version == 3 {
+                    argv.extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
+                }
+                argv
+            },
             cwd: PathBuf::from(&manifest.profile.derived_launch_cwd),
             environment: manifest.profile.sanitized_environment.clone(),
             log_path: state_root
@@ -7656,7 +9037,11 @@ fn ensure_run_worker_locked(
             "never"
         }
         .to_owned(),
-        safety_policy: crate::turn::SessionSafetyPolicy::Standard,
+        safety_policy: if manifest.schema_version == 3 {
+            crate::turn::SessionSafetyPolicy::CallerWorkspace
+        } else {
+            crate::turn::SessionSafetyPolicy::Standard
+        },
         artifact_root: run_root(state_root, run_id).join("artifacts"),
         attach: match &manifest.fork_provenance {
             Some(provenance) if provenance.mode == "history_copy" => SessionAttach::Fork {
@@ -7676,11 +9061,15 @@ fn ensure_run_worker_locked(
                     thread_id,
                 }),
         },
-        eager_thread_operation_id: manifest.aggregate_binding.as_ref().and_then(|binding| {
-            (binding.aggregate_kind == AggregateKind::OrchestratedSession
-                && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
-                .then_some(binding.operation_id)
-        }),
+        eager_thread_operation_id: (manifest.schema_version == 3)
+            .then_some(run_id)
+            .or_else(|| {
+                manifest.aggregate_binding.as_ref().and_then(|binding| {
+                    (binding.aggregate_kind == AggregateKind::OrchestratedSession
+                        && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
+                        .then_some(binding.operation_id)
+                })
+            }),
         transport_timeout_seconds: 900,
         dedicated_server,
     };
@@ -7711,22 +9100,28 @@ fn ensure_run_worker_locked(
         startup_range,
     );
     if let Err(error) = start {
-        if manifest.execution_lane == ExecutionLane::Dedicated {
-            return Err(MachineError::new(
-                "DEDICATED_SERVER_START_FAILED",
-                "the run-owned dedicated app-server generation did not become ready",
-                true,
-                json!({
-                    "run_id": run_id,
-                    "execution_lane": "dedicated",
-                    "reason": error.message,
-                    "required_action": "retry_dedicated_start",
-                }),
-            ));
-        }
-        return Err(error);
+        return Err(worker_start_failure(run_id, manifest.execution_lane, error));
     }
     Ok(control_socket_epoch)
+}
+
+#[cfg(target_os = "macos")]
+fn worker_start_failure(run_id: Uuid, lane: ExecutionLane, error: MachineError) -> MachineError {
+    if error.code == "OUTCOME_UNKNOWN" || lane != ExecutionLane::Dedicated {
+        error
+    } else {
+        MachineError::new(
+            "DEDICATED_SERVER_START_FAILED",
+            "the run-owned dedicated app-server generation did not become ready",
+            true,
+            json!({
+                "run_id": run_id,
+                "execution_lane": "dedicated",
+                "reason": error.message,
+                "required_action": "retry_dedicated_start",
+            }),
+        )
+    }
 }
 
 pub(crate) fn ensure_external_specialist_worker(
@@ -8367,10 +9762,814 @@ impl RunMutationLock for RunStartupLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caller_start_request() -> Value {
+        serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-defaults.valid.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn caller_start_defaults_resolve_to_explicit_private_selection() {
+        let request: CallerRunStartRequest =
+            serde_json::from_value(caller_start_request()).unwrap();
+        let resolved = request.resolve().unwrap();
+        assert_eq!(resolved.access, CallerWorkspaceAccess::Writable);
+        assert_eq!(resolved.role, "general");
+        let value = serde_json::to_value(resolved).unwrap();
+        assert_eq!(value["schema"], "dolgorae-run-start-resolved/v2");
+        assert_eq!(value["access"], "writable");
+        assert_eq!(value["role"], "general");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-resolved.valid.json"
+        ))
+        .unwrap();
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn caller_start_retains_explicit_read_only_role_and_request_identity() {
+        let mut value = caller_start_request();
+        value["access"] = json!("read-only");
+        value["role"] = json!("custom.role-1");
+        value["model"] = json!("selected-model");
+        value["expected_workspace_id"] = json!("a".repeat(64));
+        let request: CallerRunStartRequest = serde_json::from_value(value.clone()).unwrap();
+        let resolved = request.resolve().unwrap();
+        assert_eq!(resolved.access, CallerWorkspaceAccess::ReadOnly);
+        value["schema"] = json!("dolgorae-run-start-resolved/v2");
+        assert_eq!(serde_json::to_value(resolved).unwrap(), value);
+    }
+
+    #[test]
+    fn caller_start_rejects_null_defaults_missing_required_fields_and_unknown_inputs() {
+        for field in ["access", "role", "expected_workspace_id"] {
+            let mut value = caller_start_request();
+            value[field] = Value::Null;
+            assert!(
+                serde_json::from_value::<CallerRunStartRequest>(value).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["workspace", "model", "effort", "parent_ref"] {
+            let mut value = caller_start_request();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CallerRunStartRequest>(value).is_err(),
+                "{field}"
+            );
+        }
+        let mut value = caller_start_request();
+        value["instructions"] = json!("grant writable access");
+        assert!(serde_json::from_value::<CallerRunStartRequest>(value).is_err());
+        let mut value = caller_start_request();
+        value["purpose"]
+            .as_object_mut()
+            .unwrap()
+            .remove("external_label");
+        assert!(serde_json::from_value::<CallerRunStartRequest>(value).is_err());
+        let mut value = caller_start_request();
+        value["purpose"]["access"] = json!("writable");
+        assert!(serde_json::from_value::<CallerRunStartRequest>(value).is_err());
+    }
+
+    #[test]
+    fn caller_start_refuses_invalid_selection_bounds_and_reserved_provenance() {
+        let invalid = [
+            ("schema", json!("dolgorae-run-start-request/v1")),
+            ("role", json!("../reviewer")),
+            ("profile", json!("")),
+            ("model", json!("x".repeat(129))),
+            ("effort", json!("x".repeat(65))),
+            ("workspace", json!("é".repeat(4097))),
+            ("idempotency_key", json!("x".repeat(129))),
+            ("expected_workspace_id", json!("A".repeat(64))),
+            ("required_capabilities", json!(["duplicate", "duplicate"])),
+            ("required_capabilities", json!([""])),
+            (
+                "required_capabilities",
+                json!((0..65).map(|n| n.to_string()).collect::<Vec<_>>()),
+            ),
+            (
+                "parent_ref",
+                json!({"namespace":"dolgorae.orchestrated-session.v1","kind":"primary","id":"source"}),
+            ),
+            (
+                "parent_ref",
+                json!({"namespace":"external","kind":"","id":"source"}),
+            ),
+        ];
+        for (field, input) in invalid {
+            let mut value = caller_start_request();
+            value[field] = input;
+            let request: CallerRunStartRequest = serde_json::from_value(value).unwrap();
+            assert!(request.resolve().is_err(), "{field}");
+        }
+        let mut value = caller_start_request();
+        value["control_mode"] = json!("direct_interactive");
+        value["parent_ref"] = json!({"namespace":"external","kind":"source","id":"source"});
+        assert!(
+            serde_json::from_value::<CallerRunStartRequest>(value)
+                .unwrap()
+                .resolve()
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dedicated_start_preserves_uncertain_effects_and_only_retries_known_start_failure() {
+        use crate::turn::{TurnError, TurnFailureContext};
+        let run_id = Uuid::now_v7();
+        let original = TurnError::OutcomeUnknown.into_machine_error(&TurnFailureContext {
+            run_id,
+            profile: "selected".to_owned(),
+            thread_id: Some("original-thread".to_owned()),
+            turn_id: None,
+        });
+        let projected = worker_start_failure(run_id, ExecutionLane::Dedicated, original.clone());
+        assert_eq!(projected.code, original.code);
+        assert_eq!(projected.retryable, original.retryable);
+        assert_eq!(projected.details, original.details);
+        let known_failure = MachineError::new(
+            "TRANSPORT_FAILURE",
+            "server startup failed",
+            false,
+            json!({"stage":"connect", "acceptance":"not_accepted", "request_id":null}),
+        );
+        let dedicated = worker_start_failure(run_id, ExecutionLane::Dedicated, known_failure);
+        assert_eq!(dedicated.code, "DEDICATED_SERVER_START_FAILED");
+        assert!(dedicated.retryable);
+        assert_eq!(
+            dedicated.details["required_action"],
+            "retry_dedicated_start"
+        );
+    }
+
+    #[test]
+    fn caller_start_requires_workspace_before_profile_or_run_allocation() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary =
+            std::env::temp_dir().join(format!("dolgorae-caller-start-{}", Uuid::now_v7()));
+        std::fs::create_dir(&temporary).unwrap();
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let credential = temporary.join("controller");
+        std::fs::write(&credential, b"{}").unwrap();
+        std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let workspace = temporary.join("absent-workspace");
+        for access in ["writable", "read-only"] {
+            let mut value = caller_start_request();
+            value["workspace"] = json!(workspace);
+            value["profile"] = json!("not-a-registered-profile");
+            value["access"] = json!(access);
+            let error = CoreSemanticService
+                .start_caller_run(
+                    serde_json::from_value(value).unwrap(),
+                    CredentialCarrier::open_path(&credential).unwrap(),
+                )
+                .err()
+                .expect("absent workspace must reject");
+            assert_eq!(error.code, "WORKSPACE_NOT_INITIALIZED");
+            assert!(!error.retryable);
+            assert!(error.details["run_id"].is_null());
+            assert!(error.details["review_id"].is_null());
+            assert_eq!(std::fs::read_dir(&temporary).unwrap().count(), 1);
+            assert!(!workspace.exists());
+        }
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
-    fn caller_preparation_rejects_unqualified_discovery_before_workspace_or_profile_effects() {
+    fn caller_bootstrap_replay_observes_completed_history_without_taking_writer() {
+        let state_root = std::env::temp_dir().join(format!("caller-bootstrap-{}", Uuid::now_v7()));
+        let run_id = Uuid::now_v7();
+        let root = run_root(&state_root, run_id);
+        std::fs::create_dir_all(root.join("recovery")).unwrap();
+        for directory in [
+            &state_root,
+            &state_root.join("runs"),
+            &root,
+            &root.join("recovery"),
+        ] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(root.join("audit.jsonl"), b"").unwrap();
+        std::fs::set_permissions(
+            root.join("audit.jsonl"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut worker = ConformantLedger::open_for_bootstrap(&root, run_id).unwrap();
+        worker
+            .bootstrap(&BootstrapRequest {
+                timestamp: "2026-08-21T12:34:56.123456Z".to_owned(),
+                workspace_id: "11".repeat(32),
+                intent: IdempotencyIntent {
+                    schema_version: 1,
+                    operation: IdempotencyOperation::StartRun,
+                    idempotency_key: "caller-bootstrap-test".to_owned(),
+                    normalized_identity_sha256: "22".repeat(32),
+                    run_id,
+                },
+                record_kind: BootstrapRecordKind::RunCreated,
+                initial_access: "unknown".to_owned(),
+                default_effort: Some("low".to_owned()),
+            })
+            .unwrap();
+        assert!(!caller_bootstrap_is_complete(&state_root, run_id).unwrap());
+        worker
+            .mark_threadless_ready("2026-08-21T12:34:57.123456Z")
+            .unwrap();
+        assert!(matches!(
+            crate::ledger::Ledger::open(&root, run_id),
+            Err(crate::ledger::LedgerError::WriterBusy(_))
+        ));
+        let original_head = worker.inner().head().unwrap();
+        assert!(caller_bootstrap_is_complete(&state_root, run_id).unwrap());
+        assert_eq!(worker.inner().head().unwrap(), original_head);
+        let mut corrupted = worker.inner().projection().unwrap();
+        corrupted.ledger_head.hash = "0".repeat(64);
+        std::fs::write(
+            root.join("state.json"),
+            serde_json::to_vec(&corrupted).unwrap(),
+        )
+        .unwrap();
+        assert!(caller_bootstrap_is_complete(&state_root, run_id).is_err());
+        drop(worker);
+        std::fs::remove_dir_all(state_root).unwrap();
+    }
+
+    #[test]
+    fn caller_start_reuses_published_manifest_after_each_pre_worker_checkpoint() {
+        use crate::writer::{WriterAuthorityState, WriterStore};
+
+        for checkpoint in 0..3 {
+            let root = std::env::temp_dir().join(format!("caller-start-retry-{}", Uuid::now_v7()));
+            for path in [
+                &root,
+                &root.join("runs"),
+                &root.join("runtime"),
+                &root.join("runtime/locks"),
+            ] {
+                std::fs::create_dir(path).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let credential = root.join("controller");
+            crate::controller::create_controller_credential(
+                &credential,
+                crate::domain::ControllerKind::Automation,
+                "caller-start-retry-test".to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = CredentialCarrier::open_path(&credential).unwrap();
+            let mut intent =
+                serde_json::from_str::<crate::run::CallerStartReservation>(include_str!(
+                    "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                ))
+                .unwrap()
+                .accepted_intent;
+            intent.run_id = Uuid::now_v7();
+            intent.controller = presented_controller_from_carrier(&carrier, 1)
+                .unwrap()
+                .binding;
+            intent
+                .global_profile_binding
+                .launch_snapshot
+                .launch_contract_sha256 =
+                run_profile_snapshot(&intent.global_profile_binding.launch_snapshot)
+                    .unwrap()
+                    .launch_contract_sha256;
+            let encoded =
+                serde_json::to_string(&intent.global_profile_binding.launch_snapshot).unwrap();
+            intent.global_profile_binding.launch_snapshot_sha256 =
+                sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+            let reservation = crate::run::CallerStartReservation::new(intent.clone()).unwrap();
+            let reservations = StartReservationStore::new(SystemWorkspacePlatform, &root);
+            reservations.reserve_caller(&reservation).unwrap();
+            let uid = DarwinSystem.current_uid();
+            WriterStore::initialize_layout(&root, &intent.workspace_id, uid).unwrap();
+            let writers = WriterStore::new(&root, &intent.workspace_id, uid);
+            let state = ServerState {
+                schema_version: 2,
+                server_key: intent.global_profile_binding.server_key.clone(),
+                lifecycle: "ready".to_owned(),
+                server_epoch: 1,
+                epoch_id: Uuid::now_v7(),
+                boot_session_uuid: Uuid::now_v7(),
+                pid: 10,
+                pgid: 10,
+                uid,
+                process_fingerprint: "fixture-server".to_owned(),
+                drainer_pid: 11,
+                drainer_pgid: 11,
+                drainer_uid: uid,
+                drainer_fingerprint: "fixture-drainer".to_owned(),
+                socket_path: "/fixture/profile.sock".to_owned(),
+                socket_device: 1,
+                socket_inode: 1,
+                membership_revision: 0,
+                default_model: intent.readiness.model.clone(),
+                models: vec![intent.readiness.model.clone()],
+                capabilities: BTreeMap::new(),
+                snapshot: intent.global_profile_binding.launch_snapshot.clone(),
+            };
+            let view = WorkspaceView {
+                workspace_id: intent.workspace_id.clone(),
+                canonical_path: intent.canonical_workspace.clone(),
+                mode: intent.workspace_mode,
+                created: false,
+            };
+            let store = RunStore::new(SystemWorkspacePlatform, &root);
+            let manifest = {
+                let _allocation = reservations
+                    .lock_allocation("run-start", &reservation.idempotency_key)
+                    .unwrap();
+                let _startup = ProcessRunStartup::acquire(&root, intent.run_id).unwrap();
+                let manifest =
+                    load_or_publish_caller_manifest(&store, &intent, &view, &state).unwrap();
+                if checkpoint > 0 {
+                    ensure_caller_bootstrap(&root, &manifest, &reservation).unwrap();
+                }
+                if checkpoint == 2 {
+                    writers
+                        .transact(|record| {
+                            record.prepare_acquire(
+                                intent.run_id,
+                                WriterStore::holder(
+                                    intent.run_id,
+                                    manifest.profile.profile_name.clone(),
+                                    &manifest.controller,
+                                    1,
+                                    manifest.profile_capability_snapshot.server_key.clone(),
+                                    manifest.profile_capability_snapshot.server_epoch,
+                                    None,
+                                    RunLifecycle::Starting,
+                                ),
+                                intent.run_id,
+                            )
+                        })
+                        .unwrap();
+                }
+                manifest
+            };
+            assert_eq!(
+                store
+                    .load_state_projection(intent.run_id)
+                    .unwrap()
+                    .lifecycle,
+                RunLifecycle::Starting
+            );
+            let run = run_root(&root, intent.run_id);
+            let manifest_bytes = std::fs::read(run.join("manifest.json")).unwrap();
+            let audit_bytes = std::fs::read(run.join("audit.jsonl")).unwrap();
+            let writer_before = serde_json::to_value(writers.load().unwrap()).unwrap();
+
+            // Re-enter the same production publication boundary after losing
+            // the original callers and locks. New Profile defaults must not
+            // rebuild the accepted manifest or erase the original reservation.
+            let mut current_state = state.clone();
+            current_state.default_model = "a-later-default".to_owned();
+            let _allocation = reservations
+                .lock_allocation("run-start", &reservation.idempotency_key)
+                .unwrap();
+            let _startup = ProcessRunStartup::acquire(&root, intent.run_id).unwrap();
+            let restored = reservations
+                .load_caller(&reservation.idempotency_key, &reservation.request_sha256)
+                .unwrap()
+                .unwrap();
+            let replay = load_or_publish_caller_manifest(
+                &store,
+                &restored.accepted_intent,
+                &view,
+                &current_state,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&replay).unwrap(),
+                serde_json::to_value(&manifest).unwrap()
+            );
+            assert_eq!(
+                std::fs::read(run.join("manifest.json")).unwrap(),
+                manifest_bytes
+            );
+            assert_eq!(std::fs::read(run.join("audit.jsonl")).unwrap(), audit_bytes);
+            assert_eq!(
+                serde_json::to_value(writers.load().unwrap()).unwrap(),
+                writer_before
+            );
+            ensure_caller_bootstrap(&root, &replay, &restored).unwrap();
+            assert!(
+                replay_published_caller_start(&root, &view, &restored, &replay, &carrier)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                store
+                    .load_state_projection(intent.run_id)
+                    .unwrap()
+                    .lifecycle,
+                RunLifecycle::Starting
+            );
+            assert!(
+                store
+                    .load_caller_start_receipt(intent.run_id, &restored.normalized_identity_sha256)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                serde_json::to_value(writers.load().unwrap()).unwrap(),
+                writer_before
+            );
+            assert_eq!(
+                writers.load().unwrap().state,
+                if checkpoint == 2 {
+                    WriterAuthorityState::Reserved
+                } else {
+                    WriterAuthorityState::None
+                }
+            );
+            assert_eq!(std::fs::read_dir(root.join("runs")).unwrap().count(), 1);
+
+            let mut changed = intent.clone();
+            changed.request.role = "different-role".to_owned();
+            assert_eq!(
+                load_or_publish_caller_manifest(&store, &changed, &view, &state)
+                    .unwrap_err()
+                    .code,
+                "INTERNAL_ERROR"
+            );
+            assert_eq!(
+                std::fs::read(run.join("manifest.json")).unwrap(),
+                manifest_bytes
+            );
+            drop(_startup);
+            drop(_allocation);
+            drop(carrier);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn caller_absent_generation_retirement_preserves_guards_and_invalidates_policy() {
+        use crate::domain::{PolicyEpoch, PolicyVerification};
+        use crate::worker::{SocketIdentity, WorkerIdentity, WorkerRuntimeRecord};
+        use crate::writer::{WriterAuthorityState, WriterStore};
+        use std::os::unix::fs::MetadataExt as _;
+
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        let mut child = DarwinSystem.spawn_detached(&mut command).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let process = DarwinSystem.bsd_process_identity(child.id()).unwrap();
+        assert_eq!(process.pid, process.process_group_id);
+        assert_eq!(
+            DarwinSystem.process_group_pids(process.pid).unwrap(),
+            vec![process.pid]
+        );
+        let executable = DarwinSystem.live_process_path(process.pid).unwrap();
+        let metadata = std::fs::metadata(&executable).unwrap();
+        let executable_sha256 = sha256_hex(&std::fs::read(&executable).unwrap());
+        DarwinSystem
+            .signal_process_group(process.pid, libc::SIGTERM)
+            .unwrap();
+        child.wait().unwrap();
+
+        for guarded in [
+            WriterAuthorityState::Reserved,
+            WriterAuthorityState::Releasing,
+            WriterAuthorityState::BlockedUnknown,
+        ] {
+            let root = std::env::temp_dir().join(format!("caller-absent-{}", Uuid::now_v7()));
+            for path in [
+                &root,
+                &root.join("runs"),
+                &root.join("runtime"),
+                &root.join("runtime/locks"),
+            ] {
+                std::fs::create_dir(path).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let mut intent =
+                serde_json::from_str::<crate::run::CallerStartReservation>(include_str!(
+                    "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                ))
+                .unwrap()
+                .accepted_intent;
+            intent.run_id = Uuid::now_v7();
+            intent.request.control_mode = ControlMode::DirectInteractive;
+            intent
+                .global_profile_binding
+                .launch_snapshot
+                .launch_contract_sha256 =
+                run_profile_snapshot(&intent.global_profile_binding.launch_snapshot)
+                    .unwrap()
+                    .launch_contract_sha256;
+            let encoded =
+                serde_json::to_string(&intent.global_profile_binding.launch_snapshot).unwrap();
+            intent.global_profile_binding.launch_snapshot_sha256 =
+                sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+            let state = ServerState {
+                schema_version: 2,
+                server_key: intent.global_profile_binding.server_key.clone(),
+                lifecycle: "ready".to_owned(),
+                server_epoch: 1,
+                epoch_id: Uuid::now_v7(),
+                boot_session_uuid: Uuid::now_v7(),
+                pid: 10,
+                pgid: 10,
+                uid: process.uid,
+                process_fingerprint: "fixture-server".to_owned(),
+                drainer_pid: 11,
+                drainer_pgid: 11,
+                drainer_uid: process.uid,
+                drainer_fingerprint: "fixture-drainer".to_owned(),
+                socket_path: "/fixture/profile.sock".to_owned(),
+                socket_device: 1,
+                socket_inode: 1,
+                membership_revision: 0,
+                default_model: intent.readiness.model.clone(),
+                models: vec![intent.readiness.model.clone()],
+                capabilities: BTreeMap::new(),
+                snapshot: intent.global_profile_binding.launch_snapshot.clone(),
+            };
+            let view = WorkspaceView {
+                workspace_id: intent.workspace_id.clone(),
+                canonical_path: intent.canonical_workspace.clone(),
+                mode: intent.workspace_mode,
+                created: false,
+            };
+            let manifest =
+                build_caller_manifest(&intent, &view, &state, &intent.readiness.model, "low")
+                    .unwrap();
+            let store = RunStore::new(SystemWorkspacePlatform, &root);
+            let directory = store.publish(&manifest).unwrap();
+            let run_id = manifest.run_id;
+            WriterStore::initialize_layout(&root, &manifest.workspace_id, process.uid).unwrap();
+            let writers = WriterStore::new(&root, &manifest.workspace_id, process.uid);
+            let transaction_id = Uuid::now_v7();
+            let (_, generation) = writers
+                .transact(|writer| {
+                    let holder = WriterStore::holder(
+                        run_id,
+                        manifest.profile.profile_name.clone(),
+                        &manifest.controller,
+                        1,
+                        manifest.profile.initial_server_key.clone(),
+                        1,
+                        Some("original-thread".to_owned()),
+                        RunLifecycle::Idle,
+                    );
+                    let (_, generation) = writer.prepare_acquire(run_id, holder, transaction_id)?;
+                    if guarded != WriterAuthorityState::Reserved {
+                        writer.commit_acquire(transaction_id, generation)?;
+                        writer.prepare_release(run_id, transaction_id)?;
+                        if guarded == WriterAuthorityState::BlockedUnknown {
+                            writer.block_unknown(transaction_id);
+                        }
+                    }
+                    Ok(generation)
+                })
+                .unwrap();
+            let mut ledger = crate::ledger::Ledger::open(&directory.root, run_id).unwrap();
+            ledger
+                .append_required_payload(
+                    AuditKind::RunCreated,
+                    &json!({"initial_access":"read"}),
+                    1,
+                )
+                .unwrap();
+            let policy = crate::domain::EffectivePolicy {
+                access: Access::Write,
+                verification: PolicyVerification::Verified,
+                policy_epoch: PolicyEpoch(4),
+                thread_generation: Some(1),
+                server_epoch: Some(1),
+                writer_generation: Some(generation),
+            };
+            ledger.append_required_payload(AuditKind::ThreadBound, &json!({
+                "thread_id":"original-thread","thread_generation":1,"effective_policy":policy,
+            }), 1).unwrap();
+            let mut projection = ledger.projection().unwrap();
+            projection.lifecycle = RunLifecycle::Idle;
+            let state_path = directory.root.join("state.json");
+            std::fs::write(&state_path, serde_json::to_vec(&projection).unwrap()).unwrap();
+            drop(ledger);
+            let record = WorkerRuntimeRecord {
+                schema_version: 1,
+                identity: WorkerIdentity {
+                    workspace_id: manifest.workspace_id.clone(),
+                    run_id,
+                    run_generation: 1,
+                    boot_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap(),
+                    pid: process.pid,
+                    process_group_id: process.process_group_id,
+                    session_id: process.session_id,
+                    uid: process.uid,
+                    start_tvsec: process.start_tvsec,
+                    start_tvusec: process.start_tvusec,
+                    executable_path: executable.clone(),
+                    executable_device: metadata.dev(),
+                    executable_inode: metadata.ino(),
+                    executable_sha256: executable_sha256.clone(),
+                },
+                socket_path: crate::worker::worker_socket_path(
+                    process.uid,
+                    &manifest.workspace_id,
+                    run_id,
+                )
+                .unwrap(),
+                socket_identity: SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: None,
+                dedicated_server_identity: None,
+                dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+                mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
+                binary_sha256: executable_sha256.clone(),
+            };
+            record.validate().unwrap();
+            assert_eq!(
+                RunSources::load(&root, run_id, 1).unwrap_err().code,
+                "RUN_STATE_CONFLICT"
+            );
+            let original = writers.load().unwrap();
+            let mut incomplete = record.clone();
+            incomplete.schema_version = 2;
+            incomplete.startup_scope = Some(crate::worker::StartupScopeWitness {
+                worker_identity: record.identity.clone(),
+                app_server_epoch: 1,
+                dedicated_server_identity: None,
+                app_server_socket_identity: None,
+                revision: 1,
+                complete: false,
+                children: Vec::new(),
+            });
+            incomplete.validate().unwrap();
+            assert!(retire_absent_generation_writer(&root, &incomplete).is_err());
+            assert_eq!(writers.load().unwrap(), original);
+            let mut changed = record.clone();
+            changed.identity.run_generation = 2;
+            assert!(retire_absent_generation_writer(&root, &changed).is_err());
+            assert_eq!(writers.load().unwrap(), original);
+            changed = record.clone();
+            changed.app_server_epoch = Some(2);
+            assert!(retire_absent_generation_writer(&root, &changed).is_err());
+            assert_eq!(writers.load().unwrap(), original);
+            let mut corrupted = projection.clone();
+            corrupted.ledger_head.hash = "0".repeat(64);
+            std::fs::write(&state_path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+            assert!(retire_absent_generation_writer(&root, &record).is_err());
+            assert_eq!(writers.load().unwrap(), original);
+            std::fs::write(&state_path, serde_json::to_vec(&projection).unwrap()).unwrap();
+            let mut wrong_policy = policy.clone();
+            wrong_policy.policy_epoch = PolicyEpoch(5);
+            wrong_policy.writer_generation = Some(generation + 1);
+            let mut ledger = crate::ledger::Ledger::open(&directory.root, run_id).unwrap();
+            ledger
+                .append_required_payload(
+                    AuditKind::WriterAcquired,
+                    &json!({
+                        "writer_generation":generation + 1,"transaction_id":transaction_id,
+                        "effective_policy":wrong_policy,
+                    }),
+                    1,
+                )
+                .unwrap();
+            let wrong_head = ledger.head().unwrap();
+            drop(ledger);
+            assert_eq!(
+                retire_absent_generation_writer(&root, &record)
+                    .unwrap_err()
+                    .code,
+                "RUN_STATE_CONFLICT"
+            );
+            assert_eq!(writers.load().unwrap(), original);
+            assert_eq!(
+                store.load_state_projection(run_id).unwrap().ledger_head,
+                wrong_head
+            );
+            let mut restored_policy = policy.clone();
+            restored_policy.policy_epoch = PolicyEpoch(6);
+            let mut ledger = crate::ledger::Ledger::open(&directory.root, run_id).unwrap();
+            ledger
+                .append_required_payload(
+                    AuditKind::WriterAcquired,
+                    &json!({
+                        "writer_generation":generation,"transaction_id":transaction_id,
+                        "effective_policy":restored_policy,
+                    }),
+                    1,
+                )
+                .unwrap();
+            drop(ledger);
+            retire_absent_generation_writer(&root, &record).unwrap();
+            assert_eq!(writers.load().unwrap().state, WriterAuthorityState::None);
+            let (released, observed) = observe_caller_policy(&root, run_id).unwrap();
+            assert_eq!(released.thread_id, projection.thread_id);
+            assert_eq!(observed.access, Access::Unknown);
+            assert_eq!(observed.verification, PolicyVerification::Unverified);
+            assert_eq!(observed.policy_epoch, PolicyEpoch(7));
+            assert_eq!(observed.writer_generation, None);
+            let (_, history) = observe_caller_ledger(&root, run_id).unwrap();
+            assert_eq!(
+                history
+                    .payloads_of_kind(AuditKind::WriterReleased)
+                    .unwrap()
+                    .last()
+                    .unwrap()["transaction_id"],
+                json!(transaction_id)
+            );
+            assert!(RunSources::load(&root, run_id, 1).is_ok());
+            let retired = writers.load().unwrap();
+            retire_absent_generation_writer(&root, &record).unwrap();
+            assert_eq!(writers.load().unwrap(), retired);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn caller_policy_observation_uses_committed_prefix_while_worker_owns_ledger() {
+        let state_root = std::env::temp_dir().join(format!("caller-policy-{}", Uuid::now_v7()));
+        let run_id = Uuid::now_v7();
+        let root = run_root(&state_root, run_id);
+        std::fs::create_dir_all(root.join("recovery")).unwrap();
+        for directory in [
+            &state_root,
+            &state_root.join("runs"),
+            &root,
+            &root.join("recovery"),
+        ] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(root.join("audit.jsonl"), b"").unwrap();
+        std::fs::set_permissions(
+            root.join("audit.jsonl"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut worker_ledger = crate::ledger::Ledger::open(&root, run_id).unwrap();
+        assert!(matches!(
+            crate::ledger::Ledger::open(&root, run_id),
+            Err(crate::ledger::LedgerError::WriterBusy(_))
+        ));
+        worker_ledger
+            .append_required_payload(
+                AuditKind::RunCreated,
+                &json!({"initial_access":"read","default_effort":"low"}),
+                1,
+            )
+            .unwrap();
+        assert!(observe_caller_policy(&state_root, run_id).is_err());
+        let policy = crate::domain::EffectivePolicy {
+            access: Access::Read,
+            verification: crate::domain::PolicyVerification::Verified,
+            policy_epoch: crate::domain::PolicyEpoch(1),
+            thread_generation: Some(1),
+            server_epoch: Some(2),
+            writer_generation: None,
+        };
+        worker_ledger
+            .append_required_payload(
+                AuditKind::ThreadBound,
+                &json!({"thread_id":"original-thread","effective_policy":policy}),
+                1,
+            )
+            .unwrap();
+        let (projection, observed) = observe_caller_policy(&state_root, run_id).unwrap();
+        assert_eq!(projection, worker_ledger.projection().unwrap());
+        assert_eq!(projection.thread_id.as_deref(), Some("original-thread"));
+        assert_eq!(observed, policy);
+        let state = root.join("state.json");
+        let original = std::fs::read(&state).unwrap();
+        let mut corrupted = projection;
+        corrupted.ledger_head.hash = "0".repeat(64);
+        std::fs::write(&state, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        assert!(observe_caller_policy(&state_root, run_id).is_err());
+        std::fs::write(&state, original).unwrap();
+        assert!(observe_caller_policy(&state_root, run_id).is_ok());
+        worker_ledger
+            .append_required_payload(
+                AuditKind::ThreadBound,
+                &json!({"thread_id":"original-thread","effective_policy":{"access":"invalid"}}),
+                1,
+            )
+            .unwrap();
+        assert!(observe_caller_policy(&state_root, run_id).is_err());
+        drop(worker_ledger);
+        std::fs::remove_dir_all(state_root).unwrap();
+    }
+
+    #[test]
+    fn caller_preparation_requires_workspace_and_valid_capture_before_profile_observation() {
         let workspace =
             std::env::temp_dir().join(format!("dolgorae-unqualified-{}", Uuid::now_v7()));
         assert!(!workspace.exists());
@@ -8411,10 +10610,8 @@ mod tests {
             instructions.clone(),
         )
         .err()
-        .expect("unqualified discovery must reject preparation");
-        assert_eq!(rejected.code, "INSTRUCTION_DISCOVERY_UNSUPPORTED");
-        assert_eq!(rejected.details["phase"], "admission");
-        assert_eq!(rejected.details["outcome"], "not_dispatched");
+        .expect("absent workspace must reject preparation");
+        assert_eq!(rejected.code, "WORKSPACE_NOT_INITIALIZED");
         assert!(rejected.details["run_id"].is_null());
         assert!(rejected.details["review_id"].is_null());
         assert!(!workspace.exists());

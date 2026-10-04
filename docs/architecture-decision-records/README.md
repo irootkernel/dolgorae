@@ -187,6 +187,13 @@ singleton. Permanent lock pathnames live below
 unverifiable generation blocks same-thread recovery. A stale foreign-run
 `writer.json` remains authoritative until evidence proves a safe transition;
 process absence and a free transaction lock are insufficient.
+New caller-workspace Worker generations use private runtime version 2 to
+retain startup-descendant ownership through failed startup and process loss.
+Admission requires stable typed ancestry to the actual Dedicated Server;
+initial differing groups/sessions are frozen rather than treated as ownership
+by themselves. Incomplete or invalid witnesses retain the Writer guard.
+Serialized monotonic runtime writes preserve this evidence through locator
+replacement. Version-1 records and accepted Run/receipt shapes remain frozen.
 Idle holders may cooperatively hand off only through a controller-authorized
 prepare/commit protocol bound to both run generations, writer-authority generation,
 and a five-minute durable confirmation record. Cross-controller, active,
@@ -490,17 +497,20 @@ ownership, writer generation, or `policy_epoch`. Every Turn receives a separate
 dynamic access context derived from durable writer and verified policy state.
 
 Do not describe every Dolgorae-managed agent as a subagent. Append immutable
-Run-specific instructions as subordinate context. Continue to respect profile
-AGENTS files on legacy instruction generations, and supported skills, plugins,
-apps and checked MCP servers unless they conflict with enforced invariants.
+Run-specific instructions as subordinate context. Continue to respect Profile
+AGENTS files on legacy and modern instruction generations, and supported skills,
+plugins, apps and checked MCP servers unless they conflict with enforced invariants.
 Their mutable contents are not part of Dolgorae's
 byte-immutable role claim. The modern contract explicitly captures common and
-named Markdown Role instructions and suppresses ambient AGENTS discovery using
-empirically verified runtime configuration. Captured bodies are immutable
-developer input; current task input remains separate. Unsupported discovery
-control rejects modern admission before allocation. The caller workspace is
-cwd, while instruction home and CODEX_HOME have separate owners. Candidate
-reading restrictions for object/index review are checked independently of
+named Markdown Role instructions and suppresses project and ancestor AGENTS
+discovery using empirically verified runtime configuration. Captured bodies are
+immutable developer input; native Profile guidance and current task input remain
+separate user input with lower instruction priority. Warn users that Profile
+instruction edits can affect runtime input outside the captured snapshot.
+Unsupported project/ancestor discovery control rejects modern admission before
+allocation. The caller workspace is cwd, while instruction home and CODEX_HOME
+have separate owners. Candidate reading restrictions for object/index review
+are checked independently of
 general Profile tool availability. Native subagents require an explicit enabled
 profile
 policy and a capability snapshot of `supported`; the corrected 0.147.0 campaign
@@ -732,6 +742,13 @@ matrix, and the carrier zeroization/strict-ingest boundary in
 `controller::tests::strict_controller_creation_and_authorization_hide_secret`.
 Changing any of those mechanism bindings requires this ADR and its named
 fixture set to change together.
+
+On AArch64, the existing `sha2` SHA-256 binding enables its CPU-checked hardware
+backend and software fallback. Its pinned transitive `sha2-asm` dependency is
+admitted only as that backend. Identity checks still hash the complete
+executable on every sample; the shared startup deadline remains unchanged.
+The Worker executable-digest fixture checks independent SHA-256 vectors,
+64-KiB read boundaries and final-byte mutations.
 
 ### Consequences
 

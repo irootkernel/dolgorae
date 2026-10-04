@@ -71,6 +71,10 @@ struct Behaviour {
     /// Take the connection away the moment `turn/interrupt` arrives, without
     /// ever answering it: the write landed and its outcome is unobservable.
     hang_up_on_interrupt: bool,
+    caller_thread_settings: bool,
+    refuse_thread_start: bool,
+    refuse_thread_name: bool,
+    refuse_thread_read: bool,
 }
 
 /// An app-server stand-in: one Unix socket, one WebSocket conversation, and a
@@ -253,9 +257,31 @@ fn serve_app_server(
             }
             return;
         }
+        if (method == "thread/start" && behaviour.refuse_thread_start)
+            || (method == "thread/name/set" && behaviour.refuse_thread_name)
+            || (method == "thread/read" && behaviour.refuse_thread_read)
+        {
+            let error = json!({"id": id, "error": {"code": -32602, "message": "startup refused"}});
+            let mut writer = outbound.lock().unwrap();
+            let _ = write_server_message(
+                writer.as_mut().unwrap(),
+                &serde_json::to_vec(&error).unwrap(),
+            );
+            continue;
+        }
         let reply = match method {
             "initialize" => json!({"codexHome": codex_home.to_str().unwrap()}),
+            "thread/start" if behaviour.caller_thread_settings => json!({
+                "thread": {"id": "thread-1", "turns": []},
+                "cwd": message["params"]["cwd"], "model": message["params"]["model"],
+                "approvalPolicy": message["params"]["approvalPolicy"],
+                "sandbox": {"type": "readOnly", "networkAccess": false},
+            }),
             "thread/start" => json!({"thread": {"id": "thread-1"}}),
+            "thread/name/set" if behaviour.caller_thread_settings => json!({}),
+            "thread/read" if behaviour.caller_thread_settings => {
+                json!({"thread": {"id":"thread-1", "turns":[]}})
+            }
             "turn/start" => {
                 started_turns += 1;
                 if behaviour.first_turn_delay_ms > 0 && started_turns == 1 {
@@ -939,6 +965,141 @@ fn eager_thread_is_bound_before_a_brokered_worker_becomes_ready() {
         key == "operation_id"
             && matches!(value, LosslessJson::String(actual) if actual == &operation_id.to_string())
     }));
+}
+
+#[test]
+fn caller_partial_eager_start_preserves_unknown_and_original_thread() {
+    use dolgorae::turn::SessionSafetyPolicy;
+    use dolgorae::worker::WorkerProtocolError;
+
+    for (behaviour, partial) in [
+        (
+            Behaviour {
+                refuse_thread_start: true,
+                ..Behaviour::default()
+            },
+            false,
+        ),
+        (
+            Behaviour {
+                refuse_thread_name: true,
+                ..Behaviour::default()
+            },
+            true,
+        ),
+        (
+            Behaviour {
+                refuse_thread_read: true,
+                ..Behaviour::default()
+            },
+            true,
+        ),
+    ] {
+        let root = std::env::temp_dir().join(format!("dg-start-{}", Uuid::now_v7().simple()));
+        make_dir(&root);
+        let state_root = root.join("state");
+        make_dir(&state_root);
+        make_dir(&state_root.join("runs"));
+        make_dir(&state_root.join("runtime"));
+        make_dir(&state_root.join("runtime/locks"));
+        let uid = fs::metadata(&root).unwrap().uid();
+        dolgorae::writer::WriterStore::initialize_layout(&state_root, &"1".repeat(64), uid)
+            .unwrap();
+        let run_id = Uuid::now_v7();
+        let credential_path = root.join("controller.json");
+        let created = create_controller_credential(
+            &credential_path,
+            ControllerKind::HumanCli,
+            "cli".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let credential = CredentialCarrier::open_path(&credential_path).unwrap();
+        let binding = dolgorae::controller::binding_from_carrier(&credential, 1).unwrap();
+        RunStore::new(SystemWorkspacePlatform, &state_root)
+            .publish(&manifest(run_id, binding))
+            .unwrap();
+        let ledger_root = state_root.join("runs").join(run_id.to_string());
+        prepare_ledger_root(&ledger_root);
+        let ledger = Arc::new(Mutex::new(Ledger::open(&ledger_root, run_id).unwrap()));
+        let server = FakeAppServer::start(
+            &root,
+            Behaviour {
+                caller_thread_settings: true,
+                ..behaviour
+            },
+        );
+        let error = WorkerSession::connect(
+            &WorkerSessionBootstrap {
+                app_server_socket: server.socket_path.clone(),
+                canonical_codex_home: server.codex_home.to_str().unwrap().to_owned(),
+                server_key: "a".repeat(64),
+                server_epoch: 1,
+                controller_id: created.credential.controller_id,
+                control_mode: "direct_interactive".to_owned(),
+                fixed_model: "gpt-5".to_owned(),
+                default_effort: "medium".to_owned(),
+                supported_efforts: vec!["medium".to_owned()],
+                cwd: root.clone(),
+                developer_instructions: "fixed".to_owned(),
+                sandbox: "read-only".to_owned(),
+                approval_policy: "never".to_owned(),
+                safety_policy: SessionSafetyPolicy::CallerWorkspace,
+                artifact_root: root.join("artifacts"),
+                attach: SessionAttach::Start,
+                eager_thread_operation_id: Some(Uuid::now_v7()),
+                transport_timeout_seconds: 10,
+                dedicated_server: None,
+            },
+            RunFacts {
+                run_id,
+                profile: "default".to_owned(),
+            },
+            Arc::clone(&ledger),
+            1,
+            uid,
+            &state_root,
+            &"1".repeat(64),
+        )
+        .err()
+        .expect("scripted startup refusal must fail");
+        assert_eq!(
+            error,
+            if partial {
+                WorkerProtocolError::ThreadStartupOutcomeUnknown
+            } else {
+                WorkerProtocolError::AppServerUnavailable
+            }
+        );
+        assert_eq!(server.calls("thread/start").len(), 1);
+        assert!(server.calls("turn/start").is_empty());
+        assert_eq!(
+            server.calls("thread/read").len(),
+            usize::from(behaviour.refuse_thread_read)
+        );
+        let ledger = ledger.lock().unwrap();
+        let records = ledger.durable_records().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .any(|record| record.kind() == AuditKind::OutcomeUnknown),
+            partial
+        );
+        assert_eq!(records.iter().any(|record| {
+            record.kind() == AuditKind::TurnIntent &&
+            matches!(record.payload(), LosslessJson::Object(fields) if fields.iter().any(|(key, value)|
+                key == "provisional_thread_id" && *value == LosslessJson::String("thread-1".to_owned())))
+        }), partial);
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.kind() == AuditKind::ThreadBound)
+        );
+        drop(ledger);
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -2549,7 +2710,7 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         required_capabilities: vec!["reader".to_owned()],
         role_reference: None,
         normalized_instructions: instructions_text,
-        instructions: instructions.clone(),
+        instructions: instructions.clone().into(),
         execution_lane: ExecutionLane::SharedReadonly,
         required_assurance: Assurance::BestEffortPersonalAlpha,
         native_subagent_policy: "enabled".to_owned(),
@@ -2563,6 +2724,9 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         start_baseline: GitBaseline::empty(),
         created_at: "2026-08-22T12:34:56.123456Z".to_owned(),
         initial_access: Access::Read,
+        requested_access: None,
+        selected_role: None,
+        start_contract: None,
         control_mode: ControlMode::DirectInteractive,
         execution_lane: ExecutionLane::SharedReadonly,
         requested_assurance: Assurance::BestEffortPersonalAlpha,
@@ -2592,7 +2756,7 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         model: "gpt-5".to_owned(),
         initial_reasoning_effort: "medium".to_owned(),
         default_reasoning_effort: "medium".to_owned(),
-        instructions,
+        instructions: instructions.into(),
         controller,
         purpose,
         parent_ref: None,

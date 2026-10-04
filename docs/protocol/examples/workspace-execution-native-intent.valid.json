@@ -1,0 +1,5 @@
+{
+  "schema": "dolgorae.caller-native-intent/v1",
+  "operation_id": "019a2451-c672-744e-b103-b4d721a6b348",
+  "method": "thread/start"
+}

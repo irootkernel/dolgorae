@@ -14,10 +14,11 @@ use dolgorae::profile::{
 use dolgorae::projection::RunStateProjection;
 use dolgorae::run::{
     AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind, AppServerFacts, AuditPolicy,
-    CapabilityState, CompatibilityVerdict, ControllerBinding, DolgoraeBuild, ExecutableIdentity,
-    ForkProvenance, InstructionSnapshot, ParentReference, ProfileCapabilitySnapshot,
-    ProfileSnapshot, RunManifest, RunStore, StartReservation, StartReservationStore,
-    WriteContinuationProvenance, agent_configuration_digest, controller_capability_digest,
+    CallerStartIntent, CallerStartReservation, CapabilityState, CompatibilityVerdict,
+    ControllerBinding, DolgoraeBuild, ExecutableIdentity, ForkProvenance, InstructionSnapshot,
+    ParentReference, ProfileCapabilitySnapshot, ProfileSnapshot, RunManifest, RunStore,
+    StartReservation, StartReservationStore, WriteContinuationProvenance,
+    agent_configuration_digest, caller_start_request_digest, controller_capability_digest,
     launch_contract_digest, runtime_profile_snapshot_digest,
 };
 use dolgorae::workspace::{
@@ -289,67 +290,7 @@ fn global_profile_manifest_v2_is_complete_and_recoverable_without_registry() {
     let state_root = tree.path("state");
     make_dir(&state_root);
     make_dir(&state_root.join("runs"));
-    let mut manifest = sample_manifest();
-    manifest
-        .profile
-        .normalized_argv
-        .extend(["--enable".to_owned(), "multi_agent".to_owned()]);
-    manifest.profile.launch_contract_sha256 = launch_contract_digest(&manifest.profile).unwrap();
-    let definition = RuntimeProfile {
-        argv: manifest.profile.normalized_argv[..2].to_vec(),
-        codex_home: manifest.profile.canonical_codex_home.clone(),
-        environment: manifest.profile.sanitized_environment.clone(),
-        native_subagents: NativeSubagents::Enabled,
-    };
-    let snapshot = ServerProfileSnapshot {
-        schema_version: 1,
-        profile_name: manifest.profile.profile_name.clone(),
-        canonical_codex_home: manifest.profile.canonical_codex_home.clone(),
-        normalized_argv: manifest.profile.normalized_argv.clone(),
-        launch_cwd_policy: manifest.profile.launch_cwd_policy.clone(),
-        derived_launch_cwd: manifest.profile.derived_launch_cwd.clone(),
-        sanitized_environment: manifest.profile.sanitized_environment.clone(),
-        enabled_features: manifest.profile.enabled_features.clone(),
-        disabled_features: manifest.profile.disabled_features.clone(),
-        process_static_configuration: manifest.profile.process_static_configuration.clone(),
-        initial_configuration_observation: manifest
-            .profile
-            .initial_configuration_observation
-            .clone(),
-        executable_identity: ProfileExecutableIdentity {
-            resolved_path: manifest
-                .profile
-                .executable_identity
-                .resolved_path
-                .to_path_buf()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-            device: manifest.profile.executable_identity.device,
-            inode: manifest.profile.executable_identity.inode,
-            sha256: manifest.profile.executable_identity.sha256.clone(),
-        },
-        codex_version: manifest.profile.codex_version.clone(),
-        schema_bundle_sha256: manifest.profile.app_server_schema_sha256.clone(),
-        compatibility_manifest_sha256: manifest.profile.compatibility_manifest_sha256.clone(),
-        launch_contract_sha256: manifest.profile.launch_contract_sha256.clone(),
-        compatibility_verdict: ProfileCompatibilityVerdict::Tested,
-        server_key: manifest.profile.initial_server_key.clone(),
-    };
-    manifest.schema_version = 2;
-    manifest.global_profile_binding = Some(
-        ResolvedGlobalProfile::from_definition("default", definition)
-            .unwrap()
-            .bind(snapshot)
-            .unwrap(),
-    );
-    manifest.agent_configuration.schema_version = 2;
-    manifest.agent_configuration.runtime_profile_snapshot_sha256 = manifest
-        .global_profile_binding
-        .as_ref()
-        .unwrap()
-        .digest()
-        .unwrap();
+    let manifest = sample_global_manifest();
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     store.publish(&manifest).unwrap();
     let recovered = store.load_manifest(manifest.run_id).unwrap();
@@ -784,6 +725,557 @@ fn fork_lineage_requires_mode_specific_boundaries_and_a_distinct_source() {
     );
 }
 
+#[test]
+fn caller_manifest_recovery_retains_exact_captures_and_startup_selection() {
+    use dolgorae::domain::CallerWorkspaceAccess;
+    for access in [
+        CallerWorkspaceAccess::ReadOnly,
+        CallerWorkspaceAccess::Writable,
+    ] {
+        let tree = TestTree::new();
+        let state_root = tree.path("state");
+        make_dir(&state_root);
+        make_dir(&state_root.join("runs"));
+        let manifest = sample_caller_manifest(access);
+        let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+        let directory = store.publish(&manifest).unwrap();
+        make_dir(&state_root.join("runtime"));
+        make_dir(&state_root.join("runtime/locks"));
+        use dolgorae::workspace::WorkspacePlatform as _;
+        dolgorae::writer::WriterStore::initialize_layout(
+            &state_root,
+            &manifest.workspace_id,
+            SystemWorkspacePlatform.current_uid(),
+        )
+        .unwrap();
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(&directory.manifest).unwrap()).unwrap();
+        assert_eq!(persisted["schema_version"], 3);
+        assert!(
+            persisted["agent_configuration"]
+                .get("normalized_instructions")
+                .is_none()
+        );
+        assert_eq!(
+            persisted["instructions"],
+            persisted["agent_configuration"]["instructions"]
+        );
+        let recovered = store.load_manifest(manifest.run_id).unwrap();
+        assert_eq!(recovered, manifest);
+        let capture = recovered.instructions.caller().unwrap();
+        assert_eq!(capture.common.body, "공통 지침\r\n");
+        assert_eq!(capture.role.body, "Implement the current task.\n");
+        assert_eq!(
+            capture.developer_prefix().unwrap(),
+            recovered.agent_configuration.normalized_instructions
+        );
+        assert_eq!(recovered.requested_access, Some(access));
+        assert!(recovered.thread_id.is_none());
+        // Startup provenance is retained without establishing current write access.
+        let (snapshot, observation) =
+            dolgorae::snapshot::RunSnapshot::observe(&state_root, manifest.run_id, 0).unwrap();
+        assert_eq!(observation.effective_policy.access, Access::Unknown);
+        assert_eq!(
+            observation.effective_policy.verification,
+            dolgorae::domain::PolicyVerification::Unverified
+        );
+        assert!(dolgorae::gateway_projection::configuration(&snapshot).is_err());
+    }
+}
+
+#[test]
+fn caller_manifest_rejects_changed_capture_generation_and_startup_identity() {
+    use dolgorae::domain::CallerWorkspaceAccess;
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let manifest = sample_caller_manifest(CallerWorkspaceAccess::Writable);
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let path = store.publish(&manifest).unwrap().manifest;
+    let original = fs::read(&path).unwrap();
+    let value: Value = serde_json::from_slice(&original).unwrap();
+    for pointer in [
+        "/instructions/common/body",
+        "/instructions/role/sha256",
+        "/instructions/core_prefix_version",
+        "/agent_configuration/instructions/common/byte_length",
+        "/selected_role",
+        "/requested_access",
+        "/start_contract",
+        "/schema_version",
+        "/initial_access",
+        "/execution_lane",
+        "/agent_configuration/global_profile_binding_sha256",
+    ] {
+        let mut changed = value.clone();
+        let slot = changed.pointer_mut(pointer).unwrap();
+        *slot = match pointer {
+            "/instructions/core_prefix_version" => serde_json::json!(1),
+            "/schema_version" => serde_json::json!(2),
+            "/agent_configuration/instructions/common/byte_length" => serde_json::json!(1),
+            "/requested_access" => serde_json::json!("read-only"),
+            "/initial_access" => serde_json::json!("read"),
+            "/execution_lane" => serde_json::json!("shared_readonly"),
+            _ => serde_json::json!("changed"),
+        };
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert_eq!(
+            store.load_manifest(manifest.run_id).unwrap_err().code,
+            "RUN_STATE_INVARIANT_VIOLATION",
+            "{pointer}"
+        );
+    }
+    for field in ["requested_access", "selected_role", "start_contract"] {
+        for remove in [true, false] {
+            let mut changed = value.clone();
+            if remove {
+                changed.as_object_mut().unwrap().remove(field);
+            } else {
+                changed[field] = Value::Null;
+            }
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(store.load_manifest(manifest.run_id).is_err(), "{field}");
+        }
+    }
+    for pointer in [
+        "/parent_ref",
+        "/thread_id",
+        "/fork_provenance",
+        "/write_continuation_provenance",
+        "/aggregate_binding",
+        "/purpose/external_label",
+        "/agent_configuration/purpose/external_label",
+        "/agent_configuration/role_reference",
+    ] {
+        let mut changed = value.clone();
+        let (parent, field) = pointer.rsplit_once('/').unwrap();
+        changed
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert_eq!(
+            store.load_manifest(manifest.run_id).unwrap_err().code,
+            "RUN_STATE_INVARIANT_VIOLATION",
+            "{pointer}"
+        );
+    }
+    let mut changed = value;
+    changed["agent_configuration"]["normalized_instructions"] = serde_json::json!("replacement");
+    fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(store.load_manifest(manifest.run_id).is_err());
+    fs::write(&path, original).unwrap();
+    assert_eq!(store.load_manifest(manifest.run_id).unwrap(), manifest);
+}
+
+#[test]
+fn caller_policy_proof_binds_original_runtime_policy_and_writer_transaction() {
+    use dolgorae::domain::{PolicyEpoch, PolicyVerification};
+    use dolgorae::worker::{
+        CallerPolicyExpectation, CallerPolicyProof, DedicatedServerIdentity, SocketIdentity,
+        WorkerIdentity, WorkerRuntimeRecord,
+    };
+    use dolgorae::writer::{WriterAuthorityState, WriterRecord, WriterStore};
+    let manifest = sample_caller_manifest(dolgorae::domain::CallerWorkspaceAccess::Writable);
+    let binding = manifest.global_profile_binding.as_ref().unwrap();
+    let executable = &binding.launch_snapshot.executable_identity;
+    let operation_id = Uuid::now_v7();
+    let identity = WorkerIdentity {
+        workspace_id: manifest.workspace_id.clone(),
+        run_id: manifest.run_id,
+        run_generation: 3,
+        boot_uuid: Uuid::now_v7(),
+        pid: 42,
+        process_group_id: 42,
+        session_id: 42,
+        uid: 501,
+        start_tvsec: 1,
+        start_tvusec: 2,
+        executable_path: PathBuf::from("/example/dolgorae"),
+        executable_device: 1,
+        executable_inode: 2,
+        executable_sha256: "22".repeat(32),
+    };
+    let dedicated = DedicatedServerIdentity {
+        pid: 43,
+        process_group_id: 43,
+        session_id: 43,
+        uid: 501,
+        start_tvsec: 1,
+        start_tvusec: 3,
+        executable_path: PathBuf::from(&executable.resolved_path),
+        executable_device: executable.device,
+        executable_inode: executable.inode,
+        executable_sha256: executable.sha256.clone(),
+    };
+    let runtime = WorkerRuntimeRecord {
+        schema_version: 1,
+        socket_path: dolgorae::worker::worker_socket_path(
+            501,
+            &manifest.workspace_id,
+            manifest.run_id,
+        )
+        .unwrap(),
+        identity: identity.clone(),
+        socket_identity: SocketIdentity {
+            device: 5,
+            inode: 6,
+        },
+        control_socket_epoch: 2,
+        app_server_epoch: Some(7),
+        control_recovery_required: false,
+        startup_scope: None,
+        dedicated_server_identity: Some(dedicated.clone()),
+        dolgorae_version: "0.1.3".to_owned(),
+        mutation_protocol_version: dolgorae::worker::WORKER_PROTOCOL_VERSION,
+        binary_sha256: "22".repeat(32),
+    };
+    let socket = SocketIdentity {
+        device: 8,
+        inode: 9,
+    };
+    let policy = dolgorae::domain::EffectivePolicy {
+        access: Access::Write,
+        verification: PolicyVerification::Verified,
+        policy_epoch: PolicyEpoch(4),
+        thread_generation: Some(2),
+        server_epoch: Some(7),
+        writer_generation: Some(6),
+    };
+    let proof = CallerPolicyProof {
+        schema: "dolgorae.caller-policy-proof/v1".to_owned(),
+        operation_id,
+        identity,
+        control_socket_epoch: 2,
+        dedicated_server_identity: dedicated,
+        app_server_socket_identity: socket.clone(),
+        server_key: binding.server_key.clone(),
+        server_epoch: 7,
+        global_profile_binding_sha256: binding.digest().unwrap(),
+        thread_id: "original-thread".to_owned(),
+        effective_policy: policy.clone(),
+    };
+    let mut writer = WriterRecord::empty(&manifest.workspace_id);
+    writer.state = WriterAuthorityState::Reserved;
+    writer.writer_generation = 6;
+    writer.transaction_id = Some(operation_id);
+    writer.holder = Some(WriterStore::holder(
+        manifest.run_id,
+        binding.selected_name.clone(),
+        &manifest.controller,
+        3,
+        binding.server_key.clone(),
+        7,
+        Some("original-thread".to_owned()),
+        dolgorae::domain::RunLifecycle::Idle,
+    ));
+    let expected = CallerPolicyExpectation {
+        phase: dolgorae::worker::CallerPolicyPhase::Prepared,
+        operation_id,
+        manifest: &manifest,
+        runtime: &runtime,
+        app_server_socket_identity: &socket,
+        original_thread_id: "original-thread",
+        durable_policy: &policy,
+        controller: &manifest.controller,
+        access: Access::Write,
+        writer: Some(&writer),
+    };
+    proof.validate_binding(&expected).unwrap();
+    let wire = serde_json::to_value(&proof).unwrap();
+    for pointer in [
+        "/operation_id",
+        "/identity/run_id",
+        "/identity/run_generation",
+        "/identity/boot_uuid",
+        "/identity/start_tvusec",
+        "/control_socket_epoch",
+        "/dedicated_server_identity/pid",
+        "/dedicated_server_identity/executable_sha256",
+        "/app_server_socket_identity/inode",
+        "/server_key",
+        "/server_epoch",
+        "/global_profile_binding_sha256",
+        "/thread_id",
+        "/effective_policy/policy_epoch",
+        "/effective_policy/thread_generation",
+        "/effective_policy/server_epoch",
+        "/effective_policy/writer_generation",
+        "/effective_policy/verification",
+    ] {
+        let mut altered = wire.clone();
+        let field = altered.pointer_mut(pointer).unwrap();
+        *field = match pointer {
+            "/operation_id" | "/identity/run_id" => serde_json::json!(Uuid::now_v7()),
+            "/identity/boot_uuid" => serde_json::json!(Uuid::now_v7()),
+            "/thread_id" => serde_json::json!("replacement-thread"),
+            "/effective_policy/verification" => serde_json::json!("unverified"),
+            _ if field.is_string() => {
+                serde_json::json!(if field.as_str() == Some(&"33".repeat(32)) {
+                    "44".repeat(32)
+                } else {
+                    "33".repeat(32)
+                })
+            }
+            _ => serde_json::json!(99),
+        };
+        let altered: CallerPolicyProof = serde_json::from_value(altered).unwrap();
+        assert!(
+            altered.validate_binding(&expected).is_err(),
+            "accepted altered {pointer}"
+        );
+    }
+    for field in ["thread_generation", "server_epoch", "writer_generation"] {
+        let mut omitted = wire.clone();
+        omitted["effective_policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(serde_json::from_value::<CallerPolicyProof>(omitted).is_err());
+    }
+    let mut extra = wire.clone();
+    extra["effective_policy"]["approved"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<CallerPolicyProof>(extra).is_err());
+    let mut wrong_writer = writer.clone();
+    wrong_writer.transaction_id = Some(Uuid::now_v7());
+    assert!(
+        proof
+            .validate_binding(&CallerPolicyExpectation {
+                writer: Some(&wrong_writer),
+                ..expected
+            })
+            .is_err()
+    );
+    let mut stale_controller = manifest.controller.clone();
+    stale_controller.identity.generation += 1;
+    assert!(
+        proof
+            .validate_binding(&CallerPolicyExpectation {
+                controller: &stale_controller,
+                ..expected
+            })
+            .is_err()
+    );
+    assert!(
+        proof
+            .validate_binding(&CallerPolicyExpectation {
+                writer: None,
+                ..expected
+            })
+            .is_err()
+    );
+    let mut reader_proof = proof.clone();
+    reader_proof.effective_policy.access = Access::Read;
+    reader_proof.effective_policy.writer_generation = None;
+    let reader_policy = reader_proof.effective_policy.clone();
+    reader_proof
+        .validate_binding(&CallerPolicyExpectation {
+            access: Access::Read,
+            durable_policy: &reader_policy,
+            writer: None,
+            ..expected
+        })
+        .unwrap();
+    let mut releasing = writer.clone();
+    releasing.state = WriterAuthorityState::Releasing;
+    reader_proof
+        .validate_binding(&CallerPolicyExpectation {
+            access: Access::Read,
+            durable_policy: &reader_policy,
+            writer: Some(&releasing),
+            ..expected
+        })
+        .unwrap();
+    for state in [
+        WriterAuthorityState::Reserved,
+        WriterAuthorityState::Releasing,
+        WriterAuthorityState::BlockedUnknown,
+    ] {
+        let mut guarded = writer.clone();
+        guarded.state = state;
+        reader_proof
+            .validate_binding(&CallerPolicyExpectation {
+                phase: dolgorae::worker::CallerPolicyPhase::Recovery,
+                access: Access::Read,
+                durable_policy: &reader_policy,
+                writer: Some(&guarded),
+                ..expected
+            })
+            .unwrap();
+        assert!(
+            proof
+                .validate_binding(&CallerPolicyExpectation {
+                    phase: dolgorae::worker::CallerPolicyPhase::Recovery,
+                    writer: Some(&guarded),
+                    ..expected
+                })
+                .is_err()
+        );
+        guarded.transaction_id = Some(Uuid::now_v7());
+        assert!(
+            reader_proof
+                .validate_binding(&CallerPolicyExpectation {
+                    phase: dolgorae::worker::CallerPolicyPhase::Recovery,
+                    access: Access::Read,
+                    durable_policy: &reader_policy,
+                    writer: Some(&guarded),
+                    ..expected
+                })
+                .is_err()
+        );
+    }
+    for state in [
+        WriterAuthorityState::Reserved,
+        WriterAuthorityState::Releasing,
+        WriterAuthorityState::BlockedUnknown,
+    ] {
+        let mut guarded = writer.clone();
+        guarded.state = state;
+        let recover = CallerPolicyExpectation {
+            phase: dolgorae::worker::CallerPolicyPhase::RecoverAcquire,
+            writer: Some(&guarded),
+            ..expected
+        };
+        assert_eq!(
+            proof.validate_binding(&recover).is_ok(),
+            state == WriterAuthorityState::BlockedUnknown
+        );
+        assert!(
+            reader_proof
+                .validate_binding(&CallerPolicyExpectation {
+                    access: Access::Read,
+                    durable_policy: &reader_policy,
+                    ..recover
+                })
+                .is_err()
+        );
+    }
+    let legacy = serde_json::json!({"result":"writer_access_changed", "write":true,
+        "writer_generation":6,"thread_id":"original-thread"});
+    assert!(serde_json::from_value::<CallerPolicyProof>(legacy).is_err());
+}
+
+fn sample_caller_manifest(access: dolgorae::domain::CallerWorkspaceAccess) -> RunManifest {
+    use dolgorae::instructions::{InstructionSnapshot as Capture, RoleCapture, SourceCapture};
+    let mut manifest = sample_global_manifest();
+    let common_body = "공통 지침\r\n".to_owned();
+    let role_body = "Implement the current task.\n".to_owned();
+    let capture = Capture::compose(
+        SourceCapture {
+            byte_length: common_body.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(common_body.as_bytes()),
+            body: common_body,
+        },
+        RoleCapture {
+            name: "general".to_owned(),
+            byte_length: role_body.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(role_body.as_bytes()),
+            body: role_body,
+        },
+    )
+    .unwrap();
+    manifest.schema_version = 3;
+    manifest.execution_lane = ExecutionLane::Dedicated;
+    manifest.initial_access = match access {
+        dolgorae::domain::CallerWorkspaceAccess::ReadOnly => Access::Read,
+        dolgorae::domain::CallerWorkspaceAccess::Writable => Access::Write,
+    };
+    manifest.requested_access = Some(access);
+    manifest.selected_role = Some("general".to_owned());
+    manifest.start_contract = Some("caller_workspace/v1".to_owned());
+    manifest.agent_configuration = dolgorae::run::CallerAgentConfigurationSnapshot {
+        schema_version: 3,
+        selected_profile: manifest.profile.profile_name.clone(),
+        global_profile_binding_sha256: manifest
+            .global_profile_binding
+            .as_ref()
+            .unwrap()
+            .digest()
+            .unwrap(),
+        model: manifest.model.clone(),
+        default_effort: manifest.default_reasoning_effort.clone(),
+        purpose: manifest.purpose.clone(),
+        required_capabilities: manifest.required_capabilities.clone(),
+        role_reference: None,
+        instructions: capture.clone(),
+        execution_lane: ExecutionLane::Dedicated,
+        required_assurance: manifest.requested_assurance,
+        native_subagent_policy: "enabled".to_owned(),
+    }
+    .try_into()
+    .unwrap();
+    manifest.instructions = capture.into();
+    manifest
+}
+
+fn sample_global_manifest() -> RunManifest {
+    let mut manifest = sample_manifest();
+    manifest
+        .profile
+        .normalized_argv
+        .extend(["--enable".to_owned(), "multi_agent".to_owned()]);
+    manifest.profile.launch_contract_sha256 = launch_contract_digest(&manifest.profile).unwrap();
+    let definition = RuntimeProfile {
+        argv: manifest.profile.normalized_argv[..2].to_vec(),
+        codex_home: manifest.profile.canonical_codex_home.clone(),
+        environment: manifest.profile.sanitized_environment.clone(),
+        native_subagents: NativeSubagents::Enabled,
+    };
+    let snapshot = ServerProfileSnapshot {
+        schema_version: 1,
+        profile_name: manifest.profile.profile_name.clone(),
+        canonical_codex_home: manifest.profile.canonical_codex_home.clone(),
+        normalized_argv: manifest.profile.normalized_argv.clone(),
+        launch_cwd_policy: manifest.profile.launch_cwd_policy.clone(),
+        derived_launch_cwd: manifest.profile.derived_launch_cwd.clone(),
+        sanitized_environment: manifest.profile.sanitized_environment.clone(),
+        enabled_features: manifest.profile.enabled_features.clone(),
+        disabled_features: manifest.profile.disabled_features.clone(),
+        process_static_configuration: manifest.profile.process_static_configuration.clone(),
+        initial_configuration_observation: manifest
+            .profile
+            .initial_configuration_observation
+            .clone(),
+        executable_identity: ProfileExecutableIdentity {
+            resolved_path: manifest
+                .profile
+                .executable_identity
+                .resolved_path
+                .to_path_buf()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            device: manifest.profile.executable_identity.device,
+            inode: manifest.profile.executable_identity.inode,
+            sha256: manifest.profile.executable_identity.sha256.clone(),
+        },
+        codex_version: manifest.profile.codex_version.clone(),
+        schema_bundle_sha256: manifest.profile.app_server_schema_sha256.clone(),
+        compatibility_manifest_sha256: manifest.profile.compatibility_manifest_sha256.clone(),
+        launch_contract_sha256: manifest.profile.launch_contract_sha256.clone(),
+        compatibility_verdict: ProfileCompatibilityVerdict::Tested,
+        server_key: manifest.profile.initial_server_key.clone(),
+    };
+    manifest.schema_version = 2;
+    manifest.global_profile_binding = Some(
+        ResolvedGlobalProfile::from_definition("default", definition)
+            .unwrap()
+            .bind(snapshot)
+            .unwrap(),
+    );
+    manifest.agent_configuration.schema_version = 2;
+    manifest.agent_configuration.runtime_profile_snapshot_sha256 = manifest
+        .global_profile_binding
+        .as_ref()
+        .unwrap()
+        .digest()
+        .unwrap();
+    manifest
+}
+
 fn sample_manifest() -> RunManifest {
     let mut environment = BTreeMap::new();
     environment.insert("LANG".to_owned(), "C".to_owned());
@@ -843,7 +1335,7 @@ fn sample_manifest() -> RunManifest {
         required_capabilities: vec!["reader".to_owned()],
         role_reference: None,
         normalized_instructions: instructions_text,
-        instructions: instructions.clone(),
+        instructions: instructions.clone().into(),
         execution_lane: ExecutionLane::SharedReadonly,
         required_assurance: Assurance::BestEffortPersonalAlpha,
         native_subagent_policy: "enabled".to_owned(),
@@ -862,6 +1354,9 @@ fn sample_manifest() -> RunManifest {
         },
         created_at: "2026-08-21T12:34:56.123456Z".to_owned(),
         initial_access: Access::Read,
+        requested_access: None,
+        selected_role: None,
+        start_contract: None,
         control_mode: ControlMode::DirectInteractive,
         execution_lane: ExecutionLane::SharedReadonly,
         requested_assurance: Assurance::BestEffortPersonalAlpha,
@@ -891,7 +1386,7 @@ fn sample_manifest() -> RunManifest {
         model: "gpt-5.6".to_owned(),
         initial_reasoning_effort: "high".to_owned(),
         default_reasoning_effort: "high".to_owned(),
-        instructions,
+        instructions: instructions.into(),
         controller: ControllerBinding {
             identity: ControllerIdentity {
                 controller_id: Uuid::parse_str("018f0c6a-7b01-7def-8abc-0123456789ab").unwrap(),
@@ -948,6 +1443,445 @@ impl TestTree {
 impl Drop for TestTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn sample_caller_intent() -> CallerStartIntent {
+    let manifest = sample_caller_manifest(dolgorae::domain::CallerWorkspaceAccess::Writable);
+    let workspace_id =
+        dolgorae::workspace::workspace_id(&manifest.canonical_workspace.to_path_buf().unwrap());
+    let request: dolgorae::semantic::CallerRunStartRequest =
+        serde_json::from_value(serde_json::json!({
+            "schema":"dolgorae-run-start-request/v2", "workspace":null,
+            "profile":"default", "control_mode":"direct_interactive",
+            "model":null, "effort":null, "purpose":manifest.purpose,
+            "parent_ref":null, "required_capabilities":["reader"], "idempotency_key":"caller-k1",
+        }))
+        .unwrap();
+    let dolgorae::run::RunInstructionSnapshot::Caller(instructions) = manifest.instructions else {
+        unreachable!();
+    };
+    CallerStartIntent {
+        readiness: dolgorae::run::CallerProfileReadiness {
+            model: manifest.model.clone(),
+            default_effort: manifest.default_reasoning_effort.clone(),
+            profile_capability_snapshot: manifest.profile_capability_snapshot.clone(),
+        },
+        run_id: Uuid::now_v7(),
+        created_at: manifest.created_at,
+        workspace_id,
+        canonical_workspace: manifest.canonical_workspace,
+        workspace_mode: manifest.workspace_mode,
+        start_baseline: manifest.start_baseline,
+        request: request.resolve().unwrap(),
+        controller: manifest.controller,
+        global_profile_binding: manifest.global_profile_binding.unwrap(),
+        instructions,
+    }
+}
+
+#[test]
+fn checked_caller_reservation_example_recovers_with_its_bound_digests() {
+    let reservation: CallerStartReservation = serde_json::from_str(include_str!(
+        "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        CallerStartReservation::new(reservation.accepted_intent.clone()).unwrap(),
+        reservation
+    );
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    store.reserve_caller(&reservation).unwrap();
+    assert_eq!(
+        store
+            .load_caller(&reservation.idempotency_key, &reservation.request_sha256)
+            .unwrap()
+            .unwrap(),
+        reservation
+    );
+}
+
+#[test]
+fn caller_start_receipt_preserves_original_acceptance_and_rejects_corruption() {
+    use dolgorae::domain::{
+        CallerWorkspaceAccess, EffectivePolicy, PolicyEpoch, PolicyVerification,
+    };
+    use dolgorae::run::CallerStartReceipt;
+    for access in [
+        CallerWorkspaceAccess::Writable,
+        CallerWorkspaceAccess::ReadOnly,
+    ] {
+        let tree = TestTree::new();
+        let root = tree.path("state");
+        make_dir(&root.join("runs"));
+        let manifest = sample_caller_manifest(access);
+        let store = RunStore::new(SystemWorkspacePlatform, &root);
+        let directory = store.publish(&manifest).unwrap();
+        let receipt = CallerStartReceipt {
+            schema: "dolgorae.caller-start-receipt/v1".to_owned(),
+            run_id: manifest.run_id,
+            accepted_intent_sha256: "ab".repeat(32),
+            global_profile_binding_sha256: manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap()
+                .digest()
+                .unwrap(),
+            original_thread_id: "original-turnless-thread".to_owned(),
+            run_generation: 1,
+            effective_policy: EffectivePolicy {
+                access: if access == CallerWorkspaceAccess::Writable {
+                    Access::Write
+                } else {
+                    Access::Read
+                },
+                verification: PolicyVerification::Verified,
+                policy_epoch: PolicyEpoch(2),
+                thread_generation: Some(1),
+                server_epoch: Some(3),
+                writer_generation: (access == CallerWorkspaceAccess::Writable).then_some(1),
+            },
+        };
+        assert!(
+            store
+                .load_caller_start_receipt(manifest.run_id, &receipt.accepted_intent_sha256)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.publish_caller_start_receipt(&receipt).unwrap(),
+            receipt
+        );
+        let path = directory.root.join("caller-start-receipt.json");
+        assert_eq!(mode(&path), 0o600);
+        let mut later = receipt.clone();
+        later.run_generation = 9;
+        later.effective_policy.policy_epoch = PolicyEpoch(10);
+        assert_eq!(store.publish_caller_start_receipt(&later).unwrap(), receipt);
+        assert!(
+            store
+                .load_caller_start_receipt(manifest.run_id, &"cd".repeat(32))
+                .is_err()
+        );
+        for mutation in ["missing_epoch", "unknown_policy", "wrong_binding", "extra"] {
+            let mut value = serde_json::to_value(&receipt).unwrap();
+            match mutation {
+                "missing_epoch" => {
+                    value["effective_policy"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("server_epoch");
+                }
+                "unknown_policy" => {
+                    value["effective_policy"]["verification"] = serde_json::json!("unverified")
+                }
+                "wrong_binding" => {
+                    value["global_profile_binding_sha256"] = serde_json::json!("00".repeat(32))
+                }
+                _ => value["extra"] = serde_json::json!(true),
+            }
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                store
+                    .load_caller_start_receipt(manifest.run_id, &receipt.accepted_intent_sha256)
+                    .is_err(),
+                "{mutation}"
+            );
+        }
+    }
+}
+
+#[test]
+fn caller_reservation_retains_resolved_defaults_and_rejects_unready_profile() {
+    let intent = sample_caller_intent();
+    assert!(intent.request.model.is_none());
+    assert!(intent.request.effort.is_none());
+    let reservation = CallerStartReservation::new(intent.clone()).unwrap();
+    let restored: CallerStartReservation =
+        serde_json::from_slice(&serde_json::to_vec(&reservation).unwrap()).unwrap();
+    assert_eq!(
+        CallerStartReservation::new(restored.accepted_intent.clone()).unwrap(),
+        restored
+    );
+    assert_eq!(restored.accepted_intent.readiness, intent.readiness);
+    for mutation in ["unsupported", "epoch", "binding", "explicit_model"] {
+        let mut changed = intent.clone();
+        match mutation {
+            "unsupported" => {
+                changed
+                    .readiness
+                    .profile_capability_snapshot
+                    .capabilities
+                    .insert("reader".to_owned(), CapabilityState::Unverified);
+            }
+            "epoch" => changed.readiness.profile_capability_snapshot.server_epoch = 0,
+            "binding" => changed.readiness.profile_capability_snapshot.server_key = "00".repeat(32),
+            _ => changed.request.model = Some("changed-after-acceptance".to_owned()),
+        }
+        assert!(CallerStartReservation::new(changed).is_err(), "{mutation}");
+    }
+}
+
+#[test]
+fn caller_retry_recovers_original_intent_before_live_sources_or_manifest_exist() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    let original = CallerStartReservation::new(sample_caller_intent()).unwrap();
+    let source = tree.path("role.md");
+    fs::write(&source, &original.accepted_intent.instructions.role.body).unwrap();
+    assert_eq!(store.reserve_caller(&original).unwrap(), original);
+    assert!(!state_root.join("runs").exists());
+    fs::remove_file(&source).unwrap();
+    let retry_digest = caller_start_request_digest(
+        &original.accepted_intent.request,
+        &original.accepted_intent.canonical_workspace,
+        &original.accepted_intent.controller,
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .load_caller("caller-k1", &retry_digest)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+
+    // A losing allocator must use the original captures and Profile binding,
+    // even when its current source observation would produce different input.
+    let mut retry = original.accepted_intent.clone();
+    retry.run_id = Uuid::now_v7();
+    let body = "Changed instructions.\n".to_owned();
+    retry.instructions = dolgorae::instructions::InstructionSnapshot::compose(
+        dolgorae::instructions::SourceCapture {
+            byte_length: body.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(body.as_bytes()),
+            body,
+        },
+        retry.instructions.role,
+    )
+    .unwrap();
+    let retry = CallerStartReservation::new(retry).unwrap();
+    assert_ne!(
+        retry.normalized_identity_sha256,
+        original.normalized_identity_sha256
+    );
+    assert_eq!(retry.request_sha256, original.request_sha256);
+    assert_eq!(store.reserve_caller(&retry).unwrap(), original);
+
+    let mut alias = original.accepted_intent.request.clone();
+    alias.workspace = Some("/workspace/alias".to_owned());
+    alias.expected_workspace_id = Some(original.accepted_intent.workspace_id.clone());
+    assert_eq!(
+        caller_start_request_digest(
+            &alias,
+            &original.accepted_intent.canonical_workspace,
+            &original.accepted_intent.controller,
+        )
+        .unwrap(),
+        original.request_sha256
+    );
+    for field in ["role", "access", "model", "controller"] {
+        let mut changed = original.accepted_intent.clone();
+        match field {
+            "role" => changed.request.role = "reviewer".to_owned(),
+            "access" => changed.request.access = dolgorae::domain::CallerWorkspaceAccess::ReadOnly,
+            "model" => changed.request.model = Some("different-model".to_owned()),
+            "controller" => changed.controller.identity.generation += 1,
+            _ => unreachable!(),
+        }
+        let digest = caller_start_request_digest(
+            &changed.request,
+            &changed.canonical_workspace,
+            &changed.controller,
+        )
+        .unwrap();
+        let error = store.load_caller("caller-k1", &digest).unwrap_err();
+        assert_eq!(error.code, "IDEMPOTENCY_CONFLICT", "{field}");
+        assert_eq!(error.details["run_id"], serde_json::json!(original.run_id));
+    }
+}
+
+#[test]
+fn caller_reservation_corruption_fails_closed_without_reconstructing_input() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    let original = CallerStartReservation::new(sample_caller_intent()).unwrap();
+    store.reserve_caller(&original).unwrap();
+    let path = state_root.join("idempotency/run-start").join(format!(
+        "{}.json",
+        dolgorae::jcs::sha256_hex(original.idempotency_key.as_bytes())
+    ));
+    for field in [
+        "digest",
+        "run",
+        "capture",
+        "key",
+        "unknown",
+        "access",
+        "role",
+        "controller_subject",
+        "controller_unknown",
+    ] {
+        let mut value = serde_json::to_value(&original).unwrap();
+        match field {
+            "digest" => value["normalized_identity_sha256"] = serde_json::json!("0".repeat(64)),
+            "run" => value["run_id"] = serde_json::json!(Uuid::now_v7()),
+            "capture" => {
+                value["accepted_intent"]["instructions"]["role"]["body"] =
+                    serde_json::json!("tampered")
+            }
+            "key" => value["idempotency_key"] = serde_json::json!("other-key"),
+            "unknown" => value["future_field"] = serde_json::json!(true),
+            "access" | "role" => {
+                value["accepted_intent"]["request"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field);
+            }
+            "controller_subject" => {
+                value["accepted_intent"]["controller"]["identity"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("subject_id");
+            }
+            "controller_unknown" => {
+                value["accepted_intent"]["controller"]["identity"]["unexpected"] =
+                    serde_json::json!(true);
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            store
+                .load_caller("caller-k1", &original.request_sha256)
+                .is_err(),
+            "{field}"
+        );
+        assert!(store.load("caller-k1").is_err(), "{field}");
+    }
+    let mut invalid = original.accepted_intent.clone();
+    invalid.request.idempotency_key = "invalid-new-key".to_owned();
+    invalid.request.role = "reviewer".to_owned();
+    assert!(CallerStartReservation::new(invalid).is_err());
+    let mut lossy = original.accepted_intent.clone();
+    lossy.controller.identity.generation = (1_u64 << 53) + 1;
+    assert!(CallerStartReservation::new(lossy).is_err());
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn caller_reservation_preserves_the_maximum_raw_capture_through_json_escaping() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    let mut intent = sample_caller_intent();
+    let role = intent.instructions.role;
+    let body = "\u{1}".repeat(65_536 - role.body.len());
+    intent.instructions = dolgorae::instructions::InstructionSnapshot::compose(
+        dolgorae::instructions::SourceCapture {
+            byte_length: body.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(body.as_bytes()),
+            body,
+        },
+        role,
+    )
+    .unwrap();
+    let reservation = CallerStartReservation::new(intent).unwrap();
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    store.reserve_caller(&reservation).unwrap();
+    assert_eq!(
+        store
+            .load_caller("caller-k1", &reservation.request_sha256)
+            .unwrap()
+            .unwrap(),
+        reservation
+    );
+}
+
+#[test]
+fn concurrent_caller_allocators_return_one_original_run_and_capture() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    let first = CallerStartReservation::new(sample_caller_intent()).unwrap();
+    let mut second = first.accepted_intent.clone();
+    second.run_id = Uuid::now_v7();
+    let second = CallerStartReservation::new(second).unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let handles = [&first, &second].map(|reservation| {
+            scope.spawn(|| {
+                let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+                barrier.wait();
+                store.reserve_caller(reservation).unwrap()
+            })
+        });
+        handles.map(|handle| handle.join().unwrap())
+    });
+    assert_eq!(results[0], results[1]);
+    assert!([first.run_id, second.run_id].contains(&results[0].run_id));
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    assert_eq!(
+        store.load("caller-k1").unwrap_err().code,
+        "CAPABILITY_UNSUPPORTED"
+    );
+    assert_eq!(
+        fs::read_dir(state_root.join("idempotency/run-start"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn legacy_and_caller_allocators_cannot_shadow_each_others_key() {
+    for caller_first in [true, false] {
+        let tree = TestTree::new();
+        let state_root = tree.path("state");
+        make_dir(&state_root);
+        let store = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+        let caller = CallerStartReservation::new(sample_caller_intent()).unwrap();
+        let legacy = StartReservation {
+            schema_version: 1,
+            operation: "start_run".to_owned(),
+            idempotency_key: caller.idempotency_key.clone(),
+            normalized_identity_sha256: "a".repeat(64),
+            run_id: Uuid::now_v7(),
+        };
+        if caller_first {
+            store.reserve_caller(&caller).unwrap();
+            assert_eq!(
+                store.reserve(&legacy).unwrap_err().code,
+                "CAPABILITY_UNSUPPORTED"
+            );
+            assert_eq!(
+                store
+                    .load_caller("caller-k1", &caller.request_sha256)
+                    .unwrap()
+                    .unwrap(),
+                caller
+            );
+        } else {
+            store.reserve(&legacy).unwrap();
+            assert_eq!(
+                store.reserve_caller(&caller).unwrap_err().code,
+                "IDEMPOTENCY_CONFLICT"
+            );
+            assert_eq!(store.load("caller-k1").unwrap().unwrap(), legacy);
+        }
+        assert_eq!(
+            fs::read_dir(state_root.join("idempotency/run-start"))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 }
 

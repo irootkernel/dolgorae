@@ -20,6 +20,7 @@ def schema_name(example_name: str) -> str:
     # Explicit v2 names validate successor payloads; executable E2E checks
     # validate the current machine/v2 producers.
     prefixes = {
+        "worker-runtime-v2-": "dolgorae-worker-runtime-v2.schema.json",
         "accepted-policy-session-v1-": "dolgorae-accepted-policy-session-v1.schema.json",
         "workspace-execution-": "dolgorae-workspace-execution-v1.schema.json",
         "workspace-policy-": "dolgorae-workspace-execution-v1.schema.json",
