@@ -20,9 +20,9 @@ use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use crate::turn::FinalResponse;
 use crate::worker::{ControlRequestV1, ControlResponseV1, TurnControlRequest, call_run_worker};
 use crate::workspace::{
-    SystemWorkspacePlatform, WorkspaceMode, WorkspaceService, WorkspaceView,
-    WorktreePatchCaptureError, add_detached_git_worktree, capture_git_worktree_patch,
-    is_registered_git_worktree, isolated_specialist_root, remove_git_worktree,
+    SourceIsolationContract, SystemWorkspacePlatform, WorkspaceService, WorkspaceView,
+    WorktreePatchCaptureError, capture_git_worktree_patch, cleanup_isolated_root,
+    initial_specialist_sandbox, isolated_specialist_root, prepare_legacy_launch_root,
     verify_secure_directory, verify_secure_file,
 };
 use base64::Engine as _;
@@ -381,13 +381,33 @@ impl OpaqueRef {
 }
 
 pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
+    execute_cli_with_source_contract(arguments, SourceIsolationContract::LegacyBeforeCutover)
+}
+
+pub(crate) fn execute_cli_with_source_contract(
+    arguments: &[OsString],
+    source_contract: SourceIsolationContract,
+) -> Result<Value, MachineError> {
+    let request = read_request(arguments)?;
+    request.validate()?;
+    match &request {
+        Request::HireExternalSpecialist {
+            requested_access, ..
+        } => {
+            source_contract.admit_access(requested_access)?;
+        }
+        Request::AssignExternalSpecialistTask {
+            execution_intent, ..
+        } => {
+            source_contract.admit_access(execution_intent)?;
+        }
+        _ => {}
+    }
     let workspace = crate::cli::option_path(arguments, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?
         .ok_or_else(|| MachineError::invalid_argument("--workspace", "workspace is required"))?;
     let view = WorkspaceService::system()?.discover(Some(&workspace))?;
     let state_root = DolgoraeHome::system()?.workspace_root(&view.workspace_id);
-    let request = read_request(arguments)?;
-    request.validate()?;
     let has_new_controller = option(arguments, "--new-controller-file")?.is_some()
         || option(arguments, "--new-controller-fd")?.is_some();
     if has_new_controller != matches!(&request, Request::HireExternalSpecialist { .. }) {
@@ -473,7 +493,7 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
                     json!({}),
                 ));
             }
-            let reservation = store.reserve_external_hire(
+            let (reservation, first_attempt) = store.reserve_external_hire_with_provenance(
                 engagement_id,
                 &role_ref,
                 &prepared.agent_configuration,
@@ -484,27 +504,34 @@ pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
             if reservation.state != "provisioning" {
                 return hire_result(&reservation);
             }
-            let launch_cwd = match prepare_launch_root(
+            let launch_cwd = match prepare_legacy_launch_root(
                 &view.canonical_path.to_path_buf()?,
                 view.mode,
                 &state_root,
                 engagement_id,
                 reservation.specialist_run_id,
                 &requested_access,
+                first_attempt,
             ) {
                 Ok(root) => root,
                 Err(error) => {
                     store.finish_external_hire(
                         &reservation,
-                        RuntimeOutcome::Rejected,
+                        if first_attempt {
+                            RuntimeOutcome::Rejected
+                        } else {
+                            RuntimeOutcome::Unknown
+                        },
                         &idempotency_key,
                     )?;
-                    let _ = cleanup_isolated_root(
-                        &view.canonical_path.to_path_buf()?,
-                        &state_root,
-                        engagement_id,
-                        reservation.specialist_run_id,
-                    );
+                    if first_attempt {
+                        let _ = cleanup_isolated_root(
+                            &view.canonical_path.to_path_buf()?,
+                            &state_root,
+                            engagement_id,
+                            reservation.specialist_run_id,
+                        );
+                    }
                     return Err(error);
                 }
             };
@@ -1504,117 +1531,8 @@ fn specialist_start_arguments(
     args
 }
 
-pub(crate) fn initial_specialist_sandbox(requested_access: &str) -> &'static str {
-    if requested_access == "isolated_write" {
-        "workspace-write"
-    } else {
-        "read-only"
-    }
-}
-
-pub(crate) fn prepare_launch_root(
-    canonical: &Path,
-    mode: WorkspaceMode,
-    state_root: &Path,
-    engagement_id: Uuid,
-    run_id: Uuid,
-    access: &str,
-) -> Result<Option<PathBuf>, MachineError> {
-    match access {
-        "read_only" => Ok(None),
-        "canonical_workspace_write" => Ok(None),
-        "isolated_write" if mode == WorkspaceMode::Git => {
-            let root = isolated_root(state_root, engagement_id, run_id);
-            match std::fs::symlink_metadata(&root) {
-                Ok(_) => {
-                    verify_secure_directory(&root, DarwinSystem.current_uid())?;
-                    if !is_registered_git_worktree(canonical, &root) {
-                        return Err(MachineError::new(
-                            "RECOVERY_REQUIRED",
-                            "the isolated Specialist worktree registration is invalid",
-                            false,
-                            json!({"run_id":run_id,"required_action":"restore_isolated_worktree"}),
-                        ));
-                    }
-                    return Ok(Some(root));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(internal(error)),
-            }
-            create_private_directory(&isolated_container(state_root))?;
-            create_private_directory(&isolated_engagement_root(state_root, engagement_id))?;
-            if add_detached_git_worktree(canonical, &root).is_err() {
-                return Err(MachineError::new(
-                    "SPECIALIST_POLICY_DENIED",
-                    "isolated Git worktree creation failed",
-                    false,
-                    json!({}),
-                ));
-            }
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-                .map_err(internal)?;
-            verify_secure_directory(&root, DarwinSystem.current_uid())?;
-            Ok(Some(root))
-        }
-        "isolated_write" => Err(MachineError::new(
-            "SPECIALIST_POLICY_DENIED",
-            "isolated write requires a Git workspace",
-            false,
-            json!({}),
-        )),
-        _ => Err(MachineError::invalid_argument(
-            "requested_access",
-            "unsupported Specialist access",
-        )),
-    }
-}
-
-fn create_private_directory(path: &Path) -> Result<(), MachineError> {
-    match std::fs::create_dir(path) {
-        Ok(()) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(internal)?,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(internal(error)),
-    }
-    verify_secure_directory(path, DarwinSystem.current_uid())
-}
-
-pub(crate) fn cleanup_isolated_root(
-    canonical: &Path,
-    state_root: &Path,
-    engagement_id: Uuid,
-    run_id: Uuid,
-) -> Result<(), MachineError> {
-    let root = isolated_root(state_root, engagement_id, run_id);
-    match std::fs::symlink_metadata(&root) {
-        Ok(_) => {
-            verify_secure_directory(&root, DarwinSystem.current_uid())?;
-            if !is_registered_git_worktree(canonical, &root) {
-                return Err(MachineError::new(
-                    "RECOVERY_REQUIRED",
-                    "the isolated Specialist worktree registration is invalid",
-                    false,
-                    json!({"run_id":run_id,"required_action":"restore_isolated_worktree"}),
-                ));
-            }
-            remove_git_worktree(canonical, &root).map_err(internal)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(internal(error)),
-    }
-    Ok(())
-}
-
 fn isolated_root(state_root: &Path, engagement_id: Uuid, run_id: Uuid) -> PathBuf {
     isolated_specialist_root(state_root, engagement_id, run_id)
-}
-
-fn isolated_engagement_root(state_root: &Path, engagement_id: Uuid) -> PathBuf {
-    isolated_container(state_root).join(engagement_id.to_string())
-}
-
-fn isolated_container(state_root: &Path) -> PathBuf {
-    state_root.join("orchestration").join("isolated")
 }
 
 fn reconcile_engagement(
@@ -2573,7 +2491,60 @@ mod tests {
         Assurance, ControllerIdentity, ControllerKind, ExecutionLane, Purpose, PurposeKind,
     };
     use crate::run::{AgentConfigurationSnapshot, ControllerBinding, InstructionSnapshot};
+    use crate::workspace::WorkspaceMode;
     use std::process::Command;
+
+    #[test]
+    fn caller_source_contract_refuses_external_isolation_before_carriers_or_workspace() {
+        use std::os::fd::AsRawFd as _;
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-retired-external-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let caller = root.join("caller");
+        std::fs::create_dir(&caller).unwrap();
+        std::fs::write(caller.join("keep.txt"), b"caller-owned").unwrap();
+        let requests = [
+            json!({
+                "operation":"hire_external_specialist", "engagement_id":Uuid::now_v7(),
+                "role_ref":"reviewer", "objective":"inspect", "requested_access":"isolated_write",
+                "idempotency_key":"retired-hire", "agent_configuration":{
+                    "schema_version":2, "selected_profile":"unused", "model":null,
+                    "default_effort":"medium", "purpose":"review", "purpose_label":null,
+                    "required_capabilities":[], "instructions":"inspect", "execution_lane":"dedicated",
+                    "required_assurance":"best_effort_personal_alpha", "native_subagent_policy":"enabled"
+                }
+            }),
+            json!({
+                "operation":"assign_external_specialist_task", "engagement_id":Uuid::now_v7(),
+                "specialist_run_id":Uuid::now_v7(), "external_request_ref":{
+                    "namespace":"test", "kind":"task", "id":"retired-assignment"
+                }, "objective":"inspect", "context_refs":[], "expected_output":["result"],
+                "execution_intent":"isolated_write", "deadline_seconds":60, "idempotency_key":"retired-task"
+            }),
+        ];
+        for (index, request) in requests.iter().enumerate() {
+            let path = root.join(format!("request-{index}.json"));
+            std::fs::write(&path, serde_json::to_vec(request).unwrap()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let carrier = File::open(&path).unwrap();
+            let args = [
+                OsString::from("--request-fd"),
+                OsString::from(carrier.as_raw_fd().to_string()),
+                OsString::from("--workspace"),
+                caller.as_os_str().to_owned(),
+            ];
+            let error =
+                execute_cli_with_source_contract(&args, SourceIsolationContract::CallerWorkspace)
+                    .unwrap_err();
+            assert_eq!(error.code, "SOURCE_ISOLATION_RETIRED");
+            assert_eq!(
+                std::fs::read(caller.join("keep.txt")).unwrap(),
+                b"caller-owned"
+            );
+            assert!(!caller.join(".dolgorae").exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn worker_identity(run_id: Uuid) -> crate::worker::WorkerIdentity {
         crate::worker::WorkerIdentity {
@@ -2629,13 +2600,14 @@ mod tests {
         let isolated = isolated_root(&root, engagement_id, run_id);
         std::fs::create_dir_all(&isolated).unwrap();
         std::fs::set_permissions(&isolated, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error = prepare_launch_root(
+        let error = prepare_legacy_launch_root(
             &root,
             WorkspaceMode::Git,
             &root,
             engagement_id,
             run_id,
             "isolated_write",
+            true,
         )
         .unwrap_err();
         assert_eq!(error.code, "RECOVERY_REQUIRED");
@@ -2710,13 +2682,14 @@ mod tests {
         std::fs::create_dir(root.join("redirect")).unwrap();
         std::os::unix::fs::symlink(root.join("redirect"), parent.join(run_id.to_string())).unwrap();
         assert_eq!(
-            prepare_launch_root(
+            prepare_legacy_launch_root(
                 &root,
                 WorkspaceMode::Git,
                 &state_root,
                 engagement_id,
                 run_id,
                 "isolated_write",
+                true,
             )
             .unwrap_err()
             .code,

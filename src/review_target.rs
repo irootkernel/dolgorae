@@ -2,7 +2,9 @@
 
 use crate::machine::{MachineError, new_uuid_v7};
 use crate::paths::DolgoraeHome;
-use crate::workspace::{WorkspaceService, open_relative_nofollow, workspace_id};
+use crate::workspace::{
+    SourceIsolationContract, WorkspaceService, open_relative_nofollow, workspace_id,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -92,8 +94,23 @@ struct TerminalReceipt {
 }
 
 pub fn execute(operation: Operation, arguments: &[OsString]) -> Result<Value, MachineError> {
+    execute_with_source_contract(
+        operation,
+        arguments,
+        SourceIsolationContract::LegacyBeforeCutover,
+    )
+}
+
+pub(crate) fn execute_with_source_contract(
+    operation: Operation,
+    arguments: &[OsString],
+    source_contract: SourceIsolationContract,
+) -> Result<Value, MachineError> {
     match operation {
-        Operation::Capture => capture(arguments),
+        Operation::Capture => {
+            source_contract.admit_capture()?;
+            capture(arguments)
+        }
         Operation::Settle => settle(arguments),
     }
 }
@@ -1425,6 +1442,28 @@ fn internal(error: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_source_contract_refuses_capture_before_workspace_or_owner_effects() {
+        let error = execute_with_source_contract(
+            Operation::Capture,
+            &[],
+            SourceIsolationContract::CallerWorkspace,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "SOURCE_ISOLATION_RETIRED");
+        // Historical settlement still reaches its original checked parser.
+        assert_eq!(
+            execute_with_source_contract(
+                Operation::Settle,
+                &[],
+                SourceIsolationContract::CallerWorkspace,
+            )
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
+    }
 
     fn run_git(root: &Path, arguments: &[&str]) {
         assert!(

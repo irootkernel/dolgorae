@@ -3040,13 +3040,25 @@ pub(crate) fn validate_broker_approval_response_size(
 pub(crate) struct ProductionOrchestrationEffects<'a> {
     state_root: &'a Path,
     last_writer_release: Option<Uuid>,
+    source_contract: crate::workspace::SourceIsolationContract,
 }
 
 impl<'a> ProductionOrchestrationEffects<'a> {
     pub(crate) fn new(state_root: &'a Path) -> Self {
+        Self::with_source_contract(
+            state_root,
+            crate::workspace::SourceIsolationContract::LegacyBeforeCutover,
+        )
+    }
+
+    pub(crate) fn with_source_contract(
+        state_root: &'a Path,
+        source_contract: crate::workspace::SourceIsolationContract,
+    ) -> Self {
         Self {
             state_root,
             last_writer_release: None,
+            source_contract,
         }
     }
 
@@ -3057,6 +3069,9 @@ impl<'a> ProductionOrchestrationEffects<'a> {
     ) -> Result<(), crate::orchestration::AdapterFailure> {
         use crate::orchestration::AdapterFailure;
 
+        self.source_contract
+            .admit_access(&plan.requested_access)
+            .map_err(|error| AdapterFailure::Rejected(error.code))?;
         let root = RunStore::new(SystemWorkspacePlatform, self.state_root)
             .load_manifest(plan.session_id)
             .map_err(|error| AdapterFailure::Rejected(error.code))?;
@@ -3091,13 +3106,14 @@ impl<'a> ProductionOrchestrationEffects<'a> {
                 "SPECIALIST_POLICY_DENIED".to_owned(),
             ));
         }
-        let launch_cwd = crate::external_engagement::prepare_launch_root(
+        let launch_cwd = crate::workspace::prepare_legacy_launch_root(
             &workspace,
             prepared.view.mode,
             self.state_root,
             plan.session_id,
             plan.run_id,
             &plan.requested_access,
+            plan.first_publication,
         )
         .map_err(|error| classify_brokered_start_failure(self.state_root, plan.run_id, error))?;
         let carrier = credential.controller_carrier().map_err(|error| {
@@ -3111,9 +3127,7 @@ impl<'a> ProductionOrchestrationEffects<'a> {
                 aggregate_binding: &plan.aggregate_binding,
                 agent_configuration: configuration,
                 launch_cwd: launch_cwd.as_deref(),
-                sandbox: crate::external_engagement::initial_specialist_sandbox(
-                    &plan.requested_access,
-                ),
+                sandbox: crate::workspace::initial_specialist_sandbox(&plan.requested_access),
                 global_profile_binding: &prepared.global_profile_binding,
             },
         );
@@ -3124,7 +3138,7 @@ impl<'a> ProductionOrchestrationEffects<'a> {
                 if matches!(failure, AdapterFailure::Rejected(_))
                     && plan.requested_access == "isolated_write"
                 {
-                    let _ = crate::external_engagement::cleanup_isolated_root(
+                    let _ = crate::workspace::cleanup_isolated_root(
                         &workspace,
                         self.state_root,
                         plan.session_id,

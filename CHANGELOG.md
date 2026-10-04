@@ -14,6 +14,8 @@ development commits.
 
 ### Fixed
 
+- Refuse to recreate missing isolated worktrees during External or brokered
+  Specialist recovery, preserving the original launch identity and caller root.
 - Wait for External Specialist terminal evidence after an interrupt even while
   an interaction remains pending, preserving uncertain outcomes without proof.
 

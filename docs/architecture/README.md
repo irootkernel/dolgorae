@@ -464,6 +464,33 @@ Turn and result ownership independently of target assurance. Direct target v2
 and review v4 contain no capture root or settlement credential. Every new launch
 facade uses the canonical caller cwd; none owns that root for cleanup.
 
+Workspace-owned launch preparation keeps caller roots separate from legacy
+managed worktrees. Successor preparation admits canonical Git or non-Git roots
+without source materialization and rejects explicit copy or isolated-write
+intent before allocation. Run contract and policy selection remain independent
+of root ownership; a legacy Run using the caller cwd retains its legacy startup
+semantics. Public adapter activation remains with TASK-066.
+
+Facade services accept an explicit internal source contract. `CallerWorkspace`
+rejects new legacy capture and isolated-write requests before workspace discovery,
+credential admission, Run reservation or provider dispatch. The review-target,
+one-shot, External Engagement and broker services enforce this contract; broker
+publication also checks it before runtime preparation. Historical inspection and
+settlement retain their original ownership checks. TASK-066 activates this
+admission at the public boundary. Current public adapters explicitly select
+`LegacyBeforeCutover`; the source contract does not choose a Run version or lane.
+
+Legacy creation remains available before that activation boundary. External and
+brokered provisioning share the workspace service rather than calling launch
+helpers through the External facade. The original durable hire reservation or
+broker publication-start event binds the aggregate and reserved Run before
+managed-worktree creation. Only the first committed attempt permits creation;
+a replay or recovered publication may reuse only the original secure,
+registered worktree. Missing resources or ambiguous reservation persistence
+prevent creation; Run absence alone never proves that materialization did not
+occur. These records grant neither caller-root nor capture-settlement cleanup
+authority.
+
 ### Immutable Review Target Coordinator
 
 The following structure describes existing capture-backed records. Until

@@ -27,6 +27,42 @@ pub enum WorkspaceMode {
     NonGit,
 }
 
+/// Selected by the versioned facade, separately from Run access and lane.
+/// Legacy creation remains available until the integrated TASK-066 cutover.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SourceIsolationContract {
+    LegacyBeforeCutover,
+    CallerWorkspace,
+}
+
+impl SourceIsolationContract {
+    pub(crate) fn admit_capture(self) -> Result<(), MachineError> {
+        if self == Self::CallerWorkspace {
+            return Err(MachineError::new(
+                "SOURCE_ISOLATION_RETIRED",
+                "source capture and isolated launch require request migration",
+                false,
+                serde_json::json!({
+                    "schema":"dolgorae-workspace-error-details/v1",
+                    "required_action":"migrate_request",
+                    "phase":"admission",
+                    "outcome":"not_dispatched",
+                    "review_id":null,
+                    "run_id":null,
+                }),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn admit_access(self, access: &str) -> Result<(), MachineError> {
+        if access == "isolated_write" {
+            self.admit_capture()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LosslessPath {
@@ -248,6 +284,128 @@ pub(crate) fn isolated_specialist_root(
         .join("isolated")
         .join(engagement_id.to_string())
         .join(run_id.to_string())
+}
+
+pub(crate) fn initial_specialist_sandbox(requested_access: &str) -> &'static str {
+    if requested_access == "isolated_write" {
+        "workspace-write"
+    } else {
+        "read-only"
+    }
+}
+
+pub(crate) fn prepare_legacy_launch_root(
+    canonical: &Path,
+    mode: WorkspaceMode,
+    state_root: &Path,
+    engagement_id: uuid::Uuid,
+    run_id: uuid::Uuid,
+    access: &str,
+    first_attempt: bool,
+) -> Result<Option<PathBuf>, MachineError> {
+    match access {
+        "read_only" => Ok(None),
+        "canonical_workspace_write" => Ok(None),
+        "isolated_write" if mode == WorkspaceMode::Git => {
+            let root = isolated_specialist_root(state_root, engagement_id, run_id);
+            match fs::symlink_metadata(&root) {
+                Ok(_) => {
+                    verify_secure_directory(&root, DarwinSystem.current_uid())?;
+                    if !is_registered_git_worktree(canonical, &root) {
+                        return Err(MachineError::new(
+                            "RECOVERY_REQUIRED",
+                            "the isolated Specialist worktree registration is invalid",
+                            false,
+                            serde_json::json!({"run_id":run_id,"required_action":"restore_isolated_worktree"}),
+                        ));
+                    }
+                    return Ok(Some(root));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(launch_preparation_error(error)),
+            }
+            if !first_attempt {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the original isolated Specialist worktree is unavailable",
+                    false,
+                    serde_json::json!({"run_id":run_id,"required_action":"inspect_original_launch"}),
+                ));
+            }
+            create_private_directory(&isolated_container(state_root))?;
+            create_private_directory(&isolated_engagement_root(state_root, engagement_id))?;
+            if add_detached_git_worktree(canonical, &root).is_err() {
+                return Err(MachineError::new(
+                    "SPECIALIST_POLICY_DENIED",
+                    "isolated Git worktree creation failed",
+                    false,
+                    serde_json::json!({}),
+                ));
+            }
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                .map_err(launch_preparation_error)?;
+            verify_secure_directory(&root, DarwinSystem.current_uid())?;
+            Ok(Some(root))
+        }
+        "isolated_write" => Err(MachineError::new(
+            "SPECIALIST_POLICY_DENIED",
+            "isolated write requires a Git workspace",
+            false,
+            serde_json::json!({}),
+        )),
+        _ => Err(MachineError::invalid_argument(
+            "requested_access",
+            "unsupported Specialist access",
+        )),
+    }
+}
+
+fn create_private_directory(path: &Path) -> Result<(), MachineError> {
+    match fs::create_dir(path) {
+        Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(launch_preparation_error)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(launch_preparation_error(error)),
+    }
+    verify_secure_directory(path, DarwinSystem.current_uid())
+}
+
+pub(crate) fn cleanup_isolated_root(
+    canonical: &Path,
+    state_root: &Path,
+    engagement_id: uuid::Uuid,
+    run_id: uuid::Uuid,
+) -> Result<(), MachineError> {
+    let root = isolated_specialist_root(state_root, engagement_id, run_id);
+    match fs::symlink_metadata(&root) {
+        Ok(_) => {
+            verify_secure_directory(&root, DarwinSystem.current_uid())?;
+            if !is_registered_git_worktree(canonical, &root) {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the isolated Specialist worktree registration is invalid",
+                    false,
+                    serde_json::json!({"run_id":run_id,"required_action":"restore_isolated_worktree"}),
+                ));
+            }
+            remove_git_worktree(canonical, &root).map_err(launch_preparation_error)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(launch_preparation_error(error)),
+    }
+    Ok(())
+}
+
+fn isolated_engagement_root(state_root: &Path, engagement_id: uuid::Uuid) -> PathBuf {
+    isolated_container(state_root).join(engagement_id.to_string())
+}
+
+fn isolated_container(state_root: &Path) -> PathBuf {
+    state_root.join("orchestration").join("isolated")
+}
+
+fn launch_preparation_error(error: impl std::fmt::Display) -> MachineError {
+    MachineError::new("INTERNAL", error.to_string(), false, serde_json::json!({}))
 }
 
 pub(crate) fn is_registered_git_worktree(canonical: &Path, root: &Path) -> bool {
@@ -1759,6 +1917,128 @@ pub(crate) fn verify_secure_file(path: &Path, uid: u32) -> Result<(), MachineErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_source_contract_does_not_reinterpret_legacy_access() {
+        let caller = SourceIsolationContract::CallerWorkspace;
+        let error = caller.admit_capture().unwrap_err();
+        assert_eq!(error.exit_status(), 4);
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-error-contract-v4.json"
+        ))
+        .unwrap();
+        let contract = &schema["$defs"]["workspace_error"]["properties"]["details"];
+        let required = contract["required"].as_array().unwrap();
+        assert_eq!(error.details.as_object().unwrap().len(), required.len());
+        for key in required {
+            let key = key.as_str().unwrap();
+            assert!(
+                error.details.get(key).is_some(),
+                "missing checked field {key}"
+            );
+        }
+        assert_eq!(
+            error.details["schema"],
+            contract["properties"]["schema"]["const"]
+        );
+        assert_eq!(error.details["phase"], "admission");
+        assert_eq!(error.details["outcome"], "not_dispatched");
+        assert!(error.details["review_id"].is_null());
+        assert!(error.details["run_id"].is_null());
+        assert_eq!(
+            caller.admit_capture().unwrap_err().code,
+            "SOURCE_ISOLATION_RETIRED"
+        );
+        assert_eq!(
+            caller.admit_access("isolated_write").unwrap_err().code,
+            "SOURCE_ISOLATION_RETIRED"
+        );
+        for access in ["read_only", "canonical_workspace_write"] {
+            caller.admit_access(access).unwrap();
+            assert_eq!(initial_specialist_sandbox(access), "read-only");
+        }
+        SourceIsolationContract::LegacyBeforeCutover
+            .admit_capture()
+            .unwrap();
+        SourceIsolationContract::LegacyBeforeCutover
+            .admit_access("isolated_write")
+            .unwrap();
+    }
+
+    #[test]
+    fn isolated_launch_recovery_reuses_original_resources_without_recreating_them() {
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-isolated-recovery-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let canonical = root.join("caller");
+        let state_root = root.join("state");
+        fs::create_dir_all(&canonical).unwrap();
+        fs::create_dir_all(state_root.join("orchestration")).unwrap();
+        fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            state_root.join("orchestration"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let git = |arguments: &[&str]| {
+            let output = Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&canonical)
+                .env("HOME", &root)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {arguments:?} failed");
+            output.stdout
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@dolgorae.local"]);
+        git(&["config", "user.name", "Dolgorae Test"]);
+        fs::write(canonical.join("tracked.txt"), "caller-owned\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        let caller_identity = file_identity(&canonical).unwrap();
+        let engagement_id = uuid::Uuid::now_v7();
+        let run_id = uuid::Uuid::now_v7();
+        let prepare = |first_attempt| {
+            prepare_legacy_launch_root(
+                &canonical,
+                WorkspaceMode::Git,
+                &state_root,
+                engagement_id,
+                run_id,
+                "isolated_write",
+                first_attempt,
+            )
+        };
+
+        assert_eq!(prepare(false).unwrap_err().code, "RECOVERY_REQUIRED");
+        assert!(!isolated_container(&state_root).exists());
+        let isolated = prepare(true).unwrap().unwrap();
+        let original_identity = file_identity(&isolated).unwrap();
+        assert_eq!(prepare(false).unwrap().unwrap(), isolated);
+        assert_eq!(file_identity(&isolated).unwrap(), original_identity);
+        cleanup_isolated_root(&canonical, &state_root, engagement_id, run_id).unwrap();
+        assert!(!isolated.exists());
+        assert_eq!(prepare(false).unwrap_err().code, "RECOVERY_REQUIRED");
+        assert!(!isolated.exists());
+        assert_eq!(file_identity(&canonical).unwrap(), caller_identity);
+        assert_eq!(
+            fs::read(canonical.join("tracked.txt")).unwrap(),
+            b"caller-owned\n"
+        );
+        assert_eq!(
+            String::from_utf8(git(&["worktree", "list", "--porcelain"]))
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn patch_capture_io_classification_separates_permanent_failures() {

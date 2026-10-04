@@ -41,6 +41,13 @@ fn review_output_production_dependencies_exclude_its_callers() {
 }
 
 #[test]
+fn orchestration_production_depends_on_the_adapter_trait() {
+    let source = fs::read_to_string(repository_root().join("src/orchestration.rs")).unwrap();
+    let (production, _) = source.split_once("#[cfg(test)]\nmod tests {").unwrap();
+    assert!(!direct_crate_dependencies(production).contains("semantic"));
+}
+
+#[test]
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
         ("app_server", &["jcs"][..]),
@@ -198,6 +205,9 @@ fn source_module_dependencies_match_the_approved_graph() {
             "mutation_admission",
             &["audit", "domain", "fault", "jcs", "ledger", "machine"][..],
         ),
+        // The orchestration regression fixture also checks the production
+        // semantic adapter's pre-effect retirement boundary. Production
+        // orchestration depends on its adapter trait, not the semantic module.
         (
             "orchestration",
             &[
@@ -211,6 +221,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "markdown_policy",
                 "primary_tool",
                 "run",
+                "semantic",
                 "specialist_policy",
                 "workspace",
             ][..],
@@ -332,7 +343,6 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "domain",
                 "engagement",
                 "event",
-                "external_engagement",
                 "global_profile",
                 "global_runtime",
                 "instructions",

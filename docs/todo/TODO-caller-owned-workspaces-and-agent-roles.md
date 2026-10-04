@@ -211,18 +211,18 @@ transitions and recovery. Its bounded native pipeline passed with normal
 cleanup. A later original-manifest retry correction has focused checkpoint
 coverage and a passing complete repository gate; it does not replace the earlier
 native execution evidence. Independent review and exact final candidate approval
-remain required. A typed unsupported response alone does not complete TASK-063.
+are complete. A typed unsupported response alone does not complete TASK-063.
 
 | Requirement | Current production boundary | Verification and remaining work |
 | --- | --- | --- |
 | CW-SOURCE, CW-CAPTURE, CW-INIT, CW-SNAPSHOT | Internal startup binds accepted captures to the Dedicated Run; retry reads original intent before live sources or registry | Native pipeline passed original receipt replay after source removal; offline checks cover source admission and immutable capture identity |
 | CW-AMBIENT | Executable admission uses the qualified pin; owned Dedicated process flags and merged configuration confirm project-document suppression | Native mechanism probe passed conflicting project/ancestor input and positive controls; native pipeline passed qualified launch/configuration proof; permitted Profile guidance remains outside the managed snapshot |
-| Startup defaults and selection | Strict generation-2 reservations retain original request, captures, Profile binding, observed defaults and capability snapshot; immutable receipt retains original successful startup | Native pipeline passed successful receipt replay; later real-store regressions cover interrupted manifest publication, bootstrap and Writer reservation without rebuilding the original manifest; selected review must assess this correction against the retained native evidence |
+| Startup defaults and selection | Strict generation-2 reservations retain original request, captures, Profile binding, observed defaults and capability snapshot; immutable receipt retains original successful startup | Native pipeline passed successful receipt replay; later real-store regressions cover interrupted manifest publication, bootstrap and Writer reservation without rebuilding the original manifest; independent review accepted the correction with the retained unaffected native evidence |
 | CW-WRITER | Internal startup reserves canonical Writer authority before caller Dedicated effects and consumes current qualified Worker proof before commit | Native pipeline passed cross-Profile exclusion and reader startup; offline checks cover rejection and interrupted reservation paths |
 | CW-TRANSITION | Controller-authorized acquisition/release verifies same-Thread native settings, process/socket identities, durable policy and workload absence under the Writer transaction | Native pipeline passed same-Thread transitions and guarded live recovery; offline and kernel checks cover ambiguous outcomes and recorded descendants |
 | Manifest v3 and recovery | Provisional identities restore the original Thread as reader; explicit recovery/resume can retire a guard with current Reader proof; legacy adapters reject reinterpretation | Native pipeline passed reader recovery after owned Worker loss without automatic Writer acquisition; offline checks cover durable refusal and legacy boundaries |
 | Native binding loss | Name storage and empty-history readback qualified retained turnless history on the pinned fixture; absent original identity fails without replacement or task replay | Offline checks cover unavailable-binding refusal and retained guards; no replacement or task replay capability is claimed |
-| CW-NOCOPY and CW-SCOPE | TASK-064 and TASK-065 are planned | Remove new source materialization and verify checked index/object reads through every facade |
+| CW-NOCOPY and CW-SCOPE | TASK-064 is complete; TASK-065 is planned | Copy-free and pre-effect retirement boundaries passed verification and independent review; checked index/object reads remain TASK-065 and public activation remains TASK-066 |
 | Public activation | TASK-066 is planned | Integrate adapters, migration, help, installed skill, complete repository gate, and independent completion review |
 
 Runtime diagnosis must produce a decision for each mechanism rather than a

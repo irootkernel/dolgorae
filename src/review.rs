@@ -15,7 +15,7 @@ use crate::specialist::{
 use crate::task_request::{
     MAX_TASK_REQUEST_BYTES, SpecialistTaskRequest, TaskContext, TaskCriterion,
 };
-use crate::workspace::{SystemWorkspacePlatform, WorkspaceService};
+use crate::workspace::{SourceIsolationContract, SystemWorkspacePlatform, WorkspaceService};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -367,6 +367,19 @@ impl Drop for EphemeralCarriers {
 }
 
 pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
+    execute_cli_with_source_contract(arguments, SourceIsolationContract::LegacyBeforeCutover)
+}
+
+pub(crate) fn execute_cli_with_source_contract(
+    arguments: &[OsString],
+    source_contract: SourceIsolationContract,
+) -> Result<Value, MachineError> {
+    if arguments
+        .iter()
+        .any(|argument| argument == "--target-kind" || argument == "--request-stdin")
+    {
+        source_contract.admit_capture()?;
+    }
     let workspace = crate::cli::option_path(arguments, "--workspace")
         .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
     let profile = required(arguments, "--profile")?;
@@ -733,6 +746,25 @@ pub fn execute_scoped(
     deadline_seconds: u64,
     request_ref: Uuid,
 ) -> Result<Value, MachineError> {
+    execute_scoped_with_source_contract(
+        workspace,
+        profile,
+        target,
+        deadline_seconds,
+        request_ref,
+        SourceIsolationContract::LegacyBeforeCutover,
+    )
+}
+
+pub(crate) fn execute_scoped_with_source_contract(
+    workspace: Option<&Path>,
+    profile: &str,
+    target: &ReviewTargetRequest,
+    deadline_seconds: u64,
+    request_ref: Uuid,
+    source_contract: SourceIsolationContract,
+) -> Result<Value, MachineError> {
+    source_contract.admit_capture()?;
     let mut request = ReviewRequest::fixed();
     request.deadline_seconds = deadline_seconds;
     execute_scoped_common(
@@ -752,6 +784,23 @@ pub fn execute_v3(
     request: &ReviewRequestV3,
     request_ref: Uuid,
 ) -> Result<Value, MachineError> {
+    execute_v3_with_source_contract(
+        workspace,
+        profile,
+        request,
+        request_ref,
+        SourceIsolationContract::LegacyBeforeCutover,
+    )
+}
+
+pub(crate) fn execute_v3_with_source_contract(
+    workspace: Option<&Path>,
+    profile: &str,
+    request: &ReviewRequestV3,
+    request_ref: Uuid,
+    source_contract: SourceIsolationContract,
+) -> Result<Value, MachineError> {
+    source_contract.admit_capture()?;
     let task = request.validate()?;
     let mut legacy_shape = ReviewRequest::fixed();
     legacy_shape.deadline_seconds = request.deadline_seconds;
@@ -2150,6 +2199,41 @@ fn internal(error: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_source_contract_refuses_one_shot_capture_before_profile_or_carriers() {
+        let contract = SourceIsolationContract::CallerWorkspace;
+        for flag in ["--target-kind", "--request-stdin"] {
+            let error =
+                execute_cli_with_source_contract(&[OsString::from(flag)], contract).unwrap_err();
+            assert_eq!(error.code, "SOURCE_ISOLATION_RETIRED");
+        }
+        let target = ReviewTargetRequest {
+            kind: "workspace".to_owned(),
+            revision: None,
+        };
+        let error = execute_scoped_with_source_contract(
+            Some(Path::new("/unused-workspace")),
+            "unused-profile",
+            &target,
+            60,
+            new_uuid_v7(),
+            contract,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "SOURCE_ISOLATION_RETIRED");
+        let error = crate::review_recovery::execute_with_source_contract(
+            Some(Path::new("/unused-workspace")),
+            "unused-profile",
+            crate::review_recovery::Invocation::Scoped(target, 60),
+            new_uuid_v7(),
+            Path::new("/unused-controller"),
+            true,
+            contract,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "SOURCE_ISOLATION_RETIRED");
+    }
 
     #[test]
     fn early_capture_errors_preserve_resolved_v3_execution_without_inventing_identities() {

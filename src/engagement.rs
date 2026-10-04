@@ -1798,6 +1798,26 @@ impl EngagementStore {
         requested_access: &str,
         idempotency_key: &str,
     ) -> Result<ExternalHireReservation, MachineError> {
+        self.reserve_external_hire_with_provenance(
+            engagement_id,
+            role_ref,
+            configuration,
+            objective,
+            requested_access,
+            idempotency_key,
+        )
+        .map(|(reservation, _)| reservation)
+    }
+
+    pub(crate) fn reserve_external_hire_with_provenance(
+        &mut self,
+        engagement_id: Uuid,
+        role_ref: &str,
+        configuration: &AgentConfigurationSnapshot,
+        objective: &str,
+        requested_access: &str,
+        idempotency_key: &str,
+    ) -> Result<(ExternalHireReservation, bool), MachineError> {
         checked(role_ref, 64, "role_ref")?;
         checked_text(objective, 65_536, "objective")?;
         checked(idempotency_key, 256, "idempotency_key")?;
@@ -1824,7 +1844,7 @@ impl EngagementStore {
             idempotency_key,
             &request,
         )? {
-            return Ok(replay);
+            return Ok((replay, false));
         }
         let hire_operation_id = Uuid::now_v7();
         let specialist_run_id = Uuid::now_v7();
@@ -1838,7 +1858,7 @@ impl EngagementStore {
             idempotency_key,
             &request,
         )? {
-            return Ok(replay);
+            return Ok((replay, false));
         }
         require_current(
             &transaction,
@@ -1895,7 +1915,7 @@ impl EngagementStore {
             EngagementBarrier::BeforeExternalHireReservationCommit,
             EngagementBarrier::AfterExternalHireReservationCommit,
         )?;
-        Ok(result)
+        Ok((result, true))
     }
 
     pub fn finish_external_hire(
@@ -4804,8 +4824,8 @@ mod tests {
             );
             drop(faulted);
             let mut recovered = reopen(&root);
-            let reservation = recovered
-                .reserve_external_hire(
+            let (reservation, first_attempt) = recovered
+                .reserve_external_hire_with_provenance(
                     opened.engagement_id,
                     "reviewer",
                     &plan.agent_configuration,
@@ -4814,6 +4834,22 @@ mod tests {
                     "hire-fault",
                 )
                 .unwrap();
+            assert_eq!(
+                first_attempt,
+                barrier == EngagementBarrier::BeforeExternalHireReservationCommit
+            );
+            let (replayed, replay_is_first_attempt) = recovered
+                .reserve_external_hire_with_provenance(
+                    opened.engagement_id,
+                    "reviewer",
+                    &plan.agent_configuration,
+                    "fault matrix",
+                    "read_only",
+                    "hire-fault",
+                )
+                .unwrap();
+            assert_eq!(replayed, reservation);
+            assert!(!replay_is_first_attempt);
             assert_eq!(
                 recovered
                     .reserve_external_hire(

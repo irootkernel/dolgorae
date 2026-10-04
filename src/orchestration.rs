@@ -626,8 +626,8 @@ pub trait OrchestrationAdapter {
         credential: &BrokerCredential,
     ) -> Result<(), AdapterFailure>;
     /// Observe a prior ambiguous publication without repeating an external
-    /// effect. `Absent` is safe to retry; an unknown partial boundary remains
-    /// fenced.
+    /// effect. `Absent` permits retrying publication, but does not permit
+    /// recreating an earlier isolated worktree; unknown partial work stays fenced.
     fn observe_specialist(
         &mut self,
         plan: &BrokeredRunPlan,
@@ -672,6 +672,7 @@ pub struct BrokeredRunPlan {
     pub aggregate_binding: AggregateBinding,
     pub role: InstalledSpecialistRole,
     pub requested_access: String,
+    pub first_publication: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2022,8 +2023,24 @@ impl OrchestrationStore {
         request: &RequestSpecialist,
         adapter: &mut A,
     ) -> Result<SpecialistOperationSnapshot, MachineError> {
+        self.request_specialist_with_source_contract(
+            context,
+            request,
+            adapter,
+            crate::workspace::SourceIsolationContract::LegacyBeforeCutover,
+        )
+    }
+
+    pub(crate) fn request_specialist_with_source_contract<A: OrchestrationAdapter>(
+        &mut self,
+        context: &PrimaryCallContext,
+        request: &RequestSpecialist,
+        adapter: &mut A,
+        source_contract: crate::workspace::SourceIsolationContract,
+    ) -> Result<SpecialistOperationSnapshot, MachineError> {
         validate_context(context)?;
         validate_request_specialist(request)?;
+        source_contract.admit_access(&request.requested_access)?;
         let session = self.authorize_primary(context)?;
         let role = session.specialist_policy.role(&request.role_ref)?.clone();
         if !role.primary_may_request || !role.allowed_access.contains(&request.requested_access) {
@@ -2672,6 +2689,17 @@ impl OrchestrationStore {
                 "reserved Specialist is not publishable",
             ));
         }
+        let first_publication = !transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM orchestration_events
+             WHERE session_id=?1 AND kind='specialist_publication_started' AND payload_sha256=?2)",
+                params![
+                    context.session_id.to_string(),
+                    sha256_hex(operation_id.as_bytes())
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(internal)?;
         append_event(
             &transaction,
             context.session_id,
@@ -2699,6 +2727,7 @@ impl OrchestrationStore {
             },
             role: role.clone(),
             requested_access: member.requested_access,
+            first_publication,
         };
         self.faults
             .check(OrchestrationBarrier::BeforeWorkerPublication)?;
@@ -2792,6 +2821,7 @@ impl OrchestrationStore {
             },
             role: role.clone(),
             requested_access: member.requested_access,
+            first_publication: false,
         };
         match adapter.observe_specialist(&plan, credential) {
             Ok(SpecialistPublicationObservation::Ready) => {
@@ -2971,8 +3001,24 @@ impl OrchestrationStore {
         request: &AssignSpecialistTask,
         adapter: &mut A,
     ) -> Result<SpecialistTaskSnapshot, MachineError> {
+        self.assign_task_with_source_contract(
+            context,
+            request,
+            adapter,
+            crate::workspace::SourceIsolationContract::LegacyBeforeCutover,
+        )
+    }
+
+    pub(crate) fn assign_task_with_source_contract<A: OrchestrationAdapter>(
+        &mut self,
+        context: &PrimaryCallContext,
+        request: &AssignSpecialistTask,
+        adapter: &mut A,
+        source_contract: crate::workspace::SourceIsolationContract,
+    ) -> Result<SpecialistTaskSnapshot, MachineError> {
         validate_context(context)?;
         validate_assign_task(request)?;
+        source_contract.admit_access(&request.requested_access)?;
         let session = self.authorize_primary(context)?;
         let request_sha256 = digest_value(request)?;
         let (task_id, accepted_task) = if let Some(existing) =
@@ -6206,6 +6252,8 @@ mod tests {
 
     struct FakeAdapter {
         calls: Vec<String>,
+        publication_attempts: Vec<bool>,
+        publication_plans: Vec<BrokeredRunPlan>,
         approvals: BTreeSet<Uuid>,
         approval: Result<(), AdapterFailure>,
         publish: Result<(), AdapterFailure>,
@@ -6224,6 +6272,8 @@ mod tests {
         fn default() -> Self {
             Self {
                 calls: Vec::new(),
+                publication_attempts: Vec::new(),
+                publication_plans: Vec::new(),
                 approvals: BTreeSet::new(),
                 approval: Ok(()),
                 publish: Ok(()),
@@ -6281,6 +6331,8 @@ mod tests {
             credential: &BrokerCredential,
         ) -> Result<(), AdapterFailure> {
             self.calls.push(format!("publish:{}", plan.run_id));
+            self.publication_attempts.push(plan.first_publication);
+            self.publication_plans.push(plan.clone());
             self.observed_secret = Some(credential.capability().to_vec());
             self.publish.clone()
         }
@@ -7409,6 +7461,10 @@ mod tests {
                 "ready"
             );
             assert_eq!(
+                adapter.publication_attempts,
+                vec![barrier == OrchestrationBarrier::AfterWorkerPublication]
+            );
+            assert_eq!(
                 adapter
                     .calls
                     .iter()
@@ -7434,6 +7490,77 @@ mod tests {
             );
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn caller_source_contract_refuses_brokered_isolation_before_durable_or_runtime_effects() {
+        let root = root();
+        let mut installed = policy("fully_delegated");
+        installed.roles[0]
+            .allowed_access
+            .push("isolated_write".to_owned());
+        let (mut store, session) = active_session_with_policy(&root, installed);
+        let mut adapter = FakeAdapter::default();
+        let contract = crate::workspace::SourceIsolationContract::CallerWorkspace;
+        let call = context(session.session_id, "retired-spawn");
+        assert_eq!(
+            store
+                .request_specialist_with_source_contract(
+                    &call,
+                    &request("isolated_write"),
+                    &mut adapter,
+                    contract,
+                )
+                .unwrap_err()
+                .code,
+            "SOURCE_ISOLATION_RETIRED"
+        );
+        assert_eq!(
+            store
+                .assign_task_with_source_contract(
+                    &context(session.session_id, "retired-task"),
+                    &task_request(new_uuid_v7(), "isolated_write"),
+                    &mut adapter,
+                    contract,
+                )
+                .unwrap_err()
+                .code,
+            "SOURCE_ISOLATION_RETIRED"
+        );
+        assert!(adapter.calls.is_empty());
+        assert_eq!(store.session(session.session_id).unwrap(), session);
+        let operations: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM brokered_spawn_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tasks: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM brokered_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((operations, tasks), (0, 0));
+
+        // A retained legacy plan is still guarded at the production effect boundary.
+        let published = store
+            .request_specialist(&call, &request("isolated_write"), &mut adapter)
+            .unwrap();
+        let plan = &adapter.publication_plans[0];
+        let credential = BrokerCredential::load(
+            &store.credential_root,
+            store.uid,
+            published.specialist_run_id.unwrap(),
+        )
+        .unwrap();
+        let mut effects =
+            crate::semantic::ProductionOrchestrationEffects::with_source_contract(&root, contract);
+        assert_eq!(
+            effects.publish_specialist(plan, &credential).unwrap_err(),
+            AdapterFailure::Rejected("SOURCE_ISOLATION_RETIRED".to_owned())
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

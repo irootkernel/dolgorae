@@ -13,7 +13,9 @@ use crate::review::{
     DurableReviewContext, EphemeralCarriers, ReviewRequest, ReviewRequestV3, ReviewTargetRequest,
 };
 use crate::run::RunStore;
-use crate::workspace::{SystemWorkspacePlatform, WorkspaceService, WorkspaceView};
+use crate::workspace::{
+    SourceIsolationContract, SystemWorkspacePlatform, WorkspaceService, WorkspaceView,
+};
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -116,6 +118,29 @@ pub(crate) fn execute(
     credential: &Path,
     temporary: bool,
 ) -> Result<Value, MachineError> {
+    execute_with_source_contract(
+        workspace,
+        profile,
+        invocation,
+        reference,
+        credential,
+        temporary,
+        SourceIsolationContract::LegacyBeforeCutover,
+    )
+}
+
+pub(crate) fn execute_with_source_contract(
+    workspace: Option<&Path>,
+    profile: &str,
+    invocation: Invocation,
+    reference: Uuid,
+    credential: &Path,
+    temporary: bool,
+    source_contract: SourceIsolationContract,
+) -> Result<Value, MachineError> {
+    if !matches!(&invocation, Invocation::Legacy(_)) {
+        source_contract.admit_capture()?;
+    }
     let request = invocation.request()?;
     let view = WorkspaceService::system()?.discover(workspace)?;
     let home = DolgoraeHome::system()?;

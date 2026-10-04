@@ -26,8 +26,8 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
-`EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-063` are `COMPLETE`.
-`TASK-064` through `TASK-066` remain `PLANNED`
+`EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-064` are `COMPLETE`.
+`TASK-065` and `TASK-066` remain `PLANNED`
 after EPIC-016 and before EPIC-009.
 They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
@@ -2180,7 +2180,7 @@ Worker proof and Writer commit. The bounded native Dolgorae pipeline passed
 startup, same-Thread transitions, receipt replay, guarded recovery and normal
 cleanup without a user Turn or provider request. The original-manifest retry
 correction has focused checkpoint coverage and a passing complete repository
-gate. Independent review and exact final candidate approval remain required. The
+gate. Independent review and exact final candidate approval are complete. The
 [execution readiness map](../todo/TODO-caller-owned-workspaces-and-agent-roles.md#execution-readiness-and-decision-boundary)
 separates observed native behavior from integrated acceptance and records
 the permitted Profile guidance alongside the remaining checks.
@@ -2200,7 +2200,7 @@ success while effective policy is unverified.
 
 ### TASK-064: Remove Automatic Source Copies and Managed Worktrees
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Remove new source-capture and isolated-worktree creation from every facade,
 including review, Engagements and brokered Specialists. Reject retired new
