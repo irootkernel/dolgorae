@@ -254,6 +254,35 @@ impl GlobalProfileBinding {
                 == "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
     }
 
+    /// The native reader/history fixture qualifies this bounded tool surface,
+    /// independently of caller startup and Profile readiness.
+    pub(crate) fn checked_review_supported(&self) -> bool {
+        let snapshot = &self.launch_snapshot;
+        self.caller_workspace_supported()
+            && snapshot.enabled_features == ["multi_agent"]
+            && [
+                "mcp_servers",
+                "apps",
+                "agents",
+                "hooks",
+                "notify",
+                "plugins",
+                "marketplaces",
+                "skills",
+            ]
+            .iter()
+            .all(|name| {
+                snapshot
+                    .process_static_configuration
+                    .get(*name)
+                    .is_none_or(|value| {
+                        value.is_null()
+                            || value.as_object().is_some_and(|fields| fields.is_empty())
+                            || value.as_array().is_some_and(|items| items.is_empty())
+                    })
+            })
+    }
+
     pub fn digest(&self) -> Result<String, MachineError> {
         canonical_digest(self)
     }
@@ -1196,6 +1225,50 @@ mod tests {
             capabilities: BTreeMap::new(),
             snapshot,
         }
+    }
+
+    #[test]
+    fn direct_review_qualification_rejects_unexercised_tool_surfaces_and_pin_drift() {
+        let (parent, _) = home();
+        let definition = definition(&parent);
+        let mut snapshot = snapshot("reviewer", &definition, &"a".repeat(64));
+        snapshot.codex_version = "0.159.3".to_owned();
+        snapshot.executable_identity.sha256 =
+            "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+        let bind = |snapshot| {
+            ResolvedGlobalProfile::from_definition("reviewer", definition.clone())
+                .unwrap()
+                .bind(snapshot)
+                .unwrap()
+        };
+        let binding = bind(snapshot.clone());
+        assert!(binding.checked_review_supported());
+        for name in [
+            "mcp_servers",
+            "apps",
+            "agents",
+            "hooks",
+            "notify",
+            "plugins",
+            "marketplaces",
+            "skills",
+        ] {
+            let mut changed = snapshot.clone();
+            changed
+                .process_static_configuration
+                .insert(name.to_owned(), json!({"enabled":true}));
+            assert!(!bind(changed).checked_review_supported(), "{name}");
+        }
+        let mut changed = snapshot.clone();
+        changed.enabled_features.push("apps".to_owned());
+        assert!(!bind(changed).checked_review_supported());
+        let mut changed = snapshot;
+        changed.executable_identity.sha256 = "b".repeat(64);
+        assert!(!bind(changed).checked_review_supported());
+        let mut changed = binding;
+        changed.launch_snapshot.codex_version = "0.159.4".to_owned();
+        assert!(!changed.checked_review_supported());
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]

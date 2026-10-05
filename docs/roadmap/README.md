@@ -26,8 +26,8 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
-`EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-064` are `COMPLETE`.
-`TASK-065` and `TASK-066` remain `PLANNED`
+`EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-065` are `COMPLETE`.
+`TASK-066` remains `PLANNED`
 after EPIC-016 and before EPIC-009.
 They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
@@ -2216,7 +2216,7 @@ against the remaining shared responsibilities.
 
 ### TASK-065: Review Direct Workspaces and Pinned Git Objects
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Implement explicitly read-only review for workspace, staged, dirty, HEAD,
 commit and range scopes without checkout or source copies. Read committed

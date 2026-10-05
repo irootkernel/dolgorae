@@ -291,6 +291,10 @@ and returned range. Candidate evidence MUST bind a matching receipt and location
 the coordinator MUST validate it against the admitted source. Live-workspace
 reads MUST be labelled separate context and cannot supply candidate evidence.
 Model-generated labels or claims that a read used Git are insufficient.
+Numbered candidate locations name lines in an admitted file side, not diff
+headers or diff row numbers. Transition evidence MAY cite a diff receipt with
+null line locations; numbered locations MUST cite a current/before/after file
+receipt covering those source lines.
 
 Before dispatch, the selected runtime/tool configuration MUST establish that
 unmediated native or plugin tool reads cannot enter candidate provenance and
@@ -322,6 +326,11 @@ verdict, criterion completion, source assurance, Reviewer/engagement closure and
 server cleanup remain separate facts. Direct review has no capture-settlement
 identity or immutable root. Read-only access protects source mutation; it does
 not establish hostile-process containment or repository secrecy.
+
+Direct review lifecycle and output errors retain their existing codes with
+capture-free checked details identifying the original request, review and
+Reviewer Run. One-shot inspection retains legacy results and admits direct v4
+results without synthesizing a capture or settlement identity.
 
 ## Migration, projections and implementation handoffs
 

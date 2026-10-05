@@ -20,7 +20,7 @@ INT_TESTS := \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
 	test-live-instruction-discovery test-live-workspace-startup test-live-workspace-policy \
-	test-native-workspace-policy-fixture test-native-caller-pipeline \
+	test-native-workspace-policy-fixture test-native-caller-pipeline test-native-review-reader \
 	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
@@ -152,6 +152,7 @@ test-e2e:
 		run_case tests/e2e/test_independent_review_acceptance.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_live_independent_review_admission.py; \
 		run_case tests/e2e/test_live_instruction_discovery.py; \
+		run_case tests/e2e/test_native_review_reader.py; \
 		run_case tests/e2e/test_live_workspace_startup.py; \
 		run_case tests/e2e/test_live_workspace_policy.py; \
 		run_case tests/e2e/test_native_workspace_policy_fixture.py; \
@@ -260,6 +261,16 @@ test-native-caller-pipeline:
 	$(CARGO) build --locked --example native_caller_pipeline
 	$(PYTHON_BIN) tests/e2e/run_native_caller_pipeline.py \
 		--driver "$(CURDIR)/target/debug/examples/native_caller_pipeline" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
+
+test-native-review-reader:
+	@test "$${DOLGORAE_RUN_NATIVE_REVIEW_READER:-}" = 1 || { \
+		echo "DOLGORAE_RUN_NATIVE_REVIEW_READER=1 is required" >&2; \
+		exit 2; \
+	}
+	$(CARGO) build --locked --example native_review_reader
+	$(PYTHON_BIN) tests/e2e/run_native_review_reader.py \
+		--driver "$(CURDIR)/target/debug/examples/native_review_reader" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
 
 test-live-access-safety:

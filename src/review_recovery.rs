@@ -27,6 +27,7 @@ pub(crate) enum Invocation {
     Legacy(ReviewRequest),
     Scoped(ReviewTargetRequest, u64),
     Task(ReviewRequestV3),
+    Direct(crate::direct_review::ReviewRequestV4),
 }
 
 impl Invocation {
@@ -50,6 +51,10 @@ impl Invocation {
             }
             Self::Task(request) => {
                 request.validate()?;
+                serde_json::to_value(request).map_err(internal)
+            }
+            Self::Direct(request) => {
+                request.task()?;
                 serde_json::to_value(request).map_err(internal)
             }
         }
@@ -138,7 +143,7 @@ pub(crate) fn execute_with_source_contract(
     temporary: bool,
     source_contract: SourceIsolationContract,
 ) -> Result<Value, MachineError> {
-    if !matches!(&invocation, Invocation::Legacy(_)) {
+    if matches!(&invocation, Invocation::Scoped(..) | Invocation::Task(_)) {
         source_contract.admit_capture()?;
     }
     let request = invocation.request()?;
@@ -166,19 +171,48 @@ pub(crate) fn execute_with_source_contract(
     }
     let outcome = (|| {
         let binding = ResolvedGlobalProfile::resolve(&home, profile)?.prepare(&home)?;
+        let instructions = if let Invocation::Direct(request) = &invocation {
+            request.admit_profile(&binding)?;
+            crate::review::verify_executable_identity(&binding.launch_snapshot)?;
+            Some(
+                crate::instructions::InstructionSourceStore::new(&home)
+                    .capture(request.role.as_deref().unwrap_or("reviewer"))?,
+            )
+        } else {
+            None
+        };
         store.bind_one_shot_profile(reference, &binding)?;
         let review_owner = ReviewServerOwner {
             workspace_id: view.workspace_id.clone(),
             request_ref: reference,
         };
-        let prepared = crate::semantic::prepare_reviewer_with_binding(
+        let mut prepared = crate::semantic::prepare_reviewer_with_binding(
             view,
             root.clone(),
             binding,
             Some(&review_owner),
         )?;
+        if let Some(instructions) = instructions {
+            let role = instructions.role.name.clone();
+            prepared.plan = crate::specialist::ReviewerRuntimePlan::resolve_direct(
+                crate::run::CallerAgentConfigurationSnapshot {
+                    schema_version: 3,
+                    selected_profile: profile.to_owned(),
+                    global_profile_binding_sha256: prepared.global_profile_binding.digest()?,
+                    model: prepared.model.clone(),
+                    default_effort: prepared.effort.clone(),
+                    purpose: prepared.plan.agent_configuration.purpose.clone(),
+                    required_capabilities: Vec::new(),
+                    role_reference: Some(role),
+                    instructions,
+                    execution_lane: crate::domain::ExecutionLane::Dedicated,
+                    required_assurance: crate::domain::Assurance::BestEffortPersonalAlpha,
+                    native_subagent_policy: "enabled".to_owned(),
+                },
+            )?;
+        }
         let carriers = EphemeralCarriers::create_retained(input.carrier_root.clone())?;
-        let capture_ref = if matches!(invocation, Invocation::Legacy(_)) {
+        let capture_ref = if matches!(invocation, Invocation::Legacy(_) | Invocation::Direct(_)) {
             None
         } else {
             let capture = Uuid::now_v7();
@@ -224,6 +258,9 @@ pub(crate) fn execute_with_source_contract(
                     Some((&request, &task)),
                     Some(context),
                 )
+            }
+            Invocation::Direct(request) => {
+                crate::direct_review::execute_with_context(reference, &request, context)
             }
         }
     })();

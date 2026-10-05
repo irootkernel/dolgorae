@@ -4840,6 +4840,28 @@ impl WorkerSession {
                 })
             })
             .transpose()?;
+        let candidate_reader =
+            crate::direct_review_target::DirectTargetReader::for_run(state_root, facts.run_id)
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+        if let Some(reader) = &candidate_reader
+            && (primary_tool.is_some()
+                || session.sandbox != "read-only"
+                || session.approval_policy != "never"
+                || reader
+                    .workspace()
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                    != session.cwd
+                || reader.target().workspace_id != manifest.workspace_id
+                || reader.workspace_mode() != manifest.workspace_mode
+                || manifest.initial_access != crate::domain::Access::Read
+                || manifest.schema_version != 3
+                || manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .is_none_or(|binding| !binding.checked_review_supported()))
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
         let mut dedicated_server = session
             .dedicated_server
             .as_ref()
@@ -4945,7 +4967,11 @@ impl WorkerSession {
                     developer_instructions: session.developer_instructions.clone(),
                     sandbox: session.sandbox.clone(),
                     approval_policy: session.approval_policy.clone(),
-                    safety_policy: session.safety_policy,
+                    safety_policy: if candidate_reader.is_some() {
+                        SessionSafetyPolicy::ReviewerReadOnly
+                    } else {
+                        session.safety_policy
+                    },
                     run_generation,
                     server_key: session.server_key.clone(),
                     server_epoch: session.server_epoch,
@@ -4956,6 +4982,7 @@ impl WorkerSession {
                         |binding| binding.member_kind != AggregateMemberKind::Specialist,
                     ),
                     primary_tool,
+                    candidate_reader,
                 },
                 &session.canonical_codex_home,
             )

@@ -506,7 +506,7 @@
       "x-invariants": [
         "receipt is issued by the trusted target reader and stored durably; model-supplied identities are not receipts",
         "content digest binds admitted file side or a deterministic diff of its admitted sides; returned range must fit that content",
-        "candidate line evidence must resolve inside bytes returned under the matching receipt"
+        "candidate line evidence must resolve inside bytes returned under the matching file-side receipt; diff receipts support transition evidence with null line locations"
       ]
     },
     "safe_relative_path": {

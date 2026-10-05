@@ -81,6 +81,9 @@
             },
             {
               "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/review_result"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/review_result"
             }
           ]
         }
@@ -295,6 +298,9 @@
                 },
                 {
                   "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/verdict"
+                },
+                {
+                  "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/verdict"
                 }
               ]
             }

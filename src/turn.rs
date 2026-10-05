@@ -1290,6 +1290,10 @@ pub trait ForeignDiagnostics: Send {
 #[derive(Debug)]
 pub struct ThreadTurnSink {
     turn_id: String,
+    expected_thread_id: Option<String>,
+    observed_thread_id: Option<String>,
+    reading_thread_id: bool,
+    thread_id_bytes: Vec<u8>,
     stack: Vec<Frame>,
     in_string: bool,
     escaped: bool,
@@ -1317,6 +1321,10 @@ impl ThreadTurnSink {
     pub fn new(turn_id: &str) -> Self {
         Self {
             turn_id: turn_id.to_owned(),
+            expected_thread_id: None,
+            observed_thread_id: None,
+            reading_thread_id: false,
+            thread_id_bytes: Vec::new(),
             stack: Vec::new(),
             in_string: false,
             escaped: false,
@@ -1339,7 +1347,16 @@ impl ThreadTurnSink {
         if !self.stack.is_empty() || self.in_string {
             return Err(TurnError::CorrelationMismatch);
         }
+        if self.expected_thread_id.is_some() && self.expected_thread_id != self.observed_thread_id {
+            return Err(TurnError::CorrelationMismatch);
+        }
         self.items.ok_or(TurnError::CorrelationMismatch)
+    }
+
+    pub fn new_bound(thread_id: &str, turn_id: &str) -> Self {
+        let mut sink = Self::new(turn_id);
+        sink.expected_thread_id = Some(thread_id.to_owned());
+        sink
     }
 
     #[must_use]
@@ -1405,6 +1422,9 @@ impl ThreadTurnSink {
             if self.escaped {
                 self.escaped = false;
             } else if byte == b'\\' {
+                if self.reading_thread_id {
+                    return Err(TurnError::CorrelationMismatch);
+                }
                 self.escaped = true;
             } else if byte == b'"' {
                 self.in_string = false;
@@ -1412,6 +1432,15 @@ impl ThreadTurnSink {
                 if self.reading_name {
                     self.reading_name = false;
                     self.pending_name = Some(std::mem::take(&mut self.name));
+                } else if self.reading_thread_id {
+                    self.reading_thread_id = false;
+                    if self.observed_thread_id.is_some() {
+                        return Err(TurnError::CorrelationMismatch);
+                    }
+                    self.observed_thread_id = Some(
+                        String::from_utf8(std::mem::take(&mut self.thread_id_bytes))
+                            .map_err(|_| TurnError::CorrelationMismatch)?,
+                    );
                 } else if self.reading_element_id {
                     self.reading_element_id = false;
                     self.discard_unless_wanted();
@@ -1421,6 +1450,11 @@ impl ThreadTurnSink {
                     return Err(TurnError::CorrelationMismatch);
                 }
                 self.name.push(byte);
+            } else if self.reading_thread_id {
+                if self.thread_id_bytes.len() >= 256 {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.thread_id_bytes.push(byte);
             } else if self.reading_element_id {
                 if self.element_id.len() >= 256 {
                     return Err(TurnError::CorrelationMismatch);
@@ -1437,6 +1471,16 @@ impl ThreadTurnSink {
                 }) {
                     self.reading_name = true;
                     self.name.clear();
+                } else if self.expected_thread_id.is_some()
+                    && self.stack.len() == 2
+                    && self.stack.last().is_some_and(|frame| {
+                        !frame.array && frame.name.as_deref() == Some(b"thread")
+                    })
+                    && self.last_significant == b':'
+                    && self.pending_name.as_deref() == Some(b"id")
+                {
+                    self.reading_thread_id = true;
+                    self.thread_id_bytes.clear();
                 } else if self.element_active
                     && self.last_significant == b':'
                     && self.stack.len() == self.element_depth + 1
@@ -1587,6 +1631,7 @@ pub struct TurnCoordinator<S, J, A> {
     record_accepted_user_input: bool,
     foreign_diagnostics: Box<dyn ForeignDiagnostics>,
     primary_tool: Option<PrimaryToolConfig>,
+    candidate_reader: Option<crate::direct_review_target::DirectTargetReader>,
     pending_primary_tools: BTreeMap<String, PendingPrimaryToolCall>,
     caller_runtime: Option<crate::worker::QualifiedCallerRuntime>,
     last_effective_policy: Option<crate::domain::EffectivePolicy>,
@@ -1614,6 +1659,7 @@ pub struct CoordinatorConfig {
     pub control_mode: String,
     pub record_accepted_user_input: bool,
     pub primary_tool: Option<PrimaryToolConfig>,
+    pub candidate_reader: Option<crate::direct_review_target::DirectTargetReader>,
 }
 
 impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordinator<S, J, A> {
@@ -1648,7 +1694,24 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 supported: config.supported_efforts.iter().cloned().collect(),
             });
         }
+        if let Some(reader) = &config.candidate_reader
+            && (config.primary_tool.is_some()
+                || config.safety_policy != SessionSafetyPolicy::ReviewerReadOnly
+                || config.sandbox != "read-only"
+                || config.approval_policy != "never"
+                || reader.run_id() != config.run_id
+                || reader
+                    .workspace()
+                    .map_err(|_| TurnError::CorrelationMismatch)?
+                    != config.cwd
+                || matches!(config.attach, ThreadAttach::Fork { .. }))
+        {
+            return Err(TurnError::InvalidInput(
+                "direct Reviewer binding is invalid",
+            ));
+        }
         let experimental_api = config.primary_tool.is_some()
+            || config.candidate_reader.is_some()
             || config.safety_policy == SessionSafetyPolicy::CallerWorkspace;
         let initialized = server.request("initialize", serde_json::json!({
             "clientInfo": {"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},
@@ -1703,6 +1766,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             record_accepted_user_input: config.record_accepted_user_input,
             foreign_diagnostics: config.foreign_diagnostics,
             primary_tool: config.primary_tool,
+            candidate_reader: config.candidate_reader,
             pending_primary_tools: BTreeMap::new(),
             caller_runtime: None,
             last_effective_policy: None,
@@ -1760,7 +1824,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         mut runtime: crate::worker::QualifiedCallerRuntime,
     ) -> Result<(), TurnError> {
-        if self.safety_policy != SessionSafetyPolicy::CallerWorkspace
+        if (self.safety_policy != SessionSafetyPolicy::CallerWorkspace
+            && self.candidate_reader.is_none())
             || self.caller_runtime.is_some()
         {
             return Err(TurnError::CorrelationMismatch);
@@ -1783,6 +1848,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
 
     pub(crate) fn is_caller_workspace(&self) -> bool {
         self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            || self.candidate_reader.is_some()
     }
 
     fn caller_startup_phase(&mut self, phase: &'static str) {
@@ -1853,6 +1919,28 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .pointer("/config/project_doc_max_bytes")
                 .and_then(Value::as_u64)
                 != Some(0)
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        if self.candidate_reader.is_some()
+            && [
+                "mcp_servers",
+                "apps",
+                "agents",
+                "hooks",
+                "notify",
+                "plugins",
+                "marketplaces",
+                "skills",
+            ]
+            .iter()
+            .any(|name| {
+                result["config"].get(*name).is_some_and(|value| {
+                    !value.is_null()
+                        && !value.as_object().is_some_and(|fields| fields.is_empty())
+                        && !value.as_array().is_some_and(|items| items.is_empty())
+                })
+            })
         {
             return Err(TurnError::CorrelationMismatch);
         }
@@ -2394,6 +2482,31 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .or_else(|| result.get("turns"))
             .and_then(Value::as_array)
             .ok_or(TurnError::CorrelationMismatch)?;
+        if let Some(reader) = &self.candidate_reader {
+            if nested_identity(&result, "thread", "id").as_deref() != Some(&thread_id)
+                || result
+                    .pointer("/thread/parentThreadId")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            let items = turns
+                .iter()
+                .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id.as_str()))
+                .and_then(|turn| turn.get("items"))
+                .and_then(Value::as_array);
+            if let Some(items) = items {
+                for item in items {
+                    reader
+                        .observe_item(&thread_id, &turn_id, item, true)
+                        .map_err(|_| TurnError::CorrelationMismatch)?;
+                }
+            } else {
+                reader
+                    .record_unmediated_tool()
+                    .map_err(|_| TurnError::CorrelationMismatch)?;
+            }
+        }
         let status = turns
             .iter()
             .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id.as_str()))
@@ -2468,6 +2581,27 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         lifecycle: RunLifecycle,
     ) -> Result<(), TurnError> {
+        if let Some(reader) = &self.candidate_reader {
+            let pending = reader
+                .pending_histories()
+                .map_err(|_| TurnError::CorrelationMismatch)?;
+            if !pending.is_empty() {
+                self.rebind_retained_thread()?;
+                for (thread, turn) in pending {
+                    if self.thread_id.as_deref() != Some(&thread) {
+                        return Err(TurnError::CorrelationMismatch);
+                    }
+                    let items = self.streamed_items(&thread, &turn)?;
+                    let response = self.extract_final_response(&thread, &turn, &items)?;
+                    self.candidate_reader
+                        .as_ref()
+                        .expect("checked reader")
+                        .finish_history_response(&thread, &turn, &items, response)
+                        .map_err(|_| TurnError::CorrelationMismatch)?;
+                }
+                return Ok(());
+            }
+        }
         if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
             && self.state == CoordinatorState::OutcomeUnknown
         {
@@ -2971,6 +3105,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         {
             params["dynamicTools"] = Value::Array(vec![primary_tool.contract.tool_spec()]);
         }
+        if self.candidate_reader.is_some() {
+            if method == "thread/start" {
+                params["dynamicTools"] =
+                    Value::Array(vec![crate::direct_review::candidate_tool_spec()]);
+            }
+            params["config"] = serde_json::json!({"project_doc_max_bytes":0});
+        }
         if method == "thread/start" && self.caller_runtime.is_some() {
             self.caller_startup_phase("thread_dispatch_intent_journal");
             self.journal
@@ -2991,7 +3132,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 thread_id: thread_id.clone(),
             })?;
         self.thread_id = Some(thread_id.clone());
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+        if self.is_caller_workspace() {
             self.caller_startup_phase("thread_settings");
             let sandbox = self.sandbox.clone();
             let approval_policy = self.approval_policy.clone();
@@ -3003,6 +3144,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 &sandbox,
                 &approval_policy,
             )?;
+            if self.candidate_reader.is_some()
+                && result.pointer("/thread/parentThreadId") != Some(&Value::Null)
+            {
+                return Err(TurnError::CorrelationMismatch);
+            }
             if result.get("model").and_then(Value::as_str) != Some(self.fixed_model.as_str()) {
                 self.record_caller_startup_predicate("thread_model");
                 return Err(TurnError::CorrelationMismatch);
@@ -3303,6 +3449,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 Err(self.lost_after_write(Uuid::now_v7(), TurnError::CorrelationMismatch))
             }
             "item/started" => {
+                self.observe_candidate_item(&params, false)?;
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("fileChange") {
                     let item = params.get("item").ok_or(TurnError::CorrelationMismatch)?;
                     self.capture_file_change_snapshot(
@@ -3477,7 +3624,15 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Ok(());
         }
         if method == "item/tool/call" {
+            if self.candidate_reader.is_some() {
+                return self.open_candidate_tool(request_id, params);
+            }
             return self.open_primary_tool(request_id, params);
+        }
+        if let Some(reader) = &self.candidate_reader {
+            reader
+                .record_unmediated_tool()
+                .map_err(|_| TurnError::CorrelationMismatch)?;
         }
         let supported = matches!(
             method,
@@ -3611,6 +3766,90 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             })?;
         self.pending.insert(request_id, interaction);
         self.state = CoordinatorState::WaitingInteraction;
+        Ok(())
+    }
+
+    fn open_candidate_tool(&mut self, request_id: u64, params: &Value) -> Result<(), TurnError> {
+        let reader = self
+            .candidate_reader
+            .as_ref()
+            .ok_or(TurnError::CorrelationMismatch)?;
+        let thread_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        let turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        if self.thread_id.as_deref() != Some(thread_id)
+            || self.active_turn_id.as_deref() != Some(turn_id)
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        let result = if params.get("tool").and_then(Value::as_str)
+            != Some(crate::direct_review::CANDIDATE_TOOL_NAME)
+        {
+            reader
+                .record_unmediated_tool()
+                .map_err(|_| TurnError::CorrelationMismatch)?;
+            Err(crate::direct_review_target::provenance_invalid(
+                reader.review_id(),
+            ))
+        } else {
+            let call_id = params
+                .get("callId")
+                .and_then(Value::as_str)
+                .ok_or(TurnError::CorrelationMismatch)?;
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .ok_or(TurnError::CorrelationMismatch)?;
+            if serde_json::to_vec(&arguments)
+                .map_err(|_| TurnError::CorrelationMismatch)?
+                .len()
+                > 16384
+            {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            match serde_json::from_value::<crate::direct_review_target::CandidateReadRequest>(
+                arguments,
+            ) {
+                Ok(request) => reader.read(thread_id, turn_id, call_id, &request),
+                Err(_) => Err(MachineError::invalid_argument(
+                    "candidate_read",
+                    "read request does not match the checked tool contract",
+                )),
+            }
+        };
+        let (success, body) = match result {
+            Ok(value) => (true, value),
+            Err(error) => (false, serde_json::json!({"error":error})),
+        };
+        let text = serde_json::to_string(&body).map_err(|_| TurnError::CorrelationMismatch)?;
+        self.server.respond_result(request_id,serde_json::json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}))
+    }
+
+    fn observe_candidate_item(&self, params: &Value, completed: bool) -> Result<(), TurnError> {
+        if let Some(reader) = &self.candidate_reader {
+            if params.get("threadId").and_then(Value::as_str) != self.thread_id.as_deref() {
+                return Ok(());
+            }
+            let turn_id = event_turn_id(params).ok_or(TurnError::CorrelationMismatch)?;
+            if self.active_turn_id.as_deref() != Some(turn_id) {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            reader
+                .observe_item(
+                    self.thread_id
+                        .as_deref()
+                        .ok_or(TurnError::CorrelationMismatch)?,
+                    turn_id,
+                    params.get("item").ok_or(TurnError::CorrelationMismatch)?,
+                    completed,
+                )
+                .map_err(|_| TurnError::CorrelationMismatch)?;
+        }
         Ok(())
     }
 
@@ -4157,6 +4396,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Err(TurnError::CorrelationMismatch);
         }
         params.get("item").ok_or(TurnError::CorrelationMismatch)?;
+        self.observe_candidate_item(params, true)?;
         self.completed_item_count += 1;
         Ok(())
     }
@@ -4201,6 +4441,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         // at the same point either way, and the degraded path records the
         // terminal without a response rather than risking losing both.
         let inline_items = turn.get("items").and_then(Value::as_array).cloned();
+        if let Some(reader) = &self.candidate_reader {
+            reader
+                .begin_history(&thread_id, &turn_id)
+                .map_err(|_| TurnError::CorrelationMismatch)?;
+        }
         let inline_response = inline_items
             .as_ref()
             .map(|items| self.extract_final_response(&thread_id, &turn_id, items));
@@ -4244,11 +4489,22 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.active_operation_id = None;
         self.pending.clear();
         self.state = CoordinatorState::Idle;
-        let final_response = match inline_response {
-            Some(response) => response?,
-            None => {
-                let items = self.streamed_items(&thread_id, &turn_id)?;
-                self.extract_final_response(&thread_id, &turn_id, &items)?
+        let final_response = if self.candidate_reader.is_some() {
+            let items = self.streamed_items(&thread_id, &turn_id)?;
+            let response = self.extract_final_response(&thread_id, &turn_id, &items)?;
+            self.candidate_reader
+                .as_ref()
+                .expect("checked reader")
+                .finish_history_response(&thread_id, &turn_id, &items, response.clone())
+                .map_err(|_| TurnError::CorrelationMismatch)?;
+            response
+        } else {
+            match inline_response {
+                Some(response) => response?,
+                None => {
+                    let items = self.streamed_items(&thread_id, &turn_id)?;
+                    self.extract_final_response(&thread_id, &turn_id, &items)?
+                }
             }
         };
         let terminal = TerminalTurn {
@@ -4273,7 +4529,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// items are authoritative when present, and reading history again would
     /// cost a round trip for an answer already in hand.
     fn streamed_items(&mut self, thread_id: &str, turn_id: &str) -> Result<Vec<Value>, TurnError> {
-        let mut sink = ThreadTurnSink::new(turn_id);
+        let mut sink = if self.candidate_reader.is_some() {
+            ThreadTurnSink::new_bound(thread_id, turn_id)
+        } else {
+            ThreadTurnSink::new(turn_id)
+        };
         self.server.request_streamed(
             "thread/read",
             serde_json::json!({"threadId":thread_id,"includeTurns":true}),
@@ -4289,6 +4549,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         turn_id: &str,
         authoritative_items: &[Value],
     ) -> Result<Option<FinalResponse>, TurnError> {
+        if let Some(reader) = &self.candidate_reader {
+            for item in authoritative_items {
+                reader
+                    .observe_item(thread_id, turn_id, item, true)
+                    .map_err(|_| TurnError::CorrelationMismatch)?;
+            }
+        }
         let mut fallback = None;
         let mut final_answer = None;
         for item in authoritative_items {
@@ -5103,6 +5370,7 @@ mod tests {
                 control_mode: "direct_interactive".to_owned(),
                 record_accepted_user_input: true,
                 primary_tool,
+                candidate_reader: None,
             },
             "/tmp/codex-home",
         )
@@ -5119,6 +5387,350 @@ mod tests {
             effort: None,
             delivery,
         }
+    }
+
+    fn direct_coordinator(
+        reader: crate::direct_review_target::DirectTargetReader,
+    ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
+        let mut server = FakeServer::default();
+        for reply in [
+            serde_json::json!({"codexHome":"/tmp/codex-home"}),
+            serde_json::json!({"cwd":reader.workspace().unwrap(),"approvalPolicy":"never","sandbox":{"type":"readOnly"},"model":"gpt-5","thread":{"id":"thread-1","parentThreadId":null,"turns":[]}}),
+            serde_json::json!({}),
+            serde_json::json!({"thread":{"id":"thread-1","parentThreadId":null,"turns":[]}}),
+            serde_json::json!({"turn":{"id":"turn-1"}}),
+        ] {
+            server.replies.push_back(Ok(reply));
+        }
+        TurnCoordinator::initialize(
+            server,
+            MemoryJournal::default(),
+            MemoryArtifactStore::default(),
+            CoordinatorConfig {
+                attach: ThreadAttach::Start,
+                foreign_diagnostics: Box::new(RecordingDiagnostics::default()),
+                fixed_model: "gpt-5".to_owned(),
+                default_effort: "medium".to_owned(),
+                supported_efforts: ["medium".to_owned()].into_iter().collect(),
+                cwd: reader.workspace().unwrap(),
+                developer_instructions: "checked reviewer".to_owned(),
+                sandbox: "read-only".to_owned(),
+                approval_policy: "never".to_owned(),
+                safety_policy: SessionSafetyPolicy::ReviewerReadOnly,
+                run_generation: 1,
+                server_key: "a".repeat(64),
+                server_epoch: 7,
+                run_id: reader.run_id(),
+                controller_id: Uuid::now_v7(),
+                control_mode: "direct_interactive".to_owned(),
+                record_accepted_user_input: false,
+                primary_tool: None,
+                candidate_reader: Some(reader),
+            },
+            "/tmp/codex-home",
+        )
+        .unwrap()
+    }
+
+    fn candidate_call(id: u64, thread: &str) -> Value {
+        serde_json::json!({"id":id,"method":"item/tool/call","params":{"threadId":thread,"turnId":"turn-1","callId":"read-call","tool":crate::direct_review::CANDIDATE_TOOL_NAME,"arguments":{"side":"current","path":"file.txt","byte_offset":0,"byte_length":10}}})
+    }
+
+    #[test]
+    fn direct_reader_refuses_mismatched_policy_cwd_and_nonfresh_thread_before_turn_dispatch() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(true);
+        fixture.commit("candidate\n");
+        for (pointer, value) in [
+            ("/cwd", serde_json::json!("/wrong")),
+            ("/sandbox/type", serde_json::json!("workspaceWrite")),
+            ("/approvalPolicy", serde_json::json!("on-request")),
+            ("/model", serde_json::json!("wrong")),
+            ("/thread/parentThreadId", serde_json::json!("parent")),
+            ("/thread/turns", serde_json::json!([{"id":"old"}])),
+        ] {
+            let reader = fixture.reader(fixture.admit("head", None));
+            let mut coordinator = direct_coordinator(reader);
+            let response = coordinator
+                .server
+                .replies
+                .front_mut()
+                .unwrap()
+                .as_mut()
+                .unwrap();
+            *response.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                coordinator
+                    .start_turn(request("checked", DeliveryMode::Submit))
+                    .is_err(),
+                "{pointer}"
+            );
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        }
+    }
+
+    #[test]
+    fn direct_candidate_tools_are_correlated_and_native_items_poison_acceptance() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(true);
+        fixture.commit("candidate\n");
+        let reader = fixture.reader(fixture.admit("head", None));
+        let run = reader.run_id();
+        let mut coordinator = direct_coordinator(reader);
+        coordinator
+            .start_turn(request("review", DeliveryMode::Submit))
+            .unwrap();
+        let params = &coordinator
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .unwrap()
+            .1;
+        assert_eq!(
+            params["dynamicTools"][0]["name"],
+            crate::direct_review::CANDIDATE_TOOL_NAME
+        );
+        assert_eq!(
+            coordinator.server.calls[0].1["capabilities"]["experimentalApi"],
+            true
+        );
+        coordinator
+            .ingest(candidate_call(1, "foreign-thread"))
+            .unwrap();
+        assert!(coordinator.server.responses.is_empty());
+        coordinator.ingest(candidate_call(2, "thread-1")).unwrap();
+        coordinator.ingest(candidate_call(3, "thread-1")).unwrap();
+        assert_eq!(
+            coordinator.server.responses[0].1,
+            coordinator.server.responses[1].1
+        );
+        assert_eq!(coordinator.server.responses[0].1["success"], true);
+        coordinator.ingest(serde_json::json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"dynamicToolCall","id":"read-call","tool":crate::direct_review::CANDIDATE_TOOL_NAME}}})).unwrap();
+        coordinator
+            .candidate_reader
+            .as_ref()
+            .unwrap()
+            .check_acceptance()
+            .unwrap();
+        coordinator.server.replies.push_back(Ok(serde_json::json!({"thread":{"id":"thread-1","turns":[{"id":"turn-1","items":[{"type":"commandExecution","id":"native-read","command":"cat file.txt"},{"type":"agentMessage","text":"clean","phase":"final_answer"}]}]}})));
+        let terminal=coordinator.ingest(serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"type":"commandExecution","id":"native-read","command":"cat file.txt"},{"type":"agentMessage","text":"clean","phase":"final_answer"}]}}})).unwrap().unwrap();
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+        assert_eq!(
+            crate::direct_review_target::DirectTargetReader::for_run(&fixture.state, run)
+                .unwrap()
+                .unwrap()
+                .check_acceptance()
+                .unwrap_err()
+                .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+    }
+
+    #[test]
+    fn direct_reader_response_loss_retains_the_original_receipt() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(true);
+        fixture.commit("candidate\n");
+        let reader = fixture.reader(fixture.admit("head", None));
+        let run = reader.run_id();
+        let review = reader.review_id();
+        let mut coordinator = direct_coordinator(reader);
+        coordinator
+            .start_turn(request("original", DeliveryMode::Submit))
+            .unwrap();
+        coordinator.server.fail_response = true;
+        assert!(coordinator.ingest(candidate_call(1, "thread-1")).is_err());
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        let response: Value = serde_json::from_str(
+            coordinator.server.responses[0].1["contentItems"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let reopened =
+            crate::direct_review_target::DirectTargetReader::for_run(&fixture.state, run)
+                .unwrap()
+                .unwrap();
+        assert_eq!(reopened.review_id(), review);
+        let retried = reopened
+            .read(
+                "thread-1",
+                "turn-1",
+                "read-call",
+                &crate::direct_review_target::CandidateReadRequest {
+                    side: "current".to_owned(),
+                    path: "file.txt".to_owned(),
+                    byte_offset: 0,
+                    byte_length: 10,
+                },
+            )
+            .unwrap();
+        assert_eq!(retried, response);
+        assert_eq!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .filter(|(method, _)| method == "turn/start")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn direct_recovery_history_cannot_erase_an_unmediated_tool() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(true);
+        fixture.commit("candidate\n");
+        let reader = fixture.reader(fixture.admit("head", None));
+        let mut coordinator = direct_coordinator(reader);
+        coordinator
+            .start_turn(request("original", DeliveryMode::Submit))
+            .unwrap();
+        coordinator.abandon().unwrap();
+        coordinator.server.replies.push_back(Ok(serde_json::json!({"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","items":[{"type":"mcpToolCall","id":"plugin-read"}]}]}})));
+        assert!(coordinator.reconcile_history().unwrap());
+        assert_eq!(
+            coordinator
+                .candidate_reader
+                .as_ref()
+                .unwrap()
+                .check_acceptance()
+                .unwrap_err()
+                .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+        assert_eq!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .filter(|(method, _)| method == "turn/start")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn direct_original_history_response_survives_missing_or_different_notification_output() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(true);
+        fixture.commit("candidate\n");
+        for inline in [
+            None,
+            Some(
+                serde_json::json!([{"type":"agentMessage","text":"different notification response"}]),
+            ),
+        ] {
+            let reader = fixture.reader(fixture.admit("head", None));
+            let run = reader.run_id();
+            let mut coordinator = direct_coordinator(reader);
+            coordinator
+                .start_turn(request("original", DeliveryMode::Submit))
+                .unwrap();
+            coordinator.server.replies.push_back(Ok(serde_json::json!({"thread":{"id":"thread-1","turns":[{"id":"turn-1","status":"completed","items":[{"type":"agentMessage","text":"authoritative original response"}]}]}})));
+            let mut turn = serde_json::json!({"id":"turn-1","status":"completed"});
+            if let Some(items) = inline {
+                turn["items"] = items;
+            }
+            let terminal = coordinator.ingest(serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":turn}})).unwrap().unwrap();
+            assert_eq!(
+                terminal.final_response,
+                Some(FinalResponse::Inline {
+                    text: "authoritative original response".to_owned()
+                })
+            );
+            drop(coordinator);
+            let reopened =
+                crate::direct_review_target::DirectTargetReader::for_run(&fixture.state, run)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                reopened
+                    .completed_history_response("thread-1", "turn-1")
+                    .unwrap(),
+                terminal.final_response
+            );
+            assert!(
+                reopened
+                    .completed_history_response("thread-1", "replacement")
+                    .is_err()
+            );
+            reopened.check_acceptance().unwrap();
+        }
+    }
+
+    #[test]
+    fn direct_terminal_history_loss_blocks_acceptance_until_original_startup_readback() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(true);
+        fixture.commit("candidate\n");
+        let reader = fixture.reader(fixture.admit("head", None));
+        let run = reader.run_id();
+        let mut coordinator = direct_coordinator(reader);
+        coordinator
+            .start_turn(request("original", DeliveryMode::Submit))
+            .unwrap();
+        assert!(coordinator.ingest(serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"type":"agentMessage","text":"clean"}]}}})).is_err());
+        assert!(
+            coordinator
+                .journal()
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, JournalEntry::Terminal { .. }))
+        );
+        let reopened =
+            crate::direct_review_target::DirectTargetReader::for_run(&fixture.state, run)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            reopened.check_acceptance().unwrap_err().code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+        let mut recovered = direct_coordinator(reopened);
+        recovered.restore_durable_state(
+            RunLifecycle::Idle,
+            Some("thread-1".to_owned()),
+            None,
+            Some("turn-1".to_owned()),
+        );
+        recovered.server.replies.clear();
+        recovered
+            .server
+            .replies
+            .push_back(Ok(serde_json::json!({"cwd":recovered.cwd,"approvalPolicy":"never","sandbox":{"type":"readOnly"},"model":"gpt-5","thread":{"id":"thread-1","parentThreadId":null,"turns":[]}})));
+        recovered.server.replies.push_back(Ok(serde_json::json!({"thread":{"id":"thread-1","turns":[{"id":"turn-1","items":[{"type":"commandExecution","id":"hidden-read"}]}]}})));
+        recovered
+            .complete_connection_startup(RunLifecycle::Idle)
+            .unwrap();
+        assert!(
+            recovered
+                .candidate_reader
+                .as_ref()
+                .unwrap()
+                .pending_histories()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            recovered
+                .candidate_reader
+                .as_ref()
+                .unwrap()
+                .check_acceptance()
+                .unwrap_err()
+                .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+        assert!(
+            !recovered
+                .server
+                .calls
+                .iter()
+                .any(|(method, _)| method == "turn/start" || method == "thread/start")
+        );
     }
 
     #[test]

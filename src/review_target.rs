@@ -753,13 +753,33 @@ fn materialize_source(
     Ok(())
 }
 
-struct Candidate {
-    path: String,
-    mode: u32,
-    bytes: Vec<u8>,
+pub(crate) struct Candidate {
+    pub(crate) path: String,
+    pub(crate) mode: u32,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) blob_oid: Option<String>,
 }
 
-fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
+fn admit_candidate(
+    result: &mut Vec<Candidate>,
+    total: &mut usize,
+    candidate: Candidate,
+) -> Result<(), MachineError> {
+    *total = total
+        .checked_add(candidate.bytes.len())
+        .ok_or_else(|| target_error("REVIEW_TARGET_LIMIT_EXCEEDED", "target size overflow"))?;
+    if result.len() >= MAX_FILES || *total as u64 > MAX_TARGET_BYTES {
+        return Err(target_error(
+            "REVIEW_TARGET_LIMIT_EXCEEDED",
+            "target exceeds source limits",
+        ));
+    }
+    screen(&candidate.bytes)?;
+    result.push(candidate);
+    Ok(())
+}
+
+pub(crate) fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
     let bytes = git(
         root,
         &[
@@ -771,11 +791,16 @@ fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
         ],
     )?;
     let mut result = Vec::new();
+    let mut total = 0;
+    let mut seen = std::collections::BTreeSet::new();
     for raw in bytes.split(|b| *b == 0).filter(|v| !v.is_empty()) {
         let path = std::str::from_utf8(raw)
             .map_err(|_| target_error("REVIEW_TARGET_UNSAFE_PATH", "opaque paths are unsupported"))?
             .to_owned();
         if is_private_tool_path(&path) {
+            continue;
+        }
+        if !seen.insert(path.clone()) {
             continue;
         }
         let Some((metadata, bytes)) = read_worktree_file(root, &path)? else {
@@ -786,14 +811,23 @@ fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
         } else {
             0o444
         };
-        result.push(Candidate { path, mode, bytes });
+        admit_candidate(
+            &mut result,
+            &mut total,
+            Candidate {
+                path,
+                mode,
+                bytes,
+                blob_oid: None,
+            },
+        )?;
     }
     result.sort_by(|a, b| a.path.cmp(&b.path));
     result.dedup_by(|a, b| a.path == b.path);
     Ok(result)
 }
 
-fn read_worktree_file(
+pub(crate) fn read_worktree_file(
     root: &Path,
     relative: &str,
 ) -> Result<Option<(fs::Metadata, Vec<u8>)>, MachineError> {
@@ -846,11 +880,11 @@ fn unsafe_worktree_file(_error: std::io::Error) -> MachineError {
     )
 }
 
-fn index_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
+pub(crate) fn index_entries(root: &Path) -> Result<Vec<Candidate>, MachineError> {
     parse_ls_files(root, &git(root, &["ls-files", "--stage", "-z"])?)
 }
 
-fn ensure_index_resolved(root: &Path) -> Result<(), MachineError> {
+pub(crate) fn ensure_index_resolved(root: &Path) -> Result<(), MachineError> {
     if !git(root, &["ls-files", "--unmerged", "-z"])?.is_empty() {
         Err(target_error(
             "REVIEW_TARGET_CONFLICT",
@@ -863,6 +897,7 @@ fn ensure_index_resolved(root: &Path) -> Result<(), MachineError> {
 
 fn parse_ls_files(root: &Path, bytes: &[u8]) -> Result<Vec<Candidate>, MachineError> {
     let mut result = Vec::new();
+    let mut total = 0;
     for raw in bytes.split(|b| *b == 0).filter(|v| !v.is_empty()) {
         let tab = raw
             .iter()
@@ -882,18 +917,24 @@ fn parse_ls_files(root: &Path, bytes: &[u8]) -> Result<Vec<Candidate>, MachineEr
         if is_private_tool_path(&path) {
             continue;
         }
-        result.push(Candidate {
-            path,
-            mode: git_mode(fields[0])?,
-            bytes: git(root, &["cat-file", "blob", fields[1]])?,
-        });
+        admit_candidate(
+            &mut result,
+            &mut total,
+            Candidate {
+                path,
+                mode: git_mode(fields[0])?,
+                bytes: git(root, &["cat-file", "blob", fields[1]])?,
+                blob_oid: Some(fields[1].to_owned()),
+            },
+        )?;
     }
     Ok(result)
 }
 
-fn tree_entries(root: &Path, commit: &str) -> Result<Vec<Candidate>, MachineError> {
+pub(crate) fn tree_entries(root: &Path, commit: &str) -> Result<Vec<Candidate>, MachineError> {
     let bytes = git(root, &["ls-tree", "-rz", "--full-tree", commit])?;
     let mut result = Vec::new();
+    let mut total = 0;
     for raw in bytes.split(|b| *b == 0).filter(|v| !v.is_empty()) {
         let tab = raw
             .iter()
@@ -913,11 +954,16 @@ fn tree_entries(root: &Path, commit: &str) -> Result<Vec<Candidate>, MachineErro
         if is_private_tool_path(&path) {
             continue;
         }
-        result.push(Candidate {
-            path,
-            mode: git_mode(fields[0])?,
-            bytes: git(root, &["cat-file", "blob", fields[2]])?,
-        });
+        admit_candidate(
+            &mut result,
+            &mut total,
+            Candidate {
+                path,
+                mode: git_mode(fields[0])?,
+                bytes: git(root, &["cat-file", "blob", fields[2]])?,
+                blob_oid: Some(fields[2].to_owned()),
+            },
+        )?;
     }
     Ok(result)
 }
@@ -937,14 +983,24 @@ fn git_mode(value: &str) -> Result<u32, MachineError> {
     }
 }
 
-fn head(root: &Path) -> Result<Option<String>, MachineError> {
+pub(crate) fn head(root: &Path) -> Result<Option<String>, MachineError> {
     match git_status(root, &["rev-parse", "--verify", "HEAD^{commit}"])? {
         Some(value) => Ok(Some(line(&value)?)),
-        None => Ok(None),
+        None => {
+            if git_status(root, &["rev-parse", "--verify", "HEAD"])?.is_some()
+                || git_status(root, &["symbolic-ref", "--quiet", "HEAD"])?.is_none()
+            {
+                return Err(target_error(
+                    "REVIEW_TARGET_UNAVAILABLE",
+                    "HEAD does not have its required commit object",
+                ));
+            }
+            Ok(None)
+        }
     }
 }
 
-fn resolve_commit(root: &Path, value: &str) -> Result<String, MachineError> {
+pub(crate) fn resolve_commit(root: &Path, value: &str) -> Result<String, MachineError> {
     git_status(
         root,
         &[
@@ -964,10 +1020,28 @@ fn resolve_commit(root: &Path, value: &str) -> Result<String, MachineError> {
     })
 }
 
-fn first_parent(root: &Path, commit: &str) -> Result<Option<String>, MachineError> {
-    let bytes = git(root, &["rev-list", "--parents", "-n", "1", commit])?;
-    let value = std::str::from_utf8(&bytes).map_err(internal)?.trim();
-    Ok(value.split_whitespace().nth(1).map(ToOwned::to_owned))
+pub(crate) fn first_parent(root: &Path, commit: &str) -> Result<Option<String>, MachineError> {
+    // Graph traversal hides parents at shallow boundaries. The object header
+    // retains the actual first parent and must own commit transition semantics.
+    let bytes = git(root, &["cat-file", "commit", commit])?;
+    for header in bytes
+        .split(|byte| *byte == b'\n')
+        .take_while(|line| !line.is_empty())
+    {
+        if let Some(parent) = header.strip_prefix(b"parent ") {
+            let parent = std::str::from_utf8(parent).map_err(internal)?;
+            if !matches!(parent.len(), 40 | 64)
+                || !parent.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(target_error(
+                    "REVIEW_TARGET_UNAVAILABLE",
+                    "commit parent identity is invalid",
+                ));
+            }
+            return Ok(Some(parent.to_owned()));
+        }
+    }
+    Ok(None)
 }
 
 fn merge_base(root: &Path, left: &str, right: &str) -> Result<String, MachineError> {
@@ -975,7 +1049,7 @@ fn merge_base(root: &Path, left: &str, right: &str) -> Result<String, MachineErr
     line(&git(root, &["merge-base", &left, right])?)
 }
 
-fn split_range(value: &str) -> Result<(&str, &str, bool), MachineError> {
+pub(crate) fn split_range(value: &str) -> Result<(&str, &str, bool), MachineError> {
     if let Some((a, b)) = value.split_once("...")
         && !a.is_empty()
         && !b.is_empty()
@@ -1001,15 +1075,25 @@ fn split_range(value: &str) -> Result<(&str, &str, bool), MachineError> {
     ))
 }
 
-fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, MachineError> {
+pub(crate) fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, MachineError> {
     git_status(root, arguments)?
         .ok_or_else(|| target_error("REVIEW_TARGET_GIT_FAILED", "Git command failed"))
 }
 
-fn git_status(root: &Path, arguments: &[&str]) -> Result<Option<Vec<u8>>, MachineError> {
+pub(crate) fn git_status(root: &Path, arguments: &[&str]) -> Result<Option<Vec<u8>>, MachineError> {
     let limit = git_output_limit(arguments)?;
     let mut child = Command::new("/usr/bin/git")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
         .args(["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-C"])
         .arg(root)
         .args(arguments)
@@ -1095,7 +1179,9 @@ fn git_output_limit(arguments: &[&str]) -> Result<u64, MachineError> {
     match arguments.first().copied() {
         Some("cat-file") => Ok(MAX_FILE_BYTES),
         Some("ls-files" | "ls-tree" | "status") => Ok(MAX_GIT_LIST_BYTES),
-        Some("rev-parse" | "rev-list" | "merge-base") => Ok(MAX_GIT_IDENTITY_BYTES),
+        Some("rev-parse" | "rev-list" | "merge-base" | "symbolic-ref") => {
+            Ok(MAX_GIT_IDENTITY_BYTES)
+        }
         _ => Err(internal("Git command has no declared output bound")),
     }
 }
@@ -1148,7 +1234,7 @@ fn make_directories_writable(path: &Path) -> Result<(), MachineError> {
     Ok(())
 }
 
-fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, MachineError> {
+pub(crate) fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, MachineError> {
     let path = Path::new(relative);
     if path.is_absolute()
         || relative.is_empty()
@@ -1164,7 +1250,7 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, MachineError> {
     Ok(root.join(path))
 }
 
-fn screen(bytes: &[u8]) -> Result<(), MachineError> {
+pub(crate) fn screen(bytes: &[u8]) -> Result<(), MachineError> {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     for marker in [
         "-----begin private key-----",
@@ -1204,7 +1290,7 @@ fn classify(bytes: &[u8]) -> &'static str {
     }
 }
 
-fn is_private_tool_path(path: &str) -> bool {
+pub(crate) fn is_private_tool_path(path: &str) -> bool {
     Path::new(path).components().any(|component| {
         matches!(
             component,

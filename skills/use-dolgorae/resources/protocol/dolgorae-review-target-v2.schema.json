@@ -1,0 +1,519 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/review-target/v2",
+  "title": "Dolgorae direct review target v2",
+  "description": "Accepted EPIC-017 successor contract; schema presence does not advertise runtime support.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/target"
+    },
+    {
+      "$ref": "#/$defs/read_receipt"
+    }
+  ],
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "workspace",
+            "staged",
+            "dirty",
+            "head",
+            "commit",
+            "range"
+          ]
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "workspace",
+                  "staged",
+                  "dirty",
+                  "head"
+                ]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "revision"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "commit",
+                  "range"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "revision"
+            ]
+          }
+        }
+      ]
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "side",
+        "path",
+        "source",
+        "mode",
+        "byte_length",
+        "sha256",
+        "blob_oid"
+      ],
+      "properties": {
+        "side": {
+          "enum": [
+            "current",
+            "before",
+            "after"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/safe_relative_path"
+        },
+        "source": {
+          "enum": [
+            "worktree",
+            "index",
+            "git_object"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "100644",
+            "100755"
+          ]
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8388608
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "blob_oid": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "each side/path is unique and eligible; index and git_object entries require blob_oid",
+        "a missing entry for a side represents an absent file; no materialized source path is stored"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "kind",
+        "requested_revision",
+        "workspace_id",
+        "resolved_base",
+        "resolved_head",
+        "range",
+        "assurance",
+        "reading_boundary",
+        "entries",
+        "excluded",
+        "admission_fingerprint",
+        "target_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-review-target/v2"
+        },
+        "kind": {
+          "enum": [
+            "workspace",
+            "staged",
+            "dirty",
+            "head",
+            "commit",
+            "range"
+          ]
+        },
+        "requested_revision": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "resolved_base": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved_head": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "left_oid",
+                "right_oid"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "two_dot",
+                    "three_dot"
+                  ]
+                },
+                "left_oid": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                },
+                "right_oid": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assurance": {
+          "enum": [
+            "sampled_mutable",
+            "pinned_objects"
+          ]
+        },
+        "reading_boundary": {
+          "enum": [
+            "checked_index",
+            "checked_objects",
+            "checked_workspace"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ignored_files",
+              "git_metadata",
+              "private_tool_state"
+            ]
+          }
+        },
+        "admission_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "workspace",
+                  "staged",
+                  "dirty"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "assurance": {
+                "const": "sampled_mutable"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "assurance": {
+                "const": "pinned_objects"
+              },
+              "resolved_head": {
+                "type": "string",
+                "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "staged"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reading_boundary": {
+                "const": "checked_index"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "head",
+                  "commit",
+                  "range"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reading_boundary": {
+                "const": "checked_objects"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "workspace",
+                  "dirty"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reading_boundary": {
+                "const": "checked_workspace"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "range"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "range": {
+                "type": "object"
+              },
+              "resolved_base": {
+                "type": "string",
+                "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+              },
+              "requested_revision": {
+                "type": "string",
+                "minLength": 1,
+                "x-maxUtf8Bytes": 1024
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "range": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "commit"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requested_revision": {
+                "type": "string",
+                "minLength": 1,
+                "x-maxUtf8Bytes": 1024
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "workspace",
+                  "staged",
+                  "dirty",
+                  "head"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requested_revision": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "target_sha256 is SHA-256 of JCS metadata excluding target_sha256; admission_fingerprint covers the admitted mutable source selection",
+        "range endpoint identities and effective base preserve exact two-dot/three-dot algorithm",
+        "historical and index candidate reads cannot be substituted with live worktree bytes",
+        "Rust admission enforces per-side limits of 10000 files and 64 MiB and rejects NUL, empty or dot path components beyond the structural safe-path pattern",
+        "entry source matches selected side: staged before Git and after index; historical Git objects; dirty/workspace current worktree",
+        "resolved base/head for staged and dirty bind admitted HEAD or null on unborn repository"
+      ]
+    },
+    "read_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receipt_id",
+        "review_id",
+        "target_sha256",
+        "side",
+        "path",
+        "sha256",
+        "byte_offset",
+        "byte_length"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-candidate-read-receipt/v1"
+        },
+        "receipt_id": {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+        },
+        "review_id": {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+        },
+        "target_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "side": {
+          "enum": [
+            "current",
+            "before",
+            "after",
+            "diff"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/safe_relative_path"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8388608
+        }
+      },
+      "x-invariants": [
+        "receipt is issued by the trusted target reader and stored durably; model-supplied identities are not receipts",
+        "content digest binds admitted file side or a deterministic diff of its admitted sides; returned range must fit that content",
+        "candidate line evidence must resolve inside bytes returned under the matching file-side receipt; diff receipts support transition evidence with null line locations"
+      ]
+    },
+    "safe_relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    }
+  }
+}

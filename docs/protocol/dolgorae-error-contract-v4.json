@@ -8,6 +8,9 @@
     },
     {
       "$ref": "#/$defs/workspace_error"
+    },
+    {
+      "$ref": "#/$defs/direct_review_error"
     }
   ],
   "x-exit-status": {
@@ -377,6 +380,67 @@
           }
         }
       ]
+    },
+    "direct_review_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "https://dolgorae.local/schema/error-contract/v2#/$defs/scoped_specialist_review_error/properties/code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "request_ref",
+            "review_id",
+            "run_id",
+            "required_action"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae-direct-review-error-details/v1"
+            },
+            "request_ref": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "review_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required_action": {
+              "const": "inspect_review"
+            },
+            "diagnostic": {
+              "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -923,6 +923,133 @@ pub(crate) fn control_reviewer_run(
     }
 }
 
+/// Publish an internally reserved direct Reviewer using caller-owned startup.
+/// Engagement admission and the immutable reader binding precede this call.
+pub(crate) fn start_direct_reviewer_run(
+    prepared: &PreparedReviewer,
+    run_id: Uuid,
+    aggregate: &AggregateBinding,
+    controller_path: &Path,
+) -> Result<RunStartReceipt, MachineError> {
+    let plan = &prepared.plan;
+    let instructions = plan
+        .agent_configuration
+        .instructions
+        .caller()
+        .ok_or_else(|| internal("direct Reviewer requires captured Markdown instructions"))?
+        .clone();
+    if !prepared.global_profile_binding.checked_review_supported()
+        || plan.agent_configuration.schema_version != 3
+        || plan.agent_configuration.execution_lane != ExecutionLane::Dedicated
+    {
+        return Err(crate::direct_review_target::reading_boundary_unsupported());
+    }
+    let view = &prepared.view;
+    let state_root = &prepared.state_root;
+    let carrier = CredentialCarrier::open_path(controller_path)?;
+    let controller = binding_from_carrier(&carrier, 1)?;
+    let state = crate::profile::ensure_global_server(&prepared.global_profile_binding)?;
+    let request = CallerRunStartRequest {
+        schema: "dolgorae-run-start-request/v2".to_owned(),
+        workspace: Some(
+            view.canonical_path
+                .to_path_buf()?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        expected_workspace_id: Some(view.workspace_id.clone()),
+        profile: prepared.global_profile_binding.selected_name.clone(),
+        control_mode: ControlMode::ManagedAgent,
+        access: CallerWorkspaceAccess::ReadOnly,
+        role: instructions.role.name.clone(),
+        model: Some(prepared.model.clone()),
+        effort: Some(prepared.effort.clone()),
+        purpose: plan.agent_configuration.purpose.clone(),
+        parent_ref: Some(ParentReference {
+            namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
+            kind: "specialist".to_owned(),
+            id: aggregate.aggregate_id.to_string(),
+        }),
+        required_capabilities: plan.agent_configuration.required_capabilities.clone(),
+        idempotency_key: format!("direct-review-start:{}", aggregate.aggregate_id),
+    }
+    .resolve()?;
+    validate_caller_start_catalog(&request, &state)?;
+    let intent = crate::run::CallerStartIntent {
+        run_id,
+        created_at: SystemLedgerClock::default().timestamp(),
+        workspace_id: view.workspace_id.clone(),
+        canonical_workspace: view.canonical_path.clone(),
+        workspace_mode: view.mode,
+        start_baseline: WorkspaceService::system()?.capture_run_baseline(view)?,
+        request,
+        controller,
+        global_profile_binding: prepared.global_profile_binding.clone(),
+        instructions,
+        readiness: crate::run::CallerProfileReadiness {
+            model: prepared.model.clone(),
+            default_effort: prepared.effort.clone(),
+            profile_capability_snapshot: run_capability_snapshot(
+                &run_profile_snapshot(&prepared.profile_snapshot)?,
+                &state,
+            ),
+        },
+    };
+    let reservations = StartReservationStore::new(SystemWorkspacePlatform, state_root);
+    let _allocation = reservations.lock_allocation("run-start", &intent.request.idempotency_key)?;
+    let reservation =
+        reservations.reserve_caller(&crate::run::CallerStartReservation::new(intent)?)?;
+    if reservation.run_id != run_id {
+        return Err(internal(
+            "direct Reviewer reservation changed its original Run",
+        ));
+    }
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    let _startup = ProcessRunStartup::acquire(state_root, run_id)?;
+    let mut manifest = build_caller_manifest(
+        &reservation.accepted_intent,
+        view,
+        &state,
+        &prepared.model,
+        &prepared.effort,
+    )?;
+    manifest.agent_configuration = plan.agent_configuration.clone();
+    manifest.aggregate_binding = Some(aggregate.clone());
+    plan.validate_manifest(&manifest)?;
+    store.publish(&manifest)?;
+    ensure_caller_bootstrap(state_root, &manifest, &reservation)?;
+    crate::profile::admit_global_run(
+        &prepared.global_profile_binding,
+        &state,
+        &view.workspace_id,
+        run_id,
+    )?;
+    drop(_startup);
+    ensure_run_worker(view, state_root, run_id)?;
+    let proof = call_caller_policy_proof(state_root, run_id, &carrier, run_id)?;
+    crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid())
+        .observe_locked(|_| {
+        validate_caller_policy_commit(
+            state_root,
+            run_id,
+            &carrier,
+            run_id,
+            Access::Read,
+            None,
+            &proof,
+        )
+    })??;
+    publish_caller_start_receipt(state_root, &reservation, &proof)?;
+    Ok(RunStartReceipt {
+        snapshot: RunSources::load(
+            state_root,
+            run_id,
+            observed_control_socket_epoch(state_root, run_id),
+        )?,
+        exact_replay: false,
+    })
+}
+
 pub(crate) fn interrupt_reviewer_run(
     state_root: &Path,
     run_id: Uuid,

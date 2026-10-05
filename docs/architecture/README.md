@@ -458,11 +458,79 @@ fingerprints are sampled before dispatch and acceptance; they do not establish
 snapshot isolation. A missing runtime/tool boundary prevents dispatch.
 
 Source bytes stay in the caller workspace or existing Git object database.
+Admission and mutable resampling use the workspace's explicitly accepted Git
+or non-Git mode. A non-Git caller root never inherits source selection from an
+ancestor Git repository.
 Persistent target metadata and read receipts are protected control state.
-They contain no source tree. The review coordinator retains request, Reviewer, task,
-Turn and result ownership independently of target assurance. Direct target v2
+The [direct review state contract](../protocol/dolgorae-direct-review-state-v1.schema.json)
+owns immutable reader/Run bindings, issued reads, sticky violations and history
+inspection intents and completions.
+These records contain no source tree. The review coordinator retains request,
+Reviewer, task, Turn and result ownership independently of target assurance. Direct target v2
 and review v4 contain no capture root or settlement credential. Every new launch
 facade uses the canonical caller cwd; none owns that root for cleanup.
+
+Direct target admission reuses the review-target coordinator's bounded source
+reads. It persists only selected paths, modes, object IDs and content
+fingerprints. Staged reads reopen admitted blobs; historical reads use their
+pinned objects. Neither substitutes live index or worktree content. Mutable
+scope acceptance repeats the original selection, including the comparison HEAD.
+The trusted reader stores each read receipt before returning candidate bytes.
+Receipts bind the original review, target, side, path, content and byte range;
+full-file context passes through the same reader as changed hunks.
+The initial Turn input includes only bounded target identity and inventory size.
+The same reader exposes the complete immutable target metadata in bounded byte
+pages. Metadata receipts cannot support candidate evidence or source locations.
+The protected binding's read and publication bound accounts for JSON escaping
+of all retained paths and entries. Smaller receipt/history record limits do not
+reduce the admitted inventory or prevent reopening the original reader.
+
+A checked-review Worker must retain its reader binding and any provenance
+violation through restart. Native, plugin or subagent tool items outside that
+reader invalidate candidate provenance even if fingerprints remain unchanged.
+Supported runtime qualification must establish complete correlated tool history
+or a verified restriction to the reader before dispatch. Read-only sandboxing,
+instructions and a declared dynamic tool alone do not qualify this boundary.
+Without that proof, admission rejects the review before Reviewer allocation.
+Checked-review admission accepts only the empirically exercised executable pin
+and native tool/history configuration. Profiles with additional enabled features
+or configured MCP servers, apps, agents, hooks, notifications, plugins,
+marketplaces or skills are unsupported for this boundary. This restriction is
+independent of ordinary caller-workspace startup support. The owned Worker
+rechecks its admitted Profile and native configuration before a task Turn.
+
+The direct review coordinator captures the selected Markdown Role separately
+from the accepted task, reserves one fresh read-only Dedicated Reviewer through
+the existing Engagement store and binds its reader before Worker startup.
+Protected request state preserves the original input, Profile binding, Role
+snapshot and Controller carriers. Repeated requests inspect their original
+Engagement instead of allocating or dispatching again. A result requires the
+original Run's durably completed Turn, matching native history completion and
+validated receipts before collection. Reviewer closure and Engagement closure
+are recorded independently of that verdict; neither owns the caller root.
+
+The reader's immutable Run-to-review binding lives with protected workspace
+control state. The Worker resolves that binding before starting or connecting
+an app-server and verifies the original Run and canonical caller cwd. Recovery
+reopens this same reader and receipt store; it never substitutes a fresh review
+or grants writer access. The Turn coordinator exposes a separate candidate-read
+tool, checks native Thread/Turn/call correlation and persists unmediated tool
+observations before verdict acceptance. Notifications, authoritative terminal
+items and recovery history use the same provenance check.
+Checked review completion always reads back the original Turn's native history
+after journaling its terminal status. Inline terminal items alone cannot qualify
+provenance; a lost or malformed history read leaves acceptance unverified.
+The reader persists a history-check intent before that terminal journal append
+and an idempotent completion only after correlated history inspection. An
+unfinished intent prevents acceptance across restart; recovery inspects the
+original Thread and Turn before recording completion. Known tool violations
+remain independently durable and cannot be cleared by successful recovery.
+Before marking inspection complete, the reader durably stores the bounded final
+response extracted from that original history. Acceptance uses this response,
+even when the terminal notification omits items or contains a different response.
+The terminal journal independently establishes the original Turn's outcome.
+The host adds the sampled scope's assurance limits to the accepted verdict;
+model-written limit text cannot remove that disclosure.
 
 Workspace-owned launch preparation keeps caller roots separate from legacy
 managed worktrees. Successor preparation admits canonical Git or non-Git roots

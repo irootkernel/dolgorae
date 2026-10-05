@@ -1328,7 +1328,7 @@ pub(crate) fn settle_review_target(
     )
 }
 
-fn close_failed_engagement(
+pub(crate) fn close_failed_engagement(
     store: &mut EngagementStore,
     review_id: Uuid,
     key: &impl Fn(&str) -> String,
@@ -1668,7 +1668,7 @@ fn reviewer_start_arguments(
     ])
 }
 
-fn reviewer_send_arguments(
+pub(crate) fn reviewer_send_arguments(
     workspace: &Path,
     controller: &Path,
     run_id: Uuid,
@@ -2010,7 +2010,7 @@ fn scoped_review_result_v3(
     })
 }
 
-fn verify_executable_identity(
+pub(crate) fn verify_executable_identity(
     snapshot: &crate::profile::ProfileSnapshot,
 ) -> Result<Value, MachineError> {
     let path = Path::new(&snapshot.executable_identity.resolved_path);
@@ -2183,7 +2183,7 @@ const SCOPED_REVIEW_ERROR_CODES: &[&str] = &[
     "REVIEW_TARGET_UNSAFE_PATH",
 ];
 
-fn scoped_review_error_details(code: &str) -> bool {
+pub(crate) fn scoped_review_error_details(code: &str) -> bool {
     SCOPED_REVIEW_ERROR_CODES.contains(&code)
 }
 

@@ -131,6 +131,8 @@ def repaired_negative_example(
                     evidence["read_receipt_id"] = "018f0000-0000-7000-8000-000000061002"
     elif example_name == "error-contract-v4-boundary.invalid-private-details.json":
         del repaired["details"]["controller_credential"]
+    elif example_name == "error-contract-v4-direct-review.invalid-capture.json":
+        del repaired["details"]["capture_ref"]
     elif example_name == "error-contract-v2-review-output-legacy.invalid-missing-reason.json":
         repaired["details"]["reason"] = "Reviewer output did not match the contract"
     elif example_name == "error-contract-v2-review-output-diagnostic.invalid-extra-details.json":

@@ -222,7 +222,7 @@ are complete. A typed unsupported response alone does not complete TASK-063.
 | CW-TRANSITION | Controller-authorized acquisition/release verifies same-Thread native settings, process/socket identities, durable policy and workload absence under the Writer transaction | Native pipeline passed same-Thread transitions and guarded live recovery; offline and kernel checks cover ambiguous outcomes and recorded descendants |
 | Manifest v3 and recovery | Provisional identities restore the original Thread as reader; explicit recovery/resume can retire a guard with current Reader proof; legacy adapters reject reinterpretation | Native pipeline passed reader recovery after owned Worker loss without automatic Writer acquisition; offline checks cover durable refusal and legacy boundaries |
 | Native binding loss | Name storage and empty-history readback qualified retained turnless history on the pinned fixture; absent original identity fails without replacement or task replay | Offline checks cover unavailable-binding refusal and retained guards; no replacement or task replay capability is claimed |
-| CW-NOCOPY and CW-SCOPE | TASK-064 is complete; TASK-065 is planned | Copy-free and pre-effect retirement boundaries passed verification and independent review; checked index/object reads remain TASK-065 and public activation remains TASK-066 |
+| CW-NOCOPY and CW-SCOPE | TASK-064 and TASK-065 are complete | Copy-free boundaries and internal direct review passed required verification and independent review. Direct review binds checked index/object reads, original native history and host receipts; TASK-066 owns public activation and integrated acceptance |
 | Public activation | TASK-066 is planned | Integrate adapters, migration, help, installed skill, complete repository gate, and independent completion review |
 
 Runtime diagnosis must produce a decision for each mechanism rather than a
@@ -332,6 +332,48 @@ retry correction. The correction preserves launch and qualification behavior
 and has focused checkpoint regressions and a passing complete repository gate;
 independent review must assess whether the combined evidence covers the final
 candidate. Public adapter activation remains TASK-066.
+
+### Direct Review Reader Qualification
+
+The internal direct review path admits all six scopes, captures the selected
+Markdown Role independently of task input, and reserves a fresh read-only
+Dedicated Reviewer. Its protected reader binds the original request and Run to
+admitted source metadata. Staged and historical file reads use admitted Git
+objects; full-file and diff reads issue durable host receipts. Mutable scopes
+resample their original selection before acceptance and disclose sampled
+assurance. Unmediated native, plugin or subagent tool use invalidates provenance
+even when the source fingerprints remain unchanged.
+The initial input names bounded target identity; the same tool supplies the
+complete metadata in bounded byte pages, including inventories at the retained
+20,000-entry limit. Metadata receipts cannot support candidate evidence.
+Protected binding capacity includes JSON escaping of retained paths, so an
+admitted inventory above the smaller control-record limit remains reopenable.
+
+The account-free `test-native-review-reader` campaign requires explicit
+authorization and `DOLGORAE_RUN_NATIVE_REVIEW_READER=1`. It accepts only the
+checked Codex executable pin and uses an isolated temporary home with a loopback
+Responses endpoint. The campaign is limited to one App Server, two Turns and
+four POSTs, with no retries or external provider requests. Its three distinct
+committed, indexed and worktree contents expose candidate substitution. The
+bounded campaign passed an index candidate read, reopened the original protected
+reader, then rejected an unchanged-fingerprint native worktree read. Reopening
+the reader does not demonstrate native process or connection restart.
+
+Production admission combines that tool/history mechanism with the qualified
+caller-workspace startup contract. Additional enabled features and configured
+MCP servers, apps, agents, hooks, notifications, plugins, marketplaces or skills
+are unsupported. The Worker verifies its actual owned process configuration,
+canonical cwd, read-only policy and original Thread. Completion requires the
+original durably terminal Turn and correlated native-history inspection;
+pending history checks and sticky violations survive restart. Offline tests
+cover policy mismatch, missing history, response loss, retained Role captures,
+unknown task persistence and refusal to redispatch. Completion stores and
+accepts the original history's final response independently of
+missing or conflicting notification output. Offline tests cover this persisted
+response and complete metadata pagination.
+The combined production pipeline still requires TASK-066 integrated acceptance and its separately
+authorized native probes. CLI activation, help, migration and installed-resource
+publication remain TASK-066.
 
 ### Profile Guidance Compatibility
 

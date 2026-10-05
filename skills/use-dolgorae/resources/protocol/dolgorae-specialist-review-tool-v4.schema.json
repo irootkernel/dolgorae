@@ -1,0 +1,509 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/specialist-review-tool/v4",
+  "title": "Dolgorae direct task-aware Specialist Review v4",
+  "description": "Accepted EPIC-017 successor contract; schema presence does not advertise runtime support.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/review_request"
+    },
+    {
+      "$ref": "#/$defs/review_result"
+    }
+  ],
+  "$defs": {
+    "review_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation",
+        "target",
+        "purpose",
+        "brief",
+        "contexts",
+        "criteria",
+        "expected_output",
+        "deadline_seconds"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-specialist-review-request/v4"
+        },
+        "operation": {
+          "const": "review_target"
+        },
+        "target": {
+          "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/selection"
+        },
+        "purpose": {
+          "enum": [
+            "change",
+            "completion"
+          ]
+        },
+        "brief": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "contexts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/context"
+          }
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/specialist-review-tool/v3#/$defs/criterion"
+          }
+        },
+        "expected_output": {
+          "const": "structured_review_v4"
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "purpose": {
+                "const": "completion"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "criteria": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "x-adapterBoundFields": [
+        "canonical_workspace_id",
+        "runtime_profile_name",
+        "external_request_ref",
+        "aggregate_owner_controller_credential",
+        "specialist_run_controller_credential"
+      ],
+      "x-invariants": [
+        "adapter resolves omitted role to reviewer; trusted request digest binds resolved selection",
+        "new review creates no capture and uses explicitly read-only caller-workspace access"
+      ]
+    },
+    "assessment_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "description",
+        "path",
+        "line_start",
+        "line_end",
+        "context_id",
+        "read_receipt_id"
+      ],
+      "properties": {
+        "basis": {
+          "enum": [
+            "candidate",
+            "context",
+            "caller_reported",
+            "unavailable"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "x-maxUtf8Bytes": 4096
+        },
+        "line_start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "line_end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "context_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "read_receipt_id": {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "basis": {
+                "const": "candidate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "read_receipt_id": {
+                "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+              },
+              "path": {
+                "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/safe_relative_path"
+              },
+              "context_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "read_receipt_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "criterion_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criterion_id",
+        "status",
+        "explanation",
+        "evidence",
+        "remaining_gap"
+      ],
+      "properties": {
+        "criterion_id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "status": {
+          "enum": [
+            "met",
+            "unmet",
+            "unverified",
+            "not_applicable"
+          ]
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/assessment_evidence"
+          }
+        },
+        "remaining_gap": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "title",
+        "description",
+        "path",
+        "line_start",
+        "line_end",
+        "recommendation",
+        "confidence",
+        "read_receipt_id"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 512
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "path": {
+          "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/safe_relative_path"
+        },
+        "line_start": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line_end": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recommendation": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "read_receipt_id": {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "findings",
+        "criterion_assessments",
+        "evidence_limits",
+        "overall_assessment"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "criterion_assessments": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/criterion_assessment"
+          }
+        },
+        "evidence_limits": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 4096
+          }
+        },
+        "overall_assessment": {
+          "enum": [
+            "requirements_met",
+            "requirements_not_met",
+            "insufficient_evidence"
+          ]
+        }
+      }
+    },
+    "review_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation",
+        "review_id",
+        "target",
+        "reviewer",
+        "verdict",
+        "engagement",
+        "source_assurance",
+        "workflow_issued_source_mutation"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-specialist-review-result/v4"
+        },
+        "operation": {
+          "const": "review_target_result"
+        },
+        "review_id": {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+        },
+        "target": {
+          "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/target"
+        },
+        "reviewer": {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/reviewer"
+        },
+        "verdict": {
+          "$ref": "#/$defs/verdict"
+        },
+        "engagement": {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v2#/$defs/engagement"
+        },
+        "source_assurance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reading_boundary",
+            "candidate_provenance",
+            "drift_check",
+            "evidence_limits"
+          ],
+          "properties": {
+            "reading_boundary": {
+              "const": "verified"
+            },
+            "candidate_provenance": {
+              "const": "verified"
+            },
+            "drift_check": {
+              "enum": [
+                "unchanged",
+                "not_applicable"
+              ]
+            },
+            "evidence_limits": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "x-maxUtf8Bytes": 4096
+              }
+            }
+          }
+        },
+        "workflow_issued_source_mutation": {
+          "const": false
+        }
+      },
+      "x-invariants": [
+        "all candidate evidence and finding locations bind trusted receipts for this review and target; live context cannot supply candidate evidence",
+        "sampled mutable targets require drift_check unchanged; pinned objects require not_applicable",
+        "criterion coverage/order/status and all existing v3 evidence invariants remain enforced; no raw reasoning or protocol frames",
+        "detected drift or unverified/violated provenance returns a typed error, never this accepted result"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "properties": {
+                  "assurance": {
+                    "const": "sampled_mutable"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "source_assurance": {
+                "properties": {
+                  "drift_check": {
+                    "const": "unchanged"
+                  },
+                  "evidence_limits": {
+                    "minItems": 1
+                  }
+                }
+              },
+              "verdict": {
+                "properties": {
+                  "evidence_limits": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "source_assurance": {
+                "properties": {
+                  "drift_check": {
+                    "const": "not_applicable"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-limits": {
+    "maximumRequestBytes": 1048576,
+    "maximumResultBytes": 1048576
+  }
+}

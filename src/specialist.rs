@@ -106,6 +106,30 @@ pub struct ReviewerRuntimePlan {
 }
 
 impl ReviewerRuntimePlan {
+    pub(crate) fn resolve_direct(
+        configuration: crate::run::CallerAgentConfigurationSnapshot,
+    ) -> Result<Self, MachineError> {
+        configuration.validate()?;
+        if configuration.purpose.kind != PurposeKind::Review
+            || configuration.role_reference.as_deref()
+                != Some(configuration.instructions.role.name.as_str())
+        {
+            return Err(invalid(
+                "reviewer_configuration",
+                "direct Reviewer requires its admitted Role",
+            ));
+        }
+        let role_snapshot_sha256 = configuration.instructions.role.sha256.clone();
+        Ok(Self {
+            agent_configuration: configuration.try_into()?,
+            role_snapshot_sha256,
+            sandbox: "read-only",
+            network_access: false,
+            approval_policy: "never",
+            safety_policy: SessionSafetyPolicy::ReviewerReadOnly,
+        })
+    }
+
     pub fn resolve(
         profile: &ProfileSnapshot,
         request: ReviewerRuntimeRequest,
@@ -192,7 +216,7 @@ impl ReviewerRuntimePlan {
             operation_id: hire_operation_id,
             member_kind: AggregateMemberKind::Specialist,
             policy_sha256: None,
-            role_reference: Some(REVIEWER_ROLE_REFERENCE.to_owned()),
+            role_reference: self.agent_configuration.role_reference.clone(),
             role_snapshot_sha256: Some(self.role_snapshot_sha256.clone()),
             agent_configuration_sha256: Some(
                 agent_configuration_digest(&self.agent_configuration).map_err(internal)?,
@@ -201,6 +225,36 @@ impl ReviewerRuntimePlan {
     }
 
     pub fn validate_manifest(&self, manifest: &RunManifest) -> Result<(), MachineError> {
+        let direct = self.agent_configuration.schema_version == 3;
+        if direct {
+            let instructions = self
+                .agent_configuration
+                .instructions
+                .caller()
+                .ok_or_else(|| {
+                    invalid(
+                        "reviewer_manifest",
+                        "direct Reviewer requires captured instructions",
+                    )
+                })?;
+            if manifest.schema_version != 3
+                || manifest.requested_access != Some(crate::domain::CallerWorkspaceAccess::ReadOnly)
+                || manifest.selected_role.as_deref() != Some(instructions.role.name.as_str())
+                || manifest.start_contract.as_deref() != Some("caller_workspace/v1")
+                || manifest.instructions != self.agent_configuration.instructions
+                || manifest.execution_lane != ExecutionLane::Dedicated
+            {
+                return Err(invalid(
+                    "reviewer_manifest",
+                    "direct Reviewer startup provenance is inconsistent",
+                ));
+            }
+        } else if self.agent_configuration.execution_lane != ExecutionLane::SharedReadonly {
+            return Err(invalid(
+                "reviewer_manifest",
+                "legacy Reviewer requires its original read-only lane",
+            ));
+        }
         let binding = manifest.aggregate_binding.as_ref().ok_or_else(|| {
             invalid(
                 "aggregate_binding",
@@ -208,13 +262,20 @@ impl ReviewerRuntimePlan {
             )
         })?;
         if manifest.control_mode != ControlMode::ManagedAgent
-            || manifest.execution_lane != ExecutionLane::SharedReadonly
+            || manifest.execution_lane != self.agent_configuration.execution_lane
             || manifest.initial_access != Access::Read
             || manifest.purpose.kind != PurposeKind::Review
             || manifest.agent_configuration != self.agent_configuration
             || binding.aggregate_kind != AggregateKind::ExternalSpecialistEngagement
             || binding.member_kind != AggregateMemberKind::Specialist
-            || binding.role_reference.as_deref() != Some(REVIEWER_ROLE_REFERENCE)
+            || binding.role_reference != self.agent_configuration.role_reference
+            || binding.role_snapshot_sha256.as_deref() != Some(self.role_snapshot_sha256.as_str())
+            || binding.agent_configuration_sha256.as_deref()
+                != Some(
+                    agent_configuration_digest(&self.agent_configuration)
+                        .map_err(internal)?
+                        .as_str(),
+                )
             || self.sandbox != "read-only"
             || self.network_access
             || self.approval_policy != "never"
@@ -683,6 +744,69 @@ mod tests {
             effort: "high".to_owned(),
             required_capabilities: vec!["thread_read".to_owned()],
         }
+    }
+
+    #[test]
+    fn direct_reviewer_binds_captured_role_and_rejects_role_substitution() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+        ))
+        .unwrap();
+        let configuration = crate::run::CallerAgentConfigurationSnapshot {
+            schema_version: 3,
+            selected_profile: "reviewer".to_owned(),
+            global_profile_binding_sha256: "a".repeat(64),
+            model: "gpt-5".to_owned(),
+            default_effort: "high".to_owned(),
+            purpose: Purpose {
+                kind: PurposeKind::Review,
+                external_label: None,
+            },
+            required_capabilities: vec![],
+            role_reference: Some("reviewer".to_owned()),
+            instructions: serde_json::from_value(
+                fixture["accepted_intent"]["instructions"].clone(),
+            )
+            .unwrap(),
+            execution_lane: ExecutionLane::Dedicated,
+            required_assurance: Assurance::BestEffortPersonalAlpha,
+            native_subagent_policy: "enabled".to_owned(),
+        };
+        let plan = ReviewerRuntimePlan::resolve_direct(configuration.clone()).unwrap();
+        assert_eq!(
+            plan.agent_configuration.execution_lane,
+            ExecutionLane::Dedicated
+        );
+        assert_eq!(plan.safety_policy, SessionSafetyPolicy::ReviewerReadOnly);
+        let reopened: AgentConfigurationSnapshot =
+            serde_json::from_value(serde_json::to_value(&plan.agent_configuration).unwrap())
+                .unwrap();
+        assert_eq!(
+            reopened.instructions.caller().unwrap(),
+            &configuration.instructions
+        );
+        assert_eq!(
+            reopened.normalized_instructions,
+            configuration.instructions.developer_prefix().unwrap()
+        );
+        let binding = plan
+            .aggregate_binding(Uuid::now_v7(), Uuid::now_v7())
+            .unwrap();
+        assert_eq!(binding.role_reference, configuration.role_reference);
+        assert_eq!(
+            binding.role_snapshot_sha256.as_deref(),
+            Some(configuration.instructions.role.sha256.as_str())
+        );
+        let mut substituted = configuration.clone();
+        substituted.role_reference = Some("general".to_owned());
+        assert!(ReviewerRuntimePlan::resolve_direct(substituted).is_err());
+        let mut edited = configuration;
+        edited
+            .instructions
+            .role
+            .body
+            .push_str("Unadmitted task instructions.");
+        assert!(ReviewerRuntimePlan::resolve_direct(edited).is_err());
     }
 
     #[test]

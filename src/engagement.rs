@@ -6989,6 +6989,67 @@ mod tests {
     }
 
     #[test]
+    fn direct_v4_unknown_task_retains_original_request_and_never_redispatches() {
+        let (mut store, root) = store();
+        let opened = store
+            .open_engagement("workspace", &"a".repeat(64), "open-direct")
+            .unwrap();
+        let hired = store
+            .hire_reviewer(
+                opened.engagement_id,
+                &reviewer_plan("review"),
+                "hire-direct",
+                |_, _, _| RuntimeOutcome::Accepted,
+            )
+            .unwrap();
+        let accepted: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/specialist-review-v4-request.valid.json"
+        ))
+        .unwrap();
+        let mut task_value = accepted.clone();
+        for field in ["schema", "operation", "target", "deadline_seconds", "role"] {
+            task_value.as_object_mut().unwrap().remove(field);
+        }
+        let task: SpecialistTaskRequest = serde_json::from_value(task_value).unwrap();
+        let assigned = store
+            .assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "assign-direct",
+                |_, _, _| Ok((RuntimeOutcome::Unknown, None)),
+            )
+            .unwrap();
+        assert_eq!(assigned.state, "interrupted_unknown");
+        drop(store);
+        let mut reopened = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let original: String = reopened
+            .connection
+            .query_row(
+                "SELECT request_json FROM tasks WHERE task_id=?1",
+                [assigned.task_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&original).unwrap(), accepted);
+        let replay = reopened
+            .assign_task_v3(
+                opened.engagement_id,
+                hired.specialist_run_id,
+                &accepted,
+                &task,
+                "assign-direct",
+                |_, _, _| panic!("an unknown original Turn must not be redispatched"),
+            )
+            .unwrap();
+        assert_eq!(replay.task_id, assigned.task_id);
+        assert_eq!(replay.specialist_run_id, hired.specialist_run_id);
+        assert_eq!(replay.state, "interrupted_unknown");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn one_shot_invalid_output_commit_never_replays_a_turn_after_response_loss() {
         for barrier in [
             EngagementBarrier::BeforeTaskOutcomeCommit,

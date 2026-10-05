@@ -177,6 +177,68 @@ pub(crate) fn check_structure(value: &Value) -> Result<(), (&'static str, String
     check(value, output_contract(), "")
 }
 
+pub(crate) fn output_contract_v4() -> &'static Value {
+    static CONTRACT: OnceLock<Value> = OnceLock::new();
+    CONTRACT.get_or_init(|| {
+        let review: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-specialist-review-tool-v4.schema.json"
+        ))
+        .expect("checked v4 review schema");
+        let target: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-review-target-v2.schema.json"
+        ))
+        .expect("checked direct target schema");
+        let capture: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-review-target-v1.schema.json"
+        ))
+        .expect("checked UUID schema");
+        fn resolve(value: &Value, local: &Value, target: &Value, capture: &Value) -> Value {
+            if let Some(reference) = value.get("$ref").and_then(Value::as_str) {
+                let (root, pointer) = if let Some(pointer) = reference.strip_prefix('#') {
+                    (local, pointer)
+                } else if let Some(pointer) =
+                    reference.strip_prefix("https://dolgorae.local/schema/review-target/v2#")
+                {
+                    (target, pointer)
+                } else {
+                    (
+                        capture,
+                        reference
+                            .strip_prefix("https://dolgorae.local/schema/review-target/v1#")
+                            .expect("bounded v4 verdict references"),
+                    )
+                };
+                return resolve(
+                    root.pointer(pointer).expect("checked v4 reference"),
+                    root,
+                    target,
+                    capture,
+                );
+            }
+            match value {
+                Value::Object(fields) => Value::Object(
+                    fields
+                        .iter()
+                        .map(|(key, value)| (key.clone(), resolve(value, local, target, capture)))
+                        .collect(),
+                ),
+                Value::Array(items) => Value::Array(
+                    items
+                        .iter()
+                        .map(|value| resolve(value, local, target, capture))
+                        .collect(),
+                ),
+                _ => value.clone(),
+            }
+        }
+        resolve(&review["$defs"]["verdict"], &review, &target, &capture)
+    })
+}
+
+pub(crate) fn check_structure_v4(value: &Value) -> Result<(), (&'static str, String)> {
+    check(value, output_contract_v4(), "")
+}
+
 fn matches_type(value: &Value, kind: &str) -> bool {
     match kind {
         "object" => value.is_object(),

@@ -7,6 +7,8 @@ pub mod cli;
 pub(crate) mod codex_socket;
 pub mod conformance;
 pub mod controller;
+pub mod direct_review;
+pub mod direct_review_target;
 pub mod domain;
 pub mod engagement;
 pub mod event;
