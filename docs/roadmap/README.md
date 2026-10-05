@@ -26,8 +26,7 @@ integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
-`EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-065` are `COMPLETE`.
-`TASK-066` is `COMPLETE`
+`EPIC-017` is `COMPLETE`; `TASK-061` through `TASK-066` are `COMPLETE`
 after EPIC-016 and before EPIC-009.
 They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
@@ -2121,9 +2120,13 @@ follow-up. No stable release, installation, or external publication is claimed.
 
 ## EPIC-017: Caller-Owned Workspaces and Explicit Agent Roles
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [execution dossier](../todo/TODO-caller-owned-workspaces-and-agent-roles.md)
+Canonical Outcomes: [caller-workspace contract](../specs/caller-workspaces-v1.md),
+[direct review architecture](../architecture/README.md#direct-review-target-coordinator),
+[instruction and policy architecture](../architecture/README.md#role-source-and-policy-resolver),
+[checked protocols](../protocol/), and
+[operator guidance](../ops/README.md#specialist-role-and-policy-operation).
 
 Goal: Make Dolgorae useful for ordinary work and Specialist Review in a
 caller-selected workspace, with explicit Role instructions and runtime writer
@@ -2181,7 +2184,7 @@ startup, same-Thread transitions, receipt replay, guarded recovery and normal
 cleanup without a user Turn or provider request. The original-manifest retry
 correction has focused checkpoint coverage and a passing complete repository
 gate. Independent review and exact final candidate approval are complete. The
-[execution readiness map](../todo/TODO-caller-owned-workspaces-and-agent-roles.md#execution-readiness-and-decision-boundary)
+[caller-workspace contract](../specs/caller-workspaces-v1.md)
 separates observed native behavior from integrated acceptance and records
 the permitted Profile guidance alongside the remaining checks.
 Unsupported admission does not complete this Task.
