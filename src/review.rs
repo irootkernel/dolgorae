@@ -367,9 +367,139 @@ impl Drop for EphemeralCarriers {
 }
 
 pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
-    execute_cli_with_source_contract(arguments, SourceIsolationContract::LegacyBeforeCutover)
+    execute_direct_cli(arguments)
 }
 
+/// New Machine reviews always use the checked caller-workspace reader.
+pub fn execute_direct_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
+    if optional_value(arguments, "--scope")?.is_some() {
+        SourceIsolationContract::CallerWorkspace.admit_capture()?;
+    }
+    if required(arguments, "--format")? != "json" {
+        return Err(MachineError::invalid_argument(
+            "--format",
+            "format must be json",
+        ));
+    }
+    let workspace = crate::cli::option_path(arguments, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let profile = required(arguments, "--profile")?;
+    let cli_role = optional_value(arguments, "--role")?;
+    let mut request = if arguments.iter().any(|arg| arg == "--request-stdin") {
+        if std::io::stdin().is_terminal() {
+            return Err(MachineError::invalid_argument(
+                "--request-stdin",
+                "request requires non-TTY stdin",
+            ));
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take((MAX_TASK_REQUEST_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                MachineError::invalid_argument("--request-stdin", "request read failed")
+            })?;
+        if bytes.len() > MAX_TASK_REQUEST_BYTES {
+            return Err(MachineError::invalid_argument(
+                "--request-stdin",
+                "request exceeds 1048576 bytes",
+            ));
+        }
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            MachineError::invalid_argument("--request-stdin", "invalid JSON request")
+        })?;
+        if value.get("schema").and_then(Value::as_str)
+            != Some("dolgorae-specialist-review-request/v4")
+        {
+            SourceIsolationContract::CallerWorkspace.admit_capture()?;
+        }
+        serde_json::from_slice::<crate::direct_review::ReviewRequestV4>(&bytes).map_err(|_| {
+            MachineError::invalid_argument("--request-stdin", "request does not match v4")
+        })?
+    } else {
+        crate::direct_review::ReviewRequestV4 {
+            schema: "dolgorae-specialist-review-request/v4".to_owned(),
+            operation: "review_target".to_owned(),
+            target: ReviewTargetRequest {
+                kind: required(arguments, "--target-kind")?,
+                revision: optional_value(arguments, "--revision")?,
+            },
+            purpose: "change".to_owned(),
+            brief: "Review the selected target for actionable correctness and regression findings, with checked candidate evidence.".to_owned(),
+            contexts: Vec::new(),
+            criteria: Vec::new(),
+            expected_output: "structured_review_v4".to_owned(),
+            deadline_seconds: optional_value(arguments, "--deadline-seconds")?
+                .map(|value| value.parse::<u64>().map_err(|_| MachineError::invalid_argument("--deadline-seconds", "invalid deadline")))
+                .transpose()?.unwrap_or(300),
+            role: None,
+        }
+    };
+    if let Some(role) = cli_role {
+        if request
+            .role
+            .as_ref()
+            .is_some_and(|selected| selected != &role)
+        {
+            return Err(MachineError::invalid_argument(
+                "--role",
+                "argv and request select different Roles",
+            ));
+        }
+        request.role = Some(role);
+    }
+    request.task()?;
+    match optional_value(arguments, "--request-ref")? {
+        Some(reference) => {
+            let reference = crate::review_recovery::parse_reference(&reference)?;
+            let credential = crate::cli::option_path(arguments, "--recovery-controller-file")
+                .map_err(|reason| {
+                    MachineError::invalid_argument("--recovery-controller-file", reason)
+                })?
+                .ok_or_else(|| {
+                    MachineError::invalid_argument(
+                        "--recovery-controller-file",
+                        "credential is required",
+                    )
+                })?;
+            if !credential.is_absolute() {
+                return Err(MachineError::invalid_argument(
+                    "--recovery-controller-file",
+                    "credential must be absolute",
+                ));
+            }
+            crate::review_recovery::execute(
+                workspace.as_deref(),
+                &profile,
+                crate::review_recovery::Invocation::Direct(request),
+                reference,
+                &credential,
+                arguments.iter().any(|arg| arg == "--temporary-server"),
+            )
+        }
+        None => {
+            let view =
+                crate::workspace::WorkspaceService::system()?.discover(workspace.as_deref())?;
+            let home = crate::paths::DolgoraeHome::system()?;
+            let binding = crate::global_runtime::ResolvedGlobalProfile::resolve(&home, &profile)?
+                .prepare(&home)?;
+            request.admit_profile(&binding)?;
+            verify_executable_identity(&binding.launch_snapshot)?;
+            crate::instructions::InstructionSourceStore::new(&home)
+                .capture(request.role.as_deref().unwrap_or("reviewer"))?;
+            let carriers = EphemeralCarriers::create(&home.workspace_root(&view.workspace_id))?;
+            crate::direct_review::execute(
+                workspace.as_deref(),
+                &profile,
+                request,
+                new_uuid_v7(),
+                &carriers.aggregate,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn execute_cli_with_source_contract(
     arguments: &[OsString],
     source_contract: SourceIsolationContract,
@@ -452,7 +582,13 @@ pub(crate) fn execute_cli_with_source_contract(
                 &credential,
                 temporary,
             ),
-            None => execute_v3(workspace.as_deref(), &profile, &request, new_uuid_v7()),
+            None => execute_v3_with_source_contract(
+                workspace.as_deref(),
+                &profile,
+                &request,
+                new_uuid_v7(),
+                source_contract,
+            ),
         };
     }
     match (
@@ -468,11 +604,12 @@ pub(crate) fn execute_cli_with_source_contract(
                 &credential,
                 temporary,
             ),
-            None => execute(
+            None => execute_legacy_with_context(
                 workspace.as_deref(),
                 &profile,
                 &ReviewRequest::fixed(),
                 new_uuid_v7(),
+                None,
             ),
         },
         (None, Some(kind)) => {
@@ -500,12 +637,13 @@ pub(crate) fn execute_cli_with_source_contract(
                     &credential,
                     temporary,
                 ),
-                None => execute_scoped(
+                None => execute_scoped_with_source_contract(
                     workspace.as_deref(),
                     &profile,
                     &target,
                     deadline_seconds,
                     new_uuid_v7(),
+                    source_contract,
                 ),
             }
         }
@@ -526,6 +664,7 @@ pub fn execute(
     request: &ReviewRequest,
     request_ref: Uuid,
 ) -> Result<Value, MachineError> {
+    SourceIsolationContract::CallerWorkspace.admit_capture()?;
     execute_legacy_with_context(workspace, profile, request, request_ref, None)
 }
 
@@ -752,7 +891,7 @@ pub fn execute_scoped(
         target,
         deadline_seconds,
         request_ref,
-        SourceIsolationContract::LegacyBeforeCutover,
+        SourceIsolationContract::CallerWorkspace,
     )
 }
 
@@ -789,7 +928,7 @@ pub fn execute_v3(
         profile,
         request,
         request_ref,
-        SourceIsolationContract::LegacyBeforeCutover,
+        SourceIsolationContract::CallerWorkspace,
     )
 }
 
@@ -1273,7 +1412,11 @@ fn capture_review_target(
     }
     match reservation {
         Some(capture_ref) => crate::review_target::capture_reserved(&arguments, capture_ref),
-        None => crate::review_target::execute(crate::review_target::Operation::Capture, &arguments),
+        None => crate::review_target::execute_with_source_contract(
+            crate::review_target::Operation::Capture,
+            &arguments,
+            SourceIsolationContract::LegacyBeforeCutover,
+        ),
     }
 }
 
@@ -2583,10 +2726,40 @@ mod tests {
             revision: None,
         };
         for deadline in [0, 3_601] {
-            let error =
-                execute_scoped(None, "unused", &target, deadline, Uuid::now_v7()).unwrap_err();
+            let error = execute_scoped_with_source_contract(
+                None,
+                "unused",
+                &target,
+                deadline,
+                Uuid::now_v7(),
+                SourceIsolationContract::LegacyBeforeCutover,
+            )
+            .unwrap_err();
             assert_eq!(error.code, "INVALID_ARGUMENT");
             assert_eq!(error.details["argument"], "--deadline-seconds");
+        }
+    }
+
+    #[test]
+    fn public_legacy_review_entrypoints_retire_before_workspace_or_profile_effects() {
+        let target = ReviewTargetRequest {
+            kind: "workspace".to_owned(),
+            revision: None,
+        };
+        let request: ReviewRequestV3 = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/specialist-review-v3-request.valid.json"
+        ))
+        .unwrap();
+        for error in [
+            execute(None, "unused", &ReviewRequest::fixed(), Uuid::now_v7()).unwrap_err(),
+            execute_scoped(None, "unused", &target, 60, Uuid::now_v7()).unwrap_err(),
+            execute_v3(None, "unused", &request, Uuid::now_v7()).unwrap_err(),
+            crate::review_target::execute(crate::review_target::Operation::Capture, &[])
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, "SOURCE_ISOLATION_RETIRED");
+            assert_eq!(error.details["phase"], "admission");
+            assert_eq!(error.details["outcome"], "not_dispatched");
         }
     }
 

@@ -1,0 +1,748 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/machine-output/v4",
+  "title": "Dolgorae modern access and review machine output v4",
+  "description": "Accepted EPIC-017 successor contract; schema presence does not advertise runtime support.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/success"
+    },
+    {
+      "$ref": "#/$defs/failure"
+    }
+  ],
+  "$defs": {
+    "access_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "requested_access",
+        "selected_role",
+        "effective_access",
+        "policy_verification",
+        "writer_state",
+        "writer_generation",
+        "instruction_identity",
+        "policy_epoch",
+        "thread_id",
+        "transition_state"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+        },
+        "requested_access": {
+          "enum": [
+            "read-only",
+            "writable"
+          ]
+        },
+        "selected_role": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        },
+        "effective_access": {
+          "enum": [
+            "read",
+            "write",
+            "transitioning",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "policy_verification": {
+          "enum": [
+            "verified",
+            "unverified"
+          ]
+        },
+        "writer_state": {
+          "enum": [
+            "none",
+            "reserved",
+            "active",
+            "releasing",
+            "handoff_prepared",
+            "blocked_unknown"
+          ]
+        },
+        "writer_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "instruction_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "core_prefix_version",
+            "common_sha256",
+            "role_sha256",
+            "composition_sha256"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae.instructions/v2"
+            },
+            "core_prefix_version": {
+              "const": 2
+            },
+            "common_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "role_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "composition_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "transition_state": {
+          "enum": [
+            "none",
+            "acquiring",
+            "releasing",
+            "blocked_unknown"
+          ]
+        },
+        "lifecycle": {
+          "enum": [
+            "starting",
+            "idle",
+            "running",
+            "waiting_interaction",
+            "reconciliation_required",
+            "paused",
+            "closed",
+            "start_failed",
+            "outcome_unknown"
+          ]
+        },
+        "session_close": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation_id",
+                "interrupt",
+                "progress"
+              ],
+              "properties": {
+                "operation_id": {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                "interrupt": {
+                  "type": "boolean"
+                },
+                "progress": {
+                  "enum": [
+                    "settling",
+                    "recovery_required",
+                    "outcome_unknown",
+                    "completed",
+                    "aborted"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "write is externally writable only with verified policy and matching active writer authority",
+        "no source path, body, credential or private process identity is projected"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "effective_access": {
+                "const": "write"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "policy_verification": {
+                "const": "verified"
+              },
+              "writer_state": {
+                "const": "active"
+              },
+              "writer_generation": {
+                "type": "integer"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "dependentRequired": {
+        "lifecycle": [
+          "session_close"
+        ],
+        "session_close": [
+          "lifecycle"
+        ]
+      }
+    },
+    "success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "ok",
+        "command",
+        "invocation_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 4
+        },
+        "ok": {
+          "const": true
+        },
+        "command": {
+          "enum": [
+            "run.start",
+            "run.status",
+            "run.acquire-write",
+            "run.release-write",
+            "specialist.review",
+            "capabilities",
+            "run.resume",
+            "run.interrupt",
+            "run.recover",
+            "run.reconcile",
+            "run.close",
+            "run.list",
+            "specialist.policy.add",
+            "specialist.policy.validate",
+            "specialist.policy.show",
+            "specialist.policy.list",
+            "instructions.migrate",
+            "engagement.call"
+          ]
+        },
+        "invocation_id": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+        },
+        "data": {}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "run.start",
+                  "run.status",
+                  "run.acquire-write",
+                  "run.release-write",
+                  "run.resume",
+                  "run.interrupt",
+                  "run.recover",
+                  "run.reconcile",
+                  "run.close"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/access_projection"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "specialist.review"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/review_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "capabilities"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/capabilities/v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.start"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "policy_verification": {
+                    "const": "verified"
+                  },
+                  "thread_id": {
+                    "type": "string"
+                  },
+                  "transition_state": {
+                    "const": "none"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.acquire-write"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "effective_access": {
+                    "const": "write"
+                  },
+                  "policy_verification": {
+                    "const": "verified"
+                  },
+                  "writer_state": {
+                    "const": "active"
+                  },
+                  "transition_state": {
+                    "const": "none"
+                  },
+                  "thread_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.release-write"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "effective_access": {
+                    "const": "read"
+                  },
+                  "policy_verification": {
+                    "const": "verified"
+                  },
+                  "writer_state": {
+                    "const": "none"
+                  },
+                  "transition_state": {
+                    "const": "none"
+                  },
+                  "thread_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.start"
+              },
+              "data": {
+                "properties": {
+                  "requested_access": {
+                    "const": "writable"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "effective_access": {
+                    "const": "write"
+                  },
+                  "writer_state": {
+                    "const": "active"
+                  },
+                  "writer_generation": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "run.start"
+              },
+              "data": {
+                "properties": {
+                  "requested_access": {
+                    "const": "read-only"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "effective_access": {
+                    "const": "read"
+                  },
+                  "writer_state": {
+                    "const": "none"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "specialist.policy.add",
+                  "specialist.policy.validate",
+                  "specialist.policy.show"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/policy_projection"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "specialist.policy.list"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/policy_projection"
+                        },
+                        {
+                          "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "run.list"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/access_projection"
+                        },
+                        {
+                          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/run"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "specialist.review"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/review_result"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "capabilities"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "https://dolgorae.local/schema/capabilities/v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "instructions.migrate"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "oneOf": [
+                  {
+                    "$ref": "https://dolgorae.local/schema/instruction-migration/v1#/$defs/plan"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/instruction-migration/v1#/$defs/result"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "engagement.call"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "oneOf": [
+                  {
+                    "$ref": "https://dolgorae.local/schema/external-specialist-facade/v4#/$defs/await_result"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/external-specialist-facade/v4#/$defs/collect_result"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "ok",
+        "command",
+        "invocation_id",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 4
+        },
+        "ok": {
+          "const": false
+        },
+        "command": {
+          "enum": [
+            "run.start",
+            "run.status",
+            "run.acquire-write",
+            "run.release-write",
+            "specialist.review",
+            "review-target.capture",
+            "specialist.policy.add",
+            "specialist.policy.validate",
+            "engagement.hire",
+            "orchestration.request-specialist",
+            "capabilities",
+            "run.resume",
+            "run.interrupt",
+            "run.recover",
+            "run.reconcile",
+            "run.close",
+            "run.list",
+            "specialist.policy.show",
+            "specialist.policy.list",
+            "instructions.migrate",
+            "engagement.call"
+          ]
+        },
+        "invocation_id": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/uuid"
+        },
+        "error": {
+          "$ref": "https://dolgorae.local/schema/error-contract/v4"
+        }
+      }
+    },
+    "policy_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "snapshot_sha256",
+        "role_captures"
+      ],
+      "properties": {
+        "policy": {
+          "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/policy_input"
+        },
+        "snapshot_sha256": {
+          "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/sha256"
+        },
+        "role_captures": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role_ref",
+              "name",
+              "sha256"
+            ],
+            "properties": {
+              "role_ref": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              },
+              "sha256": {
+                "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -186,15 +186,19 @@ impl SpecialistPolicyRegistry {
     pub fn discover(workspace: Option<&Path>) -> Result<Self, MachineError> {
         let workspace = WorkspaceService::system()?.discover(workspace)?;
         let home = DolgoraeHome::system()?;
+        Ok(Self::new(home, workspace))
+    }
+
+    pub(crate) fn new(home: DolgoraeHome, workspace: WorkspaceView) -> Self {
         let registry_root = home
             .workspace_root(&workspace.workspace_id)
             .join("specialist-policies");
-        Ok(Self {
+        Self {
             home,
             workspace,
             registry_root,
             uid: DarwinSystem.current_uid(),
-        })
+        }
     }
 
     pub fn validate_file(&self, input: &Path) -> Result<InstalledSpecialistPolicy, MachineError> {
@@ -421,7 +425,7 @@ impl SpecialistPolicyRegistry {
         Ok(installed)
     }
 
-    fn capture_role(
+    pub(crate) fn capture_role(
         &self,
         workspace: &Path,
         reference: &RoleSourceReference,
@@ -434,6 +438,27 @@ impl SpecialistPolicyRegistry {
         workspace: &Path,
         reference: &RoleSourceReference,
         before_read: F,
+    ) -> Result<(RoleSource, String), MachineError>
+    where
+        F: FnOnce() -> Result<(), MachineError>,
+    {
+        self.capture_role_checked(workspace, reference, before_read, false)
+    }
+
+    pub(crate) fn capture_role_for_migration(
+        &self,
+        workspace: &Path,
+        reference: &RoleSourceReference,
+    ) -> Result<(RoleSource, String), MachineError> {
+        self.capture_role_checked(workspace, reference, || Ok(()), true)
+    }
+
+    fn capture_role_checked<F>(
+        &self,
+        workspace: &Path,
+        reference: &RoleSourceReference,
+        before_read: F,
+        require_binding: bool,
     ) -> Result<(RoleSource, String), MachineError>
     where
         F: FnOnce() -> Result<(), MachineError>,
@@ -483,6 +508,74 @@ impl SpecialistPolicyRegistry {
         before_read()?;
         let bytes = read_bounded(&mut file, MAX_CONFIG_BYTES)
             .map_err(|error| config(workspace, error.to_string()))?;
+        if require_binding {
+            let after = file.metadata().map_err(internal)?;
+            let rebound = open_relative_nofollow(&roles, OsStr::new(&filename), false)
+                .map_err(|_| config(workspace, "Role source was replaced"))?
+                .metadata()
+                .map_err(internal)?;
+            let stable = |left: &std::fs::Metadata, right: &std::fs::Metadata| {
+                (
+                    left.dev(),
+                    left.ino(),
+                    left.uid(),
+                    left.mode(),
+                    left.len(),
+                    left.mtime(),
+                    left.mtime_nsec(),
+                    left.ctime(),
+                    left.ctime_nsec(),
+                ) == (
+                    right.dev(),
+                    right.ino(),
+                    right.uid(),
+                    right.mode(),
+                    right.len(),
+                    right.mtime(),
+                    right.mtime_nsec(),
+                    right.ctime(),
+                    right.ctime_nsec(),
+                )
+            };
+            if !stable(&metadata, &after)
+                || !stable(&after, &rebound)
+                || after.len() != bytes.len() as u64
+            {
+                return Err(config(workspace, "Role source changed during capture"));
+            }
+            let rebound_first = open_relative_nofollow(
+                &root_file,
+                OsStr::new(match reference.scope {
+                    RoleSourceScope::Common => "roles",
+                    RoleSourceScope::Project => ".dolgorae",
+                }),
+                true,
+            )
+            .map_err(|_| config(workspace, "Role source directory changed"))?;
+            let rebound_roles = if reference.scope == RoleSourceScope::Project {
+                open_relative_nofollow(&rebound_first, OsStr::new("roles"), true)
+                    .map_err(|_| config(workspace, "Role source directory changed"))?
+            } else {
+                rebound_first
+            };
+            let rebound_directory = rebound_roles.metadata().map_err(internal)?;
+            if (
+                directory.dev(),
+                directory.ino(),
+                directory.uid(),
+                directory.mode(),
+            ) != (
+                rebound_directory.dev(),
+                rebound_directory.ino(),
+                rebound_directory.uid(),
+                rebound_directory.mode(),
+            ) {
+                return Err(config(
+                    workspace,
+                    "Role source directory changed during capture",
+                ));
+            }
+        }
         let role: RoleSource = decode_checked(workspace, &bytes)?;
         validate_role(&role)?;
         if role.name != reference.name {
@@ -515,7 +608,7 @@ impl SpecialistPolicyRegistry {
     }
 }
 
-fn validate_policy_input(policy: &SpecialistPolicyInput) -> Result<(), MachineError> {
+pub(crate) fn validate_policy_input(policy: &SpecialistPolicyInput) -> Result<(), MachineError> {
     if policy.schema_version != 2
         || policy.revision == 0
         || !matches!(
@@ -768,7 +861,7 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn read_input_file(path: &Path) -> Result<Vec<u8>, MachineError> {
+pub(crate) fn read_input_file(path: &Path) -> Result<Vec<u8>, MachineError> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -778,7 +871,33 @@ fn read_input_file(path: &Path) -> Result<Vec<u8>, MachineError> {
     if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
         return Err(config(path, "policy input must be a bounded regular file"));
     }
-    read_bounded(&mut file, MAX_CONFIG_BYTES).map_err(|error| config(path, error.to_string()))
+    let bytes = read_bounded(&mut file, MAX_CONFIG_BYTES)
+        .map_err(|error| config(path, error.to_string()))?;
+    let after = file.metadata().map_err(internal)?;
+    let rebound = fs::symlink_metadata(path).map_err(internal)?;
+    if (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) || (after.dev(), after.ino(), after.uid(), after.mode())
+        != (rebound.dev(), rebound.ino(), rebound.uid(), rebound.mode())
+        || after.len() != bytes.len() as u64
+    {
+        return Err(config(path, "policy input changed during capture"));
+    }
+    Ok(bytes)
 }
 
 fn read_bounded(file: &mut File, maximum: u64) -> std::io::Result<Vec<u8>> {
@@ -794,7 +913,10 @@ fn read_bounded(file: &mut File, maximum: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn decode_policy_input(path: &Path, bytes: &[u8]) -> Result<SpecialistPolicyInput, MachineError> {
+pub(crate) fn decode_policy_input(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<SpecialistPolicyInput, MachineError> {
     decode_checked(path, bytes)
 }
 
@@ -860,7 +982,10 @@ fn required_path(args: &[std::ffi::OsString], flag: &str) -> Result<PathBuf, Mac
         .ok_or_else(|| MachineError::invalid_argument(flag, "required option is missing"))
 }
 
-fn positional(args: &[std::ffi::OsString], requested: usize) -> Result<String, MachineError> {
+pub(crate) fn positional(
+    args: &[std::ffi::OsString],
+    requested: usize,
+) -> Result<String, MachineError> {
     let mut positionals = Vec::new();
     let mut index = 0;
     while index < args.len() {

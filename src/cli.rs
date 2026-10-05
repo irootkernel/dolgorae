@@ -26,6 +26,10 @@ pub enum Command {
     LiveTransportMcp(LiveTransportMcpArgs),
     Version(VersionArgs),
     Init(InitArgs),
+    Instructions {
+        #[command(subcommand)]
+        command: InstructionsCommand,
+    },
     Serve(LeafArgs),
     Runtime {
         #[command(subcommand)]
@@ -72,6 +76,9 @@ impl Command {
             Self::LiveTransportMcp(_) => "__live-transport-mcp",
             Self::Version(_) => "version",
             Self::Init(_) => "init",
+            Self::Instructions {
+                command: InstructionsCommand::Migrate(_),
+            } => "instructions.migrate",
             Self::Serve(_) => "serve",
             Self::Runtime { command } => command.machine_name(),
             Self::Engagement { command } => command.machine_name(),
@@ -92,16 +99,19 @@ impl Command {
             | Self::SpecialistReviewMcp(_)
             | Self::LiveTransportMcp(_)
             | Self::Version(_)
-            | Self::Init(_)
-            | Self::Runtime {
-                command: RuntimeCommand::Capabilities,
-            } => None,
+            | Self::Init(_) => None,
+            Self::Runtime {
+                command: RuntimeCommand::Capabilities(args),
+            } => Some(args),
             Self::Runtime {
                 command: RuntimeCommand::Orphan { command },
             } => Some(match command {
                 RuntimeOrphanCommand::Inspect(args) | RuntimeOrphanCommand::Cleanup(args) => args,
             }),
             Self::Serve(args) => Some(args),
+            Self::Instructions {
+                command: InstructionsCommand::Migrate(args),
+            } => Some(args),
             Self::Engagement {
                 command: EngagementCommand::Call(args),
             } => Some(args),
@@ -124,6 +134,15 @@ impl Command {
             Self::Run(args) => args.command.leaf_args(),
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InstructionsCommand {
+    #[command(
+        about = "Plan explicit JSON Role and policy migration",
+        long_about = "Plan with --workspace <path> and optional --file <legacy-policy-input>. Apply explicit source digests, destination names, and access choices with --request-stdin. Existing sources and accepted records are preserved; destinations must be new."
+    )]
+    Migrate(LeafArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -175,7 +194,7 @@ pub struct LiveTransportMcpArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeCommand {
-    Capabilities,
+    Capabilities(LeafArgs),
     Orphan {
         #[command(subcommand)]
         command: RuntimeOrphanCommand,
@@ -189,7 +208,7 @@ pub enum RuntimeOrphanCommand {
 impl RuntimeCommand {
     const fn machine_name(&self) -> &'static str {
         match self {
-            Self::Capabilities => "runtime.capabilities",
+            Self::Capabilities(_) => "runtime.capabilities",
             Self::Orphan { command } => match command {
                 RuntimeOrphanCommand::Inspect(_) => "runtime.orphan.inspect",
                 RuntimeOrphanCommand::Cleanup(_) => "runtime.orphan.cleanup",
@@ -396,6 +415,10 @@ impl ProfileCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum SpecialistCommand {
+    #[command(
+        about = "Review caller source through checked reads",
+        long_about = "Supply a dolgorae-specialist-review-request/v4 on --request-stdin with trusted --workspace and --profile selectors. Supported targets: workspace, staged, dirty, head, commit, range. New reviews use read-only caller access and create no source copy. Accepted legacy results retain their original contracts."
+    )]
     Review(LeafArgs),
     ReviewInspect(LeafArgs),
     ReviewRecover(LeafArgs),
@@ -457,6 +480,10 @@ pub struct RunArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RunCommand {
+    #[command(
+        about = "Start in the selected caller workspace",
+        long_about = "New starts default to --access writable and --role general. Select --access read-only for read access. Markdown instructions are captured from Dolgorae common and Role files. Explicit legacy --execution-lane and --required-assurance must be paired and cannot mix with --access or --role. A Controller credential, --profile, --control-mode, --purpose and --idempotency-key are required."
+    )]
     Start(LeafArgs),
     List(LeafArgs),
     Status(LeafArgs),
@@ -638,6 +665,34 @@ pub fn validate_argument_contract(command: &Command) -> Result<(), String> {
     }
     let spec = leaf_spec(command.machine_name());
     validate_leaf_tokens(command.machine_name(), args, &spec)?;
+    if command.machine_name() == "instructions.migrate"
+        && has(args, "--file")
+        && has(args, "--request-stdin")
+    {
+        return Err("--file is a planning option and conflicts with --request-stdin".to_owned());
+    }
+    if command.machine_name() == "run.start" {
+        let legacy = has(args, "--execution-lane");
+        if legacy != has(args, "--required-assurance") {
+            return Err("legacy execution lane and assurance must be provided together".to_owned());
+        }
+        if legacy && (has(args, "--access") || has(args, "--role")) {
+            return Err("legacy startup conflicts with --access and --role".to_owned());
+        }
+        if !legacy
+            && [
+                "--instructions",
+                "--instructions-file",
+                "--instructions-stdin",
+            ]
+            .into_iter()
+            .any(|flag| has(args, flag))
+        {
+            return Err(
+                "modern startup captures instructions from the selected Markdown Role".to_owned(),
+            );
+        }
+    }
     if command.machine_name() == "specialist.review" {
         if has(args, "--request-ref") != has(args, "--recovery-controller-file") {
             return Err(
@@ -755,6 +810,8 @@ fn leaf_spec(command: &str) -> LeafSpec {
     const W: &[&str] = &["--workspace"];
     const C: &[&str] = &["--workspace", "--controller-file", "--controller-fd"];
     match command {
+        "runtime.capabilities" => spec(&["--profile"], &[], &[], 0, 0),
+        "instructions.migrate" => spec(&["--workspace", "--file"], &["--request-stdin"], &[], 0, 0),
         "runtime.orphan.inspect" => spec(
             &[
                 "--owner-root",
@@ -973,6 +1030,7 @@ fn leaf_spec(command: &str) -> LeafSpec {
             &[
                 "--workspace",
                 "--profile",
+                "--role",
                 "--scope",
                 "--target-kind",
                 "--revision",
@@ -1058,6 +1116,8 @@ fn leaf_spec(command: &str) -> LeafSpec {
                 "--controller-fd",
                 "--profile",
                 "--control-mode",
+                "--access",
+                "--role",
                 "--execution-lane",
                 "--required-assurance",
                 "--model",
@@ -1077,8 +1137,6 @@ fn leaf_spec(command: &str) -> LeafSpec {
                 "--workspace",
                 "--profile",
                 "--control-mode",
-                "--execution-lane",
-                "--required-assurance",
                 "--purpose",
                 "--idempotency-key",
             ],
@@ -1525,6 +1583,57 @@ mod tests {
     #[test]
     fn runtime_capabilities_parses() {
         assert!(Cli::try_parse_from(["dolgorae", "runtime", "capabilities"]).is_ok());
+        let cli = Cli::try_parse_from([
+            "dolgorae",
+            "runtime",
+            "capabilities",
+            "--profile",
+            "reviewer",
+        ])
+        .unwrap();
+        validate_argument_contract(&cli.command).unwrap();
+    }
+
+    #[test]
+    fn modern_start_defaults_are_distinct_from_the_explicit_legacy_lane() {
+        let base = [
+            "dolgorae",
+            "run",
+            "start",
+            "--workspace",
+            "/workspace",
+            "--profile",
+            "default",
+            "--control-mode",
+            "managed-agent",
+            "--purpose",
+            "implementation",
+            "--idempotency-key",
+            "start",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        validate_argument_contract(&cli.command).unwrap();
+        for extra in [
+            vec!["--execution-lane", "dedicated"],
+            vec![
+                "--execution-lane",
+                "dedicated",
+                "--required-assurance",
+                "best-effort-personal-alpha",
+                "--access",
+                "writable",
+            ],
+            vec!["--instructions", "inline body"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(validate_argument_contract(&cli.command).is_err());
+        }
+        let mut args = base.to_vec();
+        args.extend(["--access", "read-only", "--role", "researcher"]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        validate_argument_contract(&cli.command).unwrap();
     }
     #[test]
     fn review_target_commands_preserve_checked_scope_and_operation_identity() {

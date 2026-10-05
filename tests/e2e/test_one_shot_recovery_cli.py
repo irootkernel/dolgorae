@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import native_codex
 from schema_support import assert_valid, validator
+import accepted_legacy_fixture
 from test_scoped_specialist_review_failures import (
     add_profile as fixture_add_profile,
     v3_review_request,
@@ -30,7 +31,11 @@ def machine(binary: pathlib.Path, home: pathlib.Path, arguments: list[str], *,
     if timeout is None:
         timeout = 180 if arguments[:2] == ["specialist", "review"] else 60
     stdin = {"input": json.dumps(request)} if request is not None else {"stdin": subprocess.DEVNULL}
-    completed = subprocess.run(
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        completed = accepted_legacy_fixture.prepare(binary, home, arguments,
+            input=json.dumps(request) if request is not None else None, timeout=timeout)
+    else:
+        completed = subprocess.run(
         [str(binary), *arguments], capture_output=True, text=True, timeout=timeout,
         env={**os.environ, "HOME": str(home)}, **stdin,
     )
@@ -49,9 +54,10 @@ def start_input(binary: pathlib.Path, home: pathlib.Path, arguments: list[str],
     payload = json.dumps(request)
     if len(payload.encode()) > 4096:
         raise AssertionError("asynchronous fixture request exceeds one empty pipe write")
+    argv, environment, _ = accepted_legacy_fixture.command(home, arguments)
     process = subprocess.Popen(
-        [str(binary), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env={**os.environ, "HOME": str(home)},
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=environment,
     )
     process.stdin.write(payload)
     process.stdin.close()
@@ -311,10 +317,8 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     # The caller retains only its reference and credential;
                     # the initial response is never delivered to the test.
                     environment = {**os.environ, "HOME": str(home)}
-                    completed = subprocess.run(
-                        [str(binary), *arguments], input=json.dumps(v3_review_request()),
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=environment, timeout=180,
-                    )
+                    completed = accepted_legacy_fixture.prepare(binary, home, arguments,
+                        input=json.dumps(v3_review_request()), env=environment, timeout=180)
                     if completed.returncode != 0 or completed.stderr:
                         raise AssertionError(f"response-loss fixture failed: {completed.stderr!r}")
                 observation = inspect(reference(index))
@@ -456,11 +460,9 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                     "WHEN NEW.state='closed' BEGIN SELECT RAISE(ABORT, 'fixture closure interruption'); END"
                 )
             try:
-                completed = subprocess.run(
-                    [str(binary), *review_arguments(workspace, profile, reference(4), controller)],
-                    input=json.dumps(v3_review_request()), stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE, text=True, env={**os.environ, "HOME": str(home)}, timeout=180,
-                )
+                completed = accepted_legacy_fixture.prepare(binary, home,
+                    review_arguments(workspace, profile, reference(4), controller),
+                    input=json.dumps(v3_review_request()), timeout=180)
                 if completed.returncode == 0 or completed.stderr:
                     raise AssertionError("closure fault did not interrupt the original operation cleanly")
             finally:

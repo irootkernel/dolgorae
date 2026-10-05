@@ -1,0 +1,9 @@
+{
+  "code": "INTERNAL_ERROR",
+  "message": "caller Worker startup failed",
+  "retryable": false,
+  "details": {
+    "invariant": "caller Worker startup failed",
+    "run_id": "018f0000-0000-7000-8000-000000000001"
+  }
+}

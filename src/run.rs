@@ -14,12 +14,14 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
+use std::io::Read as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const CONTROLLER_CAPABILITY_DOMAIN: &[u8] = b"dolgorae.controller-capability.v1\0";
+const MAX_CALLER_START_RESERVATION_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -661,6 +663,12 @@ pub struct CallerRunStartRequest {
     pub access: crate::domain::CallerWorkspaceAccess,
     #[serde(default = "default_caller_role")]
     pub role: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_binding"
+    )]
+    pub specialist_policy: Option<String>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub model: Option<String>,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -694,7 +702,40 @@ where
 impl CallerRunStartRequest {
     /// Resolve the checked private request without observing workspace/Profile
     /// state or granting runtime authority. Explicit null is not omission.
-    pub fn resolve(mut self) -> Result<Self, MachineError> {
+    pub fn resolve(self) -> Result<Self, MachineError> {
+        self.resolve_checked(false)
+    }
+
+    pub(crate) fn resolve_member(self, aggregate: &AggregateBinding) -> Result<Self, MachineError> {
+        let namespace = match aggregate.aggregate_kind {
+            AggregateKind::OrchestratedSession => "dolgorae.orchestrated-session.v1",
+            AggregateKind::ExternalSpecialistEngagement => {
+                "dolgorae.external-specialist-engagement.v1"
+            }
+        };
+        if aggregate.member_kind != AggregateMemberKind::Specialist
+            || self.control_mode != ControlMode::ManagedAgent
+            || !parent_matches(self.parent_ref.as_ref(), namespace, aggregate.aggregate_id)
+        {
+            return Err(MachineError::invalid_argument(
+                "parent_ref",
+                "member startup requires its authoritative aggregate binding",
+            ));
+        }
+        self.resolve_checked(true)
+    }
+
+    fn resolve_checked(mut self, admitted_member: bool) -> Result<Self, MachineError> {
+        if self
+            .specialist_policy
+            .as_ref()
+            .is_some_and(|name| crate::instructions::validate_role_name(name).is_err())
+        {
+            return Err(MachineError::invalid_argument(
+                "specialist_policy",
+                "policy name is invalid",
+            ));
+        }
         if self.schema != "dolgorae-run-start-request/v2" {
             return Err(MachineError::invalid_argument(
                 "schema",
@@ -773,11 +814,12 @@ impl CallerRunStartRequest {
                 .any(|(value, limit)| {
                     value.is_empty() || value.len() > *limit || value.chars().any(char::is_control)
                 })
-                || matches!(
-                    parent.namespace.as_str(),
-                    "dolgorae.orchestrated-session.v1"
-                        | "dolgorae.external-specialist-engagement.v1"
-                ))
+                || (!admitted_member
+                    && matches!(
+                        parent.namespace.as_str(),
+                        "dolgorae.orchestrated-session.v1"
+                            | "dolgorae.external-specialist-engagement.v1"
+                    )))
         {
             return Err(MachineError::invalid_argument(
                 "parent_ref",
@@ -822,6 +864,8 @@ pub struct CallerStartIntent {
     pub global_profile_binding: GlobalProfileBinding,
     pub instructions: crate::instructions::InstructionSnapshot,
     pub readiness: CallerProfileReadiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration: Option<crate::markdown_policy::PreparedPolicySession>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -929,6 +973,20 @@ impl CallerStartIntent {
         }
         self.global_profile_binding.validate_for_recovery()?;
         self.instructions.developer_prefix()?;
+        if let Some(captures) = &self.orchestration {
+            captures.validate_for_workspace(&self.workspace_id, &self.canonical_workspace)?;
+            if self.request.specialist_policy.as_deref()
+                != Some(captures.policy().policy_name.as_str())
+            {
+                return Err(reservation_invalid(
+                    "caller policy capture differs from accepted selection",
+                ));
+            }
+        } else if self.request.specialist_policy.is_some() {
+            return Err(reservation_invalid(
+                "caller policy selection has no accepted capture",
+            ));
+        }
         let ready = &self.readiness;
         let caps = &ready.profile_capability_snapshot;
         if !bounded_identity(&ready.model, 128)
@@ -983,7 +1041,7 @@ pub fn caller_start_request_digest(
     let workspace_id = crate::workspace::workspace_id(&path);
     let mut checked = request.clone();
     checked.schema = "dolgorae-run-start-request/v2".to_owned();
-    if &checked.resolve()? != request
+    if &checked.resolve_checked(true)? != request
         || !path.is_absolute()
         || path.as_os_str().as_bytes().contains(&0)
         || request
@@ -1244,8 +1302,14 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             Ok(_) => {}
         }
         verify_secure_file(&path, self.platform.current_uid())?;
-        let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;
-        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+        let file =
+            crate::workspace::open_secure_file_if_present(&path, self.platform.current_uid())?
+                .ok_or_else(|| reservation_invalid("reservation vanished"))?;
+        let mut bytes = Vec::new();
+        std::io::Read::take(file, (MAX_CALLER_START_RESERVATION_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        if bytes.len() > MAX_CALLER_START_RESERVATION_BYTES {
             return Err(reservation_invalid("reservation exceeds its bound"));
         }
         let text = std::str::from_utf8(&bytes)
@@ -1255,6 +1319,11 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
                 .map_err(|_| reservation_invalid("reservation is not canonicalizable"))?;
         let decoded: AllocationReservation = serde_json::from_slice(&canonical)
             .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+        if matches!(decoded, AllocationReservation::Legacy(_))
+            && bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT
+        {
+            return Err(reservation_invalid("legacy reservation exceeds its bound"));
+        }
         if let AllocationReservation::Caller(reservation) = &decoded {
             let original: serde_json::Value = serde_json::from_slice(&canonical)
                 .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
@@ -1333,7 +1402,7 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         )
         .map_err(|_| reservation_invalid("caller reservation is unrepresentable"))?;
         bytes.push(b'\n');
-        if bytes.len() > crate::jcs::RAW_PAYLOAD_LIMIT {
+        if bytes.len() > MAX_CALLER_START_RESERVATION_BYTES {
             return Err(reservation_invalid("reservation exceeds its bound"));
         }
         match atomic_create(&self.platform, &path, &bytes, 0o600) {
@@ -1416,6 +1485,9 @@ pub struct RunStore<P> {
 }
 
 impl<P: WorkspacePlatform> RunStore<P> {
+    pub(crate) fn state_root(&self) -> &Path {
+        &self.state_root
+    }
     #[must_use]
     pub fn new(platform: P, state_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -2470,6 +2542,41 @@ fn parent_matches(parent: Option<&ParentReference>, namespace: &str, aggregate_i
             && parent.kind == "specialist"
             && parent.id == aggregate_id.to_string()
     })
+}
+
+#[cfg(test)]
+mod caller_member_admission_tests {
+    use super::*;
+
+    #[test]
+    fn admitted_member_parent_is_resolvable_but_public_start_cannot_forge_it() {
+        let aggregate = AggregateBinding {
+            aggregate_kind: AggregateKind::ExternalSpecialistEngagement,
+            aggregate_id: Uuid::now_v7(),
+            operation_id: Uuid::now_v7(),
+            member_kind: AggregateMemberKind::Specialist,
+            policy_sha256: None,
+            role_reference: Some("reviewer".to_owned()),
+            role_snapshot_sha256: Some("a".repeat(64)),
+            agent_configuration_sha256: Some("b".repeat(64)),
+        };
+        let mut request: CallerRunStartRequest = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-defaults.valid.json"
+        ))
+        .unwrap();
+        request.parent_ref = Some(ParentReference {
+            namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
+            kind: "specialist".to_owned(),
+            id: aggregate.aggregate_id.to_string(),
+        });
+        assert!(request.clone().resolve().is_err());
+        let accepted = request.clone().resolve_member(&aggregate).unwrap();
+        assert_eq!(accepted.parent_ref, request.parent_ref);
+        assert_eq!(accepted.schema, "dolgorae-run-start-resolved/v2");
+        let mut wrong = aggregate.clone();
+        wrong.aggregate_id = Uuid::now_v7();
+        assert!(request.resolve_member(&wrong).is_err());
+    }
 }
 
 fn bounded_identity(value: &str, maximum: usize) -> bool {

@@ -23,6 +23,10 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[allow(
+    dead_code,
+    reason = "retired invocation variants prepare historical test records; production recovers their accepted operations without new invocation"
+)]
 pub(crate) enum Invocation {
     Legacy(ReviewRequest),
     Scoped(ReviewTargetRequest, u64),

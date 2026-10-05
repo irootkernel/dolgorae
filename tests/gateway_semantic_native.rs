@@ -246,7 +246,7 @@ fn install_orchestration_controller_with_approval(
         .unwrap(),
     )
     .unwrap();
-    fixture.cli(&[
+    fixture.historical(&[
         "specialist",
         "policy",
         "add",
@@ -986,6 +986,39 @@ async fn root_close_persists_one_operation_and_survives_gateway_restart() {
         workspace: Some(fixture.workspace()),
         run_id: started.run_id.clone(),
     };
+    let run_root = fixture.state_root.join("runs").join(&started.run_id);
+    let state_before = fs::read(run_root.join("state.json")).unwrap();
+    let audit_before = fs::read(run_root.join("audit.jsonl")).unwrap();
+    let refusal = fixture.command(&[
+        "run",
+        "close",
+        &started.run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--controller-file",
+        &controller.absolute_file_path,
+    ]);
+    assert_eq!(refusal.status.code(), Some(4));
+    assert!(refusal.stderr.is_empty());
+    let refusal: Value = serde_json::from_slice(&refusal.stdout).unwrap();
+    let projection: Value = serde_json::from_slice(&state_before).unwrap();
+    assert_eq!(refusal["schema_version"], 2);
+    assert_eq!(refusal["ok"], false);
+    assert_eq!(refusal["error"]["code"], "RUN_STATE_CONFLICT");
+    assert_eq!(refusal["error"]["retryable"], false);
+    assert_eq!(
+        refusal["error"]["details"],
+        serde_json::json!({
+            "run_id": started.run_id,
+            "state": projection["lifecycle"],
+            "operation": "run.close",
+        })
+    );
+    assert_eq!(fs::read(run_root.join("state.json")).unwrap(), state_before);
+    assert_eq!(
+        fs::read(run_root.join("audit.jsonl")).unwrap(),
+        audit_before
+    );
     let close_request = pb::CloseRunRequest {
         context: context(),
         run: Some(run.clone()),
@@ -1637,7 +1670,7 @@ async fn public_orchestrated_session_observation_survives_gateway_restart_withou
         .unwrap(),
     )
     .unwrap();
-    fixture.cli(&[
+    fixture.historical(&[
         "specialist",
         "policy",
         "add",
@@ -3182,7 +3215,7 @@ async fn orchestrated_start_run_pins_policy_and_replays_without_registry_source(
         fixture.operator.to_str().unwrap(),
     ]);
     assert_eq!(stopped["stopped"], true);
-    let rejected = fixture.command(&[
+    let rejected = fixture.historical_command(&[
         "specialist",
         "policy",
         "validate",
@@ -3197,7 +3230,7 @@ async fn orchestrated_start_run_pins_policy_and_replays_without_registry_source(
     let status = fixture.cli(&["profile", "server", "status", "default"]);
     assert_eq!(status["lifecycle"], "stopped");
     fixture.cli(&["profile", "server", "start", "default"]);
-    let validated = fixture.cli(&[
+    let validated = fixture.historical(&[
         "specialist",
         "policy",
         "validate",
@@ -3206,7 +3239,7 @@ async fn orchestrated_start_run_pins_policy_and_replays_without_registry_source(
         "--file",
         policy_input.to_str().unwrap(),
     ]);
-    let installed = fixture.cli(&[
+    let installed = fixture.historical(&[
         "specialist",
         "policy",
         "add",
@@ -3377,7 +3410,7 @@ async fn orchestrated_start_run_pins_policy_and_replays_without_registry_source(
         serde_json::to_vec(&out_of_slice).unwrap(),
     )
     .unwrap();
-    fixture.cli(&[
+    fixture.historical(&[
         "specialist",
         "policy",
         "add",
@@ -4247,7 +4280,23 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
     use dolgorae::run::{CallerAgentConfigurationSnapshot, RunManifest};
 
     let fixture = Fixture::new("run_start_model_list.json");
+    let list_args = [
+        "run",
+        "list",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ];
+    let empty = fixture.command(&list_args);
+    assert!(empty.status.success());
+    let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["schema_version"], 2);
+    assert!(empty["data"]["items"].as_array().unwrap().is_empty());
     let id = fixture.start_run(&["--execution-lane", "dedicated"]);
+    let legacy = fixture.command(&list_args);
+    assert!(legacy.status.success());
+    let legacy: Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_eq!(legacy["schema_version"], 2);
+    assert_eq!(legacy["data"]["items"][0]["run_id"], id);
     let root = fixture.state_root.join("runs").join(&id);
     let path = root.join("manifest.json");
     let original = fs::read(&path).unwrap();
@@ -4356,53 +4405,38 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
         .unwrap_err();
     semantic_error(&error, "CAPABILITY_UNSUPPORTED");
 
-    for verb in [
-        "status",
-        "submit",
-        "resume",
-        "pause",
-        "close",
-        "acquire-write",
-        "release-write",
-        "recover",
-        "reconcile",
-    ] {
-        let key = Uuid::now_v7().to_string();
-        let mut args = vec![
-            "run",
-            "--controller-file",
-            fixture.controller.to_str().unwrap(),
-            verb,
-            &id,
-            "--workspace",
-            fixture.workspace.to_str().unwrap(),
-        ];
-        if verb == "submit" {
-            args.extend([
-                "--message",
-                "Reject the legacy write path before writer reservation.",
-                "--idempotency-key",
-                &key,
-                "--write",
-            ]);
-        }
-        let output = fixture.command(&args);
-        assert!(!output.status.success(), "{verb}");
-        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            envelope["error"]["code"], "CAPABILITY_UNSUPPORTED",
-            "{verb}: {envelope}"
-        );
-    }
-    let listed = fixture.command(&[
+    let error = runs
+        .list_runs(pb::ListRunsRequest {
+            context: context(),
+            workspace: Some(fixture.workspace()),
+            controller_id: None,
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&error, "CAPABILITY_UNSUPPORTED");
+
+    // The frozen public adapter refuses the successor shape. The modern CLI
+    // reads it without creating a Worker, taking a writer, or changing history.
+    let observed = fixture.cli(&[
         "run",
-        "list",
+        "status",
+        &id,
         "--workspace",
         fixture.workspace.to_str().unwrap(),
     ]);
-    assert!(!listed.status.success());
-    let envelope: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "CAPABILITY_UNSUPPORTED");
+    assert_eq!(observed["run_id"], id);
+    assert_eq!(observed["requested_access"], "read-only");
+    assert_eq!(observed["effective_access"], "unknown");
+    assert_eq!(observed["selected_role"], "general");
+    let listed = fixture.command(&list_args);
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["schema_version"], 4);
+    assert_eq!(listed["ok"], true);
+    let listed = &listed["data"];
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["items"][0]["run_id"], id);
+    assert_eq!(listed["items"][0]["selected_role"], "general");
     assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), audit);
     assert_eq!(fs::read(root.join("state.json")).unwrap(), state);
     assert_eq!(run_count(&fixture), 1);

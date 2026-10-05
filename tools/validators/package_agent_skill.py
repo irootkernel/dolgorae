@@ -20,12 +20,20 @@ MARKDOWN_FILES = {
     "references/recovery.md",
 }
 SCHEMA_ROOTS = (
+    "dolgorae-specialist-review-tool-v4.schema.json",
+    "dolgorae-external-specialist-facade-v4.schema.json",
+    "dolgorae-machine-v4.schema.json",
+    "dolgorae-instruction-migration-v1.schema.json",
     "dolgorae-specialist-review-tool-v3.schema.json",
     "dolgorae-external-specialist-facade-v3.schema.json",
     "dolgorae-one-shot-review-observation-v1.schema.json",
     "dolgorae-machine-v2.schema.json",
 )
 EXAMPLES = (
+    ("external-engagement-v4-hire.valid.json", "dolgorae-external-specialist-facade-v4.schema.json", "#/$defs/hire_request"),
+    ("external-engagement-v4-assign.valid.json", "dolgorae-external-specialist-facade-v4.schema.json", "#/$defs/assign_request"),
+    ("specialist-review-v4-request.valid.json", "dolgorae-specialist-review-tool-v4.schema.json", "#/$defs/review_request"),
+    ("instruction-migration-request.valid.json", "dolgorae-instruction-migration-v1.schema.json", "#/$defs/request"),
     ("external-engagement-v2-hire.valid.json", "dolgorae-external-specialist-facade-v2.schema.json", "#/$defs/hire_request"),
     ("external-engagement-v3-assign.valid.json", "dolgorae-external-specialist-facade-v3.schema.json", "#/$defs/assign_request"),
     ("specialist-review-v3-request.valid.json", "dolgorae-specialist-review-tool-v3.schema.json", "#/$defs/review_request"),
@@ -67,11 +75,31 @@ def schema_index(protocol: Path) -> dict[str, tuple[Path, dict]]:
 def resource_bundle() -> dict[str, bytes]:
     protocol = ROOT / "docs" / "protocol"
     indexed = schema_index(protocol)
+    # Embedded policy resources have their own IDs, but ship in their owner's
+    # canonical file. Keep that file intact so offline registries can crawl it.
+    owners = {}
+
+    def collect_ids(node: object, base: str, owner: str) -> None:
+        if isinstance(node, dict):
+            base = urljoin(base, node.get("$id", ""))
+            if "$id" in node:
+                previous = owners.setdefault(base, owner)
+                if previous != owner:
+                    raise PackageError(f"duplicate embedded schema ID: {base}")
+            for value in node.values():
+                collect_ids(value, base, owner)
+        elif isinstance(node, list):
+            for value in node:
+                collect_ids(value, base, owner)
+
+    for identifier, (_, document) in indexed.items():
+        collect_ids(document, identifier, identifier)
     pending = [json.loads((protocol / name).read_bytes())["$id"] for name in SCHEMA_ROOTS]
     selected = set()
     files = {}
     while pending:
         identifier = pending.pop()
+        identifier = owners.get(identifier, identifier)
         if identifier in selected:
             continue
         if identifier not in indexed:

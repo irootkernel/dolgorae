@@ -1,0 +1,688 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/error-contract/v4",
+  "title": "Dolgorae caller-workspace errors v4",
+  "oneOf": [
+    {
+      "$ref": "https://dolgorae.local/schema/error-contract/v3"
+    },
+    {
+      "$ref": "#/$defs/workspace_error"
+    },
+    {
+      "$ref": "#/$defs/direct_review_error"
+    },
+    {
+      "$ref": "#/$defs/caller_writer_busy"
+    },
+    {
+      "$ref": "#/$defs/caller_startup_internal"
+    },
+    {
+      "$ref": "#/$defs/session_close_error"
+    }
+  ],
+  "x-exit-status": {
+    "SOURCE_ISOLATION_RETIRED": 4,
+    "ROLE_MIGRATION_REQUIRED": 4,
+    "INSTRUCTION_SOURCE_INVALID": 4,
+    "INSTRUCTION_DISCOVERY_UNSUPPORTED": 4,
+    "WORKSPACE_STARTUP_UNSUPPORTED": 4,
+    "REVIEW_READING_BOUNDARY_UNSUPPORTED": 4,
+    "REVIEW_CANDIDATE_PROVENANCE_INVALID": 4,
+    "REVIEW_TARGET_DRIFTED": 4,
+    "REVIEW_TARGET_UNAVAILABLE": 4
+  },
+  "x-invariants": [
+    "successor diagnostics contain no source paths, instruction bytes, credentials or raw provider text",
+    "non-retryable means do not replay the same accepted request; required_action identifies explicit correction or observation"
+  ],
+  "$defs": {
+    "caller_startup_internal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "INTERNAL_ERROR"
+        },
+        "message": {
+          "const": "caller Worker startup failed"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invariant",
+            "run_id"
+          ],
+          "properties": {
+            "invariant": {
+              "const": "caller Worker startup failed"
+            },
+            "run_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            }
+          }
+        }
+      }
+    },
+    "workspace_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "SOURCE_ISOLATION_RETIRED",
+            "ROLE_MIGRATION_REQUIRED",
+            "INSTRUCTION_SOURCE_INVALID",
+            "INSTRUCTION_DISCOVERY_UNSUPPORTED",
+            "WORKSPACE_STARTUP_UNSUPPORTED",
+            "REVIEW_READING_BOUNDARY_UNSUPPORTED",
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID",
+            "REVIEW_TARGET_DRIFTED",
+            "REVIEW_TARGET_UNAVAILABLE"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "required_action",
+            "phase",
+            "outcome",
+            "review_id",
+            "run_id"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae-workspace-error-details/v1"
+            },
+            "required_action": {
+              "enum": [
+                "fix_instruction_source",
+                "inspect_review",
+                "migrate_request",
+                "migrate_role",
+                "restore_target",
+                "select_supported_runtime",
+                "submit_new_review"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "admission",
+                "startup",
+                "dispatch",
+                "acceptance",
+                "recovery"
+              ]
+            },
+            "outcome": {
+              "enum": [
+                "not_dispatched",
+                "failed",
+                "inconclusive",
+                "unknown"
+              ]
+            },
+            "review_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "SOURCE_ISOLATION_RETIRED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "migrate_request"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "ROLE_MIGRATION_REQUIRED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "migrate_role"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "INSTRUCTION_SOURCE_INVALID"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "fix_instruction_source"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "INSTRUCTION_DISCOVERY_UNSUPPORTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "select_supported_runtime"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "WORKSPACE_STARTUP_UNSUPPORTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "select_supported_runtime"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "select_supported_runtime"
+                  },
+                  "phase": {
+                    "const": "admission"
+                  },
+                  "outcome": {
+                    "const": "not_dispatched"
+                  },
+                  "run_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "inspect_review"
+                  },
+                  "outcome": {
+                    "const": "inconclusive"
+                  },
+                  "review_id": {
+                    "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_TARGET_DRIFTED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "submit_new_review"
+                  },
+                  "outcome": {
+                    "const": "inconclusive"
+                  },
+                  "review_id": {
+                    "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "REVIEW_TARGET_UNAVAILABLE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "required_action": {
+                    "const": "restore_target"
+                  },
+                  "outcome": {
+                    "enum": [
+                      "failed",
+                      "not_dispatched"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "direct_review_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "https://dolgorae.local/schema/error-contract/v2#/$defs/scoped_specialist_review_error/properties/code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 1024
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "request_ref",
+            "review_id",
+            "run_id",
+            "required_action"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae-direct-review-error-details/v1"
+            },
+            "request_ref": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "review_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required_action": {
+              "const": "inspect_review"
+            },
+            "diagnostic": {
+              "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+            }
+          }
+        }
+      }
+    },
+    "caller_writer_busy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "WRITER_BUSY"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requested_run_id",
+            "holder_run_id",
+            "holder_profile",
+            "authority_state",
+            "controller_kind",
+            "writer_generation",
+            "handoff_eligible"
+          ],
+          "properties": {
+            "requested_run_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "holder_run_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "holder_profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "authority_state": {
+              "enum": [
+                "none",
+                "reserved",
+                "active",
+                "handoff_prepared",
+                "releasing",
+                "blocked_unknown"
+              ]
+            },
+            "controller_kind": {
+              "type": "null"
+            },
+            "writer_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "handoff_eligible": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "session_close_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "RUN_STATE_CONFLICT",
+            "SESSION_CLOSE_IN_PROGRESS",
+            "OUTCOME_UNKNOWN",
+            "RECOVERY_REQUIRED"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "run_id",
+            "operation",
+            "operation_id",
+            "progress",
+            "interrupt",
+            "required_action"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae-session-close-error-details/v1"
+            },
+            "run_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "operation": {
+              "enum": [
+                "run.close",
+                "run.recover",
+                "run.reconcile"
+              ]
+            },
+            "operation_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "progress": {
+              "enum": [
+                null,
+                "settling",
+                "recovery_required",
+                "outcome_unknown",
+                "completed",
+                "aborted"
+              ]
+            },
+            "interrupt": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "required_action": {
+              "enum": [
+                "correct_close_request",
+                "refresh_snapshot",
+                "recover_run",
+                "reconcile_run"
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operation_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "progress": {
+                    "type": "null"
+                  },
+                  "interrupt": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "progress": {
+                    "type": "string"
+                  },
+                  "interrupt": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

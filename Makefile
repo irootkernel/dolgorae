@@ -21,6 +21,7 @@ INT_TESTS := \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
 	test-live-instruction-discovery test-live-workspace-startup test-live-workspace-policy \
 	test-native-workspace-policy-fixture test-native-caller-pipeline test-native-review-reader \
+	test-native-integrated-acceptance \
 	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture \
 	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
@@ -113,6 +114,7 @@ test-int:
 
 test-e2e:
 	$(CARGO) build --locked --bin dolgorae --example native_caller_pipeline
+	$(CARGO) test --locked --test accepted_legacy_cli --no-run --message-format=json > target/accepted-fixture-artifacts.json
 	$(CARGO) test --locked --no-run --message-format=json --test gateway_native --test gateway_semantic_native --test gateway_configuration_native --test gateway_interaction_native > target/gateway-native-artifacts.json
 	@command -v git >/dev/null 2>&1 || { \
 		echo "Missing E2E dependency: Git 2.39 or later is required." >&2; \
@@ -153,6 +155,8 @@ test-e2e:
 		run_case tests/e2e/test_live_independent_review_admission.py; \
 		run_case tests/e2e/test_live_instruction_discovery.py; \
 		run_case tests/e2e/test_native_review_reader.py; \
+		run_case tests/e2e/test_native_integrated_acceptance.py; \
+		run_case tests/e2e/test_caller_cutover_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_live_workspace_startup.py; \
 		run_case tests/e2e/test_live_workspace_policy.py; \
 		run_case tests/e2e/test_native_workspace_policy_fixture.py; \
@@ -271,6 +275,17 @@ test-native-review-reader:
 	$(CARGO) build --locked --example native_review_reader
 	$(PYTHON_BIN) tests/e2e/run_native_review_reader.py \
 		--driver "$(CURDIR)/target/debug/examples/native_review_reader" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
+
+test-native-integrated-acceptance:
+	@test "$${DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE:-}" = 1 || { \
+		echo "DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE=1 is required" >&2; \
+		exit 2; \
+	}
+	$(CARGO) build --locked --bin dolgorae --example native_caller_pipeline
+	$(PYTHON_BIN) tests/e2e/run_native_integrated_acceptance.py \
+		--binary "$(DOLGORAE_BIN)" \
+		--caller-driver "$(CURDIR)/target/debug/examples/native_caller_pipeline" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
 
 test-live-access-safety:

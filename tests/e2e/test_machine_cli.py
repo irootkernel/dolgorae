@@ -17,6 +17,7 @@ from schema_support import assert_valid, validator
 
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
+    modern_machine = validator(protocol_root, "dolgorae-machine-v4.schema.json")
     version_schema = validator(protocol_root, "dolgorae-version-v1.schema.json")
     cases = (
         ("--help",),
@@ -34,7 +35,8 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if completed.stderr:
             raise AssertionError(f"unexpected stderr for {arguments}: {completed.stderr}")
         instance = json.loads(completed.stdout)
-        assert_valid(instance, machine, f"output for {arguments}")
+        assert_valid(instance, modern_machine if arguments[0] == "runtime" else machine,
+                     f"output for {arguments}")
         if not completed.stdout.endswith("\n"):
             raise AssertionError(f"machine output lacks final LF for {arguments}")
         if arguments == ("runtime", "capabilities"):

@@ -11,6 +11,15 @@
     },
     {
       "$ref": "#/$defs/direct_review_error"
+    },
+    {
+      "$ref": "#/$defs/caller_writer_busy"
+    },
+    {
+      "$ref": "#/$defs/caller_startup_internal"
+    },
+    {
+      "$ref": "#/$defs/session_close_error"
     }
   ],
   "x-exit-status": {
@@ -29,6 +38,43 @@
     "non-retryable means do not replay the same accepted request; required_action identifies explicit correction or observation"
   ],
   "$defs": {
+    "caller_startup_internal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "INTERNAL_ERROR"
+        },
+        "message": {
+          "const": "caller Worker startup failed"
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invariant",
+            "run_id"
+          ],
+          "properties": {
+            "invariant": {
+              "const": "caller Worker startup failed"
+            },
+            "run_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            }
+          }
+        }
+      }
+    },
     "workspace_error": {
       "type": "object",
       "additionalProperties": false,
@@ -439,6 +485,202 @@
               "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
             }
           }
+        }
+      }
+    },
+    "caller_writer_busy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "WRITER_BUSY"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "const": true
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requested_run_id",
+            "holder_run_id",
+            "holder_profile",
+            "authority_state",
+            "controller_kind",
+            "writer_generation",
+            "handoff_eligible"
+          ],
+          "properties": {
+            "requested_run_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "holder_run_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "holder_profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "authority_state": {
+              "enum": [
+                "none",
+                "reserved",
+                "active",
+                "handoff_prepared",
+                "releasing",
+                "blocked_unknown"
+              ]
+            },
+            "controller_kind": {
+              "type": "null"
+            },
+            "writer_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "handoff_eligible": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "session_close_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "RUN_STATE_CONFLICT",
+            "SESSION_CLOSE_IN_PROGRESS",
+            "OUTCOME_UNKNOWN",
+            "RECOVERY_REQUIRED"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "run_id",
+            "operation",
+            "operation_id",
+            "progress",
+            "interrupt",
+            "required_action"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae-session-close-error-details/v1"
+            },
+            "run_id": {
+              "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+            },
+            "operation": {
+              "enum": [
+                "run.close",
+                "run.recover",
+                "run.reconcile"
+              ]
+            },
+            "operation_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/review-target/v1#/$defs/uuid7"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "progress": {
+              "enum": [
+                null,
+                "settling",
+                "recovery_required",
+                "outcome_unknown",
+                "completed",
+                "aborted"
+              ]
+            },
+            "interrupt": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "required_action": {
+              "enum": [
+                "correct_close_request",
+                "refresh_snapshot",
+                "recover_run",
+                "reconcile_run"
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operation_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "progress": {
+                    "type": "null"
+                  },
+                  "interrupt": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "progress": {
+                    "type": "string"
+                  },
+                  "interrupt": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          ]
         }
       }
     }

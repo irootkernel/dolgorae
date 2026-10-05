@@ -1,7 +1,7 @@
 # Caller-workspace successor contract
 
-Status: Accepted contract for EPIC-017; runtime activation is pending its
-integrated acceptance gate. The [roadmap](../roadmap/README.md#epic-017-caller-owned-workspaces-and-explicit-agent-roles)
+Status: Accepted contract for EPIC-017. The integrated interface requires a
+qualified Profile and per-guarantee readiness. The [roadmap](../roadmap/README.md#epic-017-caller-owned-workspaces-and-explicit-agent-roles)
 owns delivery status. This document is part of the [product specification](README.md).
 Uppercase normative words have the meaning defined there.
 
@@ -87,6 +87,19 @@ silent access downgrade, source copy, or a second writer. Success MUST require
 active matching authority and positively verified writable policy for the same
 Run, process generation and thread. This includes startup without a task Turn.
 An internal thread initialization is allowed; a synthetic user Turn is not.
+When a writable Turn is prepared for a Run that already holds the Writer,
+policy verification MUST use that Turn's exact durable admission and Controller.
+It MUST preserve the pending Turn admission until actual Turn execution and
+MUST reject a foreign, completed or read-only admission. Reusing the Writer
+MUST retain the existing idle, quiescence and current-policy checks.
+Machine v4 writer-busy diagnostics MUST expose only the requested Run identity,
+nullable holder Run and Profile, authority state, writer generation and handoff
+eligibility. Controller kind remains null when it is not carried by the Writer
+record. These diagnostics MUST NOT include instruction bodies, source paths or
+credentials, and MUST retain the existing retryable `WRITER_BUSY` code.
+An internal failure after caller Run allocation MUST retain `INTERNAL_ERROR`
+and the original Run identity in a closed Machine v4 diagnostic. It MUST use
+a bounded startup invariant rather than raw storage or provider diagnostics.
 Before publishing WorkerReady for each new physical Worker connection,
 initial runtime qualification, configuration
 readback and turnless Thread binding or original-Thread rebinding MAY wait for
@@ -331,8 +344,32 @@ Direct review lifecycle and output errors retain their existing codes with
 capture-free checked details identifying the original request, review and
 Reviewer Run. One-shot inspection retains legacy results and admits direct v4
 results without synthesizing a capture or settlement identity.
+One-shot and reusable membership MUST be distinguished by their durable
+authority kind. Missing reusable configuration MUST NOT reinterpret a member
+as a one-shot Reviewer or change accepted access.
 
 ## Migration, projections and implementation handoffs
+
+The Machine adapter selects modern startup when `run start` omits
+`--execution-lane` and `--required-assurance`. It accepts `--access` and `--role`
+on that surface and resolves their defaults before calling the shared service.
+The two explicit legacy lane/assurance flags select the existing startup
+contract and must appear together; they cannot be combined with modern access
+or Role flags. This preserves explicit legacy caller semantics without applying
+modern defaults to them. Frozen public-v1 requests continue to use their
+original service entrypoint.
+
+Modern startup, status and access transitions emit the closed Machine-v4
+access projection. Historical Run observations retain their original output.
+The adapter derives policy verification from the captured durable policy;
+writer ownership alone is insufficient evidence of effective access.
+
+`specialist review --request-stdin` accepts only the checked v4 request for new
+reviews. `--target-kind` constructs a v4 change review; `--role` selects its
+Markdown Role, defaulting to `reviewer`. A Role supplied both in argv and in a
+request must match. Legacy `--scope working-tree` and older request schemas
+require migration, rather than silently changing their isolation contract.
+Existing request references remain available through review inspect/recover.
 
 **CW-MIGRATE**: Explicit migration MUST enumerate legacy common/project JSON
 Role inputs, destination names and collisions. Any collision MUST require an
@@ -340,6 +377,71 @@ explicit source/name choice; migration MUST NOT choose a winner, merge bodies,
 overwrite destinations or rewrite accepted snapshots. It MUST retain original
 source bytes and generate successor authoring input separately. New source
 resolution MUST NOT fall back to JSON or project paths after cutover.
+
+`instructions migrate --workspace <root>` reports a read-only plan of legacy
+Role references, their canonical content digests, suggested destination names,
+existing destinations and duplicate-name collisions. `--file <policy-input>`
+also includes a legacy policy authoring input and its raw-byte digest.
+`--request-stdin` applies an explicit bounded selection request. Every Role
+selection binds its common/project reference and content digest to a destination
+name. Policy selections bind the input digest, a new output path and explicit
+per-role successor access selections. Referenced Roles must be selected or
+explicitly mapped to an existing valid Markdown Role. Outputs are created
+exclusively; source files and installed/accepted snapshots are never modified.
+Publication may leave completed outputs if a later publication fails. The
+caller must inspect and replan rather than replaying an uncertain batch.
+
+Policy add/validate accepts v3 authoring input. New v2 input receives
+`ROLE_MIGRATION_REQUIRED`; existing installed v2 snapshots remain readable and
+removable alongside v3 snapshots without consulting current Role files.
+Modern policy output contains authoring metadata, the snapshot digest and
+per-role capture digests. It omits captured instruction bodies.
+
+A modern parentless direct-interactive Run may admit the named Markdown
+policy carried by its authenticated orchestration launch. Its accepted start
+request binds that policy name. Session acceptance retains the policy, child
+instruction captures, configurations and Profile bindings before physical
+Primary startup. The broker uses those retained captures for later child
+publication and recovery, with every child starting in the caller's root.
+Legacy session snapshots keep their original representation and entrypoint;
+the frozen public-v1 adapter does not project modern session captures.
+
+Ordinary writable caller Runs MUST complete the same verified read-only
+transition before terminal close. Controller and revision checks precede the
+transition; concurrent mutations must invalidate close admission. Status and
+repeated close MUST remain readable after Writer release.
+Lists containing caller access projections MUST use Machine v4; empty and
+legacy-only lists retain Machine v2. Mixed lists retain each accepted item
+representation. Recovery and
+reconciliation of a closed ordinary Run retain their typed lifecycle refusal.
+
+Modern Orchestrated roots MUST support normal aggregate completion and abort
+through checked Machine `run close` and its explicit `--interrupt` choice.
+The authenticated Controller and current Run state revision authorize the
+durable close intent before effects. Admission of new Broker work stops at
+that boundary. Successful closure requires all owned Specialists retired,
+the Primary closed and its Writer released. A writable modern Primary MUST
+complete its verified same-Thread read-only transition before terminal close;
+interrupting live work must establish terminal evidence before that transition.
+Closure MUST NOT leave an active write-policy observation after Writer release.
+An uncertain effect MUST retain
+the original close operation identity and typed reconciliation state rather
+than report closure or replay the effect. `run recover` and `run reconcile`
+resume that intent after authoritative effect reconciliation; repeated close
+uses the retained interrupt choice and operation identity. Modern output
+exposes the safe close operation identity, progress and terminal Run state
+without publishing captured policy bodies or credentials. Accepted legacy
+sessions retain public `CloseRun` and its frozen projection.
+
+Reusable facade-v4 Specialists bind Agent Configuration v3 and an explicit
+Markdown Role at hire. A configuration with purpose `review` uses a read-only
+candidate-tool session from initial Thread creation. Structured v4 review tasks
+require that session, a qualified reading boundary and an explicit target;
+an existing general-purpose Thread cannot be upgraded implicitly. Each task
+owns an immutable reader and receipt history. The authenticated assignment
+binds that reader while the actor is idle, before Turn input, and subsequent
+tasks cannot reassign earlier receipts or histories. Other v4 tasks retain
+the bounded generic task/result contract.
 
 **CW-PROJECT**: Observer-safe successor output MUST expose resolved requested
 access, current effective access/verification, transition and writer state,
@@ -350,6 +452,10 @@ data. Capability output MUST distinguish `supported`, `unverified` and
 `unavailable` for managed instructions, modern startup and checked target reads;
 failure to qualify one guarantee cannot silently downgrade it. A schema's
 presence MUST NOT imply runtime support.
+Workspace Writer status MUST remain readable when a modern Run holds the
+writer slot. Its frozen status shape projects only the shared lifecycle,
+identity, cursor, and writer fields; it MUST NOT expose a successor Run
+projection through a public-v1 Run method.
 
 | Successor error | Phase/outcome and required action |
 | --- | --- |

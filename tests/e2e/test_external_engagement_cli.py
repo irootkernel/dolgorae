@@ -20,6 +20,7 @@ import uuid
 import native_codex
 from orphan_cleanup import cleanup_removed_root
 from schema_support import assert_valid, validator
+import accepted_legacy_fixture
 
 
 PROTOCOL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol"
@@ -80,6 +81,7 @@ def call(
     invalid_request: bool = False,
     v3_contract: bool = False,
     structured_task_ids: set[str] | None = None,
+    historical: bool = True,
 ) -> dict[str, object]:
     facade_schema = (
         FACADE_V3_SCHEMA
@@ -114,7 +116,14 @@ def call(
         environment["HOME"] = str(home)
         if environment_overrides:
             environment.update(environment_overrides)
-        completed = subprocess.run(
+        # Keep historical Worker mutations on the build that created them.
+        # The product's ordinary-peer build check remains enforced. Saved
+        # terminal observations are compared with the actual CLI below.
+        if historical:
+            completed = accepted_legacy_fixture.prepare(binary, home, arguments[1:],
+                env=environment, pass_fds=(request_file.fileno(),))
+        else:
+            completed = subprocess.run(
             arguments,
             check=False,
             capture_output=True,
@@ -573,6 +582,17 @@ def validate(binary: pathlib.Path, interaction_terminal: str = "delayed") -> Non
             replayed_hire = call(binary, home, workspace, owner, hire_request, child)
             if replayed_hire["specialist_run_id"] != run_id:
                 raise AssertionError("hire replay changed Specialist identity")
+            for observation_request in (
+                {"operation": "get_external_engagement", "engagement_id": engagement_id},
+                {"operation": "collect_external_specialist_results", "engagement_id": engagement_id,
+                 "after_sequence": 0, "limit": 100},
+            ):
+                expected = call(binary, home, workspace, owner, observation_request, v3_contract=True)
+                actual = call(binary, home, workspace, owner, observation_request,
+                              v3_contract=True, historical=False)
+                if actual != expected:
+                    raise AssertionError("product CLI reinterpreted accepted historical results")
+
             database = state_root / "orchestration" / "orchestration.sqlite3"
             with sqlite3.connect(database) as connection:
                 original_state = connection.execute(

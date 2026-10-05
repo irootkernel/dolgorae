@@ -67,14 +67,13 @@ does not rewrite immutable snapshots already stored by existing Runs.
 
 ## Configure a Specialist Policy
 
-1. Inspect the selected global Profiles and the explicit common or project Role
-   sources. A source defines character and instructions only; the policy input
+1. Inspect the selected global Profiles and the explicit Markdown Role
+   sources under `~/.dolgorae/roles/<name>/AGENTS.md`. A source defines character
+   and instructions only; the policy input
    separately supplies Profile, model, lane, access, approval, reuse, and
-   lifecycle controls. Never infer scope when the same name exists in both
-   locations.
-2. Start each selected Profile Server through an independently authorized
-   lifecycle operation. Then treat `validate` as read-only and run it against
-   the intended canonical workspace:
+   lifecycle controls. New JSON Role inputs require explicit migration. Resolve
+   common and project name collisions through explicit source selection.
+2. Run the read-only compiler against the intended canonical workspace:
 
    ```sh
    dolgorae specialist policy validate \
@@ -82,9 +81,10 @@ does not rewrite immutable snapshots already stored by existing Runs.
      --file <policy-input.json>
    ```
 
-   The result is the complete immutable installed-policy candidate. Validation
-   observes the already-running server and never starts, repairs, or records a
-   Profile binding. It does not authorize later installation and cannot be
+   The result projects the v3 policy metadata and captured Role digests without
+   disclosing instruction bodies. Validation checks selected Profile launch
+   definitions and qualification without starting or repairing a server.
+   Validation does not authorize installation and cannot be
    reused if a source, policy input, or Profile binding changes.
 3. Add only with explicit authorization to install the project-authored
    instructions:
@@ -103,7 +103,7 @@ does not rewrite immutable snapshots already stored by existing Runs.
    Orchestrated Session snapshot. Replacement requires an authorized remove and
    a separately validated add.
 
-Never edit common or project Role files as part of a policy operation unless
+Never edit Role files as part of a policy operation unless
 the user separately authorized that source change. Never edit the protected
 installed registry or orchestration state directly.
 
@@ -112,8 +112,8 @@ installed registry or orchestration state directly.
 - `profile add`, `profile remove`, `specialist policy add`, and `specialist
   policy remove` are mutations and require explicit intent.
 - Bare `profile doctor`, profile list/show, and policy validate/list/show are
-  read-only. Policy validation requires an already-running compatible Profile
-  Server; a launch probe is a separate lifecycle operation and is not read-only.
+  read-only. Policy validation observes qualified launch definitions. A launch
+  probe is a separate lifecycle operation and is not read-only.
 - Do not expose `CODEX_HOME` contents, authentication state, environment values,
   executable digests, or diagnostic records beyond what the user needs.
 - After a mutation, repeat the corresponding list/show operation and report the

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/error-contract/v3",
+  "title": "Dolgorae orphan cleanup error contract v3",
+  "x-exit-status": {
+    "ORPHAN_STATE_UNVERIFIABLE": 4,
+    "ORPHAN_SELECTION_CHANGED": 4
+  },
+  "oneOf": [
+    {
+      "$ref": "https://dolgorae.local/schema/error-contract/v2"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": {"enum": ["ORPHAN_STATE_UNVERIFIABLE", "ORPHAN_SELECTION_CHANGED"]},
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"},
+        "details": {"type": "object"}
+      }
+    }
+  ]
+}

@@ -38,6 +38,14 @@ use uuid::Uuid;
 
 const MAX_REQUEST_BYTES: u64 = 1_048_576;
 const FACADE_V3_SCHEMA: &str = "dolgorae-external-specialist-facade/v3";
+const FACADE_V4_SCHEMA: &str = "dolgorae-external-specialist-facade/v4";
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum HireConfiguration {
+    Caller(crate::semantic::CallerAgentConfigurationInput),
+    Legacy(ExternalAgentConfigurationInput),
+}
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -81,7 +89,9 @@ enum Request {
     HireExternalSpecialist {
         engagement_id: Uuid,
         role_ref: String,
-        agent_configuration: ExternalAgentConfigurationInput,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        schema: OptionalField<String>,
+        agent_configuration: HireConfiguration,
         objective: String,
         requested_access: String,
         idempotency_key: String,
@@ -92,6 +102,8 @@ enum Request {
         external_request_ref: OpaqueRef,
         #[serde(default, deserialize_with = "deserialize_optional_field")]
         schema: OptionalField<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_field")]
+        target: OptionalField<crate::review::ReviewTargetRequest>,
         #[serde(default, deserialize_with = "deserialize_optional_field")]
         objective: OptionalField<String>,
         #[serde(default, deserialize_with = "deserialize_optional_field")]
@@ -184,8 +196,20 @@ impl Request {
                 objective,
                 requested_access,
                 idempotency_key,
-                ..
+                schema,
+                agent_configuration,
             } => {
+                match (schema, agent_configuration) {
+                    (OptionalField::Missing, HireConfiguration::Legacy(_)) => (),
+                    (OptionalField::Value(schema), HireConfiguration::Caller(input))
+                        if schema == FACADE_V4_SCHEMA && input.schema_version == 3 => {}
+                    _ => {
+                        return Err(MachineError::invalid_argument(
+                            "agent_configuration",
+                            "hire schema and configuration version do not match",
+                        ));
+                    }
+                }
                 uuid7(*engagement_id, "engagement_id")?;
                 if role_ref.is_empty()
                     || role_ref.len() > 64
@@ -218,6 +242,7 @@ impl Request {
                 external_request_ref,
                 objective,
                 schema,
+                target,
                 task,
                 context_refs,
                 expected_output,
@@ -235,7 +260,7 @@ impl Request {
                         OptionalField::Missing,
                         OptionalField::Value(context_refs),
                         OptionalField::Value(expected_output),
-                    ) => {
+                    ) if matches!(target, OptionalField::Missing) => {
                         bounded(objective, 65_536, "objective")?;
                         unique_uuid7(context_refs, 64, "context_refs")?;
                         if expected_output.is_empty() || expected_output.len() > 32 {
@@ -254,11 +279,42 @@ impl Request {
                         OptionalField::Value(task),
                         OptionalField::Missing,
                         OptionalField::Missing,
-                    ) if schema == FACADE_V3_SCHEMA => {
+                    ) if schema == FACADE_V3_SCHEMA && matches!(target, OptionalField::Missing) => {
                         if task.expected_output == STRUCTURED_REVIEW_OUTPUT {
                             task.validate_review()?;
                         } else {
                             task.validate()?;
+                        }
+                    }
+                    (
+                        OptionalField::Value(schema),
+                        OptionalField::Missing,
+                        OptionalField::Value(task),
+                        OptionalField::Missing,
+                        OptionalField::Missing,
+                    ) if schema == FACADE_V4_SCHEMA => {
+                        if task.expected_output == "structured_review_v4" {
+                            let OptionalField::Value(target) = target else {
+                                return Err(MachineError::invalid_argument(
+                                    "target",
+                                    "v4 review requires a target",
+                                ));
+                            };
+                            direct_task_request(task, target.clone(), *deadline_seconds)?.task()?;
+                            if execution_intent != "read_only" {
+                                return Err(MachineError::invalid_argument(
+                                    "execution_intent",
+                                    "direct review is read-only",
+                                ));
+                            }
+                        } else {
+                            task.validate()?;
+                            if !matches!(target, OptionalField::Missing) {
+                                return Err(MachineError::invalid_argument(
+                                    "target",
+                                    "target is available only for structured_review_v4",
+                                ));
+                            }
                         }
                     }
                     _ => {
@@ -381,7 +437,7 @@ impl OpaqueRef {
 }
 
 pub fn execute_cli(arguments: &[OsString]) -> Result<Value, MachineError> {
-    execute_cli_with_source_contract(arguments, SourceIsolationContract::LegacyBeforeCutover)
+    execute_cli_with_source_contract(arguments, SourceIsolationContract::CallerWorkspace)
 }
 
 pub(crate) fn execute_cli_with_source_contract(
@@ -392,9 +448,16 @@ pub(crate) fn execute_cli_with_source_contract(
     request.validate()?;
     match &request {
         Request::HireExternalSpecialist {
-            requested_access, ..
+            requested_access,
+            agent_configuration,
+            ..
         } => {
             source_contract.admit_access(requested_access)?;
+            if source_contract == SourceIsolationContract::CallerWorkspace
+                && matches!(agent_configuration, HireConfiguration::Legacy(_))
+            {
+                return Err(role_migration_required());
+            }
         }
         Request::AssignExternalSpecialistTask {
             execution_intent, ..
@@ -465,6 +528,7 @@ pub(crate) fn execute_cli_with_source_contract(
             objective,
             requested_access,
             idempotency_key,
+            schema: _,
         } => {
             authorize(
                 &store,
@@ -476,6 +540,23 @@ pub(crate) fn execute_cli_with_source_contract(
             reject_nested_hire(&state_root)?;
             let child =
                 carrier_from_options(arguments, "--new-controller-file", "--new-controller-fd")?;
+            let agent_configuration = match agent_configuration {
+                HireConfiguration::Caller(input) => {
+                    return hire_caller_member(
+                        &mut store,
+                        &view,
+                        &state_root,
+                        engagement_id,
+                        &role_ref,
+                        input,
+                        &objective,
+                        &requested_access,
+                        &idempotency_key,
+                        &child,
+                    );
+                }
+                HireConfiguration::Legacy(input) => input,
+            };
             let prepared =
                 prepare_external_specialist(Some(&workspace), &role_ref, agent_configuration)?;
             if prepared.view.workspace_id != view.workspace_id {
@@ -592,6 +673,7 @@ pub(crate) fn execute_cli_with_source_contract(
             specialist_run_id,
             external_request_ref,
             schema,
+            target,
             objective,
             task,
             context_refs,
@@ -609,7 +691,7 @@ pub(crate) fn execute_cli_with_source_contract(
             )?;
             let external_request_ref =
                 serde_json::to_value(external_request_ref).map_err(internal)?;
-            let (request_value, objective, prompt) = match (
+            let (mut request_value, objective, mut prompt) = match (
                 schema,
                 objective,
                 task,
@@ -670,6 +752,37 @@ pub(crate) fn execute_cli_with_source_contract(
                 }
                 _ => unreachable!("validated assignment shape is closed"),
             };
+            let direct_request = match (&target, request_value.get("task")) {
+                (OptionalField::Value(target), Some(task)) => Some(direct_task_request(
+                    &serde_json::from_value(task.clone()).map_err(internal)?,
+                    target.clone(),
+                    deadline_seconds,
+                )?),
+                _ => None,
+            };
+            let manifest = RunStore::new(SystemWorkspacePlatform, &state_root)
+                .load_manifest(specialist_run_id)?;
+            if manifest.schema_version == 3
+                && manifest.purpose.kind == crate::domain::PurposeKind::Review
+                && direct_request.is_none()
+            {
+                return Err(crate::direct_review_target::reading_boundary_unsupported());
+            }
+            if let Some(request) = &direct_request {
+                request_value["target"] =
+                    serde_json::to_value(&request.target).map_err(internal)?;
+                if manifest.schema_version != 3
+                    || manifest.purpose.kind != crate::domain::PurposeKind::Review
+                {
+                    return Err(crate::direct_review_target::reading_boundary_unsupported());
+                }
+                request.admit_profile(
+                    manifest
+                        .global_profile_binding
+                        .as_ref()
+                        .ok_or_else(crate::direct_review_target::reading_boundary_unsupported)?,
+                )?;
+            }
             let reserved = store.reserve_external_task(
                 engagement_id,
                 specialist_run_id,
@@ -684,6 +797,33 @@ pub(crate) fn execute_cli_with_source_contract(
             )?;
             if reserved.state != "accepted" {
                 return assign_result(&reserved);
+            }
+            if let Some(request) = &direct_request {
+                let prepared = crate::direct_review_target::DirectTargetReader::create_for_task(
+                    &state_root,
+                    &view.canonical_path.to_path_buf()?,
+                    view.mode,
+                    reserved.task_id,
+                    specialist_run_id,
+                    &request.target,
+                )
+                .and_then(|reader| crate::direct_review::review_prompt(request, reader.target()));
+                match prepared {
+                    Ok(value) => prompt = value,
+                    Err(mut error) => {
+                        store.finish_external_task(
+                            engagement_id,
+                            reserved.task_id,
+                            None,
+                            "failed",
+                            Some(&error.code),
+                        )?;
+                        if error.details["schema"] == "dolgorae-workspace-error-details/v1" {
+                            error.details["run_id"] = json!(specialist_run_id);
+                        }
+                        return Err(error);
+                    }
+                }
             }
             let canonical_write = execution_intent == "canonical_workspace_write";
             if canonical_write {
@@ -1025,9 +1165,10 @@ pub(crate) fn execute_cli_with_source_contract(
                 .filter(|task| !terminal_state(&task.state))
                 .map(|task| task.task_id)
                 .collect::<Vec<_>>();
-            Ok(
-                json!({"operation":"await_external_specialist_tasks_result","tasks":task_values(tasks),"pending":pending}),
-            )
+            let tasks = versioned_task_values(&store, engagement_id, tasks)?;
+            let mut result = json!({"operation":"await_external_specialist_tasks_result","tasks":tasks,"pending":pending});
+            mark_caller_result_page(&mut result);
+            Ok(result)
         }
         Request::CollectExternalSpecialistResults {
             engagement_id,
@@ -1044,9 +1185,10 @@ pub(crate) fn execute_cli_with_source_contract(
             reconcile_engagement(&mut store, &view, &state_root, engagement_id, &owner)?;
             let (tasks, next) =
                 store.collect_external_results(engagement_id, after_sequence, limit)?;
-            Ok(
-                json!({"operation":"collect_external_specialist_results_result","tasks":task_values(tasks),"next_after_sequence":next}),
-            )
+            let tasks = versioned_task_values(&store, engagement_id, tasks)?;
+            let mut result = json!({"operation":"collect_external_specialist_results_result","tasks":tasks,"next_after_sequence":next});
+            mark_caller_result_page(&mut result);
+            Ok(result)
         }
         Request::CancelExternalSpecialistTask {
             engagement_id,
@@ -2260,7 +2402,27 @@ fn terminal_output(
     response: &Option<FinalResponse>,
 ) -> Result<Value, MachineError> {
     let accepted_request = store.external_task_request(engagement_id, task_id)?;
-    let structured = structured_task_output(&accepted_request, response).map_err(|mut error| {
+    let structured = if accepted_request.get("schema").and_then(Value::as_str)
+        == Some(FACADE_V4_SCHEMA)
+        && accepted_request
+            .pointer("/task/expected_output")
+            .and_then(Value::as_str)
+            == Some("structured_review_v4")
+    {
+        direct_task_output(
+            store,
+            state_root,
+            engagement_id,
+            task_id,
+            run_id,
+            &accepted_request,
+            response,
+        )
+        .map(Some)
+    } else {
+        structured_task_output(&accepted_request, response)
+    }
+    .map_err(|mut error| {
         if crate::review_output::diagnostic(&error).is_some()
             && let Ok((configuration, _, _)) =
                 store.external_member_configuration(engagement_id, run_id)
@@ -2296,6 +2458,50 @@ fn terminal_output(
         "final_response": final_response,
         "isolated_change": {"format":"git_diff_binary_base64","patch_base64":patch_base64}
     }))
+}
+
+fn direct_task_output(
+    store: &EngagementStore,
+    state_root: &Path,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    run_id: Uuid,
+    accepted: &Value,
+    response: &Option<FinalResponse>,
+) -> Result<Value, MachineError> {
+    let invalid = || crate::direct_review_target::provenance_invalid(task_id);
+    let task: SpecialistTaskRequest =
+        serde_json::from_value(accepted["task"].clone()).map_err(|_| invalid())?;
+    let target = serde_json::from_value(accepted["target"].clone()).map_err(|_| invalid())?;
+    let request = direct_task_request(
+        &task,
+        target,
+        accepted["deadline_seconds"].as_u64().ok_or_else(invalid)?,
+    )?;
+    let reader =
+        crate::direct_review_target::DirectTargetReader::open(state_root, task_id, run_id)?;
+    if reader.target().kind != request.target.kind
+        || reader.target().requested_revision != request.target.revision
+    {
+        return Err(invalid());
+    }
+    let terminal =
+        crate::semantic::durable_terminal_turn(state_root, run_id)?.ok_or_else(invalid)?;
+    let accepted_task = store.external_task(engagement_id, task_id)?;
+    if accepted_task.specialist_run_id != run_id
+        || !terminal_matches_task(&accepted_task, &terminal)
+        || &terminal.final_response != response
+    {
+        return Err(invalid());
+    }
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+    let turn = json!({"run_id":run_id, "thread_id":terminal.thread_id,
+        "turn_id":terminal.turn_id,"status":terminal.status});
+    let verdict =
+        crate::direct_review::completed_verdict(&turn, &terminal, &projection, &request, &reader)?;
+    reader.check_acceptance()?;
+    Ok(verdict)
 }
 
 fn structured_task_output(
@@ -2372,6 +2578,33 @@ fn task_values(tasks: Vec<ExternalTaskSnapshot>) -> Vec<Value> {
         value
     }).collect()
 }
+
+fn versioned_task_values(
+    store: &EngagementStore,
+    engagement_id: Uuid,
+    tasks: Vec<ExternalTaskSnapshot>,
+) -> Result<Vec<Value>, MachineError> {
+    let mut values = task_values(tasks);
+    for value in &mut values {
+        let task_id = serde_json::from_value(value["task_id"].clone()).map_err(internal)?;
+        let accepted = store.external_task_request(engagement_id, task_id)?;
+        if accepted["schema"] == FACADE_V4_SCHEMA {
+            value["task_contract"] = json!("dolgorae-task/v4");
+            value["expected_output"] = accepted["task"]["expected_output"].clone();
+        }
+    }
+    Ok(values)
+}
+
+fn mark_caller_result_page(result: &mut Value) {
+    if result["tasks"].as_array().is_some_and(|tasks| {
+        tasks
+            .iter()
+            .any(|task| task["task_contract"] == "dolgorae-task/v4")
+    }) {
+        result["schema"] = json!(FACADE_V4_SCHEMA);
+    }
+}
 fn assign_result(task: &ExternalTaskSnapshot) -> Result<Value, MachineError> {
     Ok(
         json!({"operation":"assign_external_specialist_task_result","task_id":task.task_id,"state":task.state}),
@@ -2381,6 +2614,220 @@ fn hire_result(hire: &crate::engagement::ExternalHireReservation) -> Result<Valu
     Ok(
         json!({"operation":"hire_external_specialist_result","engagement_id":hire.engagement_id,"hire_operation_id":hire.hire_operation_id,"specialist_run_id":hire.specialist_run_id,"state":hire.state}),
     )
+}
+
+pub(crate) fn direct_task_request(
+    task: &SpecialistTaskRequest,
+    target: crate::review::ReviewTargetRequest,
+    deadline_seconds: u64,
+) -> Result<crate::direct_review::ReviewRequestV4, MachineError> {
+    let request = crate::direct_review::ReviewRequestV4 {
+        schema: "dolgorae-specialist-review-request/v4".to_owned(),
+        operation: "review_target".to_owned(),
+        target,
+        purpose: task.purpose.clone(),
+        brief: task.brief.clone(),
+        contexts: task.contexts.clone(),
+        criteria: task.criteria.clone(),
+        expected_output: task.expected_output.clone(),
+        deadline_seconds,
+        role: None,
+    };
+    request.task()?;
+    Ok(request)
+}
+
+fn role_migration_required() -> MachineError {
+    MachineError::new(
+        "ROLE_MIGRATION_REQUIRED",
+        "new Specialists require an explicitly bound Markdown Role",
+        false,
+        json!({"schema":"dolgorae-workspace-error-details/v1", "required_action":"migrate_role",
+            "phase":"admission","outcome":"not_dispatched","review_id":null,"run_id":null}),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hire_caller_member(
+    store: &mut EngagementStore,
+    view: &WorkspaceView,
+    state_root: &Path,
+    engagement_id: Uuid,
+    role_ref: &str,
+    input: crate::semantic::CallerAgentConfigurationInput,
+    objective: &str,
+    access: &str,
+    key: &str,
+    child: &CredentialCarrier,
+) -> Result<Value, MachineError> {
+    use crate::semantic::{
+        CallerMemberStart, prepare_caller_agent_configuration_read_only, start_caller_member_run,
+    };
+    if input.purpose == "review" && access != "read_only" {
+        return Err(MachineError::invalid_argument(
+            "requested_access",
+            "Reviewer sessions require read_only access",
+        ));
+    }
+    let child_binding = binding_from_carrier(child, 1)?;
+    if !matches!(
+        child_binding.identity.kind,
+        crate::domain::ControllerKind::Automation
+            | crate::domain::ControllerKind::WorkflowOrchestrator
+    ) {
+        return Err(MachineError::invalid_argument(
+            "new_controller",
+            "Specialist requires an automation Controller",
+        ));
+    }
+    let accepted = store.accepted_external_hire_configuration(engagement_id, key)?;
+    let home = DolgoraeHome::system()?;
+    let workspace = view.canonical_path.to_path_buf()?;
+    let (configuration, prepared_binding) = match accepted {
+        Some(configuration) => {
+            require_matching_caller_hire(&input, &configuration)?;
+            (configuration, None)
+        }
+        None => {
+            let instructions =
+                crate::instructions::InstructionSourceStore::new(&home).capture(&input.role)?;
+            let prepared = prepare_caller_agent_configuration_read_only(
+                Some(&workspace),
+                Some(role_ref),
+                input,
+                instructions,
+            )?;
+            if prepared.agent_configuration.purpose.kind == crate::domain::PurposeKind::Review
+                && !prepared.global_profile_binding.checked_review_supported()
+            {
+                return Err(crate::direct_review_target::reading_boundary_unsupported());
+            }
+            (
+                prepared.agent_configuration.try_into()?,
+                Some(prepared.global_profile_binding),
+            )
+        }
+    };
+    let (reservation, _) = store.reserve_external_hire_with_provenance(
+        engagement_id,
+        role_ref,
+        &configuration,
+        objective,
+        access,
+        key,
+    )?;
+    if reservation.state != "provisioning" {
+        return hire_result(&reservation);
+    }
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let binding = match runs.load_manifest(reservation.specialist_run_id) {
+        Ok(manifest) => manifest
+            .global_profile_binding
+            .ok_or_else(|| integrity("accepted member has no Profile binding"))?,
+        Err(error) if error.code == "RUN_NOT_FOUND" => match prepared_binding {
+            Some(binding) => binding,
+            None => crate::global_runtime::ResolvedGlobalProfile::resolve(
+                &home,
+                &configuration.runtime_profile,
+            )?
+            .prepare(&home)?,
+        },
+        Err(error) => return Err(error),
+    };
+    if binding.digest()? != configuration.runtime_profile_snapshot_sha256 {
+        return Err(integrity(
+            "original accepted Profile binding is unavailable",
+        ));
+    }
+    if configuration.purpose.kind == crate::domain::PurposeKind::Review
+        && !binding.checked_review_supported()
+    {
+        return Err(crate::direct_review_target::reading_boundary_unsupported());
+    }
+    let instructions = configuration
+        .instructions
+        .caller()
+        .ok_or_else(role_migration_required)?;
+    let aggregate = AggregateBinding {
+        aggregate_kind: AggregateKind::ExternalSpecialistEngagement,
+        aggregate_id: engagement_id,
+        operation_id: reservation.hire_operation_id,
+        member_kind: AggregateMemberKind::Specialist,
+        policy_sha256: None,
+        role_reference: Some(role_ref.to_owned()),
+        role_snapshot_sha256: Some(instructions.role.sha256.clone()),
+        agent_configuration_sha256: Some(
+            agent_configuration_digest(&configuration).map_err(internal)?,
+        ),
+    };
+    let outcome = start_caller_member_run(CallerMemberStart {
+        view,
+        state_root,
+        configuration: &configuration,
+        global_profile_binding: &binding,
+        run_id: reservation.specialist_run_id,
+        aggregate: &aggregate,
+        carrier: child,
+        access: if access == "canonical_workspace_write" {
+            crate::domain::CallerWorkspaceAccess::Writable
+        } else {
+            crate::domain::CallerWorkspaceAccess::ReadOnly
+        },
+        idempotency_key: format!("caller-member-start:{}", reservation.hire_operation_id),
+        reviewer_plan: None,
+    });
+    let runtime_outcome = if outcome.is_ok() {
+        RuntimeOutcome::Accepted
+    } else if runs.load_manifest(reservation.specialist_run_id).is_ok() {
+        RuntimeOutcome::Unknown
+    } else {
+        RuntimeOutcome::Rejected
+    };
+    let reservation = store.finish_external_hire(&reservation, runtime_outcome, key)?;
+    outcome?;
+    hire_result(&reservation)
+}
+
+fn require_matching_caller_hire(
+    input: &crate::semantic::CallerAgentConfigurationInput,
+    accepted: &crate::run::AgentConfigurationSnapshot,
+) -> Result<(), MachineError> {
+    let instructions = accepted
+        .instructions
+        .caller()
+        .ok_or_else(role_migration_required)?;
+    let mut requested_capabilities = input.required_capabilities.clone();
+    requested_capabilities.sort();
+    let mut accepted_capabilities = accepted.required_capabilities.clone();
+    accepted_capabilities.sort();
+    if input.schema_version != 3
+        || accepted.schema_version != 3
+        || input.selected_profile != accepted.runtime_profile
+        || input.role != instructions.role.name
+        || input
+            .global_profile_binding_sha256
+            .as_ref()
+            .is_some_and(|digest| digest != &accepted.runtime_profile_snapshot_sha256)
+        || input
+            .model
+            .as_ref()
+            .is_some_and(|model| model != &accepted.model)
+        || input.default_effort != accepted.default_effort
+        || input.purpose != accepted.purpose.kind.as_str()
+        || input.purpose_label != accepted.purpose.external_label
+        || requested_capabilities != accepted_capabilities
+        || input.execution_lane != accepted.execution_lane.as_str()
+        || input.required_assurance != accepted.required_assurance.as_str()
+        || input.native_subagent_policy != accepted.native_subagent_policy
+    {
+        return Err(MachineError::new(
+            "IDEMPOTENCY_CONFLICT",
+            "hire input differs from its original accepted configuration",
+            false,
+            json!({"required_action":"use_new_idempotency_key"}),
+        ));
+    }
+    Ok(())
 }
 fn task_prompt(
     objective: &str,

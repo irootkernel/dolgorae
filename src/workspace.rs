@@ -28,7 +28,7 @@ pub enum WorkspaceMode {
 }
 
 /// Selected by the versioned facade, separately from Run access and lane.
-/// Legacy creation remains available until the integrated TASK-066 cutover.
+/// Legacy preparation is retained for original records and isolated fixtures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SourceIsolationContract {
     LegacyBeforeCutover,

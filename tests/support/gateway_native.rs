@@ -168,6 +168,35 @@ impl Fixture {
         assert_eq!(envelope["ok"], true, "CLI failed: {envelope}");
         envelope["data"].clone()
     }
+    /// Prepare pre-cutover state through a test-only harness, then exercise the
+    /// current provider against those immutable historical contracts.
+    pub fn historical_command(&self, args: &[&str]) -> Output {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+        Command::new(repository.join(".venv/bin/python"))
+            .arg(repository.join("tests/e2e/accepted_legacy_fixture.py"))
+            .args([
+                "--binary",
+                self.binary.to_str().unwrap(),
+                "--home",
+                self.home.to_str().unwrap(),
+                "--",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+    pub fn historical(&self, args: &[&str]) -> Value {
+        let output = self.historical_command(args);
+        assert!(
+            output.status.success(),
+            "historical fixture failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["ok"], true);
+        envelope["data"].clone()
+    }
     pub fn workspace(&self) -> pb::WorkspaceRef {
         pb::WorkspaceRef {
             absolute_path: self.workspace.to_string_lossy().into_owned(),

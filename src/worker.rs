@@ -712,13 +712,31 @@ impl QualifiedCallerRuntime {
         self.startup.take();
     }
 
-    pub(crate) fn complete_startup_witness(&self) -> Result<(), WorkerProtocolError> {
-        if self.startup.is_some() || Instant::now() >= self.startup_deadline {
-            return Err(WorkerProtocolError::InvalidIdentity);
+    pub(crate) fn complete_startup_witness(
+        &self,
+        mut diagnostic: Option<&mut Value>,
+    ) -> Result<(), WorkerProtocolError> {
+        if self.startup.is_some() {
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "startup_window_not_closed",
+                Value::Null,
+            ));
         }
-        self.prove_quiescence()?;
         if Instant::now() >= self.startup_deadline {
-            return Err(WorkerProtocolError::InvalidIdentity);
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "startup_commit_timeout",
+                Value::Null,
+            ));
+        }
+        self.prove_quiescence_observed(diagnostic.as_deref_mut())?;
+        if Instant::now() >= self.startup_deadline {
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "startup_commit_timeout",
+                Value::Null,
+            ));
         }
         update_runtime_record(&self.runtime_path, self.runtime.identity.uid, |record| {
             if record.identity != self.runtime.identity
@@ -741,10 +759,6 @@ impl QualifiedCallerRuntime {
             Ok(())
         })?;
         Ok(())
-    }
-
-    pub(crate) fn prove_quiescence(&self) -> Result<(), WorkerProtocolError> {
-        self.prove_quiescence_observed(None)
     }
 
     pub(crate) fn prove_quiescence_observed(
@@ -789,15 +803,23 @@ impl QualifiedCallerRuntime {
         operation_id: Uuid,
         thread_id: &str,
         policy: crate::domain::EffectivePolicy,
+        mut diagnostic: Option<&mut Value>,
     ) -> Result<CallerPolicyProof, WorkerProtocolError> {
-        let current = self.current_runtime()?;
+        let current = self.current_runtime().inspect_err(|_| {
+            if let Some(details) = diagnostic.as_deref_mut() {
+                *details = serde_json::json!({"predicate": "runtime_record"});
+            }
+        })?;
         if policy.verification != crate::domain::PolicyVerification::Verified
             || policy.server_epoch != current.app_server_epoch
             || thread_id.is_empty()
         {
+            if let Some(details) = diagnostic.as_deref_mut() {
+                *details = serde_json::json!({"predicate": "effective_policy_binding"});
+            }
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
-        self.prove_quiescence()?;
+        self.prove_quiescence_observed(diagnostic)?;
         Ok(CallerPolicyProof {
             schema: "dolgorae.caller-policy-proof/v1".to_owned(),
             operation_id,
@@ -1097,11 +1119,12 @@ fn startup_ancestry(
         .iter()
         .map(|entry| (entry.pid, entry))
         .collect::<BTreeMap<_, _>>();
-    if by_pid.get(&child.pid).copied() != Some(child) {
+    let observed = by_pid.get(&child.pid).copied()?;
+    if !same_owned_child(observed, child) || observed.parent_pid != child.parent_pid {
         return None;
     }
     let mut chain = Vec::new();
-    let mut next = child;
+    let mut next = observed;
     loop {
         if next.uid != server.uid
             || next.birth.is_none()
@@ -1118,6 +1141,16 @@ fn startup_ancestry(
         }
         next = by_pid.get(&next.parent_pid).copied()?;
     }
+}
+
+fn startup_ancestries_match(
+    first: &[crate::darwin::ProcessCensusEntry],
+    second: &[crate::darwin::ProcessCensusEntry],
+) -> bool {
+    first.len() == second.len()
+        && first.iter().zip(second).all(|(prior, current)| {
+            same_owned_child(prior, current) && prior.parent_pid == current.parent_pid
+        })
 }
 
 impl StartupWorkload {
@@ -1190,7 +1223,11 @@ impl StartupWorkload {
             .iter()
             .find(|entry| entry.pid == process.pid)
             .and_then(|entry| startup_ancestry(&second_census, entry, server));
-        let Some(ancestry) = Some(first).filter(|chain| Some(chain) == second.as_ref()) else {
+        let Some(ancestry) = Some(first).filter(|chain| {
+            second
+                .as_ref()
+                .is_some_and(|observed| startup_ancestries_match(chain, observed))
+        }) else {
             return Err(proof_refusal(
                 diagnostic,
                 "startup_child_ancestry",
@@ -2764,6 +2801,11 @@ impl ControlRequestV1 {
         if let Self::AbortPreparedMutation { request, .. } = self {
             return matches!(request.as_ref(), Self::Send { .. } | Self::Submit { .. });
         }
+        if let Self::AdmittedMutation { request, .. } = self
+            && matches!(request.as_ref(), Self::VerifyCallerPolicy { .. })
+        {
+            return true;
+        }
         let (Self::CheckedMutation { request, .. }
         | Self::BeginPreparedMutation { request, .. }
         | Self::AdmittedMutation { request, .. }) = self
@@ -2980,6 +3022,7 @@ impl MutationRequest for ControlRequestV1 {
         )
         .map_err(|error| admission_internal(&error.to_string()))?;
         let compatible_admission_operations: &'static [&'static str] = match self {
+            Self::VerifyCallerPolicy { .. } => &["run.submit", "run.send"],
             Self::SetWriterAccess { write: true, .. } => {
                 &["run.submit", "run.send", "run.acquire_write"]
             }
@@ -2997,7 +3040,10 @@ impl MutationRequest for ControlRequestV1 {
             crate::jcs::sha256_hex(&canonical),
             self.operation_name(),
             matches!(self, Self::Submit { request, .. } | Self::Send { request, .. } if request.write)
-                || matches!(self, Self::SetWriterAccess { write: true, .. }),
+                || matches!(
+                    self,
+                    Self::SetWriterAccess { write: true, .. } | Self::VerifyCallerPolicy { .. }
+                ),
             compatible_admission_operations,
         ))
     }
@@ -4840,9 +4886,82 @@ impl WorkerSession {
                 })
             })
             .transpose()?;
-        let candidate_reader =
+        let mut candidate_reader =
             crate::direct_review_target::DirectTargetReader::for_run(state_root, facts.run_id)
                 .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+        let mut reusable_reviewer = false;
+        let external_reviewer = manifest.schema_version == 3
+            && manifest.purpose.kind == crate::domain::PurposeKind::Review
+            && manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+                binding.aggregate_kind == AggregateKind::ExternalSpecialistEngagement
+            });
+        if external_reviewer {
+            let aggregate = manifest
+                .aggregate_binding
+                .as_ref()
+                .expect("checked aggregate");
+            let store = crate::engagement::EngagementStore::open(
+                &crate::engagement::EngagementStore::workspace_database_path(state_root),
+            )
+            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            reusable_reviewer = store
+                .is_reusable_member(aggregate.aggregate_id, facts.run_id)
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            if reusable_reviewer {
+                let tasks = store
+                    .external_active_tasks(aggregate.aggregate_id)
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                for task in tasks
+                    .into_iter()
+                    .filter(|task| task.specialist_run_id == facts.run_id)
+                {
+                    let request = store
+                        .external_task_request(aggregate.aggregate_id, task.task_id)
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                    if request
+                        .pointer("/task/expected_output")
+                        .and_then(Value::as_str)
+                        == Some("structured_review_v4")
+                    {
+                        let root = state_root
+                            .join("direct-reviews")
+                            .join(task.task_id.to_string());
+                        if root
+                            .try_exists()
+                            .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                        {
+                            if candidate_reader.is_some() {
+                                return Err(WorkerProtocolError::LedgerReplay);
+                            }
+                            candidate_reader = Some(
+                                crate::direct_review_target::DirectTargetReader::open(
+                                    state_root,
+                                    task.task_id,
+                                    facts.run_id,
+                                )
+                                .map_err(|_| WorkerProtocolError::LedgerReplay)?,
+                            );
+                        } else if task.turn_id.is_some() {
+                            return Err(WorkerProtocolError::LedgerReplay);
+                        }
+                    }
+                }
+            }
+        }
+        let candidate_tools = reusable_reviewer || candidate_reader.is_some();
+        if candidate_tools
+            && (primary_tool.is_some()
+                || session.sandbox != "read-only"
+                || session.approval_policy != "never"
+                || manifest.initial_access != crate::domain::Access::Read
+                || manifest.schema_version != 3
+                || manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .is_none_or(|binding| !binding.checked_review_supported()))
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
         if let Some(reader) = &candidate_reader
             && (primary_tool.is_some()
                 || session.sandbox != "read-only"
@@ -4967,7 +5086,7 @@ impl WorkerSession {
                     developer_instructions: session.developer_instructions.clone(),
                     sandbox: session.sandbox.clone(),
                     approval_policy: session.approval_policy.clone(),
-                    safety_policy: if candidate_reader.is_some() {
+                    safety_policy: if candidate_tools {
                         SessionSafetyPolicy::ReviewerReadOnly
                     } else {
                         session.safety_policy
@@ -4982,6 +5101,7 @@ impl WorkerSession {
                         |binding| binding.member_kind != AggregateMemberKind::Specialist,
                     ),
                     primary_tool,
+                    candidate_tools,
                     candidate_reader,
                 },
                 &session.canonical_codex_home,
@@ -5070,8 +5190,10 @@ impl WorkerSession {
             coordinator
                 .complete_caller_runtime_startup()
                 .map_err(|error| {
-                    startup_details =
-                        Some(serde_json::json!({"coordinator_error": error.diagnostic_kind()}));
+                    startup_details = Some(serde_json::json!({
+                        "coordinator_error": error.diagnostic_kind(),
+                        "caller_startup_failure": coordinator.caller_startup_failure(),
+                    }));
                     WorkerProtocolError::InvalidIdentity
                 })?;
             Ok(coordinator)
@@ -6300,6 +6422,54 @@ fn perform(
     {
         return refusal_from(error);
     }
+    if coordinator.uses_candidate_tools()
+        && let SessionCommand::Accept { request, .. } = &mutation.command
+        && let Some(engagement_id) = mutation.external_engagement
+    {
+        let bound = (|| {
+            let store = crate::engagement::EngagementStore::open(
+                &crate::engagement::EngagementStore::workspace_database_path(&authority.state_root),
+            )?;
+            let task = store.external_task_for_key(engagement_id, &request.idempotency_key)?;
+            if task.specialist_run_id != identity.run_id || task.state != "dispatching" {
+                return Err(crate::direct_review_target::provenance_invalid(
+                    task.task_id,
+                ));
+            }
+            let accepted = store.external_task_request(engagement_id, task.task_id)?;
+            let task_request: crate::task_request::SpecialistTaskRequest =
+                serde_json::from_value(accepted["task"].clone())
+                    .map_err(|_| crate::direct_review_target::provenance_invalid(task.task_id))?;
+            let target: crate::review::ReviewTargetRequest =
+                serde_json::from_value(accepted["target"].clone())
+                    .map_err(|_| crate::direct_review_target::provenance_invalid(task.task_id))?;
+            let direct = crate::external_engagement::direct_task_request(
+                &task_request,
+                target,
+                accepted["deadline_seconds"]
+                    .as_u64()
+                    .ok_or_else(|| crate::direct_review_target::provenance_invalid(task.task_id))?,
+            )?;
+            let reader = crate::direct_review_target::DirectTargetReader::open(
+                &authority.state_root,
+                task.task_id,
+                identity.run_id,
+            )?;
+            if request.write
+                || request.message != crate::direct_review::review_prompt(&direct, reader.target())?
+            {
+                return Err(crate::direct_review_target::provenance_invalid(
+                    task.task_id,
+                ));
+            }
+            coordinator
+                .bind_candidate_reader(reader)
+                .map_err(|_| crate::direct_review_target::provenance_invalid(task.task_id))
+        })();
+        if let Err(error) = bound {
+            return refusal_from(error);
+        }
+    }
     let mut admission_completion = None;
     let admission_result =
         with_admission_ledger(coordinator, identity, authority, |ledger, writer| {
@@ -6389,6 +6559,7 @@ fn perform(
                         matches!(
                             mutation.command,
                             SessionCommand::SetWriterAccess { write: true, .. }
+                                | SessionCommand::VerifyCallerPolicy { .. }
                         ) && matches!(active.operation.as_str(), "run.submit" | "run.send");
                     if !preparation {
                         admission_completion = Some(*admission_id);
@@ -6458,6 +6629,7 @@ fn perform(
             Err(error) => return refusal_from(error),
         }
     }
+    let policy_verification = matches!(mutation.command, SessionCommand::VerifyCallerPolicy { .. });
     let response = perform_command(
         coordinator,
         identity,
@@ -6467,6 +6639,21 @@ fn perform(
         mutation.command,
         typed_receipt,
     );
+    if policy_verification && let ControlResponseV1::Failed { code, .. } = &response {
+        let log = authority
+            .state_root
+            .join("runs")
+            .join(identity.run_id.to_string())
+            .join(format!("dedicated-server-{}.log", identity.run_generation));
+        append_private_diagnostic(
+            &log,
+            &serde_json::json!({
+                "schema": "dolgorae.caller-policy-verification-failure/v1",
+                "error_code": code,
+                "details": coordinator.caller_startup_failure(),
+            }),
+        );
+    }
     let incomplete_lifecycle = matches!(response, ControlResponseV1::Interrupted { .. })
         && matches!(operation, "run.pause" | "run.close");
     let uncertain = matches!(&response, ControlResponseV1::Failed { code, .. } if matches!(code.as_str(), "OUTCOME_UNKNOWN" | "INTERNAL_ERROR"));
@@ -9060,6 +9247,9 @@ fn serve_run_operation(
                     },
                     None,
                 ),
+                ControlRequestV1::VerifyCallerPolicy { operation_id, .. } => {
+                    (SessionCommand::VerifyCallerPolicy { operation_id }, None)
+                }
                 _ => {
                     return Err(WorkerProtocolError::ProtocolMismatch {
                         expected_protocol: WORKER_PROTOCOL_VERSION,
@@ -9438,6 +9628,132 @@ mod tests {
             })
             .valid_checked_mutation()
         );
+    }
+
+    #[test]
+    fn caller_policy_proof_requires_the_exact_prepared_write_turn() {
+        let root = std::env::temp_dir().join(format!("dg-policy-admission-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let expected = identity();
+        let mut ledger = Ledger::open(&root, expected.run_id).unwrap();
+        ledger
+            .append_conformance_payload(
+                crate::audit::AuditKind::LifecycleTransition,
+                &serde_json::json!({"previous":"starting","current":"idle"}),
+                1,
+            )
+            .unwrap();
+        let controller = Uuid::now_v7();
+        let proof = ControlRequestV1::VerifyCallerPolicy {
+            expected: expected.clone(),
+            caller: None,
+            operation_id: Uuid::now_v7(),
+        };
+        for (send, write) in [(true, true), (false, true), (true, false), (false, false)] {
+            let request = TurnControlRequest {
+                write,
+                normalized_request_sha256: None,
+                message: "prepared task".to_owned(),
+                idempotency_key: format!("{send}-{write}"),
+                effort: None,
+                images: Vec::new(),
+            };
+            let turn = if send {
+                ControlRequestV1::Send {
+                    expected: expected.clone(),
+                    caller: None,
+                    request,
+                    timeout_ms: Some(1000),
+                }
+            } else {
+                ControlRequestV1::Submit {
+                    expected: expected.clone(),
+                    caller: None,
+                    request,
+                }
+            };
+            let head = ledger.head().unwrap().sequence;
+            let admission = admit_mutation(&mut ledger, controller, head, &turn).unwrap();
+            let before = fs::read(root.join("audit.jsonl")).unwrap();
+            let verified =
+                validate_mutation_admission(&ledger, admission.admission_id, controller, &proof);
+            if write {
+                verified.unwrap();
+            } else {
+                assert_eq!(verified.unwrap_err().code, "RUN_STATE_CONFLICT");
+            }
+            for (id, owner) in [
+                (Uuid::now_v7(), controller),
+                (admission.admission_id, Uuid::now_v7()),
+            ] {
+                assert_eq!(
+                    validate_mutation_admission(&ledger, id, owner, &proof)
+                        .unwrap_err()
+                        .code,
+                    "RUN_STATE_CONFLICT"
+                );
+            }
+            assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), before);
+            assert_eq!(
+                active_mutation_admission(&ledger)
+                    .unwrap()
+                    .unwrap()
+                    .admission_id,
+                admission.admission_id
+            );
+            validate_mutation_admission(&ledger, admission.admission_id, controller, &turn)
+                .unwrap();
+            complete_mutation_admission(&mut ledger, admission.admission_id).unwrap();
+            assert_eq!(
+                validate_mutation_admission(&ledger, admission.admission_id, controller, &proof)
+                    .unwrap_err()
+                    .code,
+                "RUN_STATE_CONFLICT"
+            );
+        }
+        let wrapped = ControlRequestV1::AdmittedMutation {
+            admission_id: Uuid::now_v7(),
+            request: Box::new(proof.clone()),
+        };
+        assert!(wrapped.valid_checked_mutation());
+        assert_eq!(
+            serde_json::from_slice::<ControlRequestV1>(&serde_json::to_vec(&wrapped).unwrap())
+                .unwrap(),
+            wrapped
+        );
+        assert!(
+            !ControlRequestV1::BeginPreparedMutation {
+                expected_state_revision: 1,
+                request: Box::new(proof.clone()),
+            }
+            .valid_checked_mutation()
+        );
+        assert!(
+            !ControlRequestV1::CheckedMutation {
+                expected_state_revision: 1,
+                request: Box::new(proof),
+            }
+            .valid_checked_mutation()
+        );
+        assert!(
+            !ControlRequestV1::AdmittedMutation {
+                admission_id: Uuid::now_v7(),
+                request: Box::new(wrapped),
+            }
+            .valid_checked_mutation()
+        );
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -9824,6 +10140,94 @@ mod tests {
             );
             assert_eq!(observed["expected_server"]["session_id"], server.session_id);
             assert_eq!(observed["mismatches"][mismatch], true);
+        }
+    }
+
+    #[test]
+    fn startup_ancestry_preserves_identity_while_children_exit() {
+        let leader = crate::darwin::ProcessCensusEntry {
+            pid: 100,
+            parent_pid: 99,
+            uid: 501,
+            process_group_id: 100,
+            session_id: 100,
+            birth: Some((10, 1)),
+            zombie: false,
+        };
+        let parent = crate::darwin::ProcessCensusEntry {
+            pid: 101,
+            parent_pid: 100,
+            birth: Some((10, 2)),
+            ..leader
+        };
+        let leaf = crate::darwin::ProcessCensusEntry {
+            pid: 102,
+            parent_pid: 101,
+            birth: Some((10, 3)),
+            ..leader
+        };
+        let first = [leaf, parent, leader];
+        let mut second = first;
+        second[0].zombie = true;
+        second[1].zombie = true;
+        let worker = identity();
+        let server = DedicatedServerIdentity {
+            pid: leader.pid,
+            process_group_id: leader.process_group_id,
+            session_id: leader.session_id,
+            uid: leader.uid,
+            start_tvsec: 10,
+            start_tvusec: 1,
+            executable_path: worker.executable_path,
+            executable_device: worker.executable_device,
+            executable_inode: worker.executable_inode,
+            executable_sha256: worker.executable_sha256,
+        };
+        assert_eq!(
+            startup_ancestry(&second, &leaf, &server),
+            Some(second.to_vec())
+        );
+        assert!(startup_ancestries_match(&first, &second));
+        assert!(startup_ancestries_match(&second, &first));
+        assert!(!startup_ancestries_match(&first, &second[..2]));
+        for ancestor in 0..first.len() {
+            for changed in [
+                crate::darwin::ProcessCensusEntry {
+                    pid: first[ancestor].pid + 1,
+                    ..first[ancestor]
+                },
+                crate::darwin::ProcessCensusEntry {
+                    parent_pid: first[ancestor].parent_pid + 1,
+                    ..first[ancestor]
+                },
+                crate::darwin::ProcessCensusEntry {
+                    uid: first[ancestor].uid + 1,
+                    ..first[ancestor]
+                },
+                crate::darwin::ProcessCensusEntry {
+                    process_group_id: 200,
+                    ..first[ancestor]
+                },
+                crate::darwin::ProcessCensusEntry {
+                    session_id: 200,
+                    ..first[ancestor]
+                },
+                crate::darwin::ProcessCensusEntry {
+                    birth: Some((11, 1)),
+                    ..first[ancestor]
+                },
+                crate::darwin::ProcessCensusEntry {
+                    birth: None,
+                    ..first[ancestor]
+                },
+            ] {
+                let mut drifted = second;
+                drifted[ancestor] = changed;
+                assert!(!startup_ancestries_match(&first, &drifted));
+                if ancestor == 0 {
+                    assert!(startup_ancestry(&drifted, &leaf, &server).is_none());
+                }
+            }
         }
     }
 
@@ -10442,7 +10846,11 @@ mod tests {
             }
             fs::write(root.join("server.release"), b"release").unwrap();
             absent(completed.dedicated_server_identity.as_ref().unwrap().pid);
-            prove_worker_generation_absent(&completed).unwrap();
+            let mut diagnostic = Value::Null;
+            prove_group_empty_observed(&completed, false, false, Some(&mut diagnostic))
+                .unwrap_or_else(|error| {
+                    panic!("generation absence refused: {error:?}: {diagnostic}")
+                });
             fs::remove_dir_all(root).unwrap();
         }
     }

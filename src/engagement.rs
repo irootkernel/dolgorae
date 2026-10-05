@@ -1809,6 +1809,27 @@ impl EngagementStore {
         .map(|(reservation, _)| reservation)
     }
 
+    /// Read an accepted configuration before consulting mutable Role sources.
+    pub(crate) fn accepted_external_hire_configuration(
+        &self,
+        engagement_id: Uuid,
+        key: &str,
+    ) -> Result<Option<AgentConfigurationSnapshot>, MachineError> {
+        let response: Option<String> = self.connection.query_row(
+            "SELECT response_json FROM operations WHERE scope_id=?1 AND operation='hire_external_specialist' AND idempotency_key=?2",
+            params![engagement_id.to_string(), key], |row| row.get(0)).optional().map_err(internal)?;
+        let Some(response) = response else {
+            return Ok(None);
+        };
+        let reservation: ExternalHireReservation =
+            serde_json::from_str(&response).map_err(internal)?;
+        if reservation.engagement_id != engagement_id {
+            return Err(internal("hire receipt crossed engagement boundary"));
+        }
+        self.external_member_configuration(engagement_id, reservation.specialist_run_id)
+            .map(|(configuration, _, _)| Some(configuration))
+    }
+
     pub(crate) fn reserve_external_hire_with_provenance(
         &mut self,
         engagement_id: Uuid,
@@ -2059,6 +2080,24 @@ impl EngagementStore {
             EngagementBarrier::AfterExternalMemberResidencyCommit,
         )?;
         Ok(())
+    }
+
+    pub(crate) fn is_reusable_member(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<bool, MachineError> {
+        let kind: String = self.connection.query_row(
+            "SELECT e.authority_kind FROM members m JOIN engagements e ON e.engagement_id=m.engagement_id
+             WHERE m.engagement_id=?1 AND m.specialist_run_id=?2",
+            params![engagement_id.to_string(), specialist_run_id.to_string()],
+            |row| row.get(0),
+        ).optional().map_err(internal)?.ok_or_else(|| specialist_not_member(specialist_run_id))?;
+        match kind.as_str() {
+            "external_v1" => Ok(true),
+            "legacy_one_shot" => Ok(false),
+            _ => Err(integrity("unsupported engagement authority kind")),
+        }
     }
 
     pub fn external_member_configuration(
@@ -2740,6 +2779,21 @@ impl EngagementStore {
             .map_err(|_| integrity("external task request is not valid JSON"))
     }
 
+    pub(crate) fn external_task_for_key(
+        &self,
+        engagement_id: Uuid,
+        key: &str,
+    ) -> Result<ExternalTaskSnapshot, MachineError> {
+        let task_id: String = self.connection.query_row(
+            "SELECT json_extract(response_json,'$.task_id') FROM operations
+             WHERE scope_id=?1 AND operation='assign_external_specialist_task' AND idempotency_key=?2",
+            params![engagement_id.to_string(), key], |row| row.get(0),
+        ).map_err(internal)?;
+        let task_id = Uuid::parse_str(&task_id).map_err(internal)?;
+        self.external_task_request(engagement_id, task_id)?;
+        self.external_task(engagement_id, task_id)
+    }
+
     pub fn external_task_deadline_expired(
         &self,
         engagement_id: Uuid,
@@ -3117,22 +3171,42 @@ impl EngagementStore {
         specialist_run_id: Uuid,
         binding: &AggregateBinding,
     ) -> Result<(), MachineError> {
-        let row: Option<(String, Option<String>, String)> = self
+        let row: Option<(String, Option<String>, String, Option<String>)> = self
             .connection
             .query_row(
-                "SELECT hire_operation_id,role_ref,configuration_sha256 FROM members
+                "SELECT hire_operation_id,role_ref,configuration_sha256,configuration_json FROM members
              WHERE engagement_id=?1 AND specialist_run_id=?2",
                 params![engagement_id.to_string(), specialist_run_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(internal)?;
-        let (operation, role, configuration) =
+        let (operation, role, configuration, stored) =
             row.ok_or_else(|| specialist_not_member(specialist_run_id))?;
+        let mut role_digest = role.as_ref().map(|value| sha256_hex(value.as_bytes()));
+        if let Some(stored) = stored {
+            let captured: AgentConfigurationSnapshot =
+                serde_json::from_str(&stored).map_err(internal)?;
+            if captured.schema_version == 3 {
+                if agent_configuration_digest(&captured).map_err(internal)? != configuration {
+                    return Err(integrity(
+                        "stored member configuration digest does not match",
+                    ));
+                }
+                role_digest = Some(
+                    captured
+                        .instructions
+                        .caller()
+                        .ok_or_else(|| integrity("caller member has no instruction capture"))?
+                        .role
+                        .sha256
+                        .clone(),
+                );
+            }
+        }
         if binding.operation_id.to_string() != operation
             || binding.role_reference != role
-            || binding.role_snapshot_sha256
-                != role.as_ref().map(|value| sha256_hex(value.as_bytes()))
+            || binding.role_snapshot_sha256 != role_digest
             || binding.agent_configuration_sha256.as_deref() != Some(configuration.as_str())
         {
             return Err(integrity(
@@ -4574,6 +4648,117 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn external_member_binding_uses_the_accepted_role_digest_for_its_configuration_generation() {
+        let (mut store, root) = store();
+        let opened = external_open(&mut store);
+        let legacy = reviewer_plan("binding generation").agent_configuration;
+        let instructions: crate::instructions::InstructionSnapshot = serde_json::from_str(
+            include_str!("../docs/protocol/examples/workspace-execution-instructions.valid.json"),
+        )
+        .unwrap();
+        let mut caller = legacy.clone();
+        caller.schema_version = 3;
+        caller.normalized_instructions = instructions.developer_prefix().unwrap();
+        caller.instructions = crate::run::RunInstructionSnapshot::Caller(instructions.clone());
+        let alias = "facade-reviewer-alias";
+        for (key, configuration, role_digest) in [
+            ("legacy", legacy, sha256_hex(alias.as_bytes())),
+            ("caller", caller, instructions.role.sha256.clone()),
+        ] {
+            let member = store
+                .reserve_external_hire(
+                    opened.engagement_id,
+                    alias,
+                    &configuration,
+                    "binding generation",
+                    "read_only",
+                    key,
+                )
+                .unwrap();
+            store
+                .finish_external_hire(&member, RuntimeOutcome::Accepted, key)
+                .unwrap();
+            let binding = AggregateBinding {
+                aggregate_kind: AggregateKind::ExternalSpecialistEngagement,
+                aggregate_id: opened.engagement_id,
+                operation_id: member.hire_operation_id,
+                member_kind: crate::run::AggregateMemberKind::Specialist,
+                policy_sha256: None,
+                role_reference: Some(alias.to_owned()),
+                role_snapshot_sha256: Some(role_digest),
+                agent_configuration_sha256: Some(
+                    agent_configuration_digest(&configuration).unwrap(),
+                ),
+            };
+            drop(store);
+            store = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+            store
+                .validate_external_member_binding(
+                    opened.engagement_id,
+                    member.specialist_run_id,
+                    &binding,
+                )
+                .unwrap();
+            for field in ["role", "configuration", "operation", "reference"] {
+                let mut wrong = binding.clone();
+                match field {
+                    "role" => wrong.role_snapshot_sha256 = Some("0".repeat(64)),
+                    "configuration" => wrong.agent_configuration_sha256 = Some("0".repeat(64)),
+                    "operation" => wrong.operation_id = Uuid::now_v7(),
+                    "reference" => wrong.role_reference = Some("other".to_owned()),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    store
+                        .validate_external_member_binding(
+                            opened.engagement_id,
+                            member.specialist_run_id,
+                            &wrong
+                        )
+                        .is_err()
+                );
+            }
+            if configuration.schema_version == 3 {
+                let mut old_digest = binding.clone();
+                old_digest.role_snapshot_sha256 = Some(sha256_hex(alias.as_bytes()));
+                assert!(
+                    store
+                        .validate_external_member_binding(
+                            opened.engagement_id,
+                            member.specialist_run_id,
+                            &old_digest
+                        )
+                        .is_err()
+                );
+                let mut changed = configuration.clone();
+                changed.model = "changed-stored-model".to_owned();
+                store
+                    .connection
+                    .execute(
+                        "UPDATE members SET configuration_json=?2 WHERE specialist_run_id=?1",
+                        params![
+                            member.specialist_run_id.to_string(),
+                            serde_json::to_string(&changed).unwrap()
+                        ],
+                    )
+                    .unwrap();
+                let error = store
+                    .validate_external_member_binding(
+                        opened.engagement_id,
+                        member.specialist_run_id,
+                        &binding,
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    error.details["invariant"],
+                    "stored member configuration digest does not match"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6699,6 +6884,104 @@ mod tests {
             .unwrap();
         assert_eq!(migrated_tables, 0);
         drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reviewer_members_keep_their_durable_one_shot_or_reusable_authority() {
+        let (mut store, root) = store();
+        let one_shot = store
+            .open_engagement("workspace", &"a".repeat(64), "one-shot")
+            .unwrap();
+        let plan = reviewer_plan("authority separation");
+        let hired = store
+            .hire_reviewer(
+                one_shot.engagement_id,
+                &plan,
+                "one-shot-hire",
+                |reservation, _, _| {
+                    assert_eq!(reservation.engagement_id, one_shot.engagement_id);
+                    RuntimeOutcome::Accepted
+                },
+            )
+            .unwrap();
+        assert!(
+            !store
+                .is_reusable_member(one_shot.engagement_id, hired.specialist_run_id)
+                .unwrap()
+        );
+        let columns: (Option<String>, Option<String>) = store.connection.query_row(
+            "SELECT configuration_json,requested_access FROM members WHERE specialist_run_id=?1",
+            [hired.specialist_run_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(columns, (None, None));
+        let reusable = external_open(&mut store);
+        let member = external_ready_member(&mut store, reusable.engagement_id);
+        assert!(
+            store
+                .is_reusable_member(reusable.engagement_id, member.specialist_run_id)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .external_member_configuration(reusable.engagement_id, member.specialist_run_id)
+                .unwrap()
+                .1,
+            "read_only"
+        );
+        for (engagement_id, run_id) in [
+            (one_shot.engagement_id, member.specialist_run_id),
+            (reusable.engagement_id, hired.specialist_run_id),
+            (Uuid::now_v7(), member.specialist_run_id),
+        ] {
+            assert_eq!(
+                store
+                    .is_reusable_member(engagement_id, run_id)
+                    .unwrap_err()
+                    .code,
+                "SPECIALIST_NOT_MEMBER"
+            );
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE members SET configuration_json=NULL WHERE specialist_run_id=?1",
+                [member.specialist_run_id.to_string()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .is_reusable_member(reusable.engagement_id, member.specialist_run_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .external_member_configuration(reusable.engagement_id, member.specialist_run_id)
+                .is_err()
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE engagements SET authority_kind='unknown' WHERE engagement_id=?1",
+                [reusable.engagement_id.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .is_reusable_member(reusable.engagement_id, member.specialist_run_id)
+                .unwrap_err()
+                .code,
+            "INTERNAL_ERROR"
+        );
+        assert!(
+            !store
+                .is_reusable_member(one_shot.engagement_id, hired.specialist_run_id)
+                .unwrap()
+        );
+        let after: (Option<String>, Option<String>) = store.connection.query_row(
+            "SELECT configuration_json,requested_access FROM members WHERE specialist_run_id=?1",
+            [hired.specialist_run_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(after, columns);
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

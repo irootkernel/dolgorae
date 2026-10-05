@@ -537,7 +537,24 @@ managed worktrees. Successor preparation admits canonical Git or non-Git roots
 without source materialization and rejects explicit copy or isolated-write
 intent before allocation. Run contract and policy selection remain independent
 of root ownership; a legacy Run using the caller cwd retains its legacy startup
-semantics. Public adapter activation remains with TASK-066.
+semantics. TASK-066 connects the Machine adapter to these services. Its modern
+member startup uses the same captured instruction, reservation, caller-root,
+policy proof and writer admission machinery as an independent modern Run.
+Engagement and broker stores remain the authority for reserved member identity
+and aggregate configuration; they cannot choose a different root or grant
+writer authority. Existing accepted snapshots remain the input to recovery.
+The session store distinguishes accepted legacy policy snapshots from captured
+Markdown policy sessions. Both feed the existing broker lifecycle through
+explicit versioned policy and Role variants. A modern Primary's startup identity
+includes its selected policy name; physical activation consumes the same
+accepted capture receipt. Child startup uses its retained Role configuration
+and Profile binding without consulting current authoring files.
+Reusable Reviewer sessions install the candidate tool before their first
+Thread. Each accepted review task retains its own immutable reader root and
+receipts; the accepted task record owns the active reader identity.
+The Worker resolves the authenticated assignment's task identity before
+binding its reader, and accepts that change only while idle. Recovery keeps
+the original Thread and task histories, rather than constructing new evidence.
 
 Facade services accept an explicit internal source contract. `CallerWorkspace`
 rejects new legacy capture and isolated-write requests before workspace discovery,
@@ -545,10 +562,12 @@ credential admission, Run reservation or provider dispatch. The review-target,
 one-shot, External Engagement and broker services enforce this contract; broker
 publication also checks it before runtime preparation. Historical inspection and
 settlement retain their original ownership checks. TASK-066 activates this
-admission at the public boundary. Current public adapters explicitly select
-`LegacyBeforeCutover`; the source contract does not choose a Run version or lane.
+admission at the public boundary. New adapter operations select
+`CallerWorkspace`, including Primary requests in accepted legacy sessions.
+`LegacyBeforeCutover` is an internal historical-record preparation contract;
+it does not choose a Run version or lane or authorize a new public copy request.
 
-Legacy creation remains available before that activation boundary. External and
+External and
 brokered provisioning share the workspace service rather than calling launch
 helpers through the External facade. The original durable hire reservation or
 broker publication-start event binds the aggregate and reserved Run before
@@ -789,6 +808,21 @@ session-commit fault barriers distinguish failure before acceptance from an
 unknown response after commit; retry preserves the accepted identity. This
 private capture acceptance does not publish a physical Run, thread, or active
 session, and leaves legacy session rows and readers unchanged.
+
+`session_policy` validates the versioned legacy and caller capture variants
+used by `orchestration`, while `semantic` binds the accepted session to the
+physical Primary and starts caller members from retained configurations. The
+`migration` module reads legacy inputs and publishes only new authoring files;
+it cannot mutate accepted records. The direct review adapters share their
+checked prompt and result logic with reusable external tasks, and the Worker
+binds each accepted task to its own Reader before starting a Turn. Runtime
+capability projection reads selected Profile qualification without starting a
+server.
+One-shot and reusable Reviewers share the aggregate kind but retain distinct
+durable engagement authority kinds. Worker startup reads reusable membership
+configuration and access only for `external_v1`; `legacy_one_shot` retains its
+accepted Reviewer plan and fixed read-only boundary. Missing reusable fields
+cannot downgrade a member into the one-shot path.
 
 The existing JSON resolver below is the legacy v2 authoring path. Explicit
 migration produces new Markdown sources and policy input without replacing
@@ -1189,7 +1223,10 @@ Ordinary new prompts cannot enter an active Primary Turn; exact receipt replay
 and current Interaction responses retain their distinct paths. No human-input
 queue, steering or automatic interruption is introduced.
 
-Whole-session root CloseRun records durable close intent, stops new admission
+The shared semantic close coordinator serves legacy public CloseRun and modern
+Machine root close/recovery. Frozen public-v1 projection guards stay in the
+gateway adapter; Broker child retirement and Writer release select the Run's
+retained manifest version. Whole-session close records durable intent, stops new admission
 and retires owned children through the Broker. Both semantic and Worker
 admission consult the orchestration-owned durable close intent before accepting
 a fresh Primary Turn; accepted receipt replay precedes this check.
@@ -1202,6 +1239,10 @@ unknown outcome without sealing the Run closed; the ordinary Run timeout-close
 path does not satisfy whole-session completion. Close settlement checks the
 Primary's durable unknown-outcome evidence even when a later Pause has changed
 its lifecycle; only matching terminal or reconciled history clears that blocker.
+For a writable modern Primary, the coordinator confirms any requested
+interruption, transitions the original Thread to verified Reader and releases
+its Writer before sealing the root. The terminal snapshot therefore does not
+depend on a stale write-policy proof whose Writer has already been retired.
 Root recovery accounts for retained aggregate intent without new semantic work
 or auto-resume.
 History, results, workspace changes and unrelated runtimes remain intact.
@@ -1488,20 +1529,52 @@ the checked predicate without retaining the returned content. These diagnostics 
 payloads and error prose. A process-quiescence refusal includes its checked
 predicate and bounded kernel observation; a socket refusal identifies the
 failed socket-identity check. Diagnostic detail never changes the returned
-error, durable provisional Thread, or retry fence.
+error, durable provisional Thread, or retry fence. A direct-review coordinator
+with checked candidate tools retains the same startup diagnostics and
+quarantines a refused persistence barrier after provisional Thread creation.
+Its read-only Reviewer safety policy does not exempt it from that fence.
+On restart it restores native-start intent and the original provisional Thread;
+missing identity leaves startup quarantined, while a retained identity permits
+only read-only attachment and checked reconciliation without a new task Turn.
 A startup-child refusal also records the expected Dedicated leader scope,
 the prior observation for that PID, and the failed identity comparisons. These
 values come from the refused check; diagnostics add no kernel lookup or wait.
 Initial descendant admission additionally identifies its census call site and
 bounded typed ancestor chain. It uses two complete kernel observations to bind
-every ancestor PID, birth and UID to the actual Dedicated leader. A differing
+every ancestor PID, birth and UID to the actual Dedicated leader. These
+observations, including the initial entry matched after a membership lookup,
+compare identity and parent links rather than zombie state. A
+normal exit can change that state, but each admitted child must still be proven
+absent before readiness. The underlying process census likewise permits a
+normal transition to zombie state between its short and full BSD reads while
+requiring stable PID, parent, UID, group and session. It retains the full BSD
+birth identity and reports the final observed zombie state. That state alone
+does not prove absence. On Darwin, BSD lookups can return
+`ESRCH` for an exited but unreaped child while the independent kernel group
+census still lists its PID. That membership difference keeps the sample dirty
+and prevents it from counting toward readiness; BSD `ESRCH` alone does not
+complete the workload proof. A differing
 initial group/session is frozen at admission; later drift remains a refusal.
+If an entry changes scope identity between the kernel reads used to assemble a
+global census, the sampler discards that entire observation and takes a fresh
+complete census, at most three observations in total. When full BSD birth lookup
+is denied, one fresh short BSD lookup may establish that PID, parent, UID or
+group changed, invalidating the entire sample, or independently establish
+`ESRCH`. A denied lookup alone never omits a process. Stable permission errors,
+persistent inconsistency and malformed kernel replies still refuse the proof. This
+bounded read-only sampling does not retry any command or reset the startup
+deadline; the resulting census must still pass the recorded Worker, Dedicated
+leader and child birth, UID, group, session and ancestry checks.
 The post-configuration startup proof preserves its predicate before mapping a
 refusal to the coordinator's busy error. Both the entry and repeated startup
 socket checks preserve socket-identity refusal details.
 Runtime qualification failures identify the failed process-proof predicate and
 its bounded kernel observation in that private log. These observations explain
 the refusal and do not replace or weaken the required proof.
+Policy verification after WorkerReady records its failing substage and typed
+error in the same private log. A policy-proof refusal retains its checked
+process predicate before mapping to outcome uncertainty. No RPC content or
+provider error prose is retained, and verification never retries the refusal.
 On AArch64, executable integrity checks use the SHA-256 library's CPU-checked
 hardware backend with its software fallback. Every identity sample still hashes
 the complete executable. This reduces qualification cost without extending the
@@ -1560,6 +1633,12 @@ Diagnostic phases and later resumes cannot restore it. No task Turn or provider
 dispatch occurs inside the window. Failure retains the original or provisional
 Thread, unknown-state retry fence and Writer guard. Policy proofs and access
 transitions retain their immediate refusal.
+For a prepared writable Send or Submit that reuses an active Writer, the CLI
+wraps policy verification in the existing admitted-mutation request. The Worker
+validates the exact admission, Controller and write intent before verification;
+verification is preparation and does not complete the parent Turn admission.
+Unwrapped verification remains serialized behind any pending mutation. The
+original Thread, idle-state, process-census and Writer proof checks still apply.
 New caller Worker generations publish [private runtime schema version 2](../protocol/dolgorae-worker-runtime-v2.schema.json) before
 Dedicated launch. Its bounded startup ownership witness binds the immutable
 Worker generation, app-server epoch, Dedicated identity and physical socket.
@@ -1569,6 +1648,15 @@ witness becomes complete only after binding and final empty-scope verification,
 before WorkerReady. An incomplete witness cannot prove generation absence,
 even with no recorded children. Version 1 remains unchanged; frozen readers
 reject version 2 rather than ignore its ownership evidence.
+For reusable caller Specialists, the aggregate Role snapshot digest is the
+accepted Markdown Role body digest from Agent Configuration v3. Membership
+authorization verifies the stored configuration digest before using that capture;
+it does not hash the mutable source or substitute the facade's role reference.
+Legacy member bindings retain their original role-reference digest.
+Primary startup applies authenticated orchestration launch policy to the
+already-resolved request. It checks the launch's Controller, parentless mode
+and policy-name binding without passing the resolved schema through authoring
+request resolution again.
 Worker startup ownership serializes all runtime writes. Rewrites preserve the
 latest witness revision, children and completion state; connection completion
 reloads the committed record instead of overwriting it with a startup copy.
@@ -1857,8 +1945,11 @@ revision. Migration and quiesce revisions live in the home-authoritative
 hash-chained, directory-fsynced `membership.jsonl` is authoritative;
 `members.json` is an atomic derived snapshot bound to its revision/checksum.
 Membership records workspace/run/controller, worker generation, thread,
-connection, lifecycle, writer, observed epoch and runtime locator. Startup
-replays the journal, validates every referenced manifest/runtime record, and
+connection, lifecycle, writer, observed epoch and runtime locator. Startup and
+Operator lifecycle checks accept legacy manifest v2 and caller manifest v3
+with the same Run, workspace and global Profile binding identity checks. A
+caller's manifest version alone never makes it an orphan. Startup replays the
+journal, validates every referenced manifest/runtime record, and
 rejects missing/corrupt/revision-mismatched history; it does not rebuild by
 scanning incidental project directories. The common membership reader and
 appender compare the derived index and persisted server-state identity/revision

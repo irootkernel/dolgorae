@@ -3,6 +3,61 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+// Qualification and per-guarantee readiness still apply to the selected Profile.
+const CALLER_WORKSPACE_INTEGRATED: bool = true;
+
+pub fn caller_capabilities(
+    profile: Option<&str>,
+) -> Result<serde_json::Value, crate::machine::MachineError> {
+    let mut value = serde_json::to_value(capabilities()).expect("typed capabilities");
+    value["machine_protocol_version"] = json!(4);
+    value["profile"] = json!(profile);
+    let binding = profile
+        .map(|name| {
+            let home = crate::paths::DolgoraeHome::system()?;
+            crate::global_profile::require_generation(&home)?;
+            crate::global_runtime::ResolvedGlobalProfile::resolve(&home, name)?.prepare(&home)
+        })
+        .transpose()?;
+    let qualified = binding
+        .as_ref()
+        .is_some_and(|binding| binding.caller_workspace_supported());
+    let instructions = binding
+        .as_ref()
+        .is_some_and(|binding| crate::instructions::require_discovery_control(binding).is_ok());
+    let reads = binding
+        .as_ref()
+        .is_some_and(|binding| binding.checked_review_supported());
+    let guarantee = |supported: bool, contract: &str, unsupported: &str| {
+        if supported {
+            let binding = binding.as_ref().expect("qualified Profile");
+            // Identify the exact qualified mechanism and Profile configuration,
+            // without exporting the Profile's private launch snapshot.
+            let facts = json!({"contract":contract, "global_profile_binding_sha256":binding.digest()?,
+                "codex_version":binding.launch_snapshot.codex_version,
+                "executable_sha256":binding.launch_snapshot.executable_identity.sha256,
+                "schema_bundle_sha256":binding.launch_snapshot.schema_bundle_sha256});
+            Ok::<_, crate::machine::MachineError>(
+                json!({"state":"supported", "reason_code":"qualified",
+                "evidence_sha256":crate::jcs::sha256_hex(&serde_json::to_vec(&facts).expect("qualification facts"))}),
+            )
+        } else {
+            Ok(
+                json!({"state":if binding.is_some() {"unavailable"} else {"unverified"},
+                "reason_code":if binding.is_some() {unsupported} else {"not_qualified"}, "evidence_sha256":null}),
+            )
+        }
+    };
+    value["caller_workspace"] = json!({
+        "contract":"caller_workspace/v1", "integrated":CALLER_WORKSPACE_INTEGRATED && qualified && instructions && reads,
+        "managed_instructions":guarantee(instructions, "dolgorae.instructions/v2", "unsupported_runtime")?,
+        "modern_startup":guarantee(qualified, "caller_workspace/v1", "unsupported_runtime")?,
+        "checked_candidate_reads":guarantee(reads, "direct-reading/v1", "unsupported_tool_boundary")?,
+        "source_materialization":"retired", "physical_start":"initialized_before_success",
+    });
+    Ok(value)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
     pub dolgorae_version: String,

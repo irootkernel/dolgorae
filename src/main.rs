@@ -47,10 +47,11 @@ fn main() -> ExitCode {
             if !matches!(&cli.command, Command::Profile { .. })
                 && let Err(reason) = dolgorae::cli::validate_argument_contract(&cli.command)
             {
-                return render_failure(
+                return render_failure_version(
                     cli.human,
                     cli.command.machine_name(),
                     MachineError::invalid_argument("argv", reason),
+                    uses_modern_contract(&cli.command),
                 );
             }
             execute(cli)
@@ -251,6 +252,42 @@ fn execute(cli: Cli) -> ExitCode {
         }
     }
     if let Command::Runtime {
+        command: RuntimeCommand::Capabilities(args),
+    } = &cli.command
+    {
+        let result = option_path(&args.args, "--profile")
+            .map_err(|reason| MachineError::invalid_argument("--profile", reason))
+            .and_then(|profile| {
+                let profile = profile
+                    .map(|profile| {
+                        profile.to_str().map(str::to_owned).ok_or_else(|| {
+                            MachineError::invalid_argument(
+                                "--profile",
+                                "Profile name must be UTF-8",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                dolgorae::runtime::caller_capabilities(profile.as_deref())
+            });
+        return match result {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed capabilities")
+                    );
+                } else {
+                    let mut envelope = SuccessEnvelope::new("capabilities", data);
+                    envelope.schema_version = 4;
+                    render_json(&envelope);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, "capabilities", error),
+        };
+    }
+    if let Command::Runtime {
         command: RuntimeCommand::Orphan { command },
     } = &cli.command
     {
@@ -278,7 +315,7 @@ fn execute(cli: Cli) -> ExitCode {
     if !matches!(
         &cli.command,
         Command::Runtime {
-            command: RuntimeCommand::Capabilities
+            command: RuntimeCommand::Capabilities(_)
         } | Command::LiveTransportMcp(_)
     ) {
         let home = match dolgorae::paths::DolgoraeHome::system() {
@@ -319,6 +356,27 @@ fn execute(cli: Cli) -> ExitCode {
             }
         };
     }
+    if let Command::Instructions {
+        command: dolgorae::cli::InstructionsCommand::Migrate(args),
+    } = &cli.command
+    {
+        return match dolgorae::migration::execute_cli(&args.args) {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("typed migration result")
+                    );
+                } else {
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    envelope.schema_version = 4;
+                    render_json(&envelope);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
     if let Command::Engagement {
         command: EngagementCommand::Call(args),
     } = &cli.command
@@ -331,7 +389,12 @@ fn execute(cli: Cli) -> ExitCode {
                         serde_json::to_string_pretty(&data).expect("typed engagement result")
                     );
                 } else {
-                    render_json(&SuccessEnvelope::new(command_name, data));
+                    let modern = data["schema"] == "dolgorae-external-specialist-facade/v4";
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    if modern {
+                        envelope.schema_version = 4;
+                    }
+                    render_json(&envelope);
                 }
                 ExitCode::SUCCESS
             }
@@ -374,7 +437,19 @@ fn execute(cli: Cli) -> ExitCode {
                         serde_json::to_string_pretty(&data).expect("typed Run list")
                     );
                 } else {
-                    render_json(&SuccessEnvelope::new(command_name, data));
+                    let modern = data
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|items| {
+                            items
+                                .iter()
+                                .any(|item| item.get("requested_access").is_some())
+                        });
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    if modern {
+                        envelope.schema_version = 4;
+                    }
+                    render_json(&envelope);
                 }
                 ExitCode::SUCCESS
             }
@@ -552,7 +627,7 @@ fn execute(cli: Cli) -> ExitCode {
         command: SpecialistCommand::Review(args),
     } = &cli.command
     {
-        return match dolgorae::review::execute_cli(&args.args) {
+        return match dolgorae::review::execute_direct_cli(&args.args) {
             Ok(data) => {
                 if cli.human {
                     println!(
@@ -560,7 +635,9 @@ fn execute(cli: Cli) -> ExitCode {
                         serde_json::to_string_pretty(&data).expect("typed review result")
                     );
                 } else {
-                    render_json(&SuccessEnvelope::new(command_name, data));
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    envelope.schema_version = 4;
+                    render_json(&envelope);
                 }
                 ExitCode::SUCCESS
             }
@@ -612,7 +689,7 @@ fn execute(cli: Cli) -> ExitCode {
                 &args.args,
             ),
         };
-        return match dolgorae::specialist_policy::execute(operation, arguments) {
+        return match dolgorae::markdown_policy::execute(operation, arguments) {
             Ok(data) => {
                 if cli.human {
                     println!(
@@ -620,7 +697,18 @@ fn execute(cli: Cli) -> ExitCode {
                         serde_json::to_string_pretty(&data).expect("typed policy result")
                     );
                 } else {
-                    render_json(&SuccessEnvelope::new(command_name, data));
+                    let modern = data.get("policy").is_some()
+                        || data
+                            .get("items")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|item| item.get("policy").is_some())
+                            });
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    if modern {
+                        envelope.schema_version = 4;
+                    }
+                    render_json(&envelope);
                 }
                 ExitCode::SUCCESS
             }
@@ -636,7 +724,7 @@ fn execute(cli: Cli) -> ExitCode {
                 (dolgorae::review_target::Operation::Settle, &args.args)
             }
         };
-        return match dolgorae::review_target::execute(operation, arguments) {
+        return match dolgorae::review_target::execute_current(operation, arguments) {
             Ok(data) => {
                 if cli.human {
                     println!(
@@ -696,7 +784,7 @@ fn execute(cli: Cli) -> ExitCode {
             unreachable!("review target handled before semantic dispatch")
         }
         Command::Runtime {
-            command: RuntimeCommand::Capabilities,
+            command: RuntimeCommand::Capabilities(_),
         } => SemanticCommand::RuntimeCapabilities,
         Command::Runtime {
             command: RuntimeCommand::Orphan { .. },
@@ -762,12 +850,55 @@ fn execute(cli: Cli) -> ExitCode {
                     serde_json::to_string_pretty(&data).expect("typed semantic result")
                 );
             } else {
-                render_json(&SuccessEnvelope::new(command_name, data));
+                let modern = data.get("requested_access").is_some()
+                    || data
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|items| {
+                            items
+                                .iter()
+                                .any(|item| item.get("requested_access").is_some())
+                        });
+                let name = match (modern, command_name) {
+                    (true, "run.acquire_write") => "run.acquire-write",
+                    (true, "run.release_write") => "run.release-write",
+                    _ => command_name,
+                };
+                let mut envelope = SuccessEnvelope::new(name, data);
+                if modern {
+                    envelope.schema_version = 4;
+                }
+                render_json(&envelope);
             }
             ExitCode::SUCCESS
         }
-        Err(error) => render_failure(cli.human, command_name, error),
+        Err(error) => {
+            let modern = uses_modern_contract(&cli.command);
+            render_failure_version(cli.human, command_name, error, modern)
+        }
     }
+}
+
+fn uses_modern_contract(command: &Command) -> bool {
+    matches!(command, Command::Run(run)
+        if matches!(&run.command, RunCommand::Start(args)
+            if !args.args.iter().any(|arg| arg == "--execution-lane")))
+        || matches!(
+            command,
+            Command::Instructions { .. }
+                | Command::Runtime {
+                    command: RuntimeCommand::Capabilities(_)
+                }
+                | Command::Specialist {
+                    command: SpecialistCommand::Review(_)
+                }
+                | Command::Specialist {
+                    command: SpecialistCommand::Policy {
+                        command: SpecialistPolicyCommand::Add(_)
+                            | SpecialistPolicyCommand::Validate(_)
+                    }
+                }
+        )
 }
 
 fn profile_operation(
@@ -868,6 +999,23 @@ fn run_arguments(run: &dolgorae::cli::RunArgs, leaf: &[OsString]) -> Vec<OsStrin
 }
 
 fn render_failure(human: bool, command: &str, error: MachineError) -> ExitCode {
+    let modern = matches!(
+        command,
+        "instructions.migrate"
+            | "capabilities"
+            | "specialist.review"
+            | "specialist.policy.add"
+            | "specialist.policy.validate"
+    );
+    render_failure_version(human, command, error, modern)
+}
+
+fn render_failure_version(
+    human: bool,
+    command: &str,
+    error: MachineError,
+    modern: bool,
+) -> ExitCode {
     let status = error.exit_status();
     if human {
         eprintln!("{}: {}", error.code, error.message);
@@ -875,6 +1023,31 @@ fn render_failure(human: bool, command: &str, error: MachineError) -> ExitCode {
         let mut envelope = FailureEnvelope::new(command, error);
         if command.starts_with("runtime.orphan.") {
             envelope.schema_version = 3;
+        }
+        if modern
+            || envelope.error.details["schema"] == "dolgorae-session-close-error-details/v1"
+            || matches!(
+                envelope.error.code.as_str(),
+                "SOURCE_ISOLATION_RETIRED"
+                    | "ROLE_MIGRATION_REQUIRED"
+                    | "INSTRUCTION_SOURCE_INVALID"
+                    | "INSTRUCTION_DISCOVERY_UNSUPPORTED"
+                    | "WORKSPACE_STARTUP_UNSUPPORTED"
+                    | "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+                    | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                    | "REVIEW_TARGET_DRIFTED"
+                    | "REVIEW_TARGET_UNAVAILABLE"
+            )
+        {
+            envelope.schema_version = 4;
+        }
+        if envelope.schema_version == 4 {
+            envelope.command = match envelope.command.as_str() {
+                "run.acquire_write" => "run.acquire-write".to_owned(),
+                "run.release_write" => "run.release-write".to_owned(),
+                "runtime.capabilities" => "capabilities".to_owned(),
+                _ => envelope.command,
+            };
         }
         render_json(&envelope);
     }

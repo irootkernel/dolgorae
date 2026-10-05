@@ -20,6 +20,8 @@ def schema_name(example_name: str) -> str:
     # Explicit v2 names validate successor payloads; executable E2E checks
     # validate the current machine/v2 producers.
     prefixes = {
+        "session-policy-v3-": "dolgorae-session-policy-v3.schema.json",
+        "instruction-migration-": "dolgorae-instruction-migration-v1.schema.json",
         "worker-runtime-v2-": "dolgorae-worker-runtime-v2.schema.json",
         "accepted-policy-session-v1-": "dolgorae-accepted-policy-session-v1.schema.json",
         "workspace-execution-": "dolgorae-workspace-execution-v1.schema.json",
@@ -100,7 +102,11 @@ def repaired_negative_example(
     example_name: str, instance: dict[str, object]
 ) -> dict[str, object]:
     repaired = copy.deepcopy(instance)
-    if example_name == "external-engagement-v4-assign.invalid-isolated-intent.json":
+    if example_name == "instruction-migration-request.invalid-implicit-choice.json":
+        repaired["roles"][0]["publish"] = True
+    elif example_name == "session-policy-v3-role.invalid-version.json":
+        repaired["schema_version"] = 3
+    elif example_name == "external-engagement-v4-assign.invalid-isolated-intent.json":
         repaired["execution_intent"] = "read_only"
     elif example_name == "workspace-execution-start.invalid-isolated-access.json":
         repaired["access"] = "writable"
@@ -480,6 +486,8 @@ def main() -> int:
             *EXAMPLES.glob("error-contract-v4-*.invalid-*.json"),
             *EXAMPLES.glob("external-engagement-v4-*.invalid-*.json"),
             *EXAMPLES.glob("accepted-policy-session-v1-*.invalid-*.json"),
+            *EXAMPLES.glob("instruction-migration-*.invalid-*.json"),
+            *EXAMPLES.glob("session-policy-v3-*.invalid-*.json"),
         ]
     )
     recognized_examples = {

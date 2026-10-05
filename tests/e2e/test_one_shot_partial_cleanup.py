@@ -16,6 +16,7 @@ import time
 
 import native_codex
 from schema_support import assert_valid, validator
+import accepted_legacy_fixture
 from test_one_shot_recovery_cli import (
     authority_bytes, messages, recovery_arguments, reference, review_arguments, valid_report,
 )
@@ -38,8 +39,11 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                            capture_output=True, text=True, env=environment, timeout=30)
 
         def machine(arguments: list[str], timeout: float = 90) -> tuple[int, dict[str, object]]:
-            completed = subprocess.run([str(binary), *arguments], capture_output=True,
-                                       text=True, env=environment, timeout=timeout)
+            if accepted_legacy_fixture.creates_historical_record(arguments):
+                completed = accepted_legacy_fixture.prepare(binary, home, arguments, env=environment, timeout=timeout)
+            else:
+                completed = subprocess.run([str(binary), *arguments], capture_output=True,
+                                           text=True, env=environment, timeout=timeout)
             if completed.stderr:
                 raise AssertionError(f"unexpected CLI stderr: {completed.stderr!r}")
             envelope = json.loads(completed.stdout)
@@ -100,10 +104,12 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 credential = carriers / "reviewer.json"
                 hidden_credential = carriers / "reviewer.fixture-hidden"
                 immutable_paths: list[pathlib.Path] = []
+                argv, fixture_environment, _ = accepted_legacy_fixture.command(
+                    home, review_arguments(workspace, profile, request_ref, controller), environment)
                 process = subprocess.Popen(
-                    [str(binary), *review_arguments(workspace, profile, request_ref, controller)],
+                    argv,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, env=environment,
+                    text=True, env=fixture_environment,
                 )
                 try:
                     assert process.stdin is not None
@@ -243,7 +249,26 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                                 raise AssertionError("failed stop preparation lost the running original generation")
                             os.kill(original_server["pid"], 0)
                         os.chflags(active_path, 0)
-                    recovered = success(recovery_arguments(workspace, request_ref, controller))
+                    recovery = recovery_arguments(workspace, request_ref, controller)
+                    if fault in ("reviewer-credential", "delivered-client-loss"):
+                        # The retained Worker belongs to the historical fixture
+                        # build. A different executable must retain peer fencing.
+                        code, refused = machine(recovery)
+                        if code == 0 or refused["error"]["code"] != "REVIEW_RECOVERY_BLOCKED":
+                            raise AssertionError("a different build bypassed the live Worker fence")
+                        completed = accepted_legacy_fixture.prepare(
+                            binary, home, recovery, env=environment, timeout=90)
+                        envelope = json.loads(completed.stdout)
+                        assert_valid(envelope, machine_schema, "same-build recovery")
+                        if completed.returncode or completed.stderr or not envelope["ok"]:
+                            raise AssertionError(f"same-build recovery failed: {envelope!r}")
+                        # The product CLI can replay completed historical cleanup
+                        # without mutating a live Worker from another build.
+                        recovered = success(recovery)
+                        if recovered != envelope["data"]:
+                            raise AssertionError("product replay changed completed recovery")
+                    else:
+                        recovered = success(recovery)
                     assert_valid(recovered, observation_schema, "recovered partial cleanup")
                     if (recovered["reviewer"]["state"] != "closed"
                             or recovered["engagement"]["state"] != "closed"

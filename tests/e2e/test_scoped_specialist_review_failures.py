@@ -17,14 +17,18 @@ import time
 
 import native_codex
 from schema_support import assert_valid, validator
+import accepted_legacy_fixture
 
 
 def machine(binary: pathlib.Path, home: pathlib.Path, arguments: list[str]) -> tuple[int, dict[str, object]]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
-    completed = subprocess.run(
-        [str(binary), *arguments], check=False, capture_output=True, text=True, env=environment
-    )
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        completed = accepted_legacy_fixture.prepare(binary, home, arguments, env=environment)
+    else:
+        completed = subprocess.run(
+            [str(binary), *arguments], check=False, capture_output=True, text=True, env=environment
+        )
     if completed.stderr:
         raise AssertionError(f"unexpected stderr for {arguments}: {completed.stderr!r}")
     return completed.returncode, json.loads(completed.stdout)
@@ -41,7 +45,11 @@ def machine_input(
     environment["HOME"] = str(home)
     if environment_overrides:
         environment.update(environment_overrides)
-    completed = subprocess.run(
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        completed = accepted_legacy_fixture.prepare(binary, home, arguments,
+            input=json.dumps(request, separators=(",", ":")), env=environment)
+    else:
+        completed = subprocess.run(
         [str(binary), *arguments],
         input=json.dumps(request, separators=(",", ":")),
         check=False,
@@ -57,8 +65,11 @@ def machine_input(
 def start(binary: pathlib.Path, home: pathlib.Path, arguments: list[str]) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
+    argv = [str(binary), *arguments]
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        argv, environment, _ = accepted_legacy_fixture.command(home, arguments, environment)
     return subprocess.Popen(
-        [str(binary), *arguments],
+        argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -75,8 +86,11 @@ def start_input(
 ) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
+    argv = [str(binary), *arguments]
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        argv, environment, _ = accepted_legacy_fixture.command(home, arguments, environment)
     process = subprocess.Popen(
-        [str(binary), *arguments],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

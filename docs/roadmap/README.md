@@ -27,7 +27,7 @@ are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
 acceptance required for v0.1.3 without reopening completed Epics.
 `EPIC-017` is `ACTIVE`; `TASK-061` through `TASK-065` are `COMPLETE`.
-`TASK-066` remains `PLANNED`
+`TASK-066` is `COMPLETE`
 after EPIC-016 and before EPIC-009.
 They introduce caller-owned workspaces, explicit common
 and Markdown Role instructions, default writable starts, and copy-free review.
@@ -2239,7 +2239,7 @@ is unsupported or violated even with unchanged refs and fingerprints.
 
 ### TASK-066: Complete Migration and Integrated Acceptance
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Synchronize CLI help, Machine/private contracts, examples, operator guidance
 and the source-distributed use-dolgorae skill. Provide explicit migration of
@@ -2294,6 +2294,12 @@ in v1. Resolve collaboration selectors from accepted Role/policy snapshots,
 never ambient AGENTS files. Activation uses the selected caller workspace and
 explicit access contract from EPIC-017; it cannot create a source copy or
 acquire writer authority through peer mail.
+
+Preserve the accepted Session's versioned policy and captured child
+configurations. Caller-workspace Sessions use policy v3; historical policy v2
+records retain their original meaning. New collaboration activation must use
+the shared caller-member start service and must not reread live Role authors or
+recreate a legacy isolated source after an accepted Session loses a resource.
 
 Verification: resident idle request-response; busy-target queueing; exact
 priority and FIFO tie breaks; aging and source fairness; role-selector
@@ -2354,6 +2360,12 @@ admitted instruction identity, review target identity and drift assurance from
 EPIC-017 through checked safe successor projections. Historical snapshot
 results retain their original meaning; observations never imply attribution or
 immutable review of mutable workspaces.
+
+Consume Machine v4 access and review projections without projecting captured
+instruction bodies or Role paths. Reusable facade v4 review Tasks retain their
+own target and checked-read receipts on the original Reviewer Run; collection
+must preserve each Task's contract and expected output across mixed historical
+and successor results.
 
 ### TASK-029: Complete Gul gRPC Surface and Extended Operational Conformance
 
@@ -2476,6 +2488,12 @@ successor contract matrix: explicit Markdown instruction identity, requested
 and effective access, transitions, direct/Git review identity and drift,
 retired new captures, and historical recovery. Keep old persisted fixtures and
 TASK-056 clients unchanged; normalize only adapter metadata, never assurance.
+
+Cover explicit instruction migration's selection, collision and partial
+publication boundaries. A successful authoring migration does not upgrade an
+accepted Run or Session. Include policy v2/v3 readers, mixed result pages and
+per-guarantee capability readiness; unsupported native qualification must fail
+before new runtime effects.
 
 ### TASK-033: Crash, Concurrency, and Security E2E
 

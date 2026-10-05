@@ -93,36 +93,56 @@ unexpected mutation to the repository maintainers before retrying.
 
 ## Specialist Role and policy operation
 
-Treat project Role sources as executable project-authored instructions only
-after the user explicitly authorizes policy installation. Before adding a
-policy, inspect the selected global Profiles, verify the Role source scope and
-name, ensure each selected Profile Server is already running, and run the
-read-only compiler:
+`make test-native-integrated-acceptance` is a separately authorized acceptance
+campaign. Set `DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE=1` and point
+`DOLGORAE_CODEX_BIN` to the pinned Codex executable. It exercises the production
+CLI with isolated homes, Profiles, credentials, and caller workspaces, using
+at most 17 Turns and 34 loopback Responses requests. It never loads a real
+account or sends requests to an external provider. Its isolated Profile disables
+optional Codex plugins and verifies the captured setting so background plugin
+downloads cannot determine startup readiness. Plugin-enabled startup is outside
+this campaign's qualification. The campaign checks startup defaults,
+read-only enforcement, same-thread access changes, captured instruction replay,
+all direct review scopes, reusable Reviewer tasks, and accepted Primary/child
+policy configurations, including the Primary's actual `request_specialist`
+tool call. The modern Primary's checked Machine close must retire its child,
+release the Writer and commit aggregate completion. Fresh CLI observation,
+repeat close and recovery must retain its close operation and interrupt choice.
+An idle writable Primary must also complete checked interruption and recovery
+with its retained abort operation. This does not qualify a live active Turn abort.
+A nested turnless campaign checks writer exclusion and recovery.
+Cleanup uses the fixture's Operator to interrupt only its confirmed Profile,
+then requires process-inventory absence before removing the fixture. It does
+not project modern Runs through the frozen public-v1 adapter.
+Failures retain their owned fixture for diagnosis; they do not retry
+automatically. This campaign is outside the default gate.
 
-```sh
-dolgorae specialist policy validate \
-  --workspace /absolute/project \
-  --file /absolute/policy-input.json
-```
+New Roles are Markdown files at `~/.dolgorae/roles/<name>/AGENTS.md`; common
+instructions come from `~/.dolgorae/home/AGENTS.md`. Treat their contents as
+instructions requiring explicit installation authority. Direct starts default
+to writable access and the general Role. Policy v3 names a Role and supplies
+execution controls separately. New JSON policy admission fails with
+`ROLE_MIGRATION_REQUIRED`; accepted legacy policies and sessions retain their
+original snapshots.
 
-Common Role directories and files require owner-only modes 0700 and 0600.
-Project Role paths must be owned by the current user and must not be writable by
-group or others. `CONFIG_INVALID` leaves the installed registry unchanged;
-correct the named source or policy input and validate again. Never repair the
-registry, an installed snapshot, the orchestration database, or a broker
-credential carrier by editing its files directly.
+Use `instructions migrate --workspace <path>` with optional `--file
+<legacy-policy-input>` to enumerate source scopes, digests, and collisions.
+Apply an explicitly selected checked request through `--request-stdin`.
+Destination names and access choices must be explicit. Migration publishes new
+files without overwriting sources or accepted records. If publication fails
+partway through, inspect the new files and replan before retrying.
 
-Validation observes the running server's model, effort, and capability catalog;
-it does not start or repair a stopped server or record a Profile binding.
+Common instruction directories and files require owner-only modes 0700 and
+0600. A validation failure leaves installed state unchanged. Never edit an
+installed snapshot, runtime registry, database, or credential carrier directly.
+Validate a v3 policy input through `specialist policy validate --workspace
+<path> --file <input>` before an authorized `add`. Validation observes qualified
+Profile definitions without starting servers. `show` and `list` return safe
+metadata and Role digests for v3 entries, and original values for accepted
+legacy entries. Removal affects future selection only; accepted sessions keep
+their original policy, Role captures, child configurations, and Profile bindings.
 
-After an authorized `specialist policy add`, use `show` to verify the returned
-name, revision, Role source digests, and resolved Agent Configuration snapshots.
-Adding an existing name fails closed. Replacement is an explicit `remove`
-followed by `add`; removal changes only future session selection. Existing
-Orchestrated Sessions retain their complete policy snapshots and remain
-recoverable without the source or registry entry.
-
-For a task-aware one-shot review, validate the v3 request against the checked
+For a task-aware one-shot review, validate the v4 request against the checked
 protocol before piping it to `specialist review --request-stdin --format json`.
 Do not put workspace, Profile, credentials, or host paths in the request. Treat
 `REVIEW_OUTPUT_INVALID` as a terminal rejected report: inspect the accepted

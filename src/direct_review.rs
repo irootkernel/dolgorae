@@ -254,7 +254,10 @@ pub(crate) fn execute_with_context(
     })
 }
 
-fn review_prompt(request: &ReviewRequestV4, target: &DirectTarget) -> Result<String, MachineError> {
+pub(crate) fn review_prompt(
+    request: &ReviewRequestV4,
+    target: &DirectTarget,
+) -> Result<String, MachineError> {
     let prompt = format!(
         "{}\n\nHost-admitted target identity:\n{}\nRead the complete inventory through dolgorae_candidate_read: side metadata, path target.json, byte_offset 0, byte_length up to 262144; continue through metadata_byte_length. Metadata is not candidate evidence.",
         request.prompt()?,
@@ -272,7 +275,7 @@ fn review_prompt(request: &ReviewRequestV4, target: &DirectTarget) -> Result<Str
     Ok(prompt)
 }
 
-fn completed_verdict(
+pub(crate) fn completed_verdict(
     turn: &Value,
     terminal: &crate::turn::TerminalTurn,
     projection: &crate::projection::RunStateProjection,

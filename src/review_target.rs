@@ -97,7 +97,18 @@ pub fn execute(operation: Operation, arguments: &[OsString]) -> Result<Value, Ma
     execute_with_source_contract(
         operation,
         arguments,
-        SourceIsolationContract::LegacyBeforeCutover,
+        SourceIsolationContract::CallerWorkspace,
+    )
+}
+
+pub fn execute_current(
+    operation: Operation,
+    arguments: &[OsString],
+) -> Result<Value, MachineError> {
+    execute_with_source_contract(
+        operation,
+        arguments,
+        crate::workspace::SourceIsolationContract::CallerWorkspace,
     )
 }
 

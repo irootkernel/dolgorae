@@ -15,6 +15,7 @@ import time
 
 import native_codex
 from schema_support import assert_valid, validator
+import accepted_legacy_fixture
 
 
 def invoke(
@@ -26,7 +27,10 @@ def invoke(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
-    completed = subprocess.run(
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        completed = accepted_legacy_fixture.prepare(binary, home, arguments, input=stdin, env=environment)
+    else:
+        completed = subprocess.run(
         [str(binary), *arguments],
         check=False,
         capture_output=True,

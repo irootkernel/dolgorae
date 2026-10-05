@@ -365,6 +365,11 @@
           "type": "string",
           "minLength": 1,
           "x-maxUtf8Bytes": 128
+        },
+        "specialist_policy": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
         }
       },
       "x-adapterBoundFields": [
@@ -432,6 +437,11 @@
         },
         "idempotency_key": {
           "$ref": "#/$defs/start_request/properties/idempotency_key"
+        },
+        "specialist_policy": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
         }
       },
       "x-adapterBoundFields": [
@@ -948,14 +958,44 @@
         },
         "readiness": {
           "$ref": "#/$defs/caller_profile_readiness"
+        },
+        "orchestration": {
+          "$ref": "https://dolgorae.local/schema/accepted-policy-session/v1#/properties/captures"
         }
       },
       "x-invariants": [
         "The original UUIDv7 Run, canonical workspace and Controller are retained before manifest publication",
         "Profile and Role selections agree with the immutable binding and exact instruction capture",
         "No ready server epoch or advertised model default is invented",
-        "Observed readiness, resolved model and effort are immutable; retry identity still preserves the original omitted selections"
-      ]
+        "Observed readiness, resolved model and effort are immutable; retry identity still preserves the original omitted selections",
+        "A selected specialist_policy binds the complete accepted session capture before physical Primary startup; retries cannot reload authoring files"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "request": {
+                "required": [
+                  "specialist_policy"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "orchestration"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "orchestration"
+              ]
+            }
+          }
+        }
+      ],
+      "x-maxUtf8Bytes": 67108864
     },
     "caller_start_reservation": {
       "type": "object",

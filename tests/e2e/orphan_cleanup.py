@@ -9,12 +9,14 @@ import subprocess
 import time
 
 
-def _call(binary: pathlib.Path, command: str, owner_root: pathlib.Path, *extra: str) -> dict:
+def _call(binary: pathlib.Path, command: str, owner_root: pathlib.Path, *extra: str,
+          timeout: float) -> dict:
     completed = subprocess.run(
         [str(binary), "runtime", "orphan", command, "--owner-root-under", str(owner_root), *extra],
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
     )
     envelope = json.loads(completed.stdout)
     changed = envelope.get("error", {}).get("code") == "ORPHAN_SELECTION_CHANGED"
@@ -33,8 +35,16 @@ def cleanup_removed_root(
     if owner_root.exists() and not allow_existing_root:
         raise RuntimeError(f"owner root must be removed before orphan cleanup: {owner_root}")
     last_observation: dict | None = None
+    deadline = time.monotonic() + 30
+
+    def remaining() -> float:
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise RuntimeError("Dolgorae orphan cleanup exceeded its 30-second budget")
+        return budget
+
     for _ in range(50):
-        inspected = _call(binary, "inspect", owner_root)["data"]
+        inspected = _call(binary, "inspect", owner_root, timeout=remaining())["data"]
         last_observation = inspected
         if any(candidate["verdict"] == "unverifiable" for candidate in inspected["candidates"]):
             # A process can exit between the inventory's BSD identity and
@@ -45,12 +55,13 @@ def cleanup_removed_root(
         result = _call(
             binary, "cleanup", owner_root,
             "--confirm-selection-sha256", inspected["selection_sha256"],
+            timeout=remaining(),
         )
         last_observation = result
         if result["ok"]:
-            remaining = _call(binary, "inspect", owner_root)["data"]
-            last_observation = remaining
-            if not any(candidate["verdict"] in {"orphan", "unverifiable"} for candidate in remaining["candidates"]):
+            observed = _call(binary, "inspect", owner_root, timeout=remaining())["data"]
+            last_observation = observed
+            if not any(candidate["verdict"] in {"orphan", "unverifiable"} for candidate in observed["candidates"]):
                 return
         time.sleep(0.1)
     raise RuntimeError(f"Dolgorae process did not reach verified absence: {last_observation}")

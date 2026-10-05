@@ -50,3 +50,8 @@ unsafe_code = "deny"
 
 [lints.clippy]
 all = "deny"
+
+[[test]]
+name = "accepted_legacy_cli"
+path = "tests/support/accepted_legacy_cli.rs"
+harness = false

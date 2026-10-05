@@ -61,24 +61,28 @@ principal accepted by the current command; its existence is not permission to
 perform another mutation. The composed one-shot Specialist Review owns its
 internal credentials, so do not create replacements for it.
 
+## Close a modern Orchestrated Session
+
+With explicit whole-session termination authority, use the root's original
+Controller with `dolgorae run close <run-id> --workspace <path>
+--controller-file <path>`. Add `--interrupt` only when interruption of active
+owned work is authorized. Modern roots use this checked Machine entrypoint;
+accepted legacy roots retain public `CloseRun`.
+
+Require the root's `lifecycle:closed`, `writer_state:none` and a completed or
+aborted `session_close` record. Preserve its operation ID and interrupt choice.
+`SESSION_CLOSE_IN_PROGRESS` requires observation; `RECOVERY_REQUIRED` requires
+authorized `run recover`, and `OUTCOME_UNKNOWN` requires authoritative
+reconciliation through `run reconcile`. These commands resume the retained
+intent without starting a Turn or replaying an uncertain effect. A Profile
+Server stop is a separate Operator action and does not prove aggregate closure.
+
 ## Use low-level review targets
 
-Prefer `specialist review` for ordinary review. Use low-level capture only when
-an authorized external backend genuinely owns the lifecycle and can later
-provide a checked terminal receipt:
-
-```sh
-dolgorae review-target capture \
-  --workspace <path> \
-  --kind <kind> \
-  --backend-kind <backend> \
-  --backend-lifecycle-id <lifecycle-id> \
-  --settlement-owner-file <new-protected-path>
-```
-
-Add `--revision` only where the target-kind contract permits it. Preserve the
-capture reference, revision, backend binding, digests, and settlement-owner
-carrier. Never expose the immutable root or credential to an untrusted actor.
+New reviews use `specialist review` with the v4 direct-reading contract.
+`review-target capture` returns `SOURCE_ISOLATION_RETIRED` before creating
+source copies or credential carriers. Accepted historical captures keep their
+original IDs, backend ownership, receipts and settlement authority.
 
 Settlement is a separate authorized mutation:
 
@@ -103,9 +107,10 @@ replay is idempotent; changed input is not.
 
 Interrupt a running one-shot review only on explicit user intent. Dolgorae
 handles that interrupt as a checked `REVIEW_CANCELLED` failure envelope in the
-conflict exit class. Preserve its capture reference, engagement state, required
-action, and retryability details, then reconcile the outcome rather than
-replaying or deleting it. If a process terminates without a final envelope,
+conflict exit class. Preserve the original request, review, target and
+engagement identities, required action, and retryability details. For accepted
+legacy work, also preserve its capture reference when one exists. Reconcile the
+outcome rather than replaying or deleting it. If a process terminates without a final envelope,
 treat the outcome as unknown and reconcile it through supported inspection.
 Dolgorae has no generic skill-owned cleanup, uninstall, or legacy-root migration
 procedure. Never map a request to clean local files onto direct deletion under

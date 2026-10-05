@@ -1,0 +1,14 @@
+{
+  "schema": "dolgorae-instruction-migration-request/v1",
+  "roles": [
+    {
+      "source": {
+        "scope": "project",
+        "name": "audit"
+      },
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "destination_name": "audit"
+    }
+  ],
+  "policies": []
+}

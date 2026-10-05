@@ -15,6 +15,7 @@ import time
 
 import native_codex
 import test_one_shot_recovery_cli as recovery
+import accepted_legacy_fixture
 from schema_support import assert_valid, validator
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -178,10 +179,11 @@ def validate(binary: pathlib.Path) -> None:
                 process = None
                 try:
                     fill_pipe(write_fd)
+                    argv, environment, _ = accepted_legacy_fixture.command(home, args)
                     process = subprocess.Popen(
-                        [str(binary), *args], stdin=subprocess.PIPE, stdout=write_fd,
+                        argv, stdin=subprocess.PIPE, stdout=write_fd,
                         stderr=subprocess.PIPE, text=True,
-                        env={**os.environ, "HOME": str(home)},
+                        env=environment,
                     )
                     os.close(write_fd)
                     write_fd = -1

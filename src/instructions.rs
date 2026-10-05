@@ -131,7 +131,19 @@ impl<F: FaultInjector> InstructionSourceStore<F> {
         }
     }
 
-    /// Only the explicit initialization adapter calls this mutating operation.
+    /// Publish a selected migration output without replacing any existing source.
+    pub fn publish_role_exclusive(&self, name: &str, body: &str) -> Result<(), MachineError> {
+        validate_role_name(name)?;
+        SourceCapture::from_bytes(body.as_bytes().to_vec())?;
+        let mut tree = SourceTree::open(self)?;
+        let roles = tree.child(0, "roles", true)?;
+        let role = tree.child(roles, name, true)?;
+        tree.verify_bindings()?;
+        publish_source(&tree.directories[role].file, body, false)?;
+        tree.verify_bindings()
+    }
+
+    /// Only explicit initialization creates the default templates.
     pub fn initialize_templates(&self) -> Result<(), MachineError> {
         let mut tree = SourceTree::open(self)?;
         let common = tree.child(0, "home", true)?;
@@ -460,6 +472,14 @@ fn verify_entry(parent: &File, name: &OsStr, expected: &Metadata) -> Result<(), 
 }
 
 fn publish_template(directory: &File, body: &str) -> Result<(), MachineError> {
+    publish_source(directory, body, true)
+}
+
+fn publish_source(
+    directory: &File,
+    body: &str,
+    preserve_existing: bool,
+) -> Result<(), MachineError> {
     let temporary = OsString::from(format!(".instructions-{}", Uuid::now_v7()));
     let mut file = DarwinSystem
         .createat_private(directory, &temporary, true)
@@ -470,7 +490,11 @@ fn publish_template(directory: &File, body: &str) -> Result<(), MachineError> {
         file.sync_all()?;
         match DarwinSystem.renameat_exclusive(directory, &temporary, OsStr::new("AGENTS.md")) {
             Ok(()) => directory.sync_all(),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error)
+                if preserve_existing && error.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     })();

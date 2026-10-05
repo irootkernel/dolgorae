@@ -69,6 +69,31 @@ represent an expected nonterminal control state. On failure, branch on stable
 the envelope's invocation ID and every returned workspace, profile, review,
 capture, engagement, Run, revision, and digest identity needed for follow-up.
 
+## Start a caller Run or migrate instructions
+
+New Machine/private starts use the selected canonical workspace, including
+non-Git directories. Omitted access and Role select `writable` and `general`.
+Use `--access read-only` when requested; a later write acquisition requires
+Controller authority and the workspace writer slot. Observe effective access
+and policy verification before treating a Run as writable. Check selected
+Profile guarantees with `runtime capabilities --profile <name>`; an
+unverified or unavailable guarantee cannot authorize startup or checked review.
+
+Common instructions are captured from `~/.dolgorae/home/AGENTS.md` and the
+selected Role from `~/.dolgorae/roles/<name>/AGENTS.md`. Profile CODEX_HOME
+AGENTS guidance is separate user input; the core/common/Role developer input
+has precedence. Project and ancestor AGENTS discovery is disabled through the
+qualified runtime mechanism. No Role file or prompt grants writer authority.
+
+When explicitly asked to migrate, plan with `instructions migrate --workspace
+<path>` and optional `--file <legacy-policy-input>`. Read the enumerated source
+scopes, digests and collisions. Apply only explicit choices through
+`--request-stdin` using the [migration contract](resources/protocol/dolgorae-instruction-migration-v1.schema.json).
+New destinations are create-exclusive; accepted snapshots and original
+sources are preserved. After a partial publication failure, inspect new files
+and replan rather than replaying an assumed transaction. Migration does not
+authorize policy installation or service startup.
+
 ## Prepare a one-shot review
 
 1. Confirm that the requested source scope is exactly one of `workspace`,
@@ -76,7 +101,7 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    workflow identifiers express authority or focus; they are not source scopes.
 2. `workspace`, `staged`, `dirty`, and `head` reject a revision. `commit`
    requires one commit revision. `range` requires one exact `A..B` or `A...B`
-   expression. Stdin may carry a v3 request, but it is not a source scope and
+   expression. Stdin carries the checked v4 request, but it is not a source scope and
    cannot substitute patch semantics.
 3. Inspect the named global Codex Profile and run its offline diagnosis before an
    external review when current readiness is not already established:
@@ -103,10 +128,10 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
 
    Add `--revision <revision>` only for `commit` or `range`. Add
    `--deadline-seconds <1..3600>` only when the caller established a non-default
-   bound. Use the legacy `--scope working-tree` carrier only when v1 compatibility
-   is explicitly required; never combine it with v2-only options.
+   bound. New reviews reject `--scope working-tree` with `SOURCE_ISOLATION_RETIRED`.
+   Accepted legacy results and recovery operations retain their original contract.
    For a task-aware change or completion review, construct the checked
-   `dolgorae-specialist-review-request/v3` object and pass only that object on
+   `dolgorae-specialist-review-request/v4` object and pass only that object on
    non-TTY stdin:
 
    ```sh
@@ -114,11 +139,11 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
      --workspace <path> \
      --profile <profile> \
      --request-stdin \
-     --format json < review-request-v3.json
+     --format json < review-request-v4.json
    ```
 
-   Follow the packaged [v3 request example](resources/protocol/examples/specialist-review-v3-request.valid.json)
-   and [review contract](resources/protocol/dolgorae-specialist-review-tool-v3.schema.json).
+   Follow the packaged [v4 request example](resources/protocol/examples/specialist-review-v4-request.valid.json)
+   and [review contract](resources/protocol/dolgorae-specialist-review-tool-v4.schema.json).
    The request must carry
    `purpose` (`change` or `completion`) alongside the brief, contexts, criteria,
    expected output, and deadline. Keep workspace, Profile, credentials, and
@@ -127,16 +152,20 @@ capture, engagement, Run, revision, and digest identity needed for follow-up.
    artifact reference. Completion needs at least one uniquely identified
    criterion. Do not combine `--request-stdin` with v1/v2 source or deadline
    flags.
-5. Prefer the composed `specialist review` operation. It owns capture, one fresh
-   Reviewer, checked result collection, integrity verification, and settlement.
+5. Prefer the composed `specialist review` operation. It owns direct target admission, one fresh
+   Reviewer, checked result collection, integrity verification, and Reviewer and
+   Engagement closure. Capture settlement applies only to accepted legacy
+   v1/v2/v3 operations.
    Do not replace it with manual `review-target capture` and `settle` merely to
    reproduce the same workflow.
 6. Accept success only from the complete checked result. Keep the target and
-   Reviewer identities, verdict and findings, engagement state, settlement
-   state, capture-time source identity, integrity evidence, and
+   Reviewer identities, verdict and findings, engagement state,
+   admitted target identity, integrity evidence, and
    `workflow_issued_source_mutation:false` distinct. Empty findings do not make
-   a failed, unknown, active, malformed, or unsettled review successful.
-   For v3, also require every input criterion exactly once in input order,
+   a failed, unknown, active, or malformed review successful. For accepted legacy
+   v1/v2/v3 operations, also require the original capture settlement evidence;
+   an unsettled legacy review is not successful.
+   For v4, also require every input criterion exactly once in input order,
    retain each status, evidence basis, remaining gap, and `evidence_limits`, and
    report `overall_assessment` as Reviewer evidence rather than business
    approval. `REVIEW_OUTPUT_INVALID` is terminal and never a clean result.
@@ -148,7 +177,7 @@ reference and an already authorized Controller credential in a protected regular
 file. Creating a credential requires its own authorization; see
 [lifecycle.md](references/lifecycle.md). Pass both `--request-ref <UUIDv7>` and
 `--recovery-controller-file <absolute-path>` to the original `specialist review`
-command, alongside either its v3 stdin request or supported source flags.
+command, alongside either its v4 stdin request or supported source flags.
 Keep the exact reference, workspace, executable, and original credential file
 across disconnects. The reference identifies the operation; it grants no cleanup
 authority. An invocation without this pair cannot gain recoverability afterward.
@@ -157,7 +186,8 @@ Add `--temporary-server` only when retirement of a server created exclusively
 for this invocation is authorized. It does not permit stopping an existing
 shared server or a replacement generation. Ordinary review preserves server
 lifetime. Successful cleanup proves Reviewer closure, engagement closure,
-capture settlement, and server retirement separately.
+and server retirement separately. Accepted legacy v1/v2/v3 operations also
+require proof of their original capture settlement; v4 has no capture settlement.
 
 Start the CLI once and retain the host's original native process/result handle.
 Wait on that same handle until its authoritative exit and complete JSON envelope
@@ -221,15 +251,14 @@ abort, or recover one engagement. The external host remains the semantic
 planner; do not infer a task graph, retry unknown work, attach an existing Run,
 or let a Specialist hire or contact another Specialist.
 
-1. Read the packaged [facade v2 contract](resources/protocol/dolgorae-external-specialist-facade-v2.schema.json).
-   For a v3 accepted-task assignment, also read the
-   [facade v3 contract](resources/protocol/dolgorae-external-specialist-facade-v3.schema.json)
-   and [assignment example](resources/protocol/examples/external-engagement-v3-assign.valid.json).
-   For hire requests, follow the [hire example](resources/protocol/examples/external-engagement-v2-hire.valid.json): use
-   `agent_configuration.schema_version: 2` and `selected_profile`. Supply the
-   optional optimistic `global_profile_binding_sha256` only from the actual
-   selected Profile binding; never invent a digest. Construct exactly one
-   request variant and pass it through a protected regular non-TTY descriptor:
+1. Read the packaged [facade v4 contract](resources/protocol/dolgorae-external-specialist-facade-v4.schema.json)
+   and [assignment example](resources/protocol/examples/external-engagement-v4-assign.valid.json).
+   New hires select `agent_configuration.schema_version: 3`, an explicit
+   Markdown `role`, and `selected_profile`; use `schema:
+   dolgorae-external-specialist-facade/v4`. Supply an optional optimistic
+   `global_profile_binding_sha256` only from an observed binding. New hires and
+   assignments reject `isolated_write` before effects. Construct exactly one
+   request variant and pass it through a protected non-TTY descriptor:
 
    ```sh
    dolgorae engagement call \
@@ -238,14 +267,13 @@ or let a Specialist hire or contact another Specialist.
      --request-fd <request-fd>
    ```
 
-   Treat hire `objective` only as non-executable rationale; put actual work in
-   the later task assignment. A v3 assignment carries its exact brief, inline
-   context and provenance, criteria, and expected output inside `task`, with
-   `execution_intent` and `deadline_seconds` beside it. When it
-   requests `structured_review_v3`, accept only the criterion-complete report
-   returned by collection. For `isolated_write`, that report is the
-   `final_response` member beside `isolated_change`; read criterion assessments
-   and `overall_assessment` from `final_response`, not from the outer result.
+   Hire `objective` is non-executable rationale; actual work belongs to the
+   assignment. A v4 review assignment carries its exact task, target,
+   `read_only` intent and bounded deadline. A modern Reviewer accepts only
+   `structured_review_v4`; candidate evidence must cite checked read receipts
+   from that task's original Turn. Collection returns the checked verdict.
+   Accepted legacy tasks and saved results keep their v2/v3 shapes and original
+   ownership; read their original contracts when recovering them.
 
 2. The aggregate owner must be a generation-1 `workflow_orchestrator` or
    `automation` Controller. Preserve its carrier across reconnects; an
@@ -261,7 +289,8 @@ or let a Specialist hire or contact another Specialist.
    preserve `next_after_sequence` only after consuming the returned immutable
    result. Treat `interrupted_unknown` as terminal uncertainty requiring an
    external planning decision, never automatic retry.
-5. `isolated_write` confines model writes to a separate Git worktree.
+5. For accepted legacy v1/v2/v3 work, `isolated_write` confines model writes to
+   a separate Git worktree. New v4 work rejects that access mode.
    `canonical_workspace_write` is an assertion that the external host has
    quiesced its own writer; Dolgorae still rejects a competing Dolgorae writer.
    Use explicit cancellation, release, complete, or abort authority immediately

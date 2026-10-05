@@ -1,0 +1,1410 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/workspace-execution/v1",
+  "title": "Dolgorae caller-workspace execution successors",
+  "description": "Accepted EPIC-017 successor contract; schema presence does not advertise runtime support.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/start_request"
+    },
+    {
+      "$ref": "#/$defs/resolved_start_request"
+    },
+    {
+      "$ref": "#/$defs/instruction_snapshot"
+    },
+    {
+      "$ref": "#/$defs/agent_configuration_input"
+    },
+    {
+      "$ref": "#/$defs/agent_configuration"
+    },
+    {
+      "$ref": "#/$defs/run_manifest"
+    },
+    {
+      "$ref": "#/$defs/caller_start_reservation"
+    },
+    {
+      "$ref": "#/$defs/caller_policy_proof"
+    },
+    {
+      "$ref": "#/$defs/caller_start_receipt"
+    },
+    {
+      "$ref": "#/$defs/caller_native_intent"
+    }
+  ],
+  "$defs": {
+    "source_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "body",
+        "byte_length",
+        "sha256"
+      ],
+      "properties": {
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "x-invariants": [
+        "body is the exact admitted UTF-8 source, without NUL or normalization",
+        "byte_length and sha256 bind those same UTF-8 bytes"
+      ]
+    },
+    "role_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "body",
+        "byte_length",
+        "sha256",
+        "name"
+      ],
+      "properties": {
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        }
+      },
+      "x-invariants": [
+        "body is the exact admitted UTF-8 source, without NUL or normalization",
+        "byte_length and sha256 bind those same UTF-8 bytes"
+      ]
+    },
+    "instruction_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "core_prefix_version",
+        "core_prefix_sha256",
+        "common",
+        "role",
+        "composition_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.instructions/v2"
+        },
+        "core_prefix_version": {
+          "const": 2
+        },
+        "core_prefix_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "common": {
+          "$ref": "#/$defs/source_capture"
+        },
+        "role": {
+          "$ref": "#/$defs/role_capture"
+        },
+        "composition_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "x-invariants": [
+        "common.byte_length + role.byte_length <= 65536",
+        "composition_sha256 hashes core UTF-8 bytes, two LF bytes, common body, two LF bytes, role body",
+        "core version and digest must match the executable contract; source bodies are never reloaded during recovery"
+      ]
+    },
+    "agent_configuration_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "selected_profile",
+        "model",
+        "default_effort",
+        "purpose",
+        "purpose_label",
+        "required_capabilities",
+        "execution_lane",
+        "required_assurance",
+        "native_subagent_policy",
+        "role"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "selected_profile": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/selected_profile"
+        },
+        "global_profile_binding_sha256": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/global_profile_binding_sha256"
+        },
+        "model": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/model"
+        },
+        "default_effort": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/default_effort"
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/purpose"
+        },
+        "purpose_label": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/purpose_label"
+        },
+        "required_capabilities": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/required_capabilities"
+        },
+        "execution_lane": {
+          "const": "dedicated"
+        },
+        "required_assurance": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/required_assurance"
+        },
+        "native_subagent_policy": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration-input/v2#/properties/native_subagent_policy"
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        }
+      },
+      "x-invariants": [
+        "role names one explicit global Markdown source; no inline instructions or project/JSON fallback",
+        "model and Profile binding resolve before allocation; no Role text selects execution configuration"
+      ]
+    },
+    "agent_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "selected_profile",
+        "global_profile_binding_sha256",
+        "model",
+        "default_effort",
+        "purpose",
+        "required_capabilities",
+        "role_reference",
+        "instructions",
+        "execution_lane",
+        "required_assurance",
+        "native_subagent_policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "selected_profile": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/selected_profile"
+        },
+        "global_profile_binding_sha256": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/global_profile_binding_sha256"
+        },
+        "model": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/model"
+        },
+        "default_effort": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/default_effort"
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/purpose"
+        },
+        "required_capabilities": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/required_capabilities"
+        },
+        "role_reference": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/role_reference"
+        },
+        "instructions": {
+          "$ref": "#/$defs/instruction_snapshot"
+        },
+        "execution_lane": {
+          "const": "dedicated"
+        },
+        "required_assurance": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/required_assurance"
+        },
+        "native_subagent_policy": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/native_subagent_policy"
+        }
+      },
+      "x-invariants": [
+        "instructions is the accepted common/Role capture; role_reference remains the policy-local reference or null",
+        "task input is independent of instruction and Agent Configuration identity"
+      ]
+    },
+    "start_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "workspace",
+        "profile",
+        "control_mode",
+        "model",
+        "effort",
+        "purpose",
+        "parent_ref",
+        "required_capabilities",
+        "idempotency_key"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-run-start-request/v2"
+        },
+        "workspace": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "control_mode": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/control_mode"
+        },
+        "access": {
+          "enum": [
+            "read-only",
+            "writable"
+          ]
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        },
+        "model": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effort": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose"
+        },
+        "parent_ref": {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/parent_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 128
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "specialist_policy": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        }
+      },
+      "x-adapterBoundFields": [
+        "Controller credential carrier and trusted caller provenance"
+      ],
+      "x-invariants": [
+        "modern adapter resolves absent access to writable and absent role to general",
+        "resolved private input carries access and role explicitly; lane is dedicated",
+        "selected instruction and capability admission precedes new Run allocation"
+      ]
+    },
+    "resolved_start_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "workspace",
+        "profile",
+        "control_mode",
+        "model",
+        "effort",
+        "purpose",
+        "parent_ref",
+        "required_capabilities",
+        "idempotency_key",
+        "access",
+        "role"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-run-start-resolved/v2"
+        },
+        "workspace": {
+          "$ref": "#/$defs/start_request/properties/workspace"
+        },
+        "expected_workspace_id": {
+          "$ref": "#/$defs/start_request/properties/expected_workspace_id"
+        },
+        "profile": {
+          "$ref": "#/$defs/start_request/properties/profile"
+        },
+        "control_mode": {
+          "$ref": "#/$defs/start_request/properties/control_mode"
+        },
+        "access": {
+          "$ref": "#/$defs/start_request/properties/access"
+        },
+        "role": {
+          "$ref": "#/$defs/start_request/properties/role"
+        },
+        "model": {
+          "$ref": "#/$defs/start_request/properties/model"
+        },
+        "effort": {
+          "$ref": "#/$defs/start_request/properties/effort"
+        },
+        "purpose": {
+          "$ref": "#/$defs/start_request/properties/purpose"
+        },
+        "parent_ref": {
+          "$ref": "#/$defs/start_request/properties/parent_ref"
+        },
+        "required_capabilities": {
+          "$ref": "#/$defs/start_request/properties/required_capabilities"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/start_request/properties/idempotency_key"
+        },
+        "specialist_policy": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        }
+      },
+      "x-adapterBoundFields": [
+        "Controller credential carrier and trusted caller provenance"
+      ],
+      "x-invariants": [
+        "modern adapter resolves absent access to writable and absent role to general",
+        "resolved private input carries access and role explicitly; lane is dedicated",
+        "selected instruction and capability admission precedes new Run allocation"
+      ]
+    },
+    "run_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "workspace_id",
+        "canonical_workspace",
+        "workspace_mode",
+        "start_baseline",
+        "created_at",
+        "initial_access",
+        "control_mode",
+        "execution_lane",
+        "requested_assurance",
+        "achieved_assurance",
+        "profile",
+        "global_profile_binding",
+        "agent_configuration",
+        "profile_capability_snapshot",
+        "app_server",
+        "dolgorae",
+        "model",
+        "initial_reasoning_effort",
+        "default_reasoning_effort",
+        "instructions",
+        "controller",
+        "purpose",
+        "parent_ref",
+        "required_capabilities",
+        "thread_id",
+        "fork_provenance",
+        "write_continuation_provenance",
+        "aggregate_binding",
+        "audit",
+        "compatibility",
+        "requested_access",
+        "selected_role",
+        "start_contract"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "workspace_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_id"
+        },
+        "canonical_workspace": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/canonical_workspace"
+        },
+        "workspace_mode": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_mode"
+        },
+        "start_baseline": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/start_baseline"
+        },
+        "created_at": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/created_at"
+        },
+        "initial_access": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/initial_access"
+        },
+        "control_mode": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/control_mode"
+        },
+        "execution_lane": {
+          "const": "dedicated"
+        },
+        "requested_assurance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/requested_assurance"
+        },
+        "achieved_assurance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/achieved_assurance"
+        },
+        "profile": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/profile"
+        },
+        "global_profile_binding": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/global_profile_binding"
+        },
+        "agent_configuration": {
+          "$ref": "#/$defs/agent_configuration"
+        },
+        "profile_capability_snapshot": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/profile_capability_snapshot"
+        },
+        "app_server": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/app_server"
+        },
+        "dolgorae": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/dolgorae"
+        },
+        "model": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/model"
+        },
+        "initial_reasoning_effort": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/initial_reasoning_effort"
+        },
+        "default_reasoning_effort": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/default_reasoning_effort"
+        },
+        "instructions": {
+          "$ref": "#/$defs/instruction_snapshot"
+        },
+        "controller": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/controller"
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/purpose"
+        },
+        "parent_ref": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/parent_ref"
+        },
+        "required_capabilities": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/required_capabilities"
+        },
+        "thread_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/thread_id"
+        },
+        "fork_provenance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/fork_provenance"
+        },
+        "write_continuation_provenance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/write_continuation_provenance"
+        },
+        "aggregate_binding": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/aggregate_binding"
+        },
+        "audit": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/audit"
+        },
+        "compatibility": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/compatibility"
+        },
+        "requested_access": {
+          "enum": [
+            "read-only",
+            "writable"
+          ]
+        },
+        "selected_role": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        },
+        "start_contract": {
+          "const": "caller_workspace/v1"
+        }
+      },
+      "x-invariants": [
+        "global_profile_binding.selected_name equals profile.profile_name and profile_capability_snapshot.profile_name",
+        "global_profile_binding.server_key equals profile.initial_server_key and profile_capability_snapshot.server_key",
+        "recovery uses global_profile_binding and profile without reading profiles.yaml",
+        "all workspace-owned state remains below the workspace identified by workspace_id",
+        "instructions equals agent_configuration.instructions; selected_role equals instructions.role.name",
+        "requested_access is immutable startup selection, independent of effective policy",
+        "successful startup has a durably bound thread and verified selected access; prepared/failed manifests may be threadless"
+      ]
+    },
+    "policy_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy_name",
+        "revision",
+        "approval_policy",
+        "max_active_specialists",
+        "roles"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "policy_name": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/policy_name"
+        },
+        "revision": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/revision"
+        },
+        "approval_policy": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/approval_policy"
+        },
+        "max_active_specialists": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/max_active_specialists"
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/role_policy"
+          }
+        }
+      },
+      "$defs": {
+        "role_source_reference": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+              "maxLength": 64
+            }
+          }
+        },
+        "agent_configuration_input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "selected_profile",
+            "model",
+            "default_effort",
+            "purpose",
+            "purpose_label",
+            "required_capabilities",
+            "execution_lane",
+            "required_assurance",
+            "native_subagent_policy"
+          ],
+          "properties": {
+            "schema_version": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/schema_version"
+            },
+            "selected_profile": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/selected_profile"
+            },
+            "global_profile_binding_sha256": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/global_profile_binding_sha256"
+            },
+            "model": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/model"
+            },
+            "default_effort": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/default_effort"
+            },
+            "purpose": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/purpose"
+            },
+            "purpose_label": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/purpose_label"
+            },
+            "required_capabilities": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/required_capabilities"
+            },
+            "execution_lane": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/execution_lane"
+            },
+            "required_assurance": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/required_assurance"
+            },
+            "native_subagent_policy": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input/properties/native_subagent_policy"
+            }
+          }
+        },
+        "role_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role_ref",
+            "role_source",
+            "agent_configuration",
+            "max_active_instances",
+            "reuse_policy",
+            "allowed_access",
+            "activation_policy",
+            "primary_may_request",
+            "collaboration_source",
+            "collaboration_target",
+            "auto_approve_when_fully_delegated",
+            "display_name",
+            "description"
+          ],
+          "properties": {
+            "role_ref": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/role_ref"
+            },
+            "role_source": {
+              "$ref": "#/$defs/role_source_reference"
+            },
+            "agent_configuration": {
+              "$ref": "#/$defs/agent_configuration_input"
+            },
+            "max_active_instances": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/max_active_instances"
+            },
+            "reuse_policy": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/reuse_policy"
+            },
+            "allowed_access": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "read_only",
+                  "canonical_workspace_write"
+                ]
+              }
+            },
+            "activation_policy": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/activation_policy"
+            },
+            "primary_may_request": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/primary_may_request"
+            },
+            "collaboration_source": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/collaboration_source"
+            },
+            "collaboration_target": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/collaboration_target"
+            },
+            "auto_approve_when_fully_delegated": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/$defs/role_policy/properties/auto_approve_when_fully_delegated"
+            },
+            "display_name": {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 128
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "x-maxUtf8Bytes": 1024
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "role_ref values are unique; role_source selects only a named global Markdown source",
+        "display metadata and execution configuration are input, not Role directives",
+        "isolated_write is not a successor access; legacy sources require explicit migration",
+        "collaboration and fully-delegated admission restrictions remain unchanged"
+      ],
+      "$id": "https://dolgorae.local/schema/specialist-policy-input/v3"
+    },
+    "policy_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy_name",
+        "revision",
+        "approval_policy",
+        "max_active_specialists",
+        "roles"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "policy_name": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/policy_name"
+        },
+        "revision": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/revision"
+        },
+        "approval_policy": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/approval_policy"
+        },
+        "max_active_specialists": {
+          "$ref": "https://dolgorae.local/schema/specialist-policy-input/v2#/properties/max_active_specialists"
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/role_policy"
+          }
+        }
+      },
+      "$defs": {
+        "role_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role_ref",
+            "role_source",
+            "agent_configuration",
+            "max_active_instances",
+            "reuse_policy",
+            "allowed_access",
+            "activation_policy",
+            "primary_may_request",
+            "collaboration_source",
+            "collaboration_target",
+            "auto_approve_when_fully_delegated",
+            "display_name",
+            "description",
+            "role_capture"
+          ],
+          "properties": {
+            "role_ref": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/role_ref"
+            },
+            "role_source": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/role_source"
+            },
+            "agent_configuration": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/agent_configuration"
+            },
+            "max_active_instances": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/max_active_instances"
+            },
+            "reuse_policy": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/reuse_policy"
+            },
+            "allowed_access": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/allowed_access"
+            },
+            "activation_policy": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/activation_policy"
+            },
+            "primary_may_request": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/primary_may_request"
+            },
+            "collaboration_source": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/collaboration_source"
+            },
+            "collaboration_target": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/collaboration_target"
+            },
+            "auto_approve_when_fully_delegated": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/auto_approve_when_fully_delegated"
+            },
+            "display_name": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/display_name"
+            },
+            "description": {
+              "$ref": "https://dolgorae.local/schema/specialist-policy-input/v3#/$defs/role_policy/properties/description"
+            },
+            "role_capture": {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/role_capture"
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "role_source.name equals role_capture.name; raw Role bytes and SHA-256 are captured once at installation",
+        "bootstrap captures common once and resolves current Profile bindings into child Agent Configuration v3 snapshots",
+        "accepted policies and sessions never read live source files during recovery",
+        "role_ref uniqueness and existing activation, collaboration and approval constraints remain enforced"
+      ],
+      "$id": "https://dolgorae.local/schema/specialist-policy/v3"
+    },
+    "caller_start_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "created_at",
+        "workspace_id",
+        "canonical_workspace",
+        "workspace_mode",
+        "start_baseline",
+        "controller",
+        "global_profile_binding",
+        "request",
+        "instructions",
+        "readiness"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "created_at": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/created_at"
+        },
+        "workspace_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_id"
+        },
+        "canonical_workspace": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/canonical_workspace"
+        },
+        "workspace_mode": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_mode"
+        },
+        "start_baseline": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/start_baseline"
+        },
+        "controller": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/controller"
+        },
+        "global_profile_binding": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/global_profile_binding"
+        },
+        "request": {
+          "$ref": "#/$defs/resolved_start_request"
+        },
+        "instructions": {
+          "$ref": "#/$defs/instruction_snapshot"
+        },
+        "readiness": {
+          "$ref": "#/$defs/caller_profile_readiness"
+        },
+        "orchestration": {
+          "$ref": "https://dolgorae.local/schema/accepted-policy-session/v1#/properties/captures"
+        }
+      },
+      "x-invariants": [
+        "The original UUIDv7 Run, canonical workspace and Controller are retained before manifest publication",
+        "Profile and Role selections agree with the immutable binding and exact instruction capture",
+        "No ready server epoch or advertised model default is invented",
+        "Observed readiness, resolved model and effort are immutable; retry identity still preserves the original omitted selections",
+        "A selected specialist_policy binds the complete accepted session capture before physical Primary startup; retries cannot reload authoring files"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "request": {
+                "required": [
+                  "specialist_policy"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "orchestration"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "orchestration"
+              ]
+            }
+          }
+        }
+      ],
+      "x-maxUtf8Bytes": 67108864
+    },
+    "caller_start_reservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation",
+        "idempotency_key",
+        "normalized_identity_sha256",
+        "request_sha256",
+        "run_id",
+        "accepted_intent"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "operation": {
+          "const": "start_run"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "normalized_identity_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "accepted_intent": {
+          "$ref": "#/$defs/caller_start_intent"
+        }
+      },
+      "x-invariants": [
+        "Run identity and key agree with the accepted intent",
+        "request_sha256 binds the resolved request, canonical workspace and Controller independently of live sources; workspace aliases and the validated expected workspace ID are excluded",
+        "normalized_identity_sha256 binds the JCS representation of the full accepted intent",
+        "Caller and legacy reservations share one create-exclusive allocation key namespace; conflicting generations cannot allocate a second Run"
+      ]
+    },
+    "caller_worker_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "run_id",
+        "run_generation",
+        "boot_uuid",
+        "pid",
+        "process_group_id",
+        "session_id",
+        "uid",
+        "start_tvsec",
+        "start_tvusec",
+        "executable_path",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boot_uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_tvsec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_tvusec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1
+        },
+        "executable_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "caller_dedicated_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "process_group_id",
+        "session_id",
+        "uid",
+        "start_tvsec",
+        "start_tvusec",
+        "executable_path",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_group_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_tvsec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_tvusec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1
+        },
+        "executable_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "caller_policy_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_id",
+        "identity",
+        "control_socket_epoch",
+        "dedicated_server_identity",
+        "app_server_socket_identity",
+        "server_key",
+        "server_epoch",
+        "global_profile_binding_sha256",
+        "thread_id",
+        "effective_policy"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.caller-policy-proof/v1"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "identity": {
+          "$ref": "#/$defs/caller_worker_identity"
+        },
+        "control_socket_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dedicated_server_identity": {
+          "$ref": "#/$defs/caller_dedicated_identity"
+        },
+        "app_server_socket_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "device",
+            "inode"
+          ],
+          "properties": {
+            "device": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "inode": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "server_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "server_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "global_profile_binding_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "effective_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "access",
+            "verification",
+            "policy_epoch",
+            "thread_generation",
+            "server_epoch",
+            "writer_generation"
+          ],
+          "properties": {
+            "access": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "verification": {
+              "const": "verified"
+            },
+            "policy_epoch": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "thread_generation": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "server_epoch": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "writer_generation": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "all identities match the current immutable Profile binding, actual runtime and original Thread",
+        "policy equals the durable positively verified policy for the same server and Thread generation",
+        "a writer transition also matches the prepared transaction, holder, Controller and writer generation; legacy acknowledgements are not proof"
+      ]
+    },
+    "caller_profile_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "default_effort",
+        "profile_capability_snapshot"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "default_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "profile_capability_snapshot": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/profile_capability_snapshot"
+        }
+      }
+    },
+    "caller_start_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "accepted_intent_sha256",
+        "global_profile_binding_sha256",
+        "original_thread_id",
+        "run_generation",
+        "effective_policy"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.caller-start-receipt/v1"
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "accepted_intent_sha256": {
+          "$ref": "#/$defs/caller_start_reservation/properties/normalized_identity_sha256"
+        },
+        "global_profile_binding_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "original_thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "run_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "effective_policy": {
+          "$ref": "#/$defs/caller_policy_proof/properties/effective_policy"
+        }
+      },
+      "x-invariants": [
+        "Receipt is created only after positively verified reader startup or the matching Writer commit",
+        "Original policy access agrees with immutable requested_access; later mutable policy does not rewrite this receipt",
+        "Receipt binds the original accepted-intent digest, Run, Thread, generation and Profile binding",
+        "Missing or corrupt receipt is never reconstructed from current Role files or a replacement Run"
+      ]
+    },
+    "caller_native_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_id",
+        "method"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.caller-native-intent/v1"
+        },
+        "operation_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "method": {
+          "enum": [
+            "thread/start",
+            "thread/settings/update"
+          ]
+        }
+      },
+      "x-invariants": [
+        "Fsync before the qualified caller native request; unmatched startup intent never permits a replacement Thread."
+      ]
+    }
+  },
+  "x-policy-contracts": {
+    "input": "#/$defs/policy_input",
+    "snapshot": "#/$defs/policy_snapshot"
+  }
+}

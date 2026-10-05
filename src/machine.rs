@@ -196,6 +196,7 @@ pub(crate) fn registered_errors() -> &'static BTreeMap<String, u8> {
             include_str!("../docs/protocol/dolgorae-error-contract-v1.json"),
             include_str!("../docs/protocol/dolgorae-error-contract-v2.json"),
             include_str!("../docs/protocol/dolgorae-error-contract-v3.json"),
+            include_str!("../docs/protocol/dolgorae-error-contract-v4.json"),
         ] {
             let contract: Value = serde_json::from_str(source).expect("checked error contract");
             for (code, status) in contract["x-exit-status"]

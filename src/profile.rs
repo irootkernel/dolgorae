@@ -2143,9 +2143,11 @@ fn membership_orphan_reason(
         Ok(manifest) => manifest,
         Err(_) => return Some("manifest_malformed"),
     };
-    if manifest.get("schema_version").and_then(Value::as_u64) != Some(2)
-        || manifest.get("run_id").and_then(Value::as_str)
-            != Some(member.run_id.to_string().as_str())
+    if !matches!(
+        manifest.get("schema_version").and_then(Value::as_u64),
+        Some(2 | 3)
+    ) || manifest.get("run_id").and_then(Value::as_str)
+        != Some(member.run_id.to_string().as_str())
         || manifest.get("workspace_id").and_then(Value::as_str)
             != Some(member.workspace_id.as_str())
     {
@@ -8255,6 +8257,97 @@ mod tests {
             "PROFILE_SERVER_BUSY"
         );
         fs::remove_dir_all(support).unwrap();
+    }
+
+    #[test]
+    fn membership_accepts_caller_manifests_without_relaxing_identity_checks() {
+        let root = std::env::temp_dir().join(format!("membership-manifest-{}", Uuid::now_v7()));
+        let key = "a".repeat(64);
+        let member = crate::global_runtime::GlobalMembershipRecord {
+            schema_version: 2,
+            revision: 1,
+            workspace_id: "1".repeat(64),
+            run_id: Uuid::now_v7(),
+            disposition: crate::global_runtime::MembershipDisposition::Active,
+            controller_id: None,
+            worker_generation: None,
+            thread_id: None,
+            connection_id: None,
+            lifecycle: "idle".to_owned(),
+            writer: false,
+            observed_epoch: Some(1),
+            runtime_locator: None,
+            previous_sha256: "0".repeat(64),
+            record_sha256: "1".repeat(64),
+        };
+        let run_root = root
+            .join("workspaces")
+            .join(&member.workspace_id)
+            .join("runs")
+            .join(member.run_id.to_string());
+        secure_dir(&run_root).unwrap();
+        let path = run_root.join("manifest.json");
+        let mut manifest = json!({
+            "schema_version": 2,
+            "run_id": member.run_id,
+            "workspace_id": member.workspace_id,
+            "global_profile_binding": {"schema_version": 2, "server_key": key},
+        });
+        for version in [2, 3] {
+            manifest["schema_version"] = json!(version);
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert_eq!(membership_orphan_reason(&root, &key, &member), None);
+        }
+        for (field, value) in [
+            ("schema_version", json!(4)),
+            ("run_id", json!(Uuid::now_v7())),
+            ("workspace_id", json!("2".repeat(64))),
+        ] {
+            let mut changed = manifest.clone();
+            changed[field] = value;
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert_eq!(
+                membership_orphan_reason(&root, &key, &member),
+                Some("manifest_identity_mismatch")
+            );
+        }
+        for (field, value) in [
+            ("schema_version", json!(3)),
+            ("server_key", json!("b".repeat(64))),
+        ] {
+            let mut changed = manifest.clone();
+            changed["global_profile_binding"][field] = value;
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert_eq!(
+                membership_orphan_reason(&root, &key, &member),
+                Some("profile_binding_mismatch")
+            );
+        }
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("global_profile_binding");
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            membership_orphan_reason(&root, &key, &member),
+            Some("profile_binding_missing")
+        );
+        fs::write(&path, b"not-json").unwrap();
+        assert_eq!(
+            membership_orphan_reason(&root, &key, &member),
+            Some("manifest_malformed")
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            membership_orphan_reason(&root, &key, &member),
+            Some("manifest_missing")
+        );
+        let released = crate::global_runtime::GlobalMembershipRecord {
+            disposition: crate::global_runtime::MembershipDisposition::Released,
+            ..member
+        };
+        assert_eq!(membership_orphan_reason(&root, &key, &released), None);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

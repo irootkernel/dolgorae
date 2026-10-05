@@ -69,16 +69,18 @@ Stopping or replacing the gateway preserves durable Runs and their workers.
 Explicit `init` also installs private common and default Markdown instruction
 templates at `~/.dolgorae/home/AGENTS.md` and
 `~/.dolgorae/roles/{general,reviewer}/AGENTS.md`. Existing files keep their bytes;
-invalid files require correction before initialization succeeds. The
-[successor instruction contract](docs/specs/caller-workspaces-v1.md) awaits
-integrated activation. Current policy commands continue to use the JSON sources
-described below.
+invalid files require correction before initialization succeeds. New Runs use
+the [caller workspace contract](docs/specs/caller-workspaces-v1.md): omitted
+access and Role select `writable` and `general`. Read-only Runs and Reviews use
+the same selected canonical workspace without a copied tree or new worktree.
+A selected Profile must pass the pinned startup, instruction-discovery, and
+reading-boundary requirements for the requested operation.
 
 **Caution: Instruction precedence and Profile guidance**
 
 Codex may also load `AGENTS.override.md` or `AGENTS.md` from the selected
 Profile's `CODEX_HOME`. Dolgorae does not disable this Profile guidance.
-Under the successor contract, Dolgorae's core, common and selected Role
+Dolgorae's core, common and selected Role
 instructions form the developer input; Profile guidance and the current task
 are user input. The developer instructions take precedence over both. Writer
 and Controller permissions remain enforced by Dolgorae and the runtime.
@@ -87,17 +89,34 @@ Keep Profile guidance limited to general preferences. Its contents are outside
 Dolgorae's captured common/Role snapshot, so editing it can affect later runtime
 input even when the captured Role remains unchanged. Automatic project and
 ancestor instruction discovery is controlled separately by the successor
-contract. Integrated successor activation remains pending.
+contract; it does not load project or ancestor AGENTS files as Role sources.
 
-Specialist Roles keep reusable instructions separate from account and execution
-configuration. Put an explicitly named Role source in either
-`~/.dolgorae/roles/<name>.json` for machine-local use or
-`.dolgorae/roles/<name>.json` for project scope. A policy input names each
-source by both scope and name, then supplies the global Profile, model, lane,
-access, approval, reuse, and lifecycle controls separately.
+New Specialist Roles use `~/.dolgorae/roles/<name>/AGENTS.md`. The common
+instructions come from `~/.dolgorae/home/AGENTS.md`. A v3 policy explicitly
+names a Markdown Role and separately supplies its Profile, model, access,
+approval, reuse, and lifecycle controls. Accepted legacy JSON Roles, policies,
+Runs, review results and recovery records keep their original interpretation.
+New JSON policy admission returns `ROLE_MIGRATION_REQUIRED`.
 
-Start each selected Profile Server, then validate the complete resolved
-snapshot before installing it:
+Plan migration before choosing destination names and access:
+
+```sh
+dolgorae instructions migrate --workspace /absolute/project \
+  --file /absolute/legacy-policy-input.json
+dolgorae instructions migrate --workspace /absolute/project \
+  --request-stdin < migration-request.json
+```
+
+The plan enumerates common and project JSON sources, their digests, and name
+collisions. The checked [migration request](docs/protocol/examples/instruction-migration-request.valid.json)
+requires explicit source selection, destination names, publication choices,
+and per-Role access. Applying it creates new Markdown and policy authoring
+files. It never overwrites sources or rewrites accepted state. A late failure
+may leave some new files; inspect them and prepare a new explicit plan before
+retrying.
+
+Validate the policy against the selected Profile definitions before installing
+it. Validation does not start a Profile Server:
 
 ```sh
 dolgorae specialist policy validate \
@@ -109,13 +128,14 @@ dolgorae specialist policy add brokered-review \
 dolgorae specialist policy list --workspace /absolute/project
 ```
 
-Policy installation is create-exclusive. `show` reads one installed immutable
-snapshot; `remove` deletes only the registry entry and does not rewrite an
-existing session snapshot.
+Policy installation is create-exclusive. `show` returns safe metadata and Role
+digests for v3 policies. `remove` deletes only the registry entry; accepted
+sessions retain their original snapshots.
 
 A trusted interactive client starts a Dolgorae-Orchestrated Session by creating
 a protected Controller carrier with `--orchestration-policy <name>` and passing
-that carrier to a parentless, direct-interactive public-v1 `StartRun`. Dolgorae
+that carrier to a parentless, direct-interactive Machine/private start. The
+frozen public-v1 `StartRun` retains its accepted legacy policy contract. Dolgorae
 atomically prepares the session around the preallocated Primary Run identity.
 The Run-scoped `dolgorae_orchestration` dynamic tool connects that Primary to
 the existing orchestration service without editing the shared Profile. The
@@ -127,7 +147,9 @@ These reads do not repair state, start Workers, acknowledge private delivery,
 or expose child Controller authority. For a registered root, `CloseRun` now
 records one durable whole-session intent, stops new Broker admission, retires
 owned Specialists, and reports success only after the root and every known
-owned effect is settled. Compatible repeats and root recovery retain the same
+owned effect is settled. Modern roots use checked Machine `run close`,
+`run recover` and `run reconcile` through that same coordinator; the public-v1
+Run adapter retains its legacy contract. Compatible repeats and root recovery retain the same
 operation identity across gateway restarts; unknown effects remain visible
 for reconciliation instead of being replayed or hidden. Ordinary low-level Run
 close and Primary-scoped pause/interrupt semantics are unchanged.
@@ -144,7 +166,7 @@ release publication, or Personal Alpha readiness.
 
 ## Task-aware completion review
 
-Specialist Review v3 keeps the immutable Reviewer Role separate from the work
+Specialist Review v4 keeps the captured Markdown Reviewer Role separate from the work
 being reviewed. Supply the checked request on non-TTY standard input; workspace
 and Profile selection remain trusted CLI arguments:
 
@@ -153,19 +175,22 @@ dolgorae specialist review \
   --workspace /absolute/project \
   --profile reviewer \
   --request-stdin \
-  --format json < review-request-v3.json
+  --format json < review-request-v4.json
 ```
 
-The request names the target kind that Dolgorae captures immutably and includes
+The request selects the caller source directly and includes
 `purpose` (`change` or `completion`), an exact multiline brief, inline contexts
-with provenance, ordered criteria, fixed `structured_review_v3` output, and a
+with provenance, ordered criteria, fixed `structured_review_v4` output, and a
 deadline. Completion review requires at least one criterion. The result reports
 each criterion exactly once with
 evidence and remaining gaps; its overall assessment is Reviewer evidence, not
 automatic business approval. See the checked
-[request example](docs/protocol/examples/specialist-review-v3-request.valid.json)
-and [protocol](docs/protocol/dolgorae-specialist-review-tool-v3.schema.json).
-Legacy v1/v2 review commands and results retain their existing meaning.
+[request example](docs/protocol/examples/specialist-review-v4-request.valid.json)
+and [protocol](docs/protocol/dolgorae-specialist-review-tool-v4.schema.json).
+Candidate evidence carries host-issued read receipts. Native source reads are
+separate context and invalidate the checked review. Accepted v1/v2/v3 results
+and their original recovery operations remain readable; new source captures
+return `SOURCE_ISOLATION_RETIRED`.
 
 To retain access after CLI or response loss, create a private Controller credential
 and retain a UUIDv7 reference before starting the review. Pass both

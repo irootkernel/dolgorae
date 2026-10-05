@@ -1462,6 +1462,7 @@ fn sample_caller_intent() -> CallerStartIntent {
         unreachable!();
     };
     CallerStartIntent {
+        orchestration: None,
         readiness: dolgorae::run::CallerProfileReadiness {
             model: manifest.model.clone(),
             default_effort: manifest.default_reasoning_effort.clone(),

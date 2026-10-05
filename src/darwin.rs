@@ -128,6 +128,79 @@ pub struct ProcessCensusEntry {
     pub zombie: bool,
 }
 
+fn census_entry_from_samples(
+    pid: u32,
+    before: ProcBsdShortInfo,
+    full: Option<BsdProcessIdentity>,
+    after: ProcBsdShortInfo,
+    session_id: libc::pid_t,
+    final_session_id: libc::pid_t,
+) -> Result<ProcessCensusEntry, std::io::Error> {
+    if session_id < 0
+        || before.pid != pid
+        || before.pid != after.pid
+        || before.parent_pid != after.parent_pid
+        || before.uid != after.uid
+        || before.process_group_id != after.process_group_id
+        || final_session_id != session_id
+        || full.is_some_and(|identity| {
+            identity.pid != before.pid
+                || identity.parent_pid != before.parent_pid
+                || identity.uid != before.uid
+                || identity.process_group_id != before.process_group_id
+                || identity.session_id != session_id as u32
+        })
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "process census identity changed",
+        ));
+    }
+    Ok(ProcessCensusEntry {
+        pid,
+        parent_pid: after.parent_pid,
+        uid: after.uid,
+        process_group_id: after.process_group_id,
+        session_id: session_id as u32,
+        birth: full.map(|identity| (identity.start_tvsec, identity.start_tvusec)),
+        zombie: after.status == SZOMB,
+    })
+}
+
+fn census_denied_birth_error(
+    before: ProcBsdShortInfo,
+    after: Result<ProcBsdShortInfo, std::io::Error>,
+    error: std::io::Error,
+) -> std::io::Error {
+    match after {
+        Ok(after)
+            if before.pid != after.pid
+                || before.parent_pid != after.parent_pid
+                || before.uid != after.uid
+                || before.process_group_id != after.process_group_id =>
+        {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "process census identity changed during denied birth lookup",
+            )
+        }
+        Err(absent) if absent.raw_os_error() == Some(libc::ESRCH) => absent,
+        _ => error,
+    }
+}
+
+fn resample_incoherent_census(
+    mut sample: impl FnMut() -> Result<Vec<ProcessCensusEntry>, std::io::Error>,
+) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
+    for _ in 0..2 {
+        match sample() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            result => return result,
+        }
+    }
+    sample()
+}
+
 #[derive(Debug)]
 pub struct ProcessExitWatch {
     queue: OwnedFd,
@@ -626,52 +699,38 @@ impl DarwinSystem {
         };
         let before = read_short()?;
         if before.pid != pid {
-            return Err(std::io::Error::other("process census PID changed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "process census PID changed",
+            ));
         }
         // SAFETY: getsid is a read-only kernel lookup.
         let session_id = unsafe { libc::getsid(pid as libc::pid_t) };
         if session_id < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let birth = if before.uid == self.current_uid() {
-            let full = self.bsd_process_identity(pid)?;
-            if full.pid != before.pid
-                || full.parent_pid != before.parent_pid
-                || full.uid != before.uid
-                || full.process_group_id != before.process_group_id
-                || full.session_id != session_id as u32
-                || full.zombie != (before.status == SZOMB)
-            {
-                return Err(std::io::Error::other("process census identity changed"));
+        let full = if before.uid == self.current_uid() {
+            match self.bsd_process_identity(pid) {
+                Ok(identity) => Some(identity),
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Err(census_denied_birth_error(before, read_short(), error));
+                }
+                Err(error) => return Err(error),
             }
-            Some((full.start_tvsec, full.start_tvusec))
         } else {
             None
         };
         let after = read_short()?;
-        // Scheduling status may change without an identity change.
-        if before.pid != after.pid
-            || before.parent_pid != after.parent_pid
-            || before.uid != after.uid
-            || before.process_group_id != after.process_group_id
-            || (before.status == SZOMB) != (after.status == SZOMB)
-            // SAFETY: this read-only lookup verifies the sampled session.
-            || unsafe { libc::getsid(pid as libc::pid_t) } != session_id
-        {
-            return Err(std::io::Error::other("process census identity changed"));
-        }
-        Ok(ProcessCensusEntry {
-            pid,
-            parent_pid: before.parent_pid,
-            uid: before.uid,
-            process_group_id: before.process_group_id,
-            session_id: session_id as u32,
-            birth,
-            zombie: before.status == SZOMB,
-        })
+        // SAFETY: this read-only lookup verifies the sampled session.
+        let final_session_id = unsafe { libc::getsid(pid as libc::pid_t) };
+        census_entry_from_samples(pid, before, full, after, session_id, final_session_id)
     }
 
     pub fn all_process_identities(self) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
+        resample_incoherent_census(|| self.all_process_identities_once())
+    }
+
+    fn all_process_identities_once(self) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
         let mut capacity = 1_024_usize;
         loop {
             let mut pids = vec![0 as libc::pid_t; capacity];
@@ -1781,6 +1840,203 @@ mod tests {
         // Reading it twice is the same answer: it is a lookup, not a
         // snapshot of mutable process state.
         assert_eq!(DarwinSystem.account_environment().unwrap(), account);
+    }
+
+    #[test]
+    fn census_preserves_identity_across_normal_exit() {
+        let before = ProcBsdShortInfo {
+            pid: 42,
+            parent_pid: 40,
+            process_group_id: 42,
+            uid: 501,
+            // SAFETY: the remaining C integer and character fields accept zero.
+            ..unsafe { std::mem::zeroed() }
+        };
+        let full = BsdProcessIdentity {
+            pid: 42,
+            parent_pid: 40,
+            uid: 501,
+            process_group_id: 42,
+            session_id: 42,
+            start_tvsec: 123,
+            start_tvusec: 456,
+            zombie: false,
+        };
+        let after = ProcBsdShortInfo {
+            status: SZOMB,
+            ..before
+        };
+        for full_zombie in [false, true] {
+            let observed = census_entry_from_samples(
+                42,
+                before,
+                Some(BsdProcessIdentity {
+                    zombie: full_zombie,
+                    ..full
+                }),
+                after,
+                42,
+                42,
+            )
+            .unwrap();
+            assert!(observed.zombie);
+            assert_eq!(observed.birth, Some((123, 456)));
+        }
+        for field in 0..4 {
+            let mut changed = after;
+            match field {
+                0 => changed.pid += 1,
+                1 => changed.parent_pid += 1,
+                2 => changed.uid += 1,
+                _ => changed.process_group_id += 1,
+            }
+            assert!(census_entry_from_samples(42, before, Some(full), changed, 42, 42).is_err());
+        }
+        for field in 0..5 {
+            let mut changed = full;
+            match field {
+                0 => changed.pid += 1,
+                1 => changed.parent_pid += 1,
+                2 => changed.uid += 1,
+                3 => changed.process_group_id += 1,
+                _ => changed.session_id += 1,
+            }
+            assert!(census_entry_from_samples(42, before, Some(changed), after, 42, 42).is_err());
+        }
+        assert!(census_entry_from_samples(43, before, Some(full), after, 42, 42).is_err());
+        assert!(census_entry_from_samples(42, before, Some(full), after, 42, 43).is_err());
+        assert!(census_entry_from_samples(42, before, Some(full), after, -1, -1).is_err());
+        let foreign = census_entry_from_samples(42, before, None, after, 42, 42).unwrap();
+        assert!(foreign.zombie);
+        assert_eq!(foreign.birth, None);
+    }
+
+    #[test]
+    fn census_denied_birth_requires_observed_identity_change_or_absence() {
+        let before = ProcBsdShortInfo {
+            pid: 42,
+            parent_pid: 40,
+            process_group_id: 42,
+            status: 2,
+            command: [0; 16],
+            flags: 0,
+            uid: 501,
+            gid: 20,
+            real_uid: 501,
+            real_gid: 20,
+            saved_uid: 501,
+            saved_gid: 20,
+            reserved: 0,
+        };
+        for code in [libc::EPERM, libc::EACCES] {
+            let denied = || std::io::Error::from_raw_os_error(code);
+            assert_eq!(
+                census_denied_birth_error(before, Ok(before), denied()).raw_os_error(),
+                Some(code)
+            );
+            let mut zombie = before;
+            zombie.status = SZOMB;
+            assert_eq!(
+                census_denied_birth_error(before, Ok(zombie), denied()).raw_os_error(),
+                Some(code)
+            );
+            for field in 0..4 {
+                let mut changed = before;
+                match field {
+                    0 => changed.pid += 1,
+                    1 => changed.parent_pid += 1,
+                    2 => changed.uid = 0,
+                    _ => changed.process_group_id += 1,
+                }
+                assert_eq!(
+                    census_denied_birth_error(before, Ok(changed), denied()).kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            }
+            assert_eq!(
+                census_denied_birth_error(
+                    before,
+                    Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+                    denied(),
+                )
+                .raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            for unavailable in [libc::EPERM, libc::EACCES, libc::EIO] {
+                assert_eq!(
+                    census_denied_birth_error(
+                        before,
+                        Err(std::io::Error::from_raw_os_error(unavailable)),
+                        denied(),
+                    )
+                    .raw_os_error(),
+                    Some(code)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn census_resampling_recovers_coherent_snapshots_and_preserves_refusals() {
+        let own = ProcessCensusEntry {
+            pid: 42,
+            parent_pid: 40,
+            uid: 501,
+            process_group_id: 42,
+            session_id: 42,
+            birth: Some((123, 456)),
+            zombie: false,
+        };
+        let mut calls = 0;
+        let recovered = resample_incoherent_census(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "incoherent kernel sample",
+                ))
+            } else {
+                Ok(vec![own])
+            }
+        })
+        .unwrap();
+        assert_eq!(recovered, vec![own]);
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let refused = resample_incoherent_census(|| {
+            calls += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("incoherent sample {calls}"),
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 3);
+        assert_eq!(refused.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(refused.to_string(), "incoherent sample 3");
+
+        for code in [libc::EPERM, libc::EACCES, libc::EIO] {
+            let mut calls = 0;
+            let refused = resample_incoherent_census(|| {
+                calls += 1;
+                Err(std::io::Error::from_raw_os_error(code))
+            })
+            .unwrap_err();
+            assert_eq!(calls, 1);
+            assert_eq!(refused.raw_os_error(), Some(code));
+        }
+        let mut calls = 0;
+        let refused = resample_incoherent_census(|| {
+            calls += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short kernel reply",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(refused.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

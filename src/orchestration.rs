@@ -10,9 +10,8 @@ pub use crate::primary_tool::PrimaryCallContext;
 use crate::run::{
     AggregateBinding, AggregateMemberKind, ControllerBinding, controller_capability_digest,
 };
-use crate::specialist_policy::{
-    InstalledSpecialistPolicy, InstalledSpecialistRole, validate_installed_policy,
-};
+use crate::session_policy::{SessionPolicySnapshot, SessionRoleSnapshot};
+use crate::specialist_policy::InstalledSpecialistPolicy;
 use crate::workspace::{
     SystemWorkspacePlatform, atomic_create, create_directory, open_relative_nofollow,
     sync_directory, verify_secure_directory,
@@ -100,7 +99,7 @@ pub struct OrchestratedSessionSnapshot {
     pub status: String,
     pub composition_state: String,
     pub approval_policy: String,
-    pub specialist_policy: InstalledSpecialistPolicy,
+    pub specialist_policy: SessionPolicySnapshot,
     pub specialist_policy_sha256: String,
     pub revision: u64,
     pub members: Vec<BrokeredMemberSnapshot>,
@@ -144,7 +143,7 @@ pub struct BrokeredMemberSnapshot {
     pub run_id: Uuid,
     pub parent_run_id: Uuid,
     pub role_ref: String,
-    pub role_snapshot: InstalledSpecialistRole,
+    pub role_snapshot: SessionRoleSnapshot,
     pub role_snapshot_sha256: String,
     pub agent_configuration: crate::run::AgentConfigurationSnapshot,
     pub agent_configuration_sha256: String,
@@ -670,7 +669,7 @@ pub struct BrokeredRunPlan {
     pub session_id: Uuid,
     pub run_id: Uuid,
     pub aggregate_binding: AggregateBinding,
-    pub role: InstalledSpecialistRole,
+    pub role: SessionRoleSnapshot,
     pub requested_access: String,
     pub first_publication: bool,
 }
@@ -938,6 +937,8 @@ impl<A: OrchestrationAdapter> PrimaryOrchestrationService<'_, A> {
                 blocking,
                 deadline_seconds,
             } => {
+                crate::workspace::SourceIsolationContract::CallerWorkspace
+                    .admit_access(&execution_intent)?;
                 let run_id = self.store.resolve_target(context.session_id, &target)?;
                 let request = AssignSpecialistTask {
                     specialist_run_id: run_id,
@@ -1394,14 +1395,14 @@ impl OrchestrationStore {
                 |row| row.get(0),
             )
             .map_err(|_| session_not_found(session_id))?;
-        let policy: InstalledSpecialistPolicy = serde_json::from_str(&policy_json)
+        let policy: SessionPolicySnapshot = serde_json::from_str(&policy_json)
             .map_err(|_| integrity("session policy snapshot is invalid"))?;
-        crate::specialist_policy::validate_live_provider_policy(&policy).map_err(|_| {
+        policy.validate_live(&self.state_root).map_err(|_| {
             MachineError::new(
                 "LIVE_POLICY_UNSUPPORTED",
                 "the immutable Specialist Policy is outside the live provider slice",
                 false,
-                serde_json::json!({"session_id":session_id,"policy_name":policy.policy_name}),
+                serde_json::json!({"session_id":session_id,"policy_name":policy.policy_name()}),
             )
         })
     }
@@ -1414,10 +1415,46 @@ impl OrchestrationStore {
         request_sha256: &str,
         policy: &InstalledSpecialistPolicy,
     ) -> Result<OrchestratedSessionSnapshot, MachineError> {
+        self.prepare_session_snapshot(
+            workspace_id,
+            root_run_id,
+            idempotency_key,
+            request_sha256,
+            &SessionPolicySnapshot::Legacy(policy.clone()),
+        )
+    }
+
+    pub(crate) fn prepare_caller_session(
+        &mut self,
+        accepted: &AcceptedPolicySessionSnapshot,
+    ) -> Result<OrchestratedSessionSnapshot, MachineError> {
+        let retained = self.accepted_policy_session(accepted.session_id)?;
+        if &retained != accepted {
+            return Err(integrity(
+                "session activation differs from accepted captures",
+            ));
+        }
+        self.prepare_session_snapshot(
+            accepted.captures.workspace_id(),
+            accepted.root_run_id,
+            &accepted.idempotency_key,
+            &accepted.request_sha256,
+            &SessionPolicySnapshot::Caller(accepted.captures.clone()),
+        )
+    }
+
+    fn prepare_session_snapshot(
+        &mut self,
+        workspace_id: &str,
+        root_run_id: Uuid,
+        idempotency_key: &str,
+        request_sha256: &str,
+        policy: &SessionPolicySnapshot,
+    ) -> Result<OrchestratedSessionSnapshot, MachineError> {
         checked(workspace_id, 256, "workspace_id")?;
         checked(idempotency_key, 256, "idempotency_key")?;
         digest(request_sha256, "request_sha256")?;
-        validate_installed_policy(policy)?;
+        policy.validate(&self.state_root)?;
         let policy_sha256 = policy.digest()?;
         if let Some((session, request)) = self
             .connection
@@ -1433,7 +1470,15 @@ impl OrchestrationStore {
             if session != root_run_id.to_string() || request != request_sha256 {
                 return Err(idempotency_conflict(idempotency_key));
             }
-            return self.session(root_run_id);
+            let retained = self.session(root_run_id)?;
+            if matches!(policy, SessionPolicySnapshot::Caller(_))
+                && retained.specialist_policy != *policy
+            {
+                return Err(integrity(
+                    "session activation differs from accepted captures",
+                ));
+            }
+            return Ok(retained);
         }
         self.faults
             .check(OrchestrationBarrier::BeforeSessionCommit)?;
@@ -1462,7 +1507,10 @@ impl OrchestrationStore {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        if external_membership != 0 || brokered_membership != 0 || accepted_capture != 0 {
+        if external_membership != 0
+            || brokered_membership != 0
+            || accepted_capture != i64::from(matches!(policy, SessionPolicySnapshot::Caller(_)))
+        {
             return Err(session_conflict(
                 root_run_id,
                 "Run already belongs to another aggregate",
@@ -1478,7 +1526,7 @@ impl OrchestrationStore {
                     root_run_id.to_string(),
                     operation_id.to_string(),
                     workspace_id,
-                    policy.approval_policy,
+                    policy.approval_policy(),
                     policy_json,
                     policy_sha256,
                     now
@@ -1669,10 +1717,11 @@ impl OrchestrationStore {
         {
             return Err(integrity("session identity or lifecycle is invalid"));
         }
-        let policy: InstalledSpecialistPolicy = serde_json::from_str(&row.5).map_err(internal)?;
-        validate_installed_policy(&policy)
+        let policy: SessionPolicySnapshot = serde_json::from_str(&row.5).map_err(internal)?;
+        policy
+            .validate(&self.state_root)
             .map_err(|_| integrity("session policy snapshot contract is invalid"))?;
-        if policy.digest()? != row.6 || policy.approval_policy != row.4 {
+        if policy.digest()? != row.6 || policy.approval_policy() != row.4 {
             return Err(integrity("session policy snapshot digest is invalid"));
         }
         let members = self.members(session_id)?;
@@ -1681,11 +1730,11 @@ impl OrchestrationStore {
                 .role(&member.role_ref)
                 .map_err(|_| integrity("member role is absent from the session policy"))?;
             if member.parent_run_id != root_run_id
-                || &member.role_snapshot != role
-                || member.role_snapshot_sha256 != digest_value(role)?
-                || member.agent_configuration != role.agent_configuration
+                || member.role_snapshot != role
+                || member.role_snapshot_sha256 != digest_value(&role)?
+                || member.agent_configuration != *role.agent_configuration()
                 || member.agent_configuration_sha256
-                    != crate::run::agent_configuration_digest(&role.agent_configuration)
+                    != crate::run::agent_configuration_digest(role.agent_configuration())
                         .map_err(internal)?
             {
                 return Err(integrity(
@@ -1762,11 +1811,12 @@ impl OrchestrationStore {
         {
             return Err(integrity("session observation identity is invalid"));
         }
-        let policy: InstalledSpecialistPolicy =
+        let policy: SessionPolicySnapshot =
             serde_json::from_str(&row.4).map_err(|_| integrity("session policy is invalid"))?;
-        validate_installed_policy(&policy)
+        policy
+            .validate(&self.state_root)
             .map_err(|_| integrity("session policy snapshot contract is invalid"))?;
-        if policy.digest()? != row.5 || policy.approval_policy != row.3 {
+        if policy.digest()? != row.5 || policy.approval_policy() != row.3 {
             return Err(integrity("session policy snapshot digest is invalid"));
         }
         let count = |sql: &str| -> Result<u64, MachineError> {
@@ -1860,8 +1910,8 @@ impl OrchestrationStore {
             }
             .to_owned(),
             approval_policy: row.3,
-            specialist_policy_name: policy.policy_name,
-            specialist_policy_revision: policy.revision,
+            specialist_policy_name: policy.policy_name().to_owned(),
+            specialist_policy_revision: policy.revision(),
             specialist_policy_sha256: row.5,
             aggregate_revision: row.6,
             nonretired_member_count,
@@ -2027,7 +2077,7 @@ impl OrchestrationStore {
             context,
             request,
             adapter,
-            crate::workspace::SourceIsolationContract::LegacyBeforeCutover,
+            crate::workspace::SourceIsolationContract::CallerWorkspace,
         )
     }
 
@@ -2043,7 +2093,8 @@ impl OrchestrationStore {
         source_contract.admit_access(&request.requested_access)?;
         let session = self.authorize_primary(context)?;
         let role = session.specialist_policy.role(&request.role_ref)?.clone();
-        if !role.primary_may_request || !role.allowed_access.contains(&request.requested_access) {
+        if !role.primary_may_request() || !role.allowed_access().contains(&request.requested_access)
+        {
             return Err(policy_denied(
                 &request.role_ref,
                 "Role or requested access is not allowed",
@@ -2109,12 +2160,12 @@ impl OrchestrationStore {
         }
         let role_snapshot_sha256 = digest_value(&role)?;
         let agent_configuration_sha256 =
-            crate::run::agent_configuration_digest(&role.agent_configuration).map_err(internal)?;
+            crate::run::agent_configuration_digest(role.agent_configuration()).map_err(internal)?;
         let mut reusable = session
             .members
             .iter()
             .filter(|member| {
-                role.reuse_policy != "never"
+                role.reuse_policy() != "never"
                     && member.role_ref == request.role_ref
                     && member.role_snapshot_sha256 == role_snapshot_sha256
                     && member.agent_configuration_sha256 == agent_configuration_sha256
@@ -2129,7 +2180,7 @@ impl OrchestrationStore {
                 ))
             })
             .collect::<Result<Vec<_>, MachineError>>()?;
-        if role.reuse_policy == "reuse_idle_compatible" {
+        if role.reuse_policy() == "reuse_idle_compatible" {
             reusable.retain(|(pending, _, _)| *pending == 0);
         }
         reusable.sort_by_key(|(pending, run_id, _)| (*pending != 0, *pending, *run_id));
@@ -2153,8 +2204,8 @@ impl OrchestrationStore {
                 member.membership_state != "retired" && member.role_ref == request.role_ref
             })
             .count();
-        if active_total >= session.specialist_policy.max_active_specialists as usize
-            || active_role >= role.max_active_instances as usize
+        if active_total >= session.specialist_policy.max_active_specialists() as usize
+            || active_role >= role.max_active_instances() as usize
         {
             return Err(policy_denied(
                 &request.role_ref,
@@ -2162,7 +2213,7 @@ impl OrchestrationStore {
             ));
         }
         let automatic = session.approval_policy == "fully_delegated";
-        if automatic && !role.auto_approve_when_fully_delegated {
+        if automatic && !role.auto_approve_when_fully_delegated() {
             return Err(policy_denied(
                 &request.role_ref,
                 "Role is not eligible for fully delegated approval",
@@ -2514,9 +2565,10 @@ impl OrchestrationStore {
                 |row| row.get(0),
             )
             .map_err(|_| session_not_found(session_id))?;
-        let policy: InstalledSpecialistPolicy = serde_json::from_str(&policy_json)
+        let policy: SessionPolicySnapshot = serde_json::from_str(&policy_json)
             .map_err(|_| integrity("session policy snapshot is invalid"))?;
-        validate_installed_policy(&policy)
+        policy
+            .validate(&self.state_root)
             .map_err(|_| integrity("session policy snapshot contract is invalid"))?;
         let mut statement = self
             .connection
@@ -2598,7 +2650,7 @@ impl OrchestrationStore {
         &mut self,
         context: &PrimaryCallContext,
         request: &RequestSpecialist,
-        role: &InstalledSpecialistRole,
+        role: &SessionRoleSnapshot,
         operation_id: Uuid,
         approval_request_id: Option<Uuid>,
         request_sha256: &str,
@@ -2668,7 +2720,7 @@ impl OrchestrationStore {
     fn publish_reserved_specialist<A: OrchestrationAdapter>(
         &mut self,
         context: &PrimaryCallContext,
-        role: &InstalledSpecialistRole,
+        role: &SessionRoleSnapshot,
         operation_id: Uuid,
         run_id: Uuid,
         credential: &BrokerCredential,
@@ -2709,7 +2761,7 @@ impl OrchestrationStore {
         )?;
         transaction.commit().map_err(internal)?;
         let agent_configuration_sha256 =
-            crate::run::agent_configuration_digest(&role.agent_configuration).map_err(internal)?;
+            crate::run::agent_configuration_digest(role.agent_configuration()).map_err(internal)?;
         let member = self.member(context.session_id, run_id)?;
         validate_member_credential(&member, credential)?;
         let plan = BrokeredRunPlan {
@@ -2721,8 +2773,8 @@ impl OrchestrationStore {
                 member_kind: AggregateMemberKind::Specialist,
                 operation_id,
                 policy_sha256: None,
-                role_reference: Some(role.role_ref.clone()),
-                role_snapshot_sha256: Some(digest_value(role)?),
+                role_reference: Some(role.role_ref().to_owned()),
+                role_snapshot_sha256: Some(digest_value(&role)?),
                 agent_configuration_sha256: Some(agent_configuration_sha256),
             },
             role: role.clone(),
@@ -2795,7 +2847,7 @@ impl OrchestrationStore {
     fn recover_reserved_specialist<A: OrchestrationAdapter>(
         &mut self,
         context: &PrimaryCallContext,
-        role: &InstalledSpecialistRole,
+        role: &SessionRoleSnapshot,
         operation_id: Uuid,
         run_id: Uuid,
         credential: &BrokerCredential,
@@ -2812,10 +2864,10 @@ impl OrchestrationStore {
                 member_kind: AggregateMemberKind::Specialist,
                 operation_id,
                 policy_sha256: None,
-                role_reference: Some(role.role_ref.clone()),
-                role_snapshot_sha256: Some(digest_value(role)?),
+                role_reference: Some(role.role_ref().to_owned()),
+                role_snapshot_sha256: Some(digest_value(&role)?),
                 agent_configuration_sha256: Some(
-                    crate::run::agent_configuration_digest(&role.agent_configuration)
+                    crate::run::agent_configuration_digest(role.agent_configuration())
                         .map_err(internal)?,
                 ),
             },
@@ -2945,7 +2997,7 @@ impl OrchestrationStore {
         approval_request_id: Option<Uuid>,
         state: &str,
         request_sha256: &str,
-        role: Option<&InstalledSpecialistRole>,
+        role: Option<&SessionRoleSnapshot>,
         controller: Option<&ControllerBinding>,
     ) -> Result<(), MachineError> {
         let now = self.now_ms()?;
@@ -3005,7 +3057,7 @@ impl OrchestrationStore {
             context,
             request,
             adapter,
-            crate::workspace::SourceIsolationContract::LegacyBeforeCutover,
+            crate::workspace::SourceIsolationContract::CallerWorkspace,
         )
     }
 
@@ -3059,9 +3111,9 @@ impl OrchestrationStore {
                 return Err(specialist_not_member(request.specialist_run_id));
             }
             let role = session.specialist_policy.role(&member.role_ref)?;
-            if role.role_ref != member.role_snapshot.role_ref
+            if role.role_ref() != member.role_snapshot.role_ref()
                 || !member_access_permits(&member.requested_access, &request.requested_access)
-                || !role.allowed_access.contains(&request.requested_access)
+                || !role.allowed_access().contains(&request.requested_access)
             {
                 return Err(policy_denied(
                     &member.role_ref,
@@ -5695,7 +5747,7 @@ fn insert_member(
     transaction: &Transaction<'_>,
     context: &PrimaryCallContext,
     request: &RequestSpecialist,
-    role: &InstalledSpecialistRole,
+    role: &SessionRoleSnapshot,
     operation_id: Uuid,
     run_id: Uuid,
     controller: &ControllerBinding,
@@ -5712,15 +5764,15 @@ fn insert_member(
             params![
                 run_id.to_string(),
                 context.session_id.to_string(),
-                role.role_ref,
-                digest_value(role)?,
-                canonical_string(&role.agent_configuration)?,
-                crate::run::agent_configuration_digest(&role.agent_configuration)
+                role.role_ref(),
+                digest_value(&role)?,
+                canonical_string(role.agent_configuration())?,
+                crate::run::agent_configuration_digest(role.agent_configuration())
                     .map_err(internal)?,
                 canonical_string(controller)?,
                 operation_id.to_string(),
                 context.source_turn_id,
-                role.activation_policy,
+                role.activation_policy(),
                 request.requested_access,
                 now
             ],
@@ -6654,7 +6706,10 @@ mod tests {
         store.mark_primary_intent(run_id).unwrap();
         let ready = store.finish_primary_publication(run_id, Ok(())).unwrap();
         assert_eq!(ready.status, "active");
-        assert_eq!(ready.specialist_policy, original);
+        assert_eq!(
+            ready.specialist_policy,
+            SessionPolicySnapshot::Legacy(original)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6710,6 +6765,80 @@ mod tests {
         );
         assert_eq!(observer.connection.total_changes(), 0);
         drop(observer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_session_activates_retained_roles_and_rejects_source_copies_before_effects() {
+        let root = root();
+        let mut value: Value = serde_json::from_slice(include_bytes!(
+            "../docs/protocol/examples/accepted-policy-session-v1-captured.valid.json"
+        ))
+        .unwrap();
+        let home_root = root.join(".dolgorae");
+        value["captures"]["home_root"] =
+            serde_json::to_value(crate::workspace::LosslessPath::from_path(&home_root)).unwrap();
+        let accepted: AcceptedPolicySessionSnapshot = serde_json::from_value(value).unwrap();
+        let state_root = home_root
+            .join("workspaces")
+            .join(accepted.captures.workspace_id());
+        let mut store = OrchestrationStore::open(&state_root).unwrap();
+        let accepted = store
+            .accept_policy_session(
+                accepted.root_run_id,
+                &accepted.idempotency_key,
+                &accepted.request_sha256,
+                accepted.captures.clone(),
+            )
+            .unwrap();
+        let session = store.prepare_caller_session(&accepted).unwrap();
+        assert_eq!(
+            session.specialist_policy,
+            SessionPolicySnapshot::Caller(accepted.captures.clone())
+        );
+        assert_eq!(store.prepare_caller_session(&accepted).unwrap(), session);
+        let role_ref = &accepted.captures.policy().roles[0].role_ref;
+        let role = session.specialist_policy.role(role_ref).unwrap();
+        assert_eq!(
+            role.agent_configuration(),
+            &accepted
+                .captures
+                .child(role_ref)
+                .unwrap()
+                .clone()
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(role.agent_configuration().schema_version, 3);
+        store.mark_primary_intent(session.session_id).unwrap();
+        store
+            .finish_primary_publication(session.session_id, Ok(()))
+            .unwrap();
+        let mut adapter = FakeAdapter::default();
+        let mut copied = request("isolated_write");
+        copied.role_ref = role_ref.clone();
+        let changes = store.connection.total_changes();
+        assert_eq!(
+            store
+                .request_specialist(&context(session.session_id, "copy"), &copied, &mut adapter)
+                .unwrap_err()
+                .code,
+            "SOURCE_ISOLATION_RETIRED"
+        );
+        assert_eq!(store.connection.total_changes(), changes);
+        assert!(store.members(session.session_id).unwrap().is_empty());
+        drop(store);
+        let mut store = OrchestrationStore::open(&state_root).unwrap();
+        assert_eq!(
+            store
+                .prepare_caller_session(&accepted)
+                .unwrap()
+                .specialist_policy,
+            session.specialist_policy
+        );
+        let mut changed = accepted.clone();
+        changed.request_sha256 = "d".repeat(64);
+        assert!(store.prepare_caller_session(&changed).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7529,6 +7658,29 @@ mod tests {
         );
         assert!(adapter.calls.is_empty());
         assert_eq!(store.session(session.session_id).unwrap(), session);
+        // The production tool also rejects a new copy request in a legacy
+        // session. Reading its old policy cannot revive source materialization.
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            }
+            .execute(
+                &call,
+                ToolRequest::RequestSpecialist {
+                    role_ref: "reviewer".to_owned(),
+                    objective: "Reject new source isolation".to_owned(),
+                    expected_output: vec!["text".to_owned()],
+                    requested_access: "isolated_write".to_owned(),
+                    deadline_seconds: 60,
+                },
+            )
+            .unwrap_err()
+            .code,
+            "SOURCE_ISOLATION_RETIRED"
+        );
+        assert!(adapter.calls.is_empty());
+        assert_eq!(store.session(session.session_id).unwrap(), session);
         let operations: i64 = store
             .connection
             .query_row(
@@ -7545,7 +7697,12 @@ mod tests {
 
         // A retained legacy plan is still guarded at the production effect boundary.
         let published = store
-            .request_specialist(&call, &request("isolated_write"), &mut adapter)
+            .request_specialist_with_source_contract(
+                &call,
+                &request("isolated_write"),
+                &mut adapter,
+                crate::workspace::SourceIsolationContract::LegacyBeforeCutover,
+            )
             .unwrap();
         let plan = &adapter.publication_plans[0];
         let credential = BrokerCredential::load(

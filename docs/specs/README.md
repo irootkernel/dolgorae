@@ -4446,9 +4446,13 @@ at that commit boundary. Unknown spawn, task, child-retirement, root-close, or
 writer effects keep the aggregate in a typed reconciliation state and cannot be
 converted into successful closure. Ordinary low-level and external Run meanings
 are unchanged. Primary pause/interrupt must not be presented as aggregate pause.
-The Machine CLI `run close` refuses an Orchestrated root and directs its
-Controller to public `CloseRun`, which owns the whole-session close record;
-it retains ordinary low-level Run close behavior for other Runs.
+For accepted legacy Orchestrated roots, the Machine CLI `run close` refuses
+the root and directs its Controller to public `CloseRun`. Modern manifest-v3
+roots close through the checked Machine CLI `run close`; `run recover` and
+`run reconcile` resume their retained aggregate close intent. Both entrypoints
+use the same Broker-owned close coordination, admission fence and effect
+reconciliation. The frozen public-v1 adapter continues to reject modern Run
+projections. Other Runs retain their ordinary low-level close behavior.
 A direct-interactive root `StartRun` carrying checked launch metadata
 in its protected Controller carrier is aggregate-aware inside the semantic
 service and creates the Orchestration Session without a new RPC. The

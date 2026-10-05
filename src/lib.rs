@@ -33,6 +33,7 @@ pub mod machine;
 pub mod markdown_policy;
 pub mod mcp_review;
 pub mod mcp_review_server;
+pub mod migration;
 pub(crate) mod mutation_admission;
 pub mod orchestration;
 pub mod paths;
@@ -63,3 +64,5 @@ pub mod writer;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub mod darwin;
+
+pub mod session_policy;

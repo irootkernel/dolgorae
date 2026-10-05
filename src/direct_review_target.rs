@@ -545,6 +545,63 @@ impl DirectTargetReader {
         run_id: Uuid,
         target: DirectTarget,
     ) -> Result<Self, MachineError> {
+        let reader = Self::create_root(state_root, workspace, mode, review_id, run_id, target)?;
+        let runs = state_root.join("direct-review-runs");
+        create_or_verify(&runs)?;
+        publish(
+            &runs.join(format!("{run_id}.json")),
+            &RunReaderBinding {
+                schema: "dolgorae-direct-review-run/v1".to_owned(),
+                review_id,
+                run_id,
+            },
+        )?;
+        Ok(reader)
+    }
+
+    pub(crate) fn create_for_task(
+        state_root: &Path,
+        workspace: &Path,
+        mode: WorkspaceMode,
+        task_id: Uuid,
+        run_id: Uuid,
+        request: &crate::review::ReviewTargetRequest,
+    ) -> Result<Self, MachineError> {
+        let root = state_root.join("direct-reviews").join(task_id.to_string());
+        match fs::symlink_metadata(&root) {
+            Ok(_) => {
+                let reader = Self::open(state_root, task_id, run_id)?;
+                if reader.workspace()? != fs::canonicalize(workspace).map_err(control_error)?
+                    || reader.workspace_mode() != mode
+                    || reader.target().kind != request.kind
+                    || reader.target().requested_revision != request.revision
+                {
+                    return Err(provenance_invalid(task_id));
+                }
+                Ok(reader)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let target = DirectTarget::admit(
+                    workspace,
+                    mode,
+                    &request.kind,
+                    request.revision.as_deref(),
+                    task_id,
+                )?;
+                Self::create_root(state_root, workspace, mode, task_id, run_id, target)
+            }
+            Err(error) => Err(control_error(error)),
+        }
+    }
+
+    fn create_root(
+        state_root: &Path,
+        workspace: &Path,
+        mode: WorkspaceMode,
+        review_id: Uuid,
+        run_id: Uuid,
+        target: DirectTarget,
+    ) -> Result<Self, MachineError> {
         if review_id.get_version_num() != 7 || run_id.get_version_num() != 7 {
             return Err(provenance_invalid(review_id));
         }
@@ -568,16 +625,6 @@ impl DirectTargetReader {
         };
         publish_bounded(&root.join("binding.json"), &binding, MAX_BINDING_BYTES)?;
         publish(&root.join("reader.lock"), &json!({}))?;
-        let runs = state_root.join("direct-review-runs");
-        create_or_verify(&runs)?;
-        publish(
-            &runs.join(format!("{run_id}.json")),
-            &RunReaderBinding {
-                schema: "dolgorae-direct-review-run/v1".to_owned(),
-                review_id,
-                run_id,
-            },
-        )?;
         Ok(Self { root, binding })
     }
 
@@ -1485,6 +1532,78 @@ pub(crate) mod tests {
             fs::remove_dir_all(&self.root).unwrap();
         }
     }
+    #[test]
+    fn reusable_reader_keeps_each_task_target_and_receipts_after_source_changes() {
+        let fixture = Fixture::new(false);
+        fs::write(fixture.source.join("file.txt"), b"first\n").unwrap();
+        let run_id = new_uuid_v7();
+        let first = new_uuid_v7();
+        let target = crate::review::ReviewTargetRequest {
+            kind: "workspace".to_owned(),
+            revision: None,
+        };
+        let reader = DirectTargetReader::create_for_task(
+            &fixture.state,
+            &fixture.source,
+            fixture.mode,
+            first,
+            run_id,
+            &target,
+        )
+        .unwrap();
+        let query = request("current", 6);
+        let original = reader.read("thread", "first-turn", "call", &query).unwrap();
+        let original_sha = reader.target().target_sha256.clone();
+        fs::write(fixture.source.join("file.txt"), b"later\n").unwrap();
+        let second = new_uuid_v7();
+        let later = DirectTargetReader::create_for_task(
+            &fixture.state,
+            &fixture.source,
+            fixture.mode,
+            second,
+            run_id,
+            &target,
+        )
+        .unwrap();
+        assert_ne!(later.target().target_sha256, original_sha);
+        let reopened = DirectTargetReader::create_for_task(
+            &fixture.state,
+            &fixture.source,
+            fixture.mode,
+            first,
+            run_id,
+            &target,
+        )
+        .unwrap();
+        assert_eq!(reopened.target().target_sha256, original_sha);
+        assert_eq!(
+            reopened
+                .replay_read("thread", "first-turn", "call", &query)
+                .unwrap_err()
+                .code,
+            "REVIEW_TARGET_DRIFTED"
+        );
+        assert_eq!(
+            reopened.check_acceptance().unwrap_err().code,
+            "REVIEW_TARGET_DRIFTED"
+        );
+        let receipt = original["receipt"]["receipt_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            later
+                .validate_location(receipt, "file.txt", Some(1), Some(1))
+                .is_err()
+        );
+        assert!(
+            DirectTargetReader::for_run(&fixture.state, run_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     fn request(side: &str, length: u64) -> CandidateReadRequest {
         CandidateReadRequest {
             side: side.to_owned(),

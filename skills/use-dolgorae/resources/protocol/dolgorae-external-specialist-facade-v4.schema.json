@@ -1,0 +1,431 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/external-specialist-facade/v4",
+  "title": "Dolgorae caller-workspace Specialist facade v4",
+  "description": "Successor hire, assignment and direct structured-result variants. Unchanged open, get, await/collect request, cancel, release and close carriers retain v1 shapes. Historical v1/v2/v3 readers remain available.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hire_request"
+    },
+    {
+      "$ref": "#/$defs/assign_request"
+    },
+    {
+      "$ref": "#/$defs/await_result"
+    },
+    {
+      "$ref": "#/$defs/collect_result"
+    }
+  ],
+  "$defs": {
+    "hire_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "engagement_id",
+        "role_ref",
+        "agent_configuration",
+        "objective",
+        "requested_access",
+        "idempotency_key",
+        "schema"
+      ],
+      "properties": {
+        "operation": {
+          "const": "hire_external_specialist"
+        },
+        "engagement_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "role_ref": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/role_ref"
+        },
+        "agent_configuration": {
+          "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration_input"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 65536
+        },
+        "requested_access": {
+          "enum": [
+            "read_only",
+            "canonical_workspace_write"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "schema": {
+          "const": "dolgorae-external-specialist-facade/v4"
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "brief",
+        "contexts",
+        "criteria",
+        "expected_output"
+      ],
+      "properties": {
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 64
+        },
+        "brief": {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/review_request/properties/brief"
+        },
+        "contexts": {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/review_request/properties/contexts"
+        },
+        "criteria": {
+          "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/review_request/properties/criteria"
+        },
+        "expected_output": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "expected_output": {
+                "const": "structured_review_v4"
+              }
+            },
+            "required": [
+              "expected_output"
+            ]
+          },
+          "then": {
+            "properties": {
+              "purpose": {
+                "enum": [
+                  "change",
+                  "completion"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "expected_output": {
+                "const": "structured_review_v4"
+              },
+              "purpose": {
+                "const": "completion"
+              }
+            },
+            "required": [
+              "expected_output",
+              "purpose"
+            ]
+          },
+          "then": {
+            "properties": {
+              "criteria": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "assign_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation",
+        "engagement_id",
+        "specialist_run_id",
+        "external_request_ref",
+        "task",
+        "execution_intent",
+        "deadline_seconds",
+        "idempotency_key"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae-external-specialist-facade/v4"
+        },
+        "operation": {
+          "const": "assign_external_specialist_task"
+        },
+        "engagement_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "specialist_run_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "external_request_ref": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/opaque_ref"
+        },
+        "task": {
+          "$ref": "#/$defs/task"
+        },
+        "execution_intent": {
+          "enum": [
+            "read_only",
+            "canonical_workspace_write"
+          ]
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 256
+        },
+        "target": {
+          "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/selection"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task": {
+                "properties": {
+                  "expected_output": {
+                    "const": "structured_review_v4"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "target"
+            ],
+            "properties": {
+              "execution_intent": {
+                "const": "read_only"
+              },
+              "deadline_seconds": {
+                "maximum": 3600
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "target"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "task_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "state",
+        "result_artifact_ref",
+        "result",
+        "safe_error_code",
+        "task_contract",
+        "expected_output"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "completed_not_delivered",
+            "delivered",
+            "failed",
+            "interrupted_unknown",
+            "cancelled",
+            "expired"
+          ]
+        },
+        "result_artifact_ref": {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "safe_error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "task_contract": {
+          "const": "dolgorae-task/v4"
+        },
+        "diagnostic": {
+          "$ref": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+        },
+        "expected_output": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "expected_output": {
+                "const": "structured_review_v4"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/specialist-review-tool/v4#/$defs/verdict"
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "result": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "https://dolgorae.local/schema/artifact/v1#/$defs/final_response"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "await_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "pending",
+        "schema"
+      ],
+      "properties": {
+        "operation": {
+          "const": "await_external_specialist_tasks_result"
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/task_summary"
+              },
+              {
+                "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/structured_task_summary"
+              }
+            ]
+          }
+        },
+        "pending": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/external-specialist-facade/v1#/$defs/uuid7"
+          }
+        },
+        "schema": {
+          "const": "dolgorae-external-specialist-facade/v4"
+        }
+      }
+    },
+    "collect_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "tasks",
+        "next_after_sequence",
+        "schema"
+      ],
+      "properties": {
+        "operation": {
+          "const": "collect_external_specialist_results_result"
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/task_summary"
+              },
+              {
+                "$ref": "https://dolgorae.local/schema/external-specialist-facade/v3#/$defs/structured_task_summary"
+              }
+            ]
+          }
+        },
+        "next_after_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schema": {
+          "const": "dolgorae-external-specialist-facade/v4"
+        }
+      }
+    }
+  },
+  "x-limits": {
+    "maximumRequestBytes": 1048576,
+    "normalization": "decoded JSON values are persisted as JCS without text trimming, Unicode normalization, or line-ending conversion"
+  },
+  "x-invariants": [
+    "aggregate-owner, member Controller and trusted provenance validation remain unchanged",
+    "new hire captures common and explicit named Role; no isolated workspace or implicit source copy",
+    "structured_review_v4 binds direct target and checked receipts; criteria are covered in order",
+    "ordinary tasks preserve accepted task bounds without imposing review criteria",
+    "result retrieval does not grant dispatch, writer or cleanup authority",
+    "mixed result pages preserve each accepted task version; collection includes only durable deliverable results or diagnostics"
+  ]
+}

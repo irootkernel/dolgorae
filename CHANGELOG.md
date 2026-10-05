@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Start Runs in caller-owned workspaces with explicit Markdown Roles, verified
+  access, checked direct review reads, and reusable v4 Reviewer tasks.
+- Migrate legacy JSON Roles and policy inputs through explicit source, name,
+  and access choices while preserving accepted records and recovery contracts.
 - Install private common and default Markdown Role templates during explicit init,
   preserving existing files and rejecting unsafe or invalid instruction sources.
 

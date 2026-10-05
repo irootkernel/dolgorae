@@ -15,6 +15,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 from schema_support import assert_valid, validator
+import accepted_legacy_fixture
 
 MACHINE_SCHEMA = validator(pathlib.Path(__file__).resolve().parents[2] / "docs" / "protocol", "dolgorae-machine-v2.schema.json")
 
@@ -37,7 +38,10 @@ def invoke(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     environment = os.environ.copy()
     environment["HOME"] = str(home)
-    completed = subprocess.run(
+    if accepted_legacy_fixture.creates_historical_record(arguments):
+        completed = accepted_legacy_fixture.prepare(binary, home, arguments, env=environment, timeout=timeout)
+    else:
+        completed = subprocess.run(
         [str(binary), *arguments],
         check=False,
         capture_output=True,

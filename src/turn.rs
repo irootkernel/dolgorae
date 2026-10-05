@@ -1631,6 +1631,7 @@ pub struct TurnCoordinator<S, J, A> {
     record_accepted_user_input: bool,
     foreign_diagnostics: Box<dyn ForeignDiagnostics>,
     primary_tool: Option<PrimaryToolConfig>,
+    candidate_tools: bool,
     candidate_reader: Option<crate::direct_review_target::DirectTargetReader>,
     pending_primary_tools: BTreeMap<String, PendingPrimaryToolCall>,
     caller_runtime: Option<crate::worker::QualifiedCallerRuntime>,
@@ -1659,6 +1660,7 @@ pub struct CoordinatorConfig {
     pub control_mode: String,
     pub record_accepted_user_input: bool,
     pub primary_tool: Option<PrimaryToolConfig>,
+    pub candidate_tools: bool,
     pub candidate_reader: Option<crate::direct_review_target::DirectTargetReader>,
 }
 
@@ -1694,8 +1696,18 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 supported: config.supported_efforts.iter().cloned().collect(),
             });
         }
-        if let Some(reader) = &config.candidate_reader
+        if config.candidate_tools
             && (config.primary_tool.is_some()
+                || config.safety_policy != SessionSafetyPolicy::ReviewerReadOnly
+                || config.sandbox != "read-only"
+                || config.approval_policy != "never"
+                || matches!(config.attach, ThreadAttach::Fork { .. }))
+        {
+            return Err(TurnError::InvalidInput("candidate tool session is invalid"));
+        }
+        if let Some(reader) = &config.candidate_reader
+            && (!config.candidate_tools
+                || config.primary_tool.is_some()
                 || config.safety_policy != SessionSafetyPolicy::ReviewerReadOnly
                 || config.sandbox != "read-only"
                 || config.approval_policy != "never"
@@ -1711,7 +1723,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             ));
         }
         let experimental_api = config.primary_tool.is_some()
-            || config.candidate_reader.is_some()
+            || config.candidate_tools
             || config.safety_policy == SessionSafetyPolicy::CallerWorkspace;
         let initialized = server.request("initialize", serde_json::json!({
             "clientInfo": {"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},
@@ -1766,6 +1778,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             record_accepted_user_input: config.record_accepted_user_input,
             foreign_diagnostics: config.foreign_diagnostics,
             primary_tool: config.primary_tool,
+            candidate_tools: config.candidate_tools,
             candidate_reader: config.candidate_reader,
             pending_primary_tools: BTreeMap::new(),
             caller_runtime: None,
@@ -1824,8 +1837,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         mut runtime: crate::worker::QualifiedCallerRuntime,
     ) -> Result<(), TurnError> {
-        if (self.safety_policy != SessionSafetyPolicy::CallerWorkspace
-            && self.candidate_reader.is_none())
+        if (self.safety_policy != SessionSafetyPolicy::CallerWorkspace && !self.candidate_tools)
             || self.caller_runtime.is_some()
         {
             return Err(TurnError::CorrelationMismatch);
@@ -1847,8 +1859,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     }
 
     pub(crate) fn is_caller_workspace(&self) -> bool {
-        self.safety_policy == SessionSafetyPolicy::CallerWorkspace
-            || self.candidate_reader.is_some()
+        self.safety_policy == SessionSafetyPolicy::CallerWorkspace || self.candidate_tools
     }
 
     fn caller_startup_phase(&mut self, phase: &'static str) {
@@ -1922,7 +1933,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         {
             return Err(TurnError::CorrelationMismatch);
         }
-        if self.candidate_reader.is_some()
+        if self.candidate_tools
             && [
                 "mcp_servers",
                 "apps",
@@ -1980,19 +1991,25 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
     }
 
-    pub(crate) fn complete_caller_runtime_startup(&self) -> Result<(), TurnError> {
+    pub(crate) fn complete_caller_runtime_startup(&mut self) -> Result<(), TurnError> {
         if let Some(runtime) = &self.caller_runtime {
-            runtime
-                .complete_startup_witness()
-                .map_err(|_| TurnError::TurnBusy)?;
+            let mut diagnostic = Value::Null;
+            if let Err(error) = runtime.complete_startup_witness(Some(&mut diagnostic)) {
+                self.caller_startup_failure = Some(serde_json::json!({
+                    "process_proof": diagnostic, "worker_error_code": error.code(),
+                }));
+                return Err(TurnError::TurnBusy);
+            }
         }
         Ok(())
     }
 
     pub(crate) fn caller_policy_proof(
-        &self,
+        &mut self,
         operation_id: Uuid,
     ) -> Result<Option<crate::worker::CallerPolicyProof>, TurnError> {
+        let mut diagnostic = Value::Null;
+        self.caller_startup_phase("policy_proof");
         self.caller_runtime
             .as_ref()
             .map(|runtime| {
@@ -2005,8 +2022,18 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         self.last_effective_policy
                             .clone()
                             .ok_or(TurnError::CorrelationMismatch)?,
+                        self.caller_startup_phase
+                            .is_some()
+                            .then_some(&mut diagnostic),
                     )
-                    .map_err(|_| TurnError::OutcomeUnknown)
+                    .map_err(|error| {
+                        if self.caller_startup_phase.is_some() {
+                            self.caller_startup_failure = Some(serde_json::json!({
+                                "process_proof": diagnostic, "worker_error_code": error.code(),
+                            }));
+                        }
+                        TurnError::OutcomeUnknown
+                    })
             })
             .transpose()
     }
@@ -2015,20 +2042,29 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         operation_id: Uuid,
     ) -> Result<crate::worker::CallerPolicyProof, TurnError> {
-        if operation_id.get_version_num() != 7
-            || self.state != CoordinatorState::Idle
-            || !self.pending.is_empty()
-        {
-            return Err(TurnError::TurnBusy);
+        self.caller_startup_phase = Some("policy_preconditions");
+        self.caller_startup_failure = None;
+        let result = (|| {
+            if operation_id.get_version_num() != 7
+                || self.state != CoordinatorState::Idle
+                || !self.pending.is_empty()
+            {
+                return Err(TurnError::TurnBusy);
+            }
+            let thread_id = self
+                .thread_id
+                .clone()
+                .ok_or(TurnError::CorrelationMismatch)?;
+            self.check_caller_transition_quiescence(&thread_id)?;
+            self.check_caller_process_quiescence()?;
+            self.caller_policy_proof(operation_id)?
+                .ok_or(TurnError::CorrelationMismatch)
+        })();
+        if let Err(error) = &result {
+            self.record_caller_startup_failure(error);
         }
-        let thread_id = self
-            .thread_id
-            .clone()
-            .ok_or(TurnError::CorrelationMismatch)?;
-        self.check_caller_transition_quiescence(&thread_id)?;
-        self.check_caller_process_quiescence()?;
-        self.caller_policy_proof(operation_id)?
-            .ok_or(TurnError::CorrelationMismatch)
+        self.caller_startup_phase = None;
+        result
     }
 
     fn next_effective_policy(
@@ -2273,7 +2309,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let mut startup_intent = false;
         let mut binding_complete = self.thread_id.is_some();
         for (kind, payload) in &records {
-            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            if self.is_caller_workspace()
                 && *kind == AuditKind::TurnIntent
                 && payload.get("schema").and_then(Value::as_str)
                     == Some("dolgorae.caller-native-intent/v1")
@@ -2287,7 +2323,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     .map_err(|error| TurnError::Journal(error.to_string()))?;
                 startup_intent |= intent.method == "thread/start";
             }
-            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            if self.is_caller_workspace()
                 && *kind == AuditKind::TurnIntent
                 && let Some(provisional) = payload.get("provisional_thread_id")
             {
@@ -2337,7 +2373,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let restored = restore_turn_receipt_maps(records)?;
         self.idempotency = restored.accepted;
         self.unresolved_idempotency = restored.unresolved;
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+        if self.is_caller_workspace()
             && !binding_complete
             && (startup_intent || self.thread_id.is_some())
             && self.state != CoordinatorState::OutcomeUnknown
@@ -2413,7 +2449,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// outcome-unknown. Transport and shape failures append nothing, so a
     /// transient read cannot manufacture a lifecycle transition.
     pub fn reconcile_history(&mut self) -> Result<bool, TurnError> {
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+        if self.is_caller_workspace()
             && self.state == CoordinatorState::Idle
             && self.caller_runtime.is_some()
         {
@@ -2436,9 +2472,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Err(TurnError::TurnBusy);
         }
         let thread_id = self.thread_id.clone().ok_or(TurnError::OutcomeUnknown)?;
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
-            && self.recovery_turn_id.is_none()
-        {
+        if self.is_caller_workspace() && self.recovery_turn_id.is_none() {
             // A turnless startup has no accepted Turn to reconcile. Its exact
             // retained Thread must be idle with empty history before recovery
             // can leave uncertainty. This never restores Writer authority.
@@ -2602,9 +2636,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 return Ok(());
             }
         }
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace
-            && self.state == CoordinatorState::OutcomeUnknown
-        {
+        if self.is_caller_workspace() && self.state == CoordinatorState::OutcomeUnknown {
             if self.thread_id.is_none() {
                 return Err(TurnError::OutcomeUnknown);
             }
@@ -2630,7 +2662,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 self.rebind_retained_thread()
             }
             RunLifecycle::OutcomeUnknown | RunLifecycle::ReconciliationRequired
-                if self.safety_policy == SessionSafetyPolicy::CallerWorkspace =>
+                if self.is_caller_workspace() =>
             {
                 if self.thread_id.is_none() {
                     // No durable native identity means no safe attach target.
@@ -2651,7 +2683,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
 
     fn rebind_retained_thread_inner(&mut self) -> Result<(), TurnError> {
         if let Some(previous_thread) = self.thread_id.clone() {
-            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            if self.is_caller_workspace() {
                 self.sandbox = "read-only".to_owned();
                 self.approval_policy = "never".to_owned();
                 self.writer_generation = None;
@@ -2665,7 +2697,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 thread_id: previous_thread.clone(),
             };
             self.thread_id = None;
-            if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            if self.is_caller_workspace() {
                 self.caller_startup_phase = Some("retained_thread_preparation");
                 self.caller_startup_failure = None;
             }
@@ -2848,12 +2880,43 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         Ok(Some(DeliveryResult::Accepted(accepted)))
     }
 
+    pub(crate) fn uses_candidate_tools(&self) -> bool {
+        self.candidate_tools
+    }
+
+    pub(crate) fn bind_candidate_reader(
+        &mut self,
+        reader: crate::direct_review_target::DirectTargetReader,
+    ) -> Result<(), TurnError> {
+        if !self.candidate_tools
+            || self.state != CoordinatorState::Idle
+            || self.active_turn_id.is_some()
+            || !self.pending.is_empty()
+            || reader.run_id() != self.run_id
+            || reader
+                .workspace()
+                .map_err(|_| TurnError::CorrelationMismatch)?
+                != self.cwd
+            || self.sandbox != "read-only"
+            || self.approval_policy != "never"
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        self.candidate_reader = Some(reader);
+        Ok(())
+    }
+
     pub fn start_turn(&mut self, request: TurnRequest) -> Result<AcceptedTurn, TurnError> {
         if self.state == CoordinatorState::OutcomeUnknown {
             return Err(TurnError::OutcomeUnknown);
         }
         if let Some(accepted) = self.replay_accepted(&request)? {
             return Ok(accepted);
+        }
+        if self.candidate_tools && (self.candidate_reader.is_none() || request.write) {
+            return Err(TurnError::InvalidInput(
+                "Reviewer requires a bound read-only target",
+            ));
         }
         let effort = request
             .effort
@@ -3105,7 +3168,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         {
             params["dynamicTools"] = Value::Array(vec![primary_tool.contract.tool_spec()]);
         }
-        if self.candidate_reader.is_some() {
+        if self.candidate_tools {
             if method == "thread/start" {
                 params["dynamicTools"] =
                     Value::Array(vec![crate::direct_review::candidate_tool_spec()]);
@@ -3144,7 +3207,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 &sandbox,
                 &approval_policy,
             )?;
-            if self.candidate_reader.is_some()
+            if self.candidate_tools
                 && result.pointer("/thread/parentThreadId") != Some(&Value::Null)
             {
                 return Err(TurnError::CorrelationMismatch);
@@ -3276,7 +3339,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if self.state != CoordinatorState::Threadless {
             return Err(TurnError::TurnBusy);
         }
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+        if self.is_caller_workspace() {
             self.caller_startup_phase = Some("thread_preparation");
             self.caller_startup_failure = None;
         }
@@ -3360,7 +3423,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         // no-op. Once that Thread exists, refusal of its persistence barrier
         // must still quarantine the partially completed startup.
         if matches!(error, TurnError::AppServerRejected { .. })
-            && !(self.safety_policy == SessionSafetyPolicy::CallerWorkspace
+            && !(self.is_caller_workspace()
                 && self.thread_id.is_some()
                 && self.thread_generation == 0)
         {
@@ -3624,7 +3687,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Ok(());
         }
         if method == "item/tool/call" {
-            if self.candidate_reader.is_some() {
+            if self.candidate_tools {
                 return self.open_candidate_tool(request_id, params);
             }
             return self.open_primary_tool(request_id, params);
@@ -4489,7 +4552,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.active_operation_id = None;
         self.pending.clear();
         self.state = CoordinatorState::Idle;
-        let final_response = if self.candidate_reader.is_some() {
+        let final_response = if self.candidate_tools {
             let items = self.streamed_items(&thread_id, &turn_id)?;
             let response = self.extract_final_response(&thread_id, &turn_id, &items)?;
             self.candidate_reader
@@ -4529,7 +4592,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// items are authoritative when present, and reading history again would
     /// cost a round trip for an answer already in hand.
     fn streamed_items(&mut self, thread_id: &str, turn_id: &str) -> Result<Vec<Value>, TurnError> {
-        let mut sink = if self.candidate_reader.is_some() {
+        let mut sink = if self.candidate_tools {
             ThreadTurnSink::new_bound(thread_id, turn_id)
         } else {
             ThreadTurnSink::new(turn_id)
@@ -5370,6 +5433,7 @@ mod tests {
                 control_mode: "direct_interactive".to_owned(),
                 record_accepted_user_input: true,
                 primary_tool,
+                candidate_tools: false,
                 candidate_reader: None,
             },
             "/tmp/codex-home",
@@ -5425,11 +5489,68 @@ mod tests {
                 control_mode: "direct_interactive".to_owned(),
                 record_accepted_user_input: false,
                 primary_tool: None,
+                candidate_tools: true,
                 candidate_reader: Some(reader),
             },
             "/tmp/codex-home",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn reusable_reviewer_installs_boundary_before_target_and_binds_only_while_idle() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(false);
+        std::fs::write(fixture.source.join("file.txt"), b"candidate\n").unwrap();
+        let reader = fixture.reader(fixture.admit("workspace", None));
+        let run_id = reader.run_id();
+        let review_id = reader.review_id();
+        let mut coordinator = direct_coordinator(reader);
+        coordinator.candidate_reader = None;
+        assert!(
+            coordinator
+                .start_turn(request("unbound", DeliveryMode::Submit))
+                .is_err()
+        );
+        assert!(
+            !coordinator
+                .server
+                .calls
+                .iter()
+                .any(|(method, _)| method == "turn/start")
+        );
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        assert_eq!(coordinator.state, CoordinatorState::Idle);
+        assert!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .any(|(method, params)| method == "thread/start"
+                    && params["dynamicTools"][0]["name"]
+                        == crate::direct_review::CANDIDATE_TOOL_NAME)
+        );
+        let reader = crate::direct_review_target::DirectTargetReader::open(
+            &fixture.state,
+            review_id,
+            run_id,
+        )
+        .unwrap();
+        coordinator.bind_candidate_reader(reader).unwrap();
+        coordinator
+            .start_turn(request("bound", DeliveryMode::Submit))
+            .unwrap();
+        let reader = crate::direct_review_target::DirectTargetReader::open(
+            &fixture.state,
+            review_id,
+            run_id,
+        )
+        .unwrap();
+        assert!(coordinator.bind_candidate_reader(reader).is_err());
+        assert!(
+            coordinator
+                .set_writer_access(true, 1, Uuid::now_v7())
+                .is_err()
+        );
     }
 
     fn candidate_call(id: u64, thread: &str) -> Value {
@@ -6072,6 +6193,81 @@ mod tests {
     }
 
     #[test]
+    fn caller_policy_verification_retains_the_refusal_without_retrying_or_starting_a_turn() {
+        for (case, phase, kind) in [
+            ("loaded_root", "loaded_root_before_status", "TurnBusy"),
+            ("read_transport", "thread_status_readback", "Transport"),
+            ("proof", "policy_proof", "CorrelationMismatch"),
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+            let journal_len = coordinator.journal.entries.len();
+            let calls = coordinator.server.calls.len();
+            let loaded = serde_json::json!({"data":["caller-thread"],"nextCursor":null});
+            match case {
+                "loaded_root" => coordinator.server.replies.push_back(Ok(
+                    serde_json::json!({"data":["untrusted-provider-content"],"nextCursor":null}),
+                )),
+                "read_transport" => {
+                    coordinator.server.replies.push_back(Ok(loaded));
+                    coordinator
+                        .server
+                        .replies
+                        .push_back(Err(TurnError::transport(
+                            TransportStage::Read,
+                            "untrusted-provider-content",
+                        )));
+                }
+                "proof" => {
+                    coordinator.server.replies.push_back(Ok(loaded.clone()));
+                    coordinator.server.replies.push_back(Ok(serde_json::json!({
+                        "thread":{"id":"caller-thread","parentThreadId":null,
+                            "status":{"type":"idle"}},
+                    })));
+                    coordinator.server.replies.push_back(Ok(loaded));
+                }
+                _ => unreachable!(),
+            }
+            let error = coordinator
+                .verify_caller_policy(Uuid::now_v7())
+                .unwrap_err();
+            assert_eq!(error.diagnostic_kind(), kind, "{case}");
+            let diagnostic = coordinator.caller_startup_failure().unwrap();
+            assert_eq!(diagnostic["substage"], phase, "{case}");
+            assert_eq!(diagnostic["original_error"]["kind"], kind, "{case}");
+            assert!(
+                !diagnostic
+                    .to_string()
+                    .contains("untrusted-provider-content")
+            );
+            if case == "read_transport" {
+                assert_eq!(diagnostic["original_error"]["transport_stage"], "read");
+            }
+            assert!(coordinator.caller_startup_phase.is_none());
+            assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+            assert_eq!(coordinator.journal.entries.len(), journal_len);
+            assert_eq!(
+                coordinator.server.calls.len() - calls,
+                if case == "loaded_root" {
+                    1
+                } else if case == "read_transport" {
+                    2
+                } else {
+                    3
+                }
+            );
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        }
+    }
+
+    #[test]
     fn caller_connection_enables_settings_api_without_adding_dynamic_tools() {
         let mut caller = caller_coordinator();
         assert!(caller.server.experimental_api);
@@ -6203,6 +6399,65 @@ mod tests {
                     .iter()
                     .any(|(method, _)| matches!(method.as_str(), "thread/start" | "turn/start"))
             );
+        }
+    }
+
+    #[test]
+    fn candidate_reviewer_crash_prefix_never_creates_a_replacement_thread_or_turn() {
+        for lifecycle in [RunLifecycle::Idle, RunLifecycle::OutcomeUnknown] {
+            for provisional in [false, true] {
+                let mut reviewer = caller_coordinator();
+                reviewer.safety_policy = SessionSafetyPolicy::ReviewerReadOnly;
+                reviewer.candidate_tools = true;
+                reviewer.server.replies.clear();
+                reviewer.restore_durable_state(lifecycle, None, None, None);
+                let mut records = vec![(
+                    AuditKind::TurnIntent,
+                    serde_json::json!({
+                        "schema":"dolgorae.caller-native-intent/v1", "operation_id":Uuid::now_v7(),
+                        "method":"thread/start",
+                    }),
+                )];
+                if provisional {
+                    records.push((
+                        AuditKind::TurnIntent,
+                        serde_json::json!({
+                            "provisional_thread_id":"caller-thread",
+                        }),
+                    ));
+                    reviewer.server.replies.push_back(Ok(serde_json::json!({
+                        "thread":{"id":"caller-thread","turns":[],"parentThreadId":null},
+                        "model":"gpt-5","cwd":"/tmp/workspace","approvalPolicy":"never",
+                        "sandbox":turn_sandbox("read-only",Path::new("/tmp/workspace")),
+                    })));
+                }
+                reviewer.restore_turn_receipts(records).unwrap();
+                assert_eq!(reviewer.state(), &CoordinatorState::OutcomeUnknown);
+                reviewer.sandbox = "workspace-write".to_owned();
+                reviewer.writer_generation = Some(7);
+                let connected = reviewer.complete_connection_startup(lifecycle);
+                assert_eq!(connected.is_ok(), provisional);
+                assert_eq!(reviewer.state(), &CoordinatorState::OutcomeUnknown);
+                assert_eq!(reviewer.thread_id(), provisional.then_some("caller-thread"));
+                if provisional {
+                    assert!(reviewer.writer_generation.is_none());
+                    let (method, params) = reviewer.server.calls.last().unwrap();
+                    assert_eq!(method, "thread/resume");
+                    assert_eq!(params["threadId"], "caller-thread");
+                    assert_eq!(params["sandbox"], "read-only");
+                    assert_eq!(params["approvalPolicy"], "never");
+                    prepend_caller_quiescence(&mut reviewer.server);
+                    reviewer.server.replies.push_back(Ok(serde_json::json!({
+                        "thread":{"id":"caller-thread","turns":[]},
+                    })));
+                    assert!(reviewer.reconcile_history().unwrap());
+                    assert_eq!(reviewer.state(), &CoordinatorState::Paused);
+                }
+                assert!(!reviewer.server.calls.iter().any(|(method, _)| matches!(
+                    method.as_str(),
+                    "thread/start" | "turn/start" | "thread/settings/update"
+                )));
+            }
         }
     }
 
@@ -6566,6 +6821,156 @@ mod tests {
                     .any(|(method, _)| method == "turn/start")
             );
         }
+    }
+
+    #[test]
+    fn candidate_reviewer_startup_refusals_retain_diagnostics_and_fence_retry() {
+        for failure in [
+            "settings",
+            "name_transport",
+            "name_refused",
+            "read_transport",
+            "read_refused",
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.safety_policy = SessionSafetyPolicy::ReviewerReadOnly;
+            coordinator.candidate_tools = true;
+            coordinator.server.replies[0].as_mut().unwrap()["thread"]["parentThreadId"] =
+                Value::Null;
+            match failure {
+                "settings" => {
+                    coordinator.server.replies[0].as_mut().unwrap()["cwd"] =
+                        serde_json::json!("/other-workspace");
+                }
+                "name_transport" | "read_transport" => {
+                    let index = if failure.starts_with("name_") { 1 } else { 2 };
+                    coordinator.server.replies[index] = Err(TurnError::transport(
+                        TransportStage::Read,
+                        "untrusted native refusal prose",
+                    ));
+                }
+                "name_refused" | "read_refused" => {
+                    let index = if failure.starts_with("name_") { 1 } else { 2 };
+                    coordinator.server.replies[index] = Err(TurnError::AppServerRejected {
+                        code: -32600,
+                        message: "untrusted native refusal prose".to_owned(),
+                    });
+                }
+                _ => unreachable!(),
+            }
+            let error = coordinator.initialize_thread(Uuid::now_v7()).unwrap_err();
+            let diagnostic = coordinator.caller_startup_failure().unwrap().clone();
+            assert_eq!(
+                diagnostic["substage"],
+                if failure == "settings" {
+                    "thread_settings"
+                } else if failure.starts_with("name_") {
+                    "thread/name/set"
+                } else {
+                    "thread_persistence_readback"
+                },
+                "{failure}"
+            );
+            assert_eq!(
+                diagnostic["original_error"]["kind"],
+                if failure == "settings" {
+                    "CorrelationMismatch"
+                } else if failure.ends_with("transport") {
+                    "Transport"
+                } else {
+                    "AppServerRejected"
+                },
+                "{failure}"
+            );
+            if failure.ends_with("transport") {
+                assert_eq!(diagnostic["original_error"]["transport_stage"], "read");
+            } else if failure.ends_with("refused") {
+                assert_eq!(diagnostic["original_error"]["rpc_code"], -32600);
+            }
+            assert!(
+                !diagnostic
+                    .to_string()
+                    .contains("untrusted native refusal prose")
+            );
+            assert_eq!(
+                coordinator.safety_policy,
+                SessionSafetyPolicy::ReviewerReadOnly
+            );
+            assert_eq!(coordinator.thread_id(), Some("caller-thread"));
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            assert!(coordinator.caller_startup_phase.is_none());
+            assert!(
+                coordinator
+                    .journal
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry,
+                JournalEntry::ProvisionalThread { thread_id, .. } if thread_id == "caller-thread"))
+            );
+            assert!(!coordinator.journal.entries.iter().any(|entry| matches!(
+                entry,
+                JournalEntry::ThreadBound { .. } | JournalEntry::TurnAccepted { .. }
+            )));
+            let machine = error.into_machine_error(&TurnFailureContext {
+                run_id: coordinator.run_id,
+                profile: "default".to_owned(),
+                thread_id: coordinator.thread_id().map(str::to_owned),
+                turn_id: None,
+            });
+            assert_eq!(machine.code, "OUTCOME_UNKNOWN", "{failure}");
+            assert!(!machine.retryable, "{failure}");
+            let calls = coordinator.server.calls.len();
+            assert_eq!(
+                coordinator.initialize_thread(Uuid::now_v7()),
+                Err(TurnError::OutcomeUnknown)
+            );
+            assert_eq!(coordinator.server.calls.len(), calls);
+            assert_eq!(coordinator.caller_startup_failure(), Some(&diagnostic));
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_reviewer_retained_startup_keeps_the_original_transport_failure() {
+        let mut coordinator = caller_coordinator();
+        coordinator.safety_policy = SessionSafetyPolicy::ReviewerReadOnly;
+        coordinator.candidate_tools = true;
+        coordinator.server.replies[0].as_mut().unwrap()["thread"]["parentThreadId"] = Value::Null;
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        coordinator
+            .server
+            .replies
+            .push_back(Err(TurnError::transport(
+                TransportStage::Read,
+                "untrusted retained refusal prose",
+            )));
+        assert_eq!(
+            coordinator.rebind_retained_thread(),
+            Err(TurnError::OutcomeUnknown)
+        );
+        let diagnostic = coordinator.caller_startup_failure().unwrap().clone();
+        assert_eq!(diagnostic["substage"], "thread/resume");
+        assert_eq!(diagnostic["original_error"]["kind"], "Transport");
+        assert_eq!(diagnostic["original_error"]["transport_stage"], "read");
+        assert!(
+            !diagnostic
+                .to_string()
+                .contains("untrusted retained refusal prose")
+        );
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        assert!(
+            !coordinator
+                .server
+                .calls
+                .iter()
+                .any(|(method, _)| method == "turn/start")
+        );
     }
 
     #[test]

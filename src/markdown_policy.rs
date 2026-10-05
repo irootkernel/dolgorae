@@ -1,7 +1,4 @@
-//! Internal Markdown Specialist Policy successor support.
-//!
-//! The public policy CLI and legacy readers retain their v2 contracts. These
-//! APIs prepare v3 snapshots for the caller-workspace cutover.
+//! Markdown policy admission and durable legacy/successor registry readers.
 
 use crate::darwin::DarwinSystem;
 use crate::global_runtime::GlobalProfileBinding;
@@ -29,6 +26,87 @@ use uuid::Uuid;
 // Covers 64 maximally sized captures, JSON escaping, and the bounded input
 // metadata. A legacy one-megabyte reader would reject valid v3 snapshots.
 const MAX_POLICY_BYTES: u64 = 32 * 1024 * 1024;
+
+pub fn execute(
+    operation: crate::specialist_policy::PolicyOperation,
+    args: &[OsString],
+) -> Result<serde_json::Value, MachineError> {
+    use crate::specialist_policy::PolicyOperation;
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let registry = MarkdownPolicyRegistry::discover(workspace.as_deref())?;
+    let positional = || crate::specialist_policy::positional(args, 0);
+    match operation {
+        PolicyOperation::List => Ok(serde_json::json!({"items":registry.list_any()?})),
+        PolicyOperation::Show => registry.resolve_any(&positional()?),
+        PolicyOperation::Remove => {
+            registry.remove_any(&positional()?)?;
+            Ok(serde_json::json!({"deleted":true}))
+        }
+        PolicyOperation::Add | PolicyOperation::Validate => {
+            let path = crate::cli::option_path(args, "--file")
+                .map_err(|reason| MachineError::invalid_argument("--file", reason))?
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("--file", "policy input is required")
+                })?;
+            let bytes = read_input(&path)?;
+            let value: serde_json::Value = decode_checked(&bytes)?;
+            if value
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            {
+                return Err(MachineError::new(
+                    "ROLE_MIGRATION_REQUIRED",
+                    "new policies require explicitly migrated Markdown Roles",
+                    false,
+                    serde_json::json!({"schema":"dolgorae-workspace-error-details/v1","required_action":"migrate_role",
+                        "phase":"admission","outcome":"not_dispatched","review_id":null,"run_id":null}),
+                ));
+            }
+            let input: PolicyInput = decode_checked(&bytes)?;
+            if operation == PolicyOperation::Add && input.policy_name != positional()? {
+                return Err(invalid("requested policy name differs from its input"));
+            }
+            let policy = registry.compile(input)?;
+            if operation == PolicyOperation::Add {
+                registry.publish(&policy)?;
+            }
+            policy.observer_value()
+        }
+    }
+}
+
+fn observer_policy(name: &str, bytes: &[u8]) -> Result<serde_json::Value, MachineError> {
+    let value: serde_json::Value = decode_checked(bytes)?;
+    match value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(2) => {
+            let policy: crate::specialist_policy::InstalledSpecialistPolicy =
+                decode_checked(bytes)?;
+            crate::specialist_policy::validate_installed_policy(&policy)?;
+            if policy.policy_name != name {
+                return Err(invalid(
+                    "installed policy identity differs from its filename",
+                ));
+            }
+            Ok(value)
+        }
+        Some(3) => {
+            let policy: PolicySnapshot = decode_checked(bytes)?;
+            policy.validate()?;
+            if policy.policy_name != name {
+                return Err(invalid(
+                    "installed policy identity differs from its filename",
+                ));
+            }
+            policy.observer_value()
+        }
+        _ => Err(invalid("unsupported installed policy schema")),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -281,6 +359,23 @@ pub struct PolicySnapshot {
 }
 
 impl PolicySnapshot {
+    pub fn observer_value(&self) -> Result<serde_json::Value, MachineError> {
+        let input = PolicyInput {
+            schema_version: self.schema_version,
+            policy_name: self.policy_name.clone(),
+            revision: self.revision,
+            approval_policy: self.approval_policy.clone(),
+            max_active_specialists: self.max_active_specialists,
+            roles: self.roles.iter().map(InstalledRole::input).collect(),
+        };
+        Ok(
+            serde_json::json!({"policy":input, "snapshot_sha256":self.digest()?,
+            "role_captures":self.roles.iter().map(|role| serde_json::json!({
+                "role_ref":role.role_ref,"name":role.role_capture.name,"sha256":role.role_capture.sha256
+            })).collect::<Vec<_>>()}),
+        )
+    }
+
     pub fn validate(&self) -> Result<(), MachineError> {
         PolicyInput {
             schema_version: self.schema_version,
@@ -331,6 +426,21 @@ pub struct PreparedPolicySession {
 }
 
 impl PreparedPolicySession {
+    pub(crate) fn validate_for_workspace(
+        &self,
+        workspace_id: &str,
+        canonical: &LosslessPath,
+    ) -> Result<(), MachineError> {
+        if self.workspace_id != workspace_id || &self.canonical_workspace != canonical {
+            return Err(invalid("session capture differs from caller workspace"));
+        }
+        let state_root = self
+            .home_root
+            .to_path_buf()?
+            .join("workspaces")
+            .join(workspace_id);
+        self.validate_for_state_root(&state_root)
+    }
     pub(crate) fn validate_for_state_root(&self, state_root: &Path) -> Result<(), MachineError> {
         self.policy.validate()?;
         let home = self.home_root.to_path_buf()?;
@@ -440,6 +550,56 @@ pub struct MarkdownPolicyRegistry {
 }
 
 impl MarkdownPolicyRegistry {
+    pub fn resolve_any(&self, name: &str) -> Result<serde_json::Value, MachineError> {
+        let tree = RegistryTree::open(self, false)?;
+        let (bytes, _) = tree.read_raw_with(name, || {})?;
+        observer_policy(name, &bytes)
+    }
+
+    pub fn list_any(&self) -> Result<Vec<serde_json::Value>, MachineError> {
+        let path = self
+            .home
+            .workspace_root(&self.workspace.workspace_id)
+            .join("specialist-policies");
+        if !path.try_exists().map_err(io_invalid)? {
+            return Ok(Vec::new());
+        }
+        let tree = RegistryTree::open(self, false)?;
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&path).map_err(io_invalid)? {
+            let name = entry
+                .map_err(io_invalid)?
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid("invalid policy registry filename"))?;
+            let name = name
+                .strip_suffix(".json")
+                .ok_or_else(|| invalid("unsupported policy registry entry"))?;
+            filename(name)?;
+            names.push(name.to_owned());
+        }
+        names.sort();
+        let mut items = Vec::new();
+        for name in names {
+            let (bytes, _) = tree.read_raw_with(&name, || {})?;
+            items.push(observer_policy(&name, &bytes)?);
+        }
+        tree.verify()?;
+        Ok(items)
+    }
+
+    pub fn remove_any(&self, name: &str) -> Result<(), MachineError> {
+        let tree = RegistryTree::open(self, false)?;
+        let (bytes, metadata) = tree.read_raw_with(name, || {})?;
+        observer_policy(name, &bytes)?;
+        tree.verify()?;
+        verify_entry(tree.directory(), &filename(name)?, &metadata)?;
+        DarwinSystem
+            .unlinkat_file(tree.directory(), &filename(name)?)
+            .map_err(io_invalid)?;
+        tree.directory().sync_all().map_err(io_invalid)
+    }
+
     pub fn discover(workspace: Option<&Path>) -> Result<Self, MachineError> {
         let workspace = WorkspaceService::system()?.discover(workspace)?;
         let home = DolgoraeHome::system()?;
@@ -478,6 +638,22 @@ impl MarkdownPolicyRegistry {
 
     pub fn resolve(&self, name: &str) -> Result<PolicySnapshot, MachineError> {
         let tree = RegistryTree::open(self, false)?;
+        let (bytes, _) = tree.read_raw_with(name, || {})?;
+        let value: serde_json::Value = decode_checked(&bytes)?;
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+        {
+            observer_policy(name, &bytes)?;
+            return Err(MachineError::new(
+                "ROLE_MIGRATION_REQUIRED",
+                "new sessions require explicitly migrated Markdown Roles",
+                false,
+                serde_json::json!({"schema":"dolgorae-workspace-error-details/v1","required_action":"migrate_role",
+                    "phase":"admission","outcome":"not_dispatched","review_id":null,"run_id":null}),
+            ));
+        }
         tree.read(name).map(|(policy, _)| policy)
     }
 
@@ -826,6 +1002,22 @@ impl RegistryTree {
         name: &str,
         after_read: impl FnOnce(),
     ) -> Result<(PolicySnapshot, Metadata), MachineError> {
+        let (bytes, after) = self.read_raw_with(name, after_read)?;
+        let policy: PolicySnapshot = decode_checked(&bytes)?;
+        policy.validate()?;
+        if policy.policy_name != name {
+            return Err(invalid(
+                "installed policy identity differs from its filename",
+            ));
+        }
+        Ok((policy, after))
+    }
+
+    fn read_raw_with(
+        &self,
+        name: &str,
+        after_read: impl FnOnce(),
+    ) -> Result<(Vec<u8>, Metadata), MachineError> {
         let component = filename(name)?;
         let mut file =
             open_relative_nofollow(self.directory(), &component, false).map_err(io_invalid)?;
@@ -845,14 +1037,7 @@ impl RegistryTree {
         }
         verify_entry(self.directory(), &component, &after)?;
         self.verify()?;
-        let policy: PolicySnapshot = decode_checked(&bytes)?;
-        policy.validate()?;
-        if policy.policy_name != name {
-            return Err(invalid(
-                "installed policy identity differs from its filename",
-            ));
-        }
-        Ok((policy, after))
+        Ok((bytes, after))
     }
 }
 
@@ -1109,6 +1294,27 @@ mod tests {
         second.role_ref = "second-reviewer".to_owned();
         policy.roles.push(second);
         policy
+    }
+
+    #[test]
+    fn modern_policy_observation_is_capture_free_and_needs_no_current_sources() {
+        let fixture = Fixture::new();
+        fixture.role("reviewer", "Private Role instruction canary.\n");
+        let policy = fixture.install(input());
+        let path = fixture.policy_path();
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_dir_all(fixture.registry.home.root().join("roles")).unwrap();
+        let observed = fixture.registry.resolve_any(&policy.policy_name).unwrap();
+        assert_eq!(observed["snapshot_sha256"], policy.digest().unwrap());
+        assert!(
+            !serde_json::to_string(&observed)
+                .unwrap()
+                .contains("Private Role instruction canary")
+        );
+        assert_eq!(fixture.registry.list_any().unwrap(), vec![observed]);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fixture.registry.remove_any(&policy.policy_name).unwrap();
+        assert!(!path.exists());
     }
 
     fn binding() -> GlobalProfileBinding {
