@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-validation-v2
-version: "21"
+version: "24"
 name: Aquarium Validation
 purpose: Audit one completed epic through bounded remediation, confirmation, and explicit finding disposition.
 description: A bounded Podway procedure for three whole-Epic work-unit assessments, one remediation confirmation, user-directed follow-up, and validation closeout.
@@ -14,6 +14,13 @@ node_definitions:
       - Use the invoking validation handler to bind the exact committed epic, scope, checks, and approved remediation and review envelope.
       - Do not mutate source, install assets, replace sessions, commit, or publish while recording the baseline.
     items:
+      - id: workflow-owner
+        type: choice
+        prompt: Record whether this is the continuing Epic handler's internal audit or an independently requested cold validation.
+        required: true
+        choices:
+          - epic-handler
+          - epic-validator
       - id: baseline-summary
         type: text
         prompt: Record epic identity, committed revision, authority, worktree, dependencies, and evidence baseline.
@@ -28,7 +35,7 @@ node_definitions:
         choices:
           - mulgae
           - orca
-          - native-codex
+          - independent-review
           - waived
       - id: review-target-scope
         type: text
@@ -57,6 +64,7 @@ node_definitions:
     instructions:
       - Audit the exact current candidate without source mutation and adjudicate gaps against canonical requirements.
       - Separate blockers, eligible Low gaps, unresolved confirmation, and operational result; total confirmed count is descriptive only.
+      - Run the complete Epic audit on the current target. After correction, use the current prepared pass and completed remediation as provenance; this audit does not reset review ordinals or restore consumed authority.
     items:
       - id: audit-result
         type: check_result
@@ -277,7 +285,7 @@ node_definitions:
             not_equals: pass
     reason:
       required: true
-      prompt: Explain the selection using the audit evidence.
+      prompt: Record the selected decision and its authority. For rework, include the exact source attempt and record, target, finding IDs, consumed assessment count, and correction authority.
   re-audit-decision:
     type: decision
     title: Evaluate remediation confirmation
@@ -356,6 +364,9 @@ node_definitions:
     instructions:
       - Correct only the exact blocking set within the caller's current envelope and preserve its trigger identity.
       - Do not start per-group review, reset the remediation budget, or use this phase for eligible Low-only gaps.
+      - Read the required prepare-validation-pass summary before correction. Its source attempt and native rework reason identify the admitted trigger and authority; record the completed correction against that fresh preparation basis.
+      - Reconstruct completed assessment ordinals and the exact current-envelope or one-shot user authority from native history and source review references before work. Preserve them across rework without treating a stale review as a current assessment.
+      - After this correction, use a complete Epic audit before the first, second, or third work-unit assessment. After the third completed assessment, or a separately authorized one-shot correction, restrict confirmation to the frozen correction set and direct regression surface.
     items:
       - id: remediation-summary
         type: text
@@ -364,6 +375,18 @@ node_definitions:
         min_length: 1
         max_length: 8000
         multiline: true
+      - id: completed-review-assessments
+        type: integer
+        prompt: Record the number of completed assessments in the current goal revision before this correction, reconstructed from exact native history and route evidence.
+        required: true
+        minimum: 0
+      - id: remediation-authority
+        type: choice
+        prompt: Record the authority used for this correction; a one-shot grant never restores the original envelope.
+        required: true
+        choices:
+          - current-envelope
+          - one-shot
   audit-low-basis-record:
     type: action
     title: Preserve Low-only audit basis
@@ -415,6 +438,7 @@ node_definitions:
       - Dispatch only the approved whole-Epic route and preserve its exact target, operation, evidence reference, provenance, optional backend check, and assurance limits.
       - Do not launch another provider root solely because Low findings or their accepted local delta remain.
       - Compose the current obligation summary from the selected audit basis and provider findings under separate namespaces; provider counts never erase an applicable audit Low set.
+      - Use the selected current-audit-basis-summary and its matching resolved audit source. A stale earlier audit cannot supply current target evidence.
     items:
       - id: review-route
         type: choice
@@ -423,7 +447,7 @@ node_definitions:
         choices:
           - mulgae
           - orca
-          - native-codex
+          - independent-review
           - waived
       - id: review-operation
         type: choice
@@ -471,7 +495,7 @@ node_definitions:
           - inconclusive
       - id: review-evidence-reference
         type: text
-        prompt: Record the bounded native lifecycle, delegation, preflight-failure, or waiver evidence that recovers this checkpoint.
+        prompt: Record bounded native lifecycle, all three Independent Review delegation references and statuses when selected, preflight-failure, or waiver evidence for this checkpoint.
         required: true
         min_length: 1
         max_length: 2000
@@ -545,7 +569,7 @@ node_definitions:
           - not-applicable
           - mulgae
           - orca
-          - native-codex
+          - independent-review
           - waived
       - id: prior-review-operation
         type: choice
@@ -955,7 +979,7 @@ node_definitions:
             equals: mulgae
       - id: not-required
         label: Backend not required
-        criteria: The admitted Orca, native Codex, or waiver assessment legitimately has no backend result.
+        criteria: The admitted Orca, Independent Review, or waiver assessment legitimately has no backend result.
         guards:
           - evidence:
               node: final-review
@@ -1216,6 +1240,8 @@ node_definitions:
     title: Evaluate validation rework authority
     objective: Route established rework according to the current review mode.
     prompt: Is another remediation and review pass authorized?
+    evidence_guidance:
+      - Before rework, put the exact source attempt and record identity, target, finding or failed-check IDs, admitted correction authority, and phase obligations in the decision reason
     options:
       - id: remediation
         label: Remediate within current authority
@@ -1235,7 +1261,7 @@ node_definitions:
             equals: confirmation-only
     reason:
       required: true
-      prompt: Explain the current review-mode authority.
+      prompt: Record the selected decision and its authority. For rework, include the exact source attempt and record, target, finding IDs, consumed assessment count, and correction authority.
   user-direction-record:
     type: action
     title: Await user direction
@@ -1265,6 +1291,7 @@ node_definitions:
     evidence_guidance:
       - Read the latest audit, review mode, effective priorities, exact finding IDs, and the user's current instruction.
       - Leave this decision unset until the user explicitly selects the next action.
+      - Before rework, put the exact source attempt and record identity, target, finding or failed-check IDs, admitted correction authority, and phase obligations in the decision reason
     options:
       - id: fix-and-review
         label: Fix and review once
@@ -1274,7 +1301,7 @@ node_definitions:
         criteria: The user directed validation to stop without another correction or review.
     reason:
       required: true
-      prompt: Record the exact user authority, finding IDs, and bounded next action.
+      prompt: Record the selected decision and its authority. For rework, include the exact source attempt and record, target, finding IDs, consumed assessment count, and correction authority.
   low-disposition-record:
     type: action
     title: Record completed Low dispositions
@@ -1554,7 +1581,62 @@ node_definitions:
         min_length: 1
         max_length: 4000
         multiline: true
+      - id: acceptance-source
+        type: choice
+        prompt: Record the source of the candidate decision, either an actual user response or the coordinator acting under the approved Epic envelope; never attribute a delegated decision to the user.
+        required: true
+        choices:
+          - user
+          - epic-delegation
+      - id: acceptance-authority
+        type: text
+        prompt: Record the recoverable user decision or Epic envelope reference and the applicable unconsumed grant; verify its scope against the current candidate.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+      - id: accepted-target
+        type: text
+        prompt: Record the exact candidate addressed by the decision, lifecycle, record and release-note decisions, evidence basis, and handoffs; acceptance applies only after an accepting decision and becomes stale if these change.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
   approval-decision:
+    type: decision
+    title: Accept the exact validation candidate
+    objective: Close only when the exact assessed validation outcome and handoffs are accepted.
+    prompt: Is this exact validation candidate accepted by the user or under the continuing Epic delegation?
+    evidence_guidance:
+      - Read the path-owned assessed outcome and exact final repository evidence.
+    options:
+      - id: approved
+        label: Final approval granted
+        criteria: The user explicitly accepted this exact assessed outcome and every applicable handoff.
+        guards:
+          - evidence:
+              node: record-outcome
+              item: acceptance-source
+            equals: user
+      - id: delegated
+        label: Accept under Epic delegation
+        criteria: The coordinator verified the exact candidate under the current Epic envelope's applicable grant; final user acceptance remains pending.
+        guards:
+          - evidence:
+              node: record-outcome
+              item: acceptance-source
+            equals: epic-delegation
+          - evidence:
+              node: capture-baseline
+              item: workflow-owner
+            equals: epic-handler
+      - id: changes-requested
+        label: Changes requested
+        criteria: The user requested changes, or the coordinator found an unmet closeout gate or invalid acceptance basis.
+    reason:
+      required: true
+      prompt: Record the actual acceptance source, authority, exact candidate, and any correction needed; delegated acceptance is a coordinator decision.
+  stopped-approval-decision:
     type: decision
     title: Record final validation approval
     objective: Close only when the exact assessed validation outcome and handoffs are accepted.
@@ -1564,7 +1646,12 @@ node_definitions:
     options:
       - id: approved
         label: Final approval granted
-        criteria: The assessed outcome and every applicable handoff are accepted.
+        criteria: The user explicitly accepted the stopped outcome and every applicable handoff.
+        guards:
+          - evidence:
+              node: record-stopped-outcome
+              item: acceptance-source
+            equals: user
       - id: changes-requested
         label: Changes requested
         criteria: The user requested a correction or identified an unmet closeout gate.
@@ -1595,14 +1682,156 @@ node_definitions:
         max_item_length: 1200
         max_total_length: 1000000
         unique: true
+  remediation-audit-scope-decision:
+    type: decision
+    title: Select the post-remediation audit scope
+    objective: Refresh the whole Epic before the remaining work-unit assessments and preserve the frozen scope for confirmation.
+    prompt: Which audit scope does the completed correction permit?
+    options:
+      - id: full
+        label: Refresh the complete Epic audit
+        criteria: The original envelope remains active and fewer than three assessments are complete.
+        guards:
+          - evidence:
+              node: remediate
+              item: completed-review-assessments
+            at_most: 2
+      - id: frozen
+        label: Confirm the frozen correction set
+        criteria: Three or more assessments are complete under the original envelope.
+        guards:
+          - evidence:
+              node: remediate
+              item: completed-review-assessments
+            at_least: 3
+    reason:
+      required: true
+      prompt: Preserve the exact completed correction, target, source findings, assessment count and authority for the next audit attempt.
+  validation-pass-record:
+    type: action
+    title: Prepare the next validation pass
+    intent: Bind the initial audit or admitted correction to its exact current authority and source basis.
+    instructions:
+      - On first entry, record initial-audit without performing remediation. On re-entry, match the native rework target attempt and carry the exact trigger, target, source findings, assessment count and remaining authority from its reason.
+      - An admitted blocker or user-authorized correction selects remediation before any fresh audit or review. Historical records remain provenance, not fresh evidence.
+    items:
+      - id: pass-kind
+        type: choice
+        prompt: Record initial-audit only for the first pass, or remediation for an admitted correction.
+        required: true
+        choices:
+          - initial-audit
+          - remediation
+      - id: pass-basis-summary
+        type: text
+        prompt: Record the exact trigger, source attempt and record identities, target, finding IDs, consumed assessment count and current correction authority.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+  validation-pass-decision:
+    type: decision
+    title: Enter the prepared validation pass
+    objective: Run admitted remediation before its fresh audit and next review.
+    prompt: Which pass is prepared?
+    options:
+      - id: initial-audit
+        label: Run the initial audit
+        criteria: This is the first pass and no correction has been admitted.
+        guards:
+          - evidence:
+              node: prepare-validation-pass
+              item: pass-kind
+            equals: initial-audit
+      - id: remediation
+        label: Perform the admitted correction
+        criteria: The prepared pass carries exact correction authority and source findings.
+        guards:
+          - evidence:
+              node: prepare-validation-pass
+              item: pass-kind
+            equals: remediation
+    reason:
+      required: true
+      prompt: Explain the prepared pass and its authority.
+  remediation-audit-authority-decision:
+    type: decision
+    title: Evaluate post-remediation audit authority
+    objective: Keep a separately granted correction bounded without restoring the original review envelope.
+    prompt: Which authority funded this correction?
+    options:
+      - id: current-envelope
+        label: Use the original envelope
+        criteria: The correction used the original remaining authority.
+        guards:
+          - evidence:
+              node: remediate
+              item: remediation-authority
+            equals: current-envelope
+      - id: one-shot
+        label: Confirm one authorized correction
+        criteria: Only one separately authorized correction is available.
+        guards:
+          - evidence:
+              node: remediate
+              item: remediation-authority
+            equals: one-shot
+    reason:
+      required: true
+      prompt: Explain the consumed correction authority.
+  current-audit-basis-record:
+    type: action
+    title: Bind the current audit basis
+    intent: Carry the one fresh full or frozen audit into the independently required final review.
+    instructions:
+      - Read the resolved current audit or re-audit result and complete summary after its serial gap decision. Bind its exact attempt, target, scope and applicable obligations; do not select a stale audit from before correction.
+      - Preserve any applicable audit Low basis under its own namespace. This action neither executes a review nor consumes an assessment.
+    items:
+      - id: current-audit-basis-summary
+        type: text
+        prompt: Record the exact fresh audit attempt and result, current target, full or frozen scope, applicable findings and criterion evidence.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
 graph:
   entry: capture-baseline
   nodes:
     - id: capture-baseline
       use: baseline-record
-      next: audit
+      next: prepare-validation-pass
+    - id: prepare-validation-pass
+      use: validation-pass-record
+      next: decide-validation-pass
+    - id: decide-validation-pass
+      use: validation-pass-decision
+      evidence_from:
+        - node: prepare-validation-pass
+          required: true
+          items:
+            - pass-kind
+            - pass-basis-summary
+      routes:
+        initial-audit:
+          to: audit
+          effect: advance
+        remediation:
+          to: remediate
+          effect: advance
     - id: audit
       use: audit-record
+      evidence_from:
+        - node: prepare-validation-pass
+          required: true
+          items:
+            - pass-kind
+            - pass-basis-summary
+        - node: remediate
+          required: false
+          items:
+            - remediation-summary
+            - completed-review-assessments
+            - remediation-authority
       next: decide-gaps
     - id: decide-gaps
       use: gap-decision
@@ -1619,11 +1848,11 @@ graph:
             - blocking-rework-authority
       routes:
         clean:
-          to: final-review
+          to: record-current-audit-basis
           effect: advance
         blocking-gaps:
-          to: remediate
-          effect: advance
+          to: prepare-validation-pass
+          effect: rework
         low-only:
           to: record-audit-low-basis
           effect: advance
@@ -1638,7 +1867,44 @@ graph:
           effect: advance
     - id: remediate
       use: remediation-record
-      next: re-audit
+      evidence_from:
+        - node: prepare-validation-pass
+          required: true
+          items:
+            - pass-kind
+            - pass-basis-summary
+      next: decide-remediation-audit-authority
+    - id: decide-remediation-audit-authority
+      use: remediation-audit-authority-decision
+      evidence_from:
+        - node: remediate
+          required: true
+          items:
+            - remediation-summary
+            - remediation-authority
+      routes:
+        current-envelope:
+          to: decide-remediation-audit-scope
+          effect: advance
+        one-shot:
+          to: re-audit
+          effect: advance
+    - id: decide-remediation-audit-scope
+      use: remediation-audit-scope-decision
+      evidence_from:
+        - node: remediate
+          required: true
+          items:
+            - remediation-summary
+            - completed-review-assessments
+            - remediation-authority
+      routes:
+        full:
+          to: audit
+          effect: advance
+        frozen:
+          to: re-audit
+          effect: advance
     - id: re-audit
       use: remediation-confirmation-audit-record
       evidence_from:
@@ -1646,6 +1912,8 @@ graph:
           required: true
           items:
             - remediation-summary
+            - completed-review-assessments
+            - remediation-authority
       next: decide-re-audit
     - id: decide-re-audit
       use: re-audit-decision
@@ -1663,7 +1931,7 @@ graph:
             - blocking-rework-authority
       routes:
         clean:
-          to: final-review
+          to: record-current-audit-basis
           effect: advance
         user-direction:
           to: await-audit-direction
@@ -1701,7 +1969,7 @@ graph:
             - direction-summary
       routes:
         fix-and-review:
-          to: audit
+          to: prepare-validation-pass
           effect: rework
         stop:
           to: record-stopped
@@ -1727,12 +1995,42 @@ graph:
             - blocking-gap-count
             - eligible-low-gap-count
             - confirmation-needed-gap-count
+      next: record-current-audit-basis
+    - id: record-current-audit-basis
+      use: current-audit-basis-record
+      evidence_from:
+        - node: audit
+          required: false
+          items:
+            - audit-result
+            - audit-summary
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+        - node: re-audit
+          required: false
+          items:
+            - audit-result
+            - audit-summary
+            - blocking-gap-count
+            - eligible-low-gap-count
+            - confirmation-needed-gap-count
+        - node: record-audit-low-basis
+          required: false
+          items:
+            - audit-basis-target
+            - audit-basis-status
+            - audit-low-basis-summary
       next: final-review
     - id: final-review
       use: final-review-record
       evidence_from:
-        - node: audit
+        - node: record-current-audit-basis
           required: true
+          items:
+            - current-audit-basis-summary
+        - node: audit
+          required: false
           items:
             - audit-result
             - audit-summary
@@ -2060,9 +2358,19 @@ graph:
           required: true
           items:
             - review-mode
+        - node: record-low-disposition
+          required: false
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - before-target
+            - after-target
+            - coverage-relationship
+            - current-blocking-findings
+            - low-disposition-verification
       routes:
         remediation:
-          to: audit
+          to: prepare-validation-pass
           effect: rework
         user-direction:
           to: await-user-direction
@@ -2147,7 +2455,7 @@ graph:
             - direction-summary
       routes:
         fix-and-review:
-          to: final-review
+          to: prepare-validation-pass
           effect: rework
         stop:
           to: record-stopped
@@ -2211,7 +2519,7 @@ graph:
           to: record-low-disposition
           effect: rework
         blocker-found:
-          to: await-user-direction
+          to: decide-validation-rework-authority
           effect: advance
     - id: record-stopped
       use: disposition-record
@@ -2403,40 +2711,64 @@ graph:
           required: true
           items:
             - outcome-summary
+            - acceptance-source
+            - acceptance-authority
+            - accepted-target
+        - node: capture-baseline
+          required: true
+          items:
+            - workflow-owner
       routes:
         approved:
           to: closeout
           effect: advance
+        delegated:
+          to: delegated-closeout
+          effect: advance
         changes-requested:
-          to: audit
+          to: prepare-validation-pass
           effect: rework
     - id: closeout
       use: closeout-record
+      terminal: true
+    - id: delegated-closeout
+      use: closeout-record
+      evidence_from:
+        - node: record-outcome
+          required: true
+          items:
+            - acceptance-source
+            - acceptance-authority
+            - accepted-target
+        - node: approve-closeout
+          required: true
       terminal: true
     - id: record-stopped-outcome
       use: outcome-record
       next: approve-stopped-closeout
     - id: approve-stopped-closeout
-      use: approval-decision
+      use: stopped-approval-decision
       evidence_from:
         - node: record-stopped-outcome
           required: true
           items:
             - outcome-summary
+            - acceptance-source
+            - acceptance-authority
+            - accepted-target
       routes:
         approved:
           to: stopped-closeout
           effect: advance
         changes-requested:
-          to: audit
+          to: prepare-validation-pass
           effect: rework
     - id: stopped-closeout
       use: closeout-record
       terminal: true
 manual_rework:
   allowed_targets:
-    - audit
-    - remediate
+    - prepare-validation-pass
     - re-audit
     - final-review
     - record-low-disposition

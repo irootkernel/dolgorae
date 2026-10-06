@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-goal-v2
-version: "22"
+version: "25"
 name: Aquarium Goal
 purpose: Deliver one epic member, remediation, or closeout goal with current evidence.
 description: A flexible goal-centered Podway procedure for epic-handler work.
@@ -13,6 +13,7 @@ node_definitions:
     instructions:
       - Use epic-handler for one goal-centered member, remediation, or closeout goal; do not invoke task phase skills.
       - Preserve the exact authorized scope and return current target and focused evidence without implicit commit, push, publication, or session replacement.
+      - Before rework, put the exact source attempt and record identity, target, finding or failed-check IDs, admitted correction authority, and phase obligations in the decision reason. On entry, match the native rework history target_attempt_id to the current attempt and record that bounded cause as new evidence; stale source records are historical provenance, not fresh evidence.
     items:
       - id: work-summary
         type: text
@@ -35,7 +36,7 @@ node_definitions:
         choices:
           - mulgae
           - orca
-          - native-codex
+          - independent-review
           - waived
       - id: review-target-scope
         type: text
@@ -106,7 +107,7 @@ node_definitions:
         choices:
           - mulgae
           - orca
-          - native-codex
+          - independent-review
           - waived
       - id: review-operation
         type: choice
@@ -152,7 +153,7 @@ node_definitions:
           - inconclusive
       - id: review-evidence-reference
         type: text
-        prompt: Record the bounded native lifecycle, delegation, preflight-failure, or waiver evidence that recovers this checkpoint.
+        prompt: Record bounded native lifecycle, all three Independent Review delegation references and statuses when selected, preflight-failure, or waiver evidence for this checkpoint.
         required: false
         required_when:
           - item: review-evidence-kind
@@ -224,7 +225,7 @@ node_definitions:
           - not-applicable
           - mulgae
           - orca
-          - native-codex
+          - independent-review
           - waived
       - id: prior-review-operation
         type: choice
@@ -445,18 +446,18 @@ node_definitions:
               item: route-binding-result
             field: outcome
             equals: pass
-      - id: planned-native-codex
-        label: Planned native Codex route
-        criteria: Native Codex matches the approved envelope.
+      - id: planned-independent-review
+        label: Planned Independent Review route
+        criteria: Independent Review matches the approved envelope.
         guards:
           - evidence:
               node: complete-work
               item: review-route
-            equals: native-codex
+            equals: independent-review
           - evidence:
               node: record-evidence
               item: review-route
-            equals: native-codex
+            equals: independent-review
           - evidence:
               node: record-evidence
               item: route-authorization-basis
@@ -529,14 +530,14 @@ node_definitions:
               item: route-binding-result
             field: outcome
             equals: pass
-      - id: changed-native-codex
-        label: Authorized native Codex change
-        criteria: Native Codex has explicit safe route-change authority.
+      - id: changed-independent-review
+        label: Authorized Independent Review change
+        criteria: Independent Review has explicit safe route-change authority.
         guards:
           - evidence:
               node: record-evidence
               item: review-route
-            equals: native-codex
+            equals: independent-review
           - evidence:
               node: record-evidence
               item: route-authorization-basis
@@ -893,14 +894,14 @@ node_definitions:
               node: record-evidence
               item: assessment-provenance-kind
             not_equals: coordinator-waiver
-      - id: native-codex
-        label: Native Codex completed
-        criteria: Fresh native Codex review completed with host provenance and no backend check.
+      - id: independent-review
+        label: Independent Review completed
+        criteria: All three Independent Review subagents completed for one exact target and Brief, with host provenance and no backend check.
         guards:
           - evidence:
               node: record-evidence
               item: review-route
-            equals: native-codex
+            equals: independent-review
           - evidence:
               node: record-evidence
               item: review-operation
@@ -970,14 +971,14 @@ node_definitions:
               node: record-evidence
               item: assessment-provenance-kind
             equals: delegated-reviewer
-      - id: native-codex
-        label: Native Codex incomplete evidence
-        criteria: Native Codex retains delegation or preflight evidence and no backend check.
+      - id: independent-review
+        label: Independent Review incomplete evidence
+        criteria: Independent Review retains delegation or preflight evidence and no backend check.
         guards:
           - evidence:
               node: record-evidence
               item: review-route
-            equals: native-codex
+            equals: independent-review
           - evidence:
               node: record-evidence
               item: backend-check-result
@@ -1491,6 +1492,9 @@ node_definitions:
     title: Evaluate goal rework authority
     objective: Keep the existence of rework separate from authority for another remediation and review pass.
     prompt: What authority applies to the established goal rework?
+    evidence_guidance:
+      - Before rework, put the exact source attempt and record identity, target, finding or failed-check IDs, admitted correction authority, and phase obligations in the decision reason
+      - On entry, match the native rework history target_attempt_id to the current attempt and record that bounded cause as new evidence; stale source records are historical provenance, not fresh evidence.
     options:
       - id: remediation
         label: Use current remediation authority
@@ -1510,7 +1514,7 @@ node_definitions:
             not_equals: remediation-eligible
     reason:
       required: true
-      prompt: Explain the current bounded rework authority.
+      prompt: Explain remaining authority and the exact current rework basis, including a blocker established during Low settlement and its current target when applicable.
   low-handling-decision:
     type: decision
     title: Choose Low handling
@@ -1918,7 +1922,62 @@ node_definitions:
         min_length: 1
         max_length: 3000
         multiline: true
+      - id: acceptance-source
+        type: choice
+        prompt: Record the source of the candidate decision, either an actual user response or the coordinator acting under the approved Epic envelope; never attribute a delegated decision to the user.
+        required: true
+        choices:
+          - user
+          - epic-delegation
+      - id: acceptance-authority
+        type: text
+        prompt: Record the recoverable user decision or Epic envelope reference and the applicable unconsumed grant; verify its scope against the current candidate.
+        required: true
+        min_length: 1
+        max_length: 3000
+        multiline: true
+      - id: accepted-target
+        type: text
+        prompt: Record the exact candidate addressed by the decision, lifecycle, record and release-note decisions, evidence basis, and handoffs; acceptance applies only after an accepting decision and becomes stale if these change.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
   approval-decision:
+    type: decision
+    title: Accept the exact Goal candidate
+    objective: Close only when the exact assessed Goal outcome and handoffs are accepted.
+    prompt: Is the exact Goal candidate accepted by the user or under the current Epic delegation?
+    evidence_guidance:
+      - Read the path-owned assessed outcome and exact final repository evidence.
+    options:
+      - id: approved
+        label: Final approval granted
+        criteria: The user explicitly accepted this exact assessed outcome and every applicable handoff.
+        guards:
+          - evidence:
+              node: record-outcome
+              item: acceptance-source
+            equals: user
+      - id: delegated
+        label: Accept Task or correction under Epic delegation
+        criteria: The coordinator verified a member Task or pre-validation correction under the current Epic envelope's applicable grant; final Epic user acceptance remains pending.
+        guards:
+          - evidence:
+              node: record-outcome
+              item: acceptance-source
+            equals: epic-delegation
+          - evidence:
+              node: record-evidence
+              item: goal-kind
+            not_equals: epic-closeout
+      - id: changes-requested
+        label: Changes requested
+        criteria: The user requested changes, or the coordinator found an unmet closeout gate or invalid acceptance basis.
+    reason:
+      required: true
+      prompt: Record the actual acceptance source, authority, exact candidate, and any correction needed; delegated acceptance is a coordinator decision.
+  stopped-approval-decision:
     type: decision
     title: Record final Goal approval
     objective: Close only when the exact assessed Goal outcome and handoffs are accepted.
@@ -1928,7 +1987,12 @@ node_definitions:
     options:
       - id: approved
         label: Final approval granted
-        criteria: The assessed outcome and every applicable handoff are accepted.
+        criteria: The user explicitly accepted the stopped outcome and every applicable handoff.
+        guards:
+          - evidence:
+              node: record-stopped-outcome
+              item: acceptance-source
+            equals: user
       - id: changes-requested
         label: Changes requested
         criteria: The user requested a correction or identified an unmet closeout gate.
@@ -2032,8 +2096,8 @@ graph:
         planned-orca:
           to: decide-planned-orca-review-operation
           effect: advance
-        planned-native-codex:
-          to: decide-planned-native-codex-review-operation
+        planned-independent-review:
+          to: decide-planned-independent-review-operation
           effect: advance
         planned-waiver:
           to: decide-planned-waiver-review-operation
@@ -2044,8 +2108,8 @@ graph:
         changed-orca:
           to: decide-changed-orca-review-operation
           effect: advance
-        changed-native-codex:
-          to: decide-changed-native-codex-review-operation
+        changed-independent-review:
+          to: decide-changed-independent-review-operation
           effect: advance
         changed-waiver:
           to: decide-changed-waiver-review-operation
@@ -2096,7 +2160,7 @@ graph:
         unsuccessful:
           to: confirm-incomplete-route-evidence
           effect: advance
-    - id: decide-planned-native-codex-review-operation
+    - id: decide-planned-independent-review-operation
       use: review-operation-decision
       evidence_from:
         - node: record-evidence
@@ -2190,7 +2254,7 @@ graph:
         unsuccessful:
           to: confirm-incomplete-route-evidence
           effect: advance
-    - id: decide-changed-native-codex-review-operation
+    - id: decide-changed-independent-review-operation
       use: changed-review-operation-decision
       evidence_from:
         - node: record-evidence
@@ -2332,8 +2396,8 @@ graph:
         orca:
           to: confirm-orca-finding-validity
           effect: advance
-        native-codex:
-          to: confirm-native-codex-finding-validity
+        independent-review:
+          to: confirm-independent-review-finding-validity
           effect: advance
         waived:
           to: confirm-waived-finding-validity
@@ -2362,8 +2426,8 @@ graph:
         orca:
           to: confirm-orca-finding-validity
           effect: advance
-        native-codex:
-          to: confirm-native-codex-finding-validity
+        independent-review:
+          to: confirm-independent-review-finding-validity
           effect: advance
         waived:
           to: confirm-waived-finding-validity
@@ -2392,8 +2456,8 @@ graph:
         orca:
           to: confirm-orca-finding-validity
           effect: advance
-        native-codex:
-          to: confirm-native-codex-finding-validity
+        independent-review:
+          to: confirm-independent-review-finding-validity
           effect: advance
         waived:
           to: confirm-waived-finding-validity
@@ -2422,8 +2486,8 @@ graph:
         orca:
           to: confirm-orca-finding-validity
           effect: advance
-        native-codex:
-          to: confirm-native-codex-finding-validity
+        independent-review:
+          to: confirm-independent-review-finding-validity
           effect: advance
         waived:
           to: confirm-waived-finding-validity
@@ -2448,8 +2512,8 @@ graph:
         orca:
           to: confirm-orca-review-route-settlement
           effect: advance
-        native-codex:
-          to: confirm-native-codex-review-route-settlement
+        independent-review:
+          to: confirm-independent-review-route-settlement
           effect: advance
     - id: confirm-mulgae-review-route-settlement
       use: review-route-settlement-decision
@@ -2489,7 +2553,7 @@ graph:
         terminal-safe:
           to: choose-terminal-review-route-direction
           effect: advance
-    - id: confirm-native-codex-review-route-settlement
+    - id: confirm-independent-review-route-settlement
       use: review-route-settlement-decision
       evidence_from:
         - node: record-evidence
@@ -2641,7 +2705,7 @@ graph:
         unresolved:
           to: record-evidence
           effect: rework
-    - id: confirm-native-codex-finding-validity
+    - id: confirm-independent-review-finding-validity
       use: finding-validity-decision
       evidence_from:
         - node: record-evidence
@@ -2830,6 +2894,16 @@ graph:
           required: true
           items:
             - review-mode
+        - node: record-low-disposition
+          required: false
+          items:
+            - source-review-basis
+            - low-disposition-summary
+            - before-target
+            - after-target
+            - coverage-relationship
+            - current-blocking-findings
+            - low-disposition-verification
       routes:
         remediation:
           to: complete-work
@@ -2929,7 +3003,7 @@ graph:
           to: record-low-disposition
           effect: rework
         blocker-found:
-          to: await-user-direction
+          to: decide-goal-rework-authority
           effect: advance
     - id: record-hardening-handoff
       use: hardening-deferral-disposition
@@ -3154,9 +3228,19 @@ graph:
           required: true
           items:
             - outcome-summary
+            - acceptance-source
+            - acceptance-authority
+            - accepted-target
+        - node: record-evidence
+          required: true
+          items:
+            - goal-kind
       routes:
         approved:
           to: closeout
+          effect: advance
+        delegated:
+          to: delegated-closeout
           effect: advance
         changes-requested:
           to: complete-work
@@ -3164,16 +3248,31 @@ graph:
     - id: closeout
       use: closeout-record
       terminal: true
+    - id: delegated-closeout
+      use: closeout-record
+      evidence_from:
+        - node: record-outcome
+          required: true
+          items:
+            - acceptance-source
+            - acceptance-authority
+            - accepted-target
+        - node: approve-closeout
+          required: true
+      terminal: true
     - id: record-stopped-outcome
       use: outcome-record
       next: approve-stopped-closeout
     - id: approve-stopped-closeout
-      use: approval-decision
+      use: stopped-approval-decision
       evidence_from:
         - node: record-stopped-outcome
           required: true
           items:
             - outcome-summary
+            - acceptance-source
+            - acceptance-authority
+            - accepted-target
       routes:
         approved:
           to: stopped-closeout
