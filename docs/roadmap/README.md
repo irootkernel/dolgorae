@@ -21,7 +21,13 @@ claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
 boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
-integration. `EPIC-009` and `TASK-027` are `PLANNED` for v0.1.4.
+integration. EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021, and
+EPIC-022 are PLANNED for v0.1.4, in that execution order. TASK-067 through
+TASK-089 are new planned work; TASK-027 retains its identity as EPIC-009's
+integrated collaboration acceptance after TASK-080 through TASK-083.
+Their shared execution context is the
+[v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
+Adoption activates no Task and claims no implementation or consumer acceptance.
 `EPIC-016` is `COMPLETE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
@@ -77,7 +83,7 @@ Document roles and the required synchronization procedure are defined by the
 | `MILESTONE-IR1` | `EPIC-004` | Aquarium independent-review uses Dolgorae, rather than an Orca-created Codex terminal, for immutable workspace, staged, dirty, HEAD, commit, and range review with a fresh Codex Reviewer. |
 | `MILESTONE-ES1` | `EPIC-006` | External AIs can keep and reuse durable Specialist Engagements across multiple tasks and restarts. |
 | `MILESTONE-BH1-P` | `EPIC-008` | Dolgorae operates a live Primary and durable Brokered Hierarchy with the 27-method Gul consumer profile, complete prompt history and whole-session closure, independently verified without actual Gul. |
-| `MILESTONE-BH1` | [Deferred Gul acceptance](../todo/README.md#actual-gul-consumer-acceptance) | Actual Gul integration is verified against the provider; provider QA alone does not unlock this milestone. |
+| `MILESTONE-BH1` | `EPIC-022` / `TASK-088` | Actual Gul integration is verified against the exact provider candidate; provider QA alone does not unlock this milestone. |
 | `MILESTONE-CW1` | `EPIC-017` | New Runs work in caller-selected workspaces with explicit Role instructions, read-only or writable access, and copy-free Specialist Review. |
 | `MILESTONE-BC1` | `EPIC-009` | Specialists in one Brokered Hierarchy can use durable bounded lateral collaboration without Primary message relay. |
 | `MILESTONE-PA1` | `EPIC-011` | The complete Personal Alpha acceptance campaign passes. |
@@ -99,7 +105,7 @@ stated in its owning Epic.
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
 | `v0.1.3` | Milestone Preview | `EPIC-008` and `EPIC-016` complete, including all twelve provider Tasks, all four independent review Tasks, and both Epic acceptance gates; preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` and `dolgorae.gul-consumer/v1` included; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
-| `v0.1.4` | Milestone Preview | `EPIC-017` and then `EPIC-009` complete on the verified provider boundary | v0.1.3 provider capabilities under the EPIC-017 successor contracts, plus `MILESTONE-CW1` and `MILESTONE-BC1`; no automatic Gul acceptance claim |
+| `v0.1.4` | Milestone Preview | Completed `EPIC-017`, then `EPIC-018`, `EPIC-019`, `EPIC-020`, `EPIC-009`, `EPIC-021`, and `EPIC-022` across the five-phase whole-Epic schedule; complete Aquarium/Podway/Gul acceptance, both repository gates, sequential combined Gate C and exact-artifact final QA before either release | Prior milestones under their accepted successor contracts, `MILESTONE-CW1`, `MILESTONE-BC1`, and actual-Gul `MILESTONE-BH1` only after TASK-088 passes |
 | `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013`, `EPIC-016`, and `EPIC-017` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
@@ -109,11 +115,51 @@ of v0.1.4 or v0.2.0. A completion boundary makes a version eligible for release;
 release, change the changelog, authorize a tag or publication, or prove an
 installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
-EPIC-016 is required for v0.1.3; EPIC-017 precedes EPIC-009 in v0.1.4.
+EPIC-016 remains required for v0.1.3. The v0.1.4 sequence is EPIC-017
+(completed), EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022.
+The new v0.1.4 work is a cumulative prerequisite of later release candidates;
+this adoption does not mark EPIC-010 or EPIC-011 complete or claim Personal
+Alpha readiness.
 This design does not change v0.1.3 eligibility or release metadata.
 The TASK-053 frozen conformance registry retains its original provider-only
 release metadata. This table owns current release eligibility, including
 EPIC-016 completion.
+
+### v0.1.4 joint release boundary
+
+The normal path has five phases and four whole-Epic handoffs: EPIC-018
+(TASK-067/068) publishes H1; Gul's completed contract/foundation Epic returns
+H2; EPIC-019 (TASK-069 first), EPIC-020, EPIC-009 and EPIC-021 produce the
+runnable H3 candidate; Gul's completed product/qualification Epics return H4;
+EPIC-022 independently qualifies the final artifacts and prepares release.
+The [dossier dependency graph](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md#execution-order-and-dependencies)
+defines Gates A through D. EPIC-018 closes without waiting for Gul. Gate A is
+recorded by TASK-069 from completed H2, before provider implementation.
+
+The [three-consumer acceptance matrix](../specs/dolgorae-consumer-acceptance-v014.md)
+requires current Aquarium, Podway and Gul contracts, named external owners and
+accepted work plans before H1 publication. Mandatory host feasibility is
+qualified before contract freeze; required external implementation and runtime
+compatibility remain completion prerequisites within their owning Tasks.
+Consumer activation is separate from mandatory compatibility. Frozen public-v1
+records and the historical v0.1.3 release boundary retain their meanings.
+
+Gul produces its own complete campaign evidence and closes its product Epic
+before TASK-088 independently checks and reproduces necessary actual-consumer
+cases. Combined Gate C requires both results; neither Gul closeout nor its
+campaign requires TASK-088/089 completion. TASK-089 consumes all three consumers'
+accepted evidence, both repository gates, final QA and exact artifact provenance.
+Prepare Dolgorae version identity and packaging before H3, and Gul's intended
+v0.1.0 artifact during Phase 4. TASK-089 introduces no unqualified rebuild.
+Substantive changes require an evidence-impact assessment across all consumers
+and affected requalification. Only existing explicitly permitted QA-neutral
+metadata exceptions apply. Neither product may be published before Gate D.
+Separate release workflows and authorization own publication.
+
+The shared dossier remains linked until the last of its six consumer Epics
+closes. Earlier closeouts promote their own durable outcomes and replace only
+their own Detailed SOT link. Implementation, candidate qualification,
+publication and production installation remain separate facts.
 
 ## Status Model
 
@@ -2261,27 +2307,281 @@ instructions, enforce one writer per canonical workspace, and retain honest
 review and recovery guarantees. Completion unlocks `MILESTONE-CW1`; it does
 not authorize installation, a release, external review, or actual Gul QA.
 
+## EPIC-018: Modern Public Contract and Gul Alignment
+
+Status: `PLANNED`
+
+Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+
+Goal: Prepare and publish the qualified immutable contract package for Aquarium, Podway and Gul, with pre-contract host feasibility and explicit consumer acceptance mappings.
+
+Delivery order: Phase 1, after completed EPIC-017. Close this Epic before the Gul contract/foundation Epic in Phase 2; EPIC-019 follows its completed output. Assigned release: v0.1.4.
+Execute the member Tasks in the order below. The dossier maps their requirement
+owners, feedback, external boundaries and acceptance cases; the roadmap owns
+membership, ordering and status.
+
+### TASK-067: Define the v0.1.4 Successor Requirements
+
+Status: `PLANNED`
+
+Depends on: completed TASK-066.
+
+Outcome: Reconcile specifications, architecture and ADRs for public v2, modern Run and Markdown Role inputs, immutable delegation identity, interactions, findings, groups, pooling, storage maintenance and three-consumer release qualification. Review current Aquarium and Podway authorities and bind the consumer acceptance matrix to exact contract-source revisions/digests, implementing Tasks, owners, supported transports, evidence and final gates. Identify and obtain accepted ownership/work plans for necessary external implementation before package publication. Define later runtime-record contents/owners/delivery points; final implementation revisions/artifact checksums scheduled for H3/H4 remain pending and are not H1 completion prerequisites. Preserve accepted historical meanings and scope any replacement of the v0.1.3-only release boundary explicitly.
+
+Verification: Every dossier requirement has a canonical owner, an error/effect and recovery rule where applicable, and an acceptance case. Resolve reported hypotheses before treating them as defects; retain the measured-cost questions for TASK-075. Own the pre-contract MCP feasibility decision: select exact Codex/Claude host and adapter versions, trusted invocation-identity creation/retention and receipt/lookup recovery, installation/state owners and failure rules. Reconcile any successor with ADR-031; authorize runtime qualification separately.
+
+Handoff: Adopted requirements, three-consumer matrix and old/new behavior map for TASK-068. Mandatory consumer capabilities cannot be closed as optional activation or handoff-only work.
+
+### TASK-068: Publish Checked Successor Protocols and Fixtures
+
+Status: `PLANNED`
+
+Depends on: TASK-067.
+
+Outcome: Publish public-v2 source and descriptor, Gul consumer v2, successor Machine/facade and persisted-state shapes, generated clients, per-method error/effect classification, mutation/client policies, fixtures, digest definitions and an immutable contract lock. Include the qualified pre-contract host decision, exact Aquarium/Podway requirement mappings and accepted external-owner decisions/work plans. Keep TASK-053 public-v1 source and descriptor byte-identical.
+
+Verification: Schema, descriptor, client and fixture checks; negative and response-loss examples; worst-case byte limits; source-to-lock checksum verification; unavailable methods remain unavailable. Before freeze/Gate A, require version-pinned qualification on both mandatory host routes for initial call, exact replay, input conflict, concurrency, reconnect, MCP restart and loss around acceptance. The historical 0.149.0 mcp_unavailable record stays unchanged. Unsettled support blocks freeze and later dependent work; typed unsupported cannot satisfy mandatory host acceptance.
+
+Handoff: H1, the qualified immutable contract-ready package, checked matrix, fixture inventory and external prerequisite register for Gul's whole contract/foundation Epic. Gul acknowledgement and TASK-069 are not this Epic's completion prerequisites.
+
+Epic acceptance: TASK-067 and TASK-068 pass. Both mandatory host routes have pre-contract feasibility evidence; the package and three-consumer matrix are reproducible, with necessary external work explicitly assigned. Close without waiting for Gul's Phase 2 Epic. Product runtime implementation and final consumer acceptance remain pending.
+
+## EPIC-019: Durable Control, Storage, and Observation Corrections
+
+Status: `PLANNED`
+
+Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+
+Goal: Accept the completed Gul contract/foundation Epic and record Gate A, then correct control/storage failures and observation costs while preserving authority and process proof.
+
+Delivery order: Phase 3, after completed EPIC-018 and the completed Gul Phase 2 contract/foundation Epic; before EPIC-020. Assigned release: v0.1.4.
+Execute the member Tasks in the order below. The dossier maps their requirement
+owners, feedback, external boundaries and acceptance cases; the roadmap owns
+membership, ordering and status.
+
+### TASK-069: Record Gate A from the Completed Gul Contract Epic
+
+Status: `PLANNED`
+
+Depends on: completed TASK-068/EPIC-018 and H2 from Gul's completed contract/foundation Epic containing the permanent T21 scope and required closeout.
+
+Outcome: Validate the completed consumer Epic's contract pin, scenario ownership, completed foundation corrections and scoped verification. Record Gate A against H1's exact package and the three-consumer matrix. Preserve TASK-069's permanent identity after its move from EPIC-018.
+
+Verification: No partial active-Task acknowledgement substitutes for whole-Epic output. Gul's contract Epic must not depend on TASK-069 completion. Confirm exact package identity and assigned mandatory Aquarium/Podway prerequisites before dependent implementation. A material contract objection records a blocker and explicitly scheduled correction/republication; never declare an incomplete Epic complete or hide a backward dependency.
+
+Handoff: Accepted H2/Gate A and the Phase 3 implementation entry. Master controls broker transmission; no consumer repository mutation or production activation is authorized here.
+
+### TASK-070: Resolve Submit Intents and Expose Operation Lookup
+
+Status: `PLANNED`
+
+Depends on: TASK-069.
+
+Outcome: Persist definitive non-acceptance, restore released reservations correctly, and support Controller-scoped lookup of accepted operations without reopening current attachment paths. Keep original receipts immutable and distinguish current-request rejection from an earlier unknown effect.
+
+Verification: Same-key refusal/retry before and after worker/gateway restart; lost acknowledgements; attachment movement/removal; changed key payload; Controller mismatch; exactly one accepted Turn.
+
+Handoff: Durable submit/lookup semantics for public-v2 projection and Gul unknown-attempt handling.
+
+### TASK-071: Resume Session Close and Safe Build Handoff
+
+Status: `PLANNED`
+
+Depends on: TASK-070.
+
+Outcome: Retain close cause and operation identity, use current post-settlement revisions, resume settlement after gateway restart, and perform ordinary Primary recovery when required. Preserve exact-build mutation refusal; add typed upgrade blockers and quiescent generation replacement using identity, writer and history proof.
+
+Verification: Thread-bearing idle and active roots; killed worker; orphaned admission; binary replacement; interrupted/unknown outcomes; repeat close; gateway restart. SETTLING always has a live owner; uncertain work is never redispatched.
+
+Handoff: Recoverable close and upgrade paths with explicit required actions and observer-safe progress.
+
+### TASK-072: Reserve Ledger Finalization Capacity and Segment History
+
+Status: `PLANNED`
+
+Depends on: TASK-071.
+
+Outcome: Separate capacity from corruption, reserve accepted-operation terminal/lifecycle records, and add versioned checkpoint/segment maintenance with crash recovery and retained chain identity. Preserve accepted receipts, history and export meaning; deletion requires explicit operator authority.
+
+Verification: Byte/record boundaries; Submit refusal with Close and writer cleanup still possible; interrupted checkpoint; corrupt segment; replay and export across generations; no silent history pruning.
+
+Handoff: Bounded ledger operation and documented capacity recovery.
+
+### TASK-073: Compact Profile Journals and Surface Cleanup Failure
+
+Status: `PLANNED`
+
+Depends on: TASK-072.
+
+Outcome: Add crash-safe membership and binding-history maintenance, distinguish capacity from integrity failures, and preserve active/unknown membership. Surface release failures as cleanup requiring recovery while retaining completed mutation receipts. Reduce persistence work only with proven crash ordering.
+
+Verification: 10,000 synthetic start/stop cycles; every compaction crash boundary; concurrent readers/writers; corrupt and over-cap input; failed membership release after successful close.
+
+Handoff: Profile maintenance and recovery contracts plus operator guidance.
+
+### TASK-074: Contain Worker Panics and Preserve Unknown Outcomes
+
+Status: `PLANNED`
+
+Depends on: TASK-073.
+
+Outcome: Supervise worker thread boundaries and terminate a failed generation so durable intent and exact process cleanup can drive recovery. Record terminal uncertainty when the journal remains usable; use authoritative recovery when poisoned state prevents a safe append.
+
+Verification: Injected drain/control panic; prompt caller failure; no live unresponsive owner; retained unknown acceptance; no signal to unverified processes; recovery without replay.
+
+Handoff: Worker failure containment integrated with TASK-071 lifecycle recovery.
+
+### TASK-075: Make Observation and Wait Paths Affordable
+
+Status: `PLANNED`
+
+Depends on: TASK-074.
+
+Outcome: Reuse build/Profile executable evidence with correct invalidation, workspace discovery and database connections; remove hot-path DDL/scans and duplicated result bytes. Tail verified ledger changes, use durable notification with bounded wait, separate stream budgets, and add bounded RPC work and safe structured diagnostics. Keep display observations separate from fresh mutation proof.
+
+Verification: Own warm Run/Profile/aggregate latency, ledger tailing, bounded waits, database access and core stream measurements; config/executable/workspace replacement; six idle streams; eight-task await; database growth and query plans; deadline uncertainty; diagnostic canaries. Later pool/group functionality in TASK-078/TASK-084 is not a completion prerequisite. Keep fresh authority and process/history proof at mutation, writer-release and generation-replacement boundaries.
+
+Handoff: Measured performance, bounded read/wait behavior and explicit result-retention/GC operations for later engine work.
+
+Epic acceptance: TASK-069 accepts completed H2 and records Gate A; TASK-070 through TASK-075's correction cases and repository gates pass. Capacity, unknown effects and cleanup remain distinguishable; performance evidence never substitutes for current authority.
+
+## EPIC-020: Delegation Identity, Access, and Approval Integration
+
+Status: `PLANNED`
+
+Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+
+Goal: Expose accepted delegation evidence and modern public Runs with bounded execution and Controller-owned interactions.
+
+Delivery order: Phase 3, after completed EPIC-019 and before EPIC-009. Assigned release: v0.1.4.
+Execute the member Tasks in the order below. The dossier maps their requirement
+owners, feedback, external boundaries and acceptance cases; the roadmap owns
+membership, ordering and status.
+
+### TASK-076: Capture and Publish Delegation Identity
+
+Status: `PLANNED`
+
+Depends on: TASK-075.
+
+Outcome: Expose exact Role/configuration/task/result identities and read-by-key recovery. Accept inline Role bodies with dependencies and explicitly selected project guidance under captured-source limits. Define round accounting and membership-proven disposition; preserve task/Role separation and project discovery suppression.
+
+Verification: Changed same-name Role, dependency and configuration drift; exact accepted task versus envelope; complete result versus summary; lost acknowledgement; captured bytes survive source edits; ambient guidance remains separately disclosed.
+
+Handoff: Authoritative identities shared by facade, Broker and adapter export.
+
+### TASK-077: Add the Trusted MCP Facade and Podway Export
+
+Status: `PLANNED`
+
+Depends on: TASK-076.
+
+Outcome: Implement the host routes selected and qualified before TASK-068 freeze, exposing the External Specialist facade through host-launched stdio MCP with trusted durable invocation identity and protected owner configuration. Implement and qualify the mandatory Aquarium/Podway supported paths and versioned dolgorae.external/1 and dolgorae.managed/1 exports within this Task's matrix scope. Required consumer-owned code/host qualification is an explicit prerequisite, not a handoff-only outcome.
+
+Verification: Requalify both pinned Codex and Claude host routes without per-call model-sandbox escalation; credentials absent from MCP traffic; exact replay/conflict, concurrent calls, reconnect/restart and response-loss recovery; Podway known-answer cases; no private-store scraping or invented acknowledgement. A typed unsupported result cannot complete mandatory host-support acceptance.
+
+Handoff: Implemented transport/export and actual consumer-path evidence for this Task's matrix rows. Default/backend activation remains consumer-owned; mandatory compatibility must pass. Group Action equivalence requires the supported contract and explicit Podway-owner mapping.
+
+### TASK-078: Serve Modern Runs and Bound Read-Only Execution
+
+Status: `PLANNED`
+
+Depends on: TASK-077.
+
+Outcome: Connect public v2 to modern startup, Markdown policy/Role resolution and observer-safe projections. Keep mixed-manifest listing and workspace writer status readable. Add pooled fixed read-only members, dedicated-generation diagnostics and configurable capacity refusal, with member native subagents disabled by default.
+
+Verification: Own 16-member pool measurements and the configured K-server bound; fresh provisioning; Profile upgrade; modern/legacy coexistence; same-thread dedicated access transition; pooled write denial; per-Profile/configuration/account isolation; sixth-generation diagnostic and cap. Group acceptance belongs to TASK-084 and actual-Gul final load to TASK-088.
+
+Handoff: Public-v2 Run/session operation and qualified pool isolation for scheduling.
+
+### TASK-079: Produce Activity and Route Supported Interactions
+
+Status: `PLANNED`
+
+Depends on: TASK-078.
+
+Outcome: Produce checked safe command, completion, workspace-change and runtime-error events. Add permission and MCP elicitation decision schemas and Controller routing for public and delegated work. Persist a typed decline or interrupt within a bounded interval when no answering owner exists.
+
+Verification: Both request kinds, command/file approvals and protected input; redaction canaries; no secrets in push or observer output; old unsupported-request history remains readable; task waiting/decline state and event replay.
+
+Handoff: Interaction/card and activity fixtures for Gul and a complete answer-owner contract for collaboration.
+
+Epic acceptance: Delegation identity, MCP access, modern public operation, pool isolation and interactions are verified without exposing child credentials or inventing consumer acceptance.
+
 ## EPIC-009: Brokered Specialist Collaboration
 
 Status: `PLANNED`
 
+Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+
 Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
 Brokered Hierarchy without making the Primary Agent a message relay.
 
-Delivery order: after EPIC-017 and before EPIC-010. Assigned release: v0.1.4.
+Delivery order: Phase 3, after completed EPIC-020 and before EPIC-021. Assigned release: v0.1.4.
+Execute TASK-080, TASK-081, TASK-082, TASK-083, then retained TASK-027.
+The four preparatory Tasks split implementation ownership; TASK-027 retains
+the original Epic's acceptance of the complete collaboration implementation.
+
+### TASK-080: Queue Busy Targets and Reuse Compatible Members
+
+Status: `PLANNED`
+
+Depends on: EPIC-020 and TASK-079.
+
+Outcome: Implement bounded busy-target assignment queues and deterministic reuse from accepted Role/configuration snapshots for managed and external assignments. Preserve one target Turn and explicit hire authority.
+
+Verification: Busy FIFO/priority behavior; no preemption; queue limits; cancellation; no implicit hire; compatible selection after source edits; unknown tasks never replay.
+
+Handoff: Durable queued task state for mailbox and activation scheduling.
+
+### TASK-081: Bind and Persist Specialist Collaboration Exchanges
+
+Status: `PLANNED`
+
+Depends on: TASK-080.
+
+Outcome: Implement the run-bound collaboration tool and transactional exchange/mailbox admission for provisioned peers in the same internal Session. Bind source authority outside model arguments. External Engagements retain Primary-owned assignment and cannot use lateral messaging.
+
+Verification: Same-session admission; cross-session/external denial; no peer credential or lifecycle authority; duplicate request replay; durable commit before wake.
+
+Handoff: Exchange storage with verified source authority and source/target identities.
+
+### TASK-082: Schedule and Activate Mailbox Actors
+
+Status: `PLANNED`
+
+Depends on: TASK-081.
+
+Outcome: Implement dirty-set scheduling, activation leases, passivation, on-mail wake, inherited priority, fairness, aging and deadlines. Recover committed mail before activation and make concurrent wake create one activation.
+
+Verification: Commit-before-wake crash; simultaneous mail; failed activation retains queue; lease expiry before acceptance; pooled passivation cannot stop another member or shared server; no per-actor polling.
+
+Handoff: Bounded actor scheduling and activation integrated with current lane and process ownership.
+
+### TASK-083: Deliver Results and Enforce Blocking Wait Safety
+
+Status: `PLANNED`
+
+Depends on: TASK-082.
+
+Outcome: Commit immutable result references, delivery outbox and causal events together. Support idempotent redelivery and later collection after source restart. Enforce wait depth, cycles, writer-held blocking refusal and task deadlines.
+
+Verification: Transactional publication crash; duplicate delivery; any/all waits; source restart; cycle/depth/fan-out limits; interrupted_unknown; no unsolicited continuation Turn.
+
+Handoff: Complete exchange execution/delivery and wait safety for TASK-027.
 
 ### TASK-027: Durable Mailbox, Virtual Actor, and Collaboration Plane
 
 Status: `PLANNED`
 
-Depends on completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
+Depends on TASK-080 through TASK-083, completed EPIC-020, completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
 foundations, including selected transport TASK-025 and provider acceptance
-TASK-026 and completed EPIC-017. Execute after EPIC-017 under the roadmap
-delivery order. It does not
-depend on actual Gul acceptance. Integrate the checked Specialist collaboration
-tool through the selected run-bound transport. Enable
+TASK-026 and completed EPIC-017. Execute after TASK-083 under the roadmap
+delivery order; audit the complete original collaboration requirement set. It does not
+depend on actual Gul acceptance. Integrate and qualify the checked Specialist collaboration
+tool and all four preparatory Tasks through the selected run-bound transport. Enable
 the deferred busy-target queue, reuse-any and activation policies only with their
-checked implementation and compatibility tests. Add the
+checked implementation and compatibility tests. Verify the delivered
 Collaboration Service, SQLite Collaboration Exchange and mailbox tables,
 transactional result outbox, dirty-set Mailbox Scheduler, Activation Manager,
 actor passivation, activation leases, deterministic role selection, inherited
@@ -2325,6 +2625,108 @@ or aggregate ownership boundaries, or falsely claim known outcomes. Specialists
 in one Brokered Hierarchy may now collaborate laterally through durable bounded
 mailboxes without Primary message relay.
 
+## EPIC-021: Research Groups, Findings, and Contract Cleanup
+
+Status: `PLANNED`
+
+Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+
+Goal: Provide provenance-preserving research fan-out and result aggregation, then settle obsolete contracts and affected development structure.
+
+Delivery order: Phase 3, after completed EPIC-009. Close with runnable H3 before Gul's Phase 4 product Epics; EPIC-022 follows completed H4 in Phase 5. Assigned release: v0.1.4.
+Execute the member Tasks in the order below. The dossier maps their requirement
+owners, feedback, external boundaries and acceptance cases; the roadmap owns
+membership, ordering and status.
+
+### TASK-084: Validate Findings and Operate Research Groups
+
+Status: `PLANNED`
+
+Depends on: TASK-027 and EPIC-009.
+
+Outcome: Add structured_findings_v1 validation and durable group handles for assign, await(any/all/k) and collect through managed and external entrypoints. Group task membership and failure coverage are authoritative, not caller-maintained ID guesses.
+
+Verification: Own the 50-task group measurements, bounded memory/queues and complete result/coverage accounting within the configured pool; invalid findings rejected before publication; stable group identity/replay; queued/busy members; failed/expired/unknown sources remain visible. Reuse TASK-078 pool qualification; integrated final-pair measurements belong to TASK-088.
+
+Handoff: Validated findings and complete group result manifests.
+
+### TASK-085: Merge Findings and Support Explicit Synthesis
+
+Status: `PLANNED`
+
+Depends on: TASK-084.
+
+Outcome: Implement model-free merge_group_results with immutable source provenance, deduplication, explicit conflict sets, coverage and gaps. Add an optional explicit synthesis task over the merged artifact; semantic acceptance remains with the Primary/Judge.
+
+Verification: Permuted inputs produce identical bytes/digest; conflicting claims retained; all source identity links; missing sources; merge replay; no implicit model call or semantic resolution.
+
+Handoff: Merged artifacts readable through the public result and chunk surfaces.
+
+### TASK-086: Qualify Receipt Mappings and Consumer Handoffs
+
+Status: `PLANNED`
+
+Depends on: TASK-085.
+
+Outcome: Complete the mandatory Aquarium and Podway runtime acceptance matrix, including individual/group provenance, exact accepted bytes, round/disposition evidence and both supported Primary-host paths. Consume completed required consumer implementation/decisions; distinguish Dolgorae grouping from Podway's single-cursor structural acceptance.
+
+Verification: Known answers plus actual permitted consumer host/adapter/identity/receipt/recovery paths, with appropriate runtime authorization. Required rows cannot pass on fixtures or a request for future consumer work. Unresolved mandatory mapping or implementation blocks completion; unsupported group-as-one-Action claims yield no fabricated receipt.
+
+Handoff: Qualified versioned adapters, complete applicable Aquarium/Podway matrix evidence and explicit owner decisions for candidate revalidation. Production backend selection remains Aquarium-owned.
+
+### TASK-087: Retire Unused Contracts and Strengthen Development Checks
+
+Status: `PLANNED`
+
+Depends on: TASK-086.
+
+Outcome: Inventory contract consumers, migrate supported historical data before reader retirement, remove proven unused probes/baselines and duplicate package schemas, and split affected hubs along component owners. Make architecture checks recursive, keep required frozen coverage, document protoc and add CI. Prepare intended v0.1.4 version identity and relevant packaging, then produce the exact runnable Phase 3 candidate. Recheck/requalify TASK-077/086 Aquarium/Podway evidence against the post-cleanup packaged artifact before closeout.
+
+Verification: Historical read/close/recovery and migration; package skill resolution; recursive architecture guard; no test hook in release behavior; generated-source provenance; exact version/capability admission. Complete required repository gates and applicable mandatory Aquarium/Podway final-artifact checks. Record source revision, binary/package checksums, actual Aquarium/Podway consumer and adapter implementation revisions/artifact identities used for qualification, immutable H1 contract/manifest digests, runtime/adapter pins, relevant configuration and evidence applicability. Unmet consumer prerequisites block candidate handoff.
+
+Handoff: H3, the fixed intended-version runnable Dolgorae artifact, configuration/harness contract and complete applicable Aquarium/Podway evidence for Gul's whole product Epics in Phase 4. Final Gul evidence remains pending; do not rebuild this candidate silently.
+
+Epic acceptance: Groups, merge, synthesis, mandatory Aquarium/Podway mappings/runtime paths and justified retirements pass. Post-cleanup candidate qualification and H3 are complete. Unimplemented mandatory consumer decisions or capability gaps prevent closeout; no automatic backend activation is claimed.
+
+## EPIC-022: Independent Three-Consumer Qualification and Release Handoff
+
+Status: `PLANNED`
+
+Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+
+Goal: Independently accept Aquarium, Podway and Gul compatibility against the final Dolgorae artifact and exact Gul pair before either product is released.
+
+Delivery order: Phase 5, after completed EPIC-021 and H4 from Gul's completed final product/qualification Epic; before EPIC-010. Assigned release: v0.1.4.
+Execute the member Tasks in the order below. The dossier maps their requirement
+owners, feedback, external boundaries and acceptance cases; the roadmap owns
+membership, ordering and status.
+
+### TASK-088: Independently Qualify the Three-Consumer Final Artifact
+
+Status: `PLANNED`
+
+Depends on: completed TASK-087/EPIC-021 and H4 from Gul's completed product/qualification Epic, including the intended Gul v0.1.0 artifact and complete own campaign evidence. No concurrent active Gul Task or reopened historical Task is required.
+
+Outcome: Independently validate Gul's Phase 4 campaign and reproduce necessary provider/integration cases using the completed Gul artifact and unchanged H3 Dolgorae candidate. Verify or revalidate all required Aquarium/Podway acceptance evidence on that same final Dolgorae artifact. Gate C passes only after Gul's complete producer result and Dolgorae's substantive independent acceptance; report acknowledgement is insufficient.
+
+Verification: Check exact artifacts, contract/runtime/configuration pins, reproducibility and coverage; execute actual completed Gul and Dolgorae with the pinned actual Codex scripted-Responses harness for substantive provider facts, recovery, approvals/results, stream/reconnect/load and relevant latency cases. Validate required real-account create/task/approval/result/follow-up/normal-close evidence and independently reproduce affected functionality under separate authorization. Recheck actual Aquarium/Podway host, adapter, identity, receipt, rounds/disposition and recovery evidence. Keep deterministic, real-account, device/soak and other consumer evidence distinct. Scope reproductions by risk and unchanged evidence applicability; mocks never replace mandatory runtime acceptance.
+
+Handoff: Independent three-consumer acceptance and combined Gate C, including actual-Gul MILESTONE-BH1 for the exact pair. Gul's client/UX acceptance remains its owner's result; provider correctness remains Dolgorae-owned. Publication remains pending.
+
+### TASK-089: Complete Final QA and Joint Release Handoff
+
+Status: `PLANNED`
+
+Depends on: completed TASK-088, the complete accepted Aquarium/Podway/Gul matrix, H3/H4 artifacts and both products' required repository gates/final QA with applicable consumer qualification gates. Gul product Epic closeout does not wait for TASK-088 or TASK-089.
+
+Outcome: Verify the already prepared intended-version H3 Dolgorae and H4 Gul artifacts, settle final QA/changelog handoff requirements, and supply separate release owners the same fully accepted three-consumer combination. Introduce no unqualified rebuild or packaging change. Only explicitly permitted QA-neutral metadata exceptions apply. Any substantive artifact/contract/runtime/configuration change requires three-consumer impact assessment and affected requalification before release.
+
+Verification: Every mandatory matrix row is accepted on the final Dolgorae artifact; both required gates/final QA and combined Gate C pass. Deterministic actual-client, real-account, device/soak and Aquarium/Podway host/receipt evidence match the exact artifact/contract/runtime/configuration combination. Verify integrity and authorized readiness checks; no late unqualified packaging or unresolved correctness blocker. Additional implementation needs an explicit blocker/correction schedule, not a false Epic completion.
+
+Handoff: Concrete release-ready handoff for separate release-handler workflows. Commits, pushes, tags, Releases and production cutover require their own authority.
+
+Epic acceptance: All three consumers have complete mandatory accepted evidence, both artifacts have required final QA and exact provenance, and Gate D passes. Gul success alone is insufficient. This Epic authorizes no publication and adds no provider downgrade guarantee.
+
 ## EPIC-010: Operator and Audit Interfaces
 
 Status: `PLANNED`
@@ -2335,6 +2737,11 @@ independently inspectable.
 ### TASK-028: Status, Events, Results, and Change Observation
 
 Status: `PLANNED`
+
+Consume TASK-075, TASK-078, TASK-079, TASK-084 and TASK-085's accepted
+observation and result outcomes. Reuse their implementations and regressions;
+this Task owns the remaining full operator surface, not a second consumer
+history or activity implementation.
 
 Implement workspace-scoped run listing, same-uid observer status and strict
 interaction summaries, controller-authorized full interaction retrieval,
@@ -2373,6 +2780,12 @@ and successor results.
 ### TASK-029: Complete Gul gRPC Surface and Extended Operational Conformance
 
 Status: `PLANNED`
+
+Consume the EPIC-018 public-v2 contract and EPIC-020/EPIC-022 implementation
+and consumer qualification. Keep the historical public-v1 inventory below
+version-qualified. Define remaining modern operator successors in their owning
+specifications; public-v2 adoption does not mark all 36 public-v1 methods
+implemented or repurpose frozen fields.
 
 Depends on `TASK-026` and TASK-056's frozen-consumer baseline. Extend the
 27-method consumer gateway to all 36 methods in TASK-053's extended public-v1
@@ -2426,6 +2839,10 @@ worktrees. Legacy capture cleanup still requires its original settlement proof.
 ### TASK-031: Agent Governance and Process Cleanup
 
 Status: `PLANNED`
+
+Consume TASK-071, TASK-074, TASK-076, TASK-078 and TASK-079's accepted
+lifecycle, instruction, pool and interaction contracts. Preserve their authority
+and safety checks while completing the remaining governance scope below.
 
 Depends on completed TASK-062 and TASK-063. Common/Role source loading,
 instruction snapshot composition, and startup/runtime access belong to

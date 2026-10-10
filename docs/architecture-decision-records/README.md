@@ -2083,6 +2083,37 @@ durable request identity.
   terminal-state query before it may re-enter the active roadmap.
 - Unknown delivery is not converted into duplicate Reviewer execution.
 
+### v0.1.4 successor planning requirement
+
+TASK-067 must reconcile the External Specialist MCP successor with this trusted
+identity boundary before TASK-068 freezes its contract. The checked
+[0.149.0 disposition](../protocol/dolgorae-specialist-review-mcp-disposition-v1.json)
+remains mcp_unavailable for the historical review carrier; it does not decide
+support for newer Codex or Claude hosts.
+
+Select and qualify exact host/adapter versions, the trusted creator and durable
+owner of invocation identity, and receipt/lookup recovery across lost responses,
+reconnect and MCP restart. If an adapter or alternative carrier is needed,
+explicitly adopt its ownership, installation, protected state and failure rules
+through a successor decision. Model arguments, connections, processes, request
+IDs and identical text cannot silently replace trusted identity. Qualification
+must distinguish deliberate new calls from replay, including concurrent calls
+and input conflicts. Both required host routes must pass before contract
+freeze/Gate A; unsupported handling does not complete mandatory acceptance.
+This planning requirement selects no alternative carrier and changes neither
+this accepted decision nor the historical checked record. Runtime qualification
+requires separate authorization.
+
+The whole-Epic schedule does not change this authority boundary. EPIC-018 owns
+pre-contract qualification and closes at TASK-068 publication; TASK-069 now
+opens EPIC-019 after Gul's completed contract Epic. The
+[three-consumer matrix](../specs/dolgorae-consumer-acceptance-v014.md) requires
+current Aquarium/Podway owner decisions and actual supported-path qualification
+within the implementing Tasks, post-cleanup candidate applicability checks and
+TASK-088 independent final acceptance. Default activation remains consumer-owned;
+mandatory compatibility cannot be relabeled optional. This planning amendment
+selects no implementation or alternative trust carrier.
+
 ### Rejected alternatives
 
 - Use the MCP connection or process as a session: rejected by the protocol's

@@ -20,6 +20,11 @@ contracts, implementation, validation, or local operations.
 
 The checked [protocol](protocol/) artifacts derive wire, persisted-state, and
 machine-output contracts from the product specification. The
+[v0.1.4 consumer acceptance specification](specs/dolgorae-consumer-acceptance-v014.md)
+owns mandatory Aquarium, Podway and Gul requirements-to-evidence mappings;
+the [alignment dossier](todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) supplies
+the five-phase whole-Epic execution graph and four handoffs. Neither establishes
+implemented capabilities or runtime acceptance. The
 [review-target strategy analysis](architecture-decision-records/review-strategy-analysis.md)
 is a supporting accepted design study, not runtime or completion evidence. The
 root [contribution guide](../CONTRIBUTING.md) is an entrypoint to implementation
@@ -72,6 +77,11 @@ an adopted dossier. Keep that dossier through execution and review until Epic
 closeout, which promotes durable outcomes to their owners, removes the dossier,
 and replaces that link with `Canonical Outcomes`. Historical completed work
 without these lifecycle fields remains unchanged.
+
+When several Epics share an adopted dossier, each closeout promotes its own
+outcomes and replaces only its own reference. Preserve the dossier until the
+final referencing Epic completes and all references are settled. The v0.1.4
+alignment dossier follows this shared lifecycle.
 
 ## Language and validation
 

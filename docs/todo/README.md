@@ -6,44 +6,6 @@ roadmap identity, order, status, or dependencies.
 
 ## Future candidates
 
-### Global Profile journal capacity and operator maintenance
-
-- Owner: Global Profile persistence and operator-recovery maintainers
-- Problem: binding history and membership journals have finite read ceilings.
-  Sustained growth can reach those ceilings and block ordinary admission or
-  lifecycle repair; existing recovery never compacts or deletes history.
-- Candidate: define capacity diagnostics and an explicitly authorized
-  maintenance operation that preserves immutable Run bindings, active or
-  unknown membership, revision/checksum continuity, and auditability. Specify
-  locking, interrupted-maintenance recovery, and how over-cap state is admitted
-  before introducing pruning, compaction, or a persisted-contract successor.
-- Reason for separate design: maintenance adds operator authority and retention
-  semantics beyond the current fail-closed storage contract.
-- Revisit condition: sustained deployment approaches the 1 MiB binding-history
-  or 8 MiB membership-journal ceiling, or storage maintenance is adopted.
-
-### Actual Gul consumer acceptance
-
-- Owner: Gul integration maintainers, with Dolgorae provider maintainers
-- Prerequisite: Gul has a runnable client pinned to the TASK-053 consumer contract,
-  and an exact Dolgorae v0.1.3 artifact is released after MILESTONE-BH1-P and
-  separate RC QA. Contract-ready permits mock/UI development, not actual integration.
-- Outcome: verify actual Gul startup/supervision, protected Controller carriers,
-  Orchestrated Session creation, approval UX, Specialist result rendering,
-  public result discovery and artifact metadata/chunks/digest, complete original
-  prompt history through pages/restart/close, sequential human input without
-  queue/steering, whole-session close/recovery and event reconnect against exact
-  supported client/provider revisions.
-- Evidence: `real_gul_harness`, meaning the actual Gul client and its integration
-  campaign, not a Gul-shaped test client or provider-only tests.
-- Milestone: only this separately adopted consumer campaign can establish
-  `MILESTONE-BH1`. Provider conformance never implies it has passed.
-- Delivery boundary: not a prerequisite for EPIC-008, v0.1.3 provider release
-  eligibility, or EPIC-009 provider implementation. Do not create an ACTIVE or
-  BLOCKED placeholder that consumes the roadmap's sequential Task slot.
-- Revisit condition: Gul is ready for integration; adopt a bounded acceptance
-  item then, with concrete revision/build inputs and normal completion gates.
-
 ### Read-only Podway observation
 
 - Scope: post-v0.1.3, without an assigned release or active Task slot. Inspect
@@ -87,3 +49,46 @@ This follows the [documentation lifecycle](../README.md#roadmap-identity-and-dos
 and does not depend on the Epic being `ACTIVE`. Closeout promotes durable
 content to its canonical owners, removes the dossier and this index entry, and
 replaces the roadmap link with `Canonical Outcomes`.
+
+### v0.1.4 release alignment
+
+- Dossier: [Dolgorae v0.1.4 release alignment](TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
+- Consumers: EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021 and EPIC-022.
+- Work: modern public/Gul contracts, reviewed corrections, durable delegation,
+  complete internal collaboration, findings/groups, and mandatory Aquarium,
+  Podway and Gul acceptance on the exact Dolgorae v0.1.4 artifact. The
+  [consumer matrix](../specs/dolgorae-consumer-acceptance-v014.md) owns requirements,
+  evidence and external prerequisites.
+- Execution: five phases and four Dolgorae/Gul whole-Epic handoffs. EPIC-018
+  contains TASK-067/068; TASK-069 opens EPIC-019 after Gul contract Epic closeout.
+  Phase 3 closes EPIC-019/020/009/021 with a runnable candidate; Phase 4 closes
+  Gul product qualification; Phase 5 runs EPIC-022 independently.
+- Lifecycle: all new work remains PLANNED in the roadmap. Each consumer links
+  the same dossier through Detailed SOT. Retain it through earlier closeouts until
+  the last consumer closes and all references are settled.
+
+### Global Profile journal capacity and operator maintenance
+
+- Adopted owner: EPIC-019, TASK-072 and TASK-073, with storage/read cost in
+  TASK-075.
+- The former candidate is now part of v0.1.4: capacity diagnostics and explicitly
+  authorized maintenance preserve immutable bindings, active or unknown
+  membership, revision/checksum continuity and auditability.
+- The shared dossier defines locking, interrupted maintenance, over-cap
+  admission and retention requirements before persisted-contract changes.
+  Adoption is not evidence that compaction or capacity recovery is implemented.
+
+### Actual Gul consumer acceptance
+
+- Adopted owner: Gul's completed Phase 4 qualification produces campaign
+  evidence; EPIC-022 TASK-088 independently verifies it in Phase 5. TASK-069
+  records contract Gate A at the beginning of EPIC-019 from completed Gul H2.
+- The v0.1.4 campaign uses the fixed Phase 3 provider and intended Gul v0.1.0
+  artifact. It covers startup, carriers, creation, approvals, results, history,
+  reconnect, closure and recovery. Gul closes its own Epic before TASK-088;
+  publication waits for both Gate C results and TASK-089's three-consumer Gate D.
+- Only actual consumer qualification establishes MILESTONE-BH1. Provider-only
+  tests and contract artifacts do not establish it.
+- Historical EPIC-008/v0.1.3 provider eligibility stays unchanged. The new
+  candidate-first joint release boundary is adopted for v0.1.4 and must be
+  reconciled in its successor contract by TASK-067.

@@ -296,3 +296,45 @@ Development, testing, and release-engineering guidance belongs in the
 [implementation tips](../implementation-tips/README.md), not this operations
 owner. Never record credentials, tokens, private keys, live secret values, or
 secret-bearing command output here.
+
+## Planned v0.1.4 MCP host installation and recovery
+
+TASK-067 must name the installation/configuration owner for each supported
+Codex and Claude host route before TASK-068 contract freeze. If a trusted host
+adapter or receipt-and-lookup protocol is required, its operations contract must
+specify exact host/adapter versions, protected identity-state and credential
+ownership, permissions, retention, restart/reconnect recovery and corruption/
+missing-state behavior. Keep credentials out of model-visible MCP traffic.
+
+An uncertain invocation retains its trusted identity and receipt linkage;
+operators must not recover it by creating a new key. Installation or a typed
+unsupported response does not establish required host support. Until the
+pre-contract qualification passes, successor setup and Gate A remain unavailable.
+Existing Machine CLI operation and historical MCP disposition remain unchanged.
+This section supplies planning requirements, not an install command or runtime
+authorization. The verification owner defines separately authorized host probes
+and final-pair native/real-account qualification.
+
+## Planned v0.1.4 artifact and evidence handoffs
+
+The [alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md#execution-order-and-dependencies)
+defines five whole-Epic phases and four handoffs. H1 publishes the qualified
+contract and three-consumer matrix; H2 returns a completed Gul contract Epic;
+H3 supplies the intended runnable v0.1.4 artifact after TASK-087; H4 returns
+Gul's intended v0.1.0 artifact and completed native, real-account, device/soak
+and product qualification. Gul closeout does not wait for TASK-088/089.
+EPIC-022 performs independent final verification on the completed artifacts,
+including mandatory Aquarium/Podway compatibility. Operator installation,
+account use, production cutover and stable publication retain separate authority.
+
+Prepare provider version identity and relevant packaging before H3 and Gul's
+intended artifact during Phase 4. Bind source revisions, binary/package
+checksums, contract digests, pinned runtime and relevant configuration to
+reproducible scenario results. Apply the approved bounded non-sensitive evidence
+promotion policy when cross-repository retention is required; raw logs, provider
+prose, credentials and runtime identities remain local. TASK-089 verifies the
+qualified artifacts without introducing an unqualified rebuild or packaging
+change. Substantive changes require all-consumer evidence-impact assessment
+and affected requalification. Only existing explicitly permitted QA-neutral
+metadata exceptions apply. Missing mandatory evidence or corrective work blocks
+release and incomplete Epic closeout.

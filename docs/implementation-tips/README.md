@@ -405,3 +405,77 @@ applicable live evidence. v0.1.3 requires both EPIC-008 and EPIC-016 completion
 under the roadmap release boundary. Exact-candidate build/installation QA,
 tag, publication, and runtime installation retain separate authority. v0.1.3
 remains a Milestone Preview, not Personal Alpha or proof of actual Gul integration.
+
+## Planned v0.1.4 qualification
+
+The [consumer acceptance matrix](../specs/dolgorae-consumer-acceptance-v014.md)
+binds every release-scoped Aquarium, Podway and Gul requirement to current
+contracts, implementing Tasks, external owners, runtime paths and final gates.
+TASK-067 refreshes source revisions and resolves external implementation plans;
+TASK-068 publishes qualified immutable H1 after pre-contract host feasibility.
+The [seven-case host matrix](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md#pre-contract-external-mcp-host-feasibility)
+covers initial invocation, exact replay, changed-input conflict, concurrency,
+reconnect, MCP process restart and response loss around acceptance/receipt
+commit. Host behavior requires runtime evidence. Probes need explicit runtime
+authorization and opt-in. Preserve the historical mcp_unavailable record and
+ADR trust boundary; typed unsupported cannot satisfy required host support.
+
+Validate sequential handoffs: EPIC-018 closes with H1; Gul's contract/foundation
+Epic closes with H2; TASK-069 opens EPIC-019 and records Gate A. Phase 3 closes
+EPIC-019/020/009/021 with implemented provider capabilities and mandatory
+Aquarium/Podway runtime qualification. TASK-087 prepares intended v0.1.4 identity
+and packaging and checks/requalifies earlier TASK-077/086 results against the
+post-cleanup H3 candidate. Record source revision, binary/package checksums,
+contract digests, runtime pin and relevant configuration. Missing required
+external work blocks closeout and requires an explicit corrective schedule.
+
+Gul performs Phase 4 product/qualification Epics using fixed H3, including E16-T5's
+early isolated packaging/recovery rehearsal and final requalification on its
+intended v0.1.0 artifact. Native Gate B and final campaign occur within this
+phase. Gul owns client behavior/UX and closes its product Epic with H4 evidence
+before TASK-088/089. Phase 5 TASK-088 independently validates reproducibility,
+artifact applicability and provider facts, runs necessary actual-Gul cases using
+the completed Gul artifact, and verifies/revalidates all required Aquarium and
+Podway runtime evidence against the same final provider artifact. No active or
+reopened Gul development Task is required. Gate C needs both accepted results;
+TASK-088 cannot close by acknowledging a report.
+
+Keep component and final measurements separate: TASK-075 owns core warm reads,
+ledger tailing, bounded waits, database access and streams; TASK-078 owns the
+16-member K-server bound and configuration/account/read-only isolation;
+TASK-084 owns the 50-task group, bounded queues and complete result/coverage
+accounting. Gul Phase 4 produces integrated load, reconnect, interaction visibility
+and latency evidence; TASK-088 independently checks/reproduces necessary cases.
+TASK-075 must not wait for later pool/group implementation. Fresh authority,
+process and history proofs remain necessary at mutation, writer release and
+generation replacement boundaries regardless of display-cache latency.
+
+Keep four evidence classes distinct. Deterministic integration and fault tests
+use actual Gul, actual Dolgorae and the pinned actual Codex app-server with
+scripted loopback Responses. Separately authorized real-account smoke on the
+exact final pair covers create, bounded task, approval, complete result
+collection/display, follow-up and normal close. Gul Phase 4 executes and records
+client/UX outcomes; TASK-088 independently validates provider facts and reproduces
+necessary cases with separate authorization. Device usability and the 24-hour
+three-client soak remain Gul evidence; paid execution need not cover the entire
+soak. Aquarium/Podway supported host, adapter, identity, receipt, round accounting
+and recovery require their own actual-path evidence. Mocks, fixtures and handoff
+documents cannot replace these runtime obligations.
+
+Record exact artifact, contract, runtime/model/effort, harness/scenario revision,
+configuration and per-step results. Agree commands, opt-in and bounded execution
+budget before runtime execution; this amendment advertises no new command.
+Use isolated state. Retained cross-repository evidence must follow the approved
+bounded non-sensitive aquarium.promoted-evidence/v1 policy under evidence/aquarium;
+never promote raw logs, provider prose, credentials or runtime identities.
+
+TASK-089 consumes the complete accepted three-consumer matrix, both repository
+gates, final QA and exact artifact provenance. It verifies the already qualified
+artifacts and introduces no unqualified rebuild or packaging change. Only
+existing explicitly permitted QA-neutral metadata exceptions apply. Substantive
+artifact, contract, runtime or relevant configuration changes require evidence
+impact assessment across all three consumers and affected requalification before
+Gate D or either publication. Defects block incomplete Epics and require explicit
+corrective scheduling. Planning validation proves neither implementation nor
+runtime support; runtime use and separate release workflows remain authorized
+activities in their own right.

@@ -17,6 +17,16 @@ TASK-053 publishes the exact Protobuf messages, error mappings, generated
 clients, fixtures, and immutable contract lock under `docs/protocol/` before Gul
 pins them.
 
+Version boundary: the delivery and acceptance rules below belong to the
+historical v0.1.3 profile. The adopted v0.1.4 / Gul v0.1.0 successor requires
+five whole-Epic phases, four handoffs and isolated exact-candidate actual-Gul
+qualification before either publication. Gul completes its own campaign before
+Dolgorae's independent acceptance; release also requires Aquarium and Podway
+compatibility, as specified in the
+[successor acceptance requirements](README.md#planned-v014-host-and-joint-acceptance)
+and the roadmap. This clarification preserves v1 wire, record and receipt
+meanings; it does not publish or advertise consumer v2.
+
 ## 1. Delivery boundaries
 
 Dolgorae publishes one contract; Gul retains a pinned consumer copy, not a

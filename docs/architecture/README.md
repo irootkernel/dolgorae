@@ -379,6 +379,53 @@ workspace-change claims, non-terminal cancellation cleanup, credential or
 private-endpoint disclosure, and any MCP advertisement under the selected
 `mcp_unavailable` disposition. Raw model output is not retained.
 
+#### Planned External Specialist MCP host boundary
+
+The v0.1.4 successor must resolve host feasibility in TASK-067/TASK-068 before
+contract freeze. The historical external-review disposition and run-bound
+Primary transport are separate authorities; neither proves successor Codex
+and Claude host support. Preserve ADR-031's trusted invocation identity boundary.
+
+The selected trusted host/adapter owns identity creation and protected durable
+retention before delivery; Dolgorae owns accepted execution and its receipt/
+lookup linkage. TASK-067 must name installation, persisted-state/schema,
+credential and recovery owners and define concurrent/restart/corruption failure
+behavior. No concrete successor adapter or storage layout is selected here.
+Reconnect, process replacement and response loss recover one logical identity;
+a deliberate new call with identical arguments remains distinct. Connection,
+stdio lifetime, JSON-RPC request ID and model-controlled text confer no such
+authority. If an alternative carrier is needed, adopt its successor ADR and
+checked shapes explicitly. Both mandatory host routes require version-pinned
+pre-contract qualification; failure leaves contract freeze/Gate A and dependent
+work unavailable. Runtime execution remains separately authorized.
+
+#### Planned three-consumer qualification boundary
+
+The [v0.1.4 consumer matrix](../specs/dolgorae-consumer-acceptance-v014.md)
+separates Aquarium semantic judgment/backend selection, Podway structural
+receipt/cursor/progression and Gul client/UX ownership from Dolgorae execution,
+identity, result, recovery and evidence-export ownership. Mandatory compatibility
+does not activate a consumer backend. A group has no implied Podway Action
+meaning without a supported contract and explicit Podway mapping decision.
+
+EPIC-018 publishes the qualified immutable contract package after current
+consumer requirement review and accepted external implementation plans. It does
+not wait for Gul. TASK-069 opens EPIC-019 from a completed Gul contract Epic.
+Phase 3 produces the intended runnable provider artifact after implementation,
+cleanup and mandatory Aquarium/Podway actual-path qualification. Gul's Phase 4
+product Epics consume that fixed artifact and close with their own complete
+campaign evidence. Phase 5 TASK-088 independently checks provider facts and
+consumer compatibility using completed artifacts, without a concurrent Gul
+development Task. Combined Gate C requires both sequential acceptance results.
+
+Exact source, binary/package, contract, runtime and relevant configuration
+identities bind all final evidence. Cleanup and packaging require applicability
+checks and affected requalification; TASK-089 cannot replace the qualified
+artifact with an unqualified build. Missing external implementation or runtime
+evidence blocks the owning acceptance rather than becoming an optional handoff.
+These execution requirements change no single-writer, generation or one-Turn
+invariant and prove no runtime support.
+
 #### Independent review readiness
 
 [EPIC-016](../roadmap/README.md#epic-016-reliable-independent-specialist-review)

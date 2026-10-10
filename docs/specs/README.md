@@ -30,6 +30,11 @@ scope. TASK-053 publishes the checked wire lock; this Required State amendment
 does not claim new methods or generated artifacts already exist. Completed
 TASK-025 private contracts and transport selection are unchanged.
 
+The adopted [v0.1.4 three-consumer acceptance specification](dolgorae-consumer-acceptance-v014.md)
+owns release-scoped Aquarium, Podway and Gul contract/owner/transport mappings,
+external prerequisites and runtime evidence. Its exact contract selection is
+required before successor publication; planning proves no runtime support.
+
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.
 Constraints in checked JSON Schemas and rejection by an executable semantic
@@ -5514,13 +5519,92 @@ using that inventory does not certify Gul integration. Runtime capabilities
 continue to describe implementation, not roadmap completion. Full conformance
 and later operator methods retain their later owning Tasks.
 
-Actual Gul integration is a separate deferred consumer campaign, described in
-the TODO owner. It uses a supported Gul revision against the released provider
+For the historical v0.1.3 profile, actual Gul integration was a separate deferred
+consumer campaign. It uses a supported Gul revision against the released provider
 and verifies Gul startup, approval UX, event/result rendering, reconnect, and
 artifact handling. Only that campaign establishes `MILESTONE-BH1`; it is not
 required for `MILESTONE-BH1-P`, EPIC-008, or v0.1.3 release eligibility. EPIC-009
 may build on the verified provider without claiming Gul acceptance. Publication,
 installation, and final release-candidate QA remain separate authorized actions.
+
+### Planned v0.1.4 host and joint acceptance
+
+These adopted successor requirements retain the complete CD/GI/EN scope and
+EPIC-009. They change no accepted public-v1 record meaning or checked byte and
+establish no runtime support. The [roadmap](../roadmap/README.md) owns delivery;
+the [three-consumer acceptance matrix](dolgorae-consumer-acceptance-v014.md) owns
+release-scoped Aquarium, Podway and Gul requirements, contracts, transports,
+implementing Tasks, external prerequisites and evidence.
+
+TASK-067 reviews current consumer authorities and selects exact contract/revision
+pins, named owners and accepted plans for required external implementation.
+Aquarium retains backend selection, Primary/Judge semantic judgment and final
+acceptance; Podway retains its outer cursor, structural receipt and progression
+control. Dolgorae owns authoritative execution/result/recovery identity and
+versioned evidence/export mappings. A group maps to one Podway Action only when
+the supported contract and Podway owner's explicit decision establish that
+meaning. Consumer activation does not waive mandatory compatibility.
+
+TASK-067 defines External Specialist MCP host feasibility; TASK-068 requires
+actual pre-contract qualification before freeze. Select exact Codex and Claude
+host/adapter versions, a trusted durable invocation identity owner, installation
+and persisted-state ownership, and receipt/lookup recovery across response loss,
+reconnect and restart. Preserve ADR-031's authority boundary: model, connection,
+stdio process, JSON-RPC ID and text equality cannot supply durable identity.
+Define deliberate new invocation and changed-input conflict behavior. Both host
+routes must pass the [seven-case matrix](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md#pre-contract-external-mcp-host-feasibility);
+typed unsupported does not satisfy mandatory host acceptance. Record any
+successor carrier decision explicitly in the ADR. No supported successor host
+version is established by this amendment; runtime probes need separate authority.
+
+The normal schedule has five phases and four whole-Epic handoffs. EPIC-018
+contains TASK-067/068 and closes with qualified immutable H1 without Gul
+acknowledgement. Gul's contract/foundation Epic completes T21 corrections and
+returns H2 without waiting for TASK-069. TASK-069 starts EPIC-019 and records
+Gate A from that completed output. Phase 3 then closes EPIC-019, EPIC-020,
+EPIC-009 and EPIC-021 in order, including mandatory Aquarium/Podway implementation
+and runtime acceptance within their owning Tasks. TASK-087 prepares intended
+v0.1.4 identity and packaging and revalidates earlier TASK-077/086 evidence
+against the post-cleanup runnable H3 artifact before handoff.
+
+Phase 4 uses H3 for Gul's remaining product Epics, including E16-T1..T16's complete historical E15-T5..T20 scope,
+early native Gate B, full product QA and final-pair campaign. Gul builds its
+intended v0.1.0 artifact, qualifies it and closes its own Epic with H4 evidence
+without waiting for TASK-088 or TASK-089. Phase 5 EPIC-022 consumes the completed
+artifact. TASK-088 independently validates evidence and reproduces necessary
+actual-integration cases, provider facts and all required Aquarium/Podway paths
+against the same Dolgorae artifact. This requires substantive verification. Combined
+Gate C requires both Gul's campaign and Dolgorae's independent acceptance;
+no concurrent development Task or historical Gul Task reopening is required.
+
+Keep evidence classes distinct: deterministic integration/fault testing uses
+actual Gul, actual Dolgorae and the pinned actual Codex app-server with scripted
+loopback Responses; separately authorized real-account smoke creates a Session,
+performs a bounded task, exercises approval, collects/displays the complete
+result, submits a follow-up and closes normally; Gul owns device/soak evidence;
+Aquarium/Podway require actual supported host/adapter/identity/receipt/recovery
+paths. Fixtures or contract acknowledgement cannot replace runtime acceptance.
+Gul produces client/UX evidence; TASK-088 independently accepts provider and
+consumer compatibility facts, reproducing necessary cases with separate runtime
+authority. A 24-hour soak need not use paid execution throughout.
+
+TASK-075 owns core read/wait/database/stream measurements; TASK-078 owns pool
+bounds/isolation; TASK-084 owns group queues and complete coverage. Gul Phase 4
+produces final integrated load/latency evidence; TASK-088 independently checks
+it in Phase 5. Later pool/group delivery cannot gate TASK-075. Display caching
+never replaces fresh mutation authority, process, writer-release or generation
+replacement proofs. Single-writer and one-Turn rules remain required.
+
+TASK-089 consumes the complete accepted three-consumer matrix, both repository
+gates, final QA and exact source, binary/package, contract, runtime and relevant
+configuration provenance. Gate D blocks both releases until these pass. No
+unqualified rebuild or packaging change follows acceptance; only existing
+explicitly permitted QA-neutral metadata exceptions apply. Substantive changes
+require evidence-impact assessment across all consumers and requalification.
+Defects require explicit corrective scheduling and block incomplete closeout.
+Release workflows, publication, installation and runtime authorization remain
+separate. Required external work must be resolved before Epic closeout; calling it
+optional or handoff-only does not satisfy acceptance.
 
 ## External Protocol References
 
