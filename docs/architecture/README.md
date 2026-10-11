@@ -390,7 +390,20 @@ The selected trusted host/adapter owns identity creation and protected durable
 retention before delivery; Dolgorae owns accepted execution and its receipt/
 lookup linkage. TASK-067 must name installation, persisted-state/schema,
 credential and recovery owners and define concurrent/restart/corruption failure
-behavior. No concrete successor adapter or storage layout is selected here.
+behavior. The selected pre-contract candidate is the Dolgorae-owned synchronous
+native hook and stdio adapter in
+[ADR-041](../architecture-decision-records/README.md#adr-041-qualify-a-protected-native-host-hook-binding-for-external-specialist-mcp).
+It durably stores native-event/input linkage before dispatch. Codex resolves
+the binding from native call/thread metadata without rewriting public input.
+Claude carries a private opaque binding in hook-rewritten input; the adapter
+verifies and removes it before public processing. Claude's native hook journal
+belongs to the protected identity-state boundary described in ADR-041. Its
+state generation is initialized explicitly and never recreated by normal
+delivery or lookup. Both actual hosts passed the
+[prototype scenarios](../specs/dolgorae-v014-host-contract-qualification.md),
+including physical host loss before acknowledgement and supported lookup.
+Independent acceptance remains pending; this decision advertises no product
+runtime support.
 Reconnect, process replacement and response loss recover one logical identity;
 a deliberate new call with identical arguments remains distinct. Connection,
 stdio lifetime, JSON-RPC request ID and model-controlled text confer no such
@@ -425,6 +438,63 @@ artifact with an unqualified build. Missing external implementation or runtime
 evidence blocks the owning acceptance rather than becoming an optional handoff.
 These execution requirements change no single-writer, generation or one-Turn
 invariant and prove no runtime support.
+
+#### Planned v0.1.4 state and component ownership
+
+Public v2 and successor Machine/facade adapters call the shared semantic
+services. They do not own separate lifecycle, task or result truth. Accepted
+legacy records retain their version-qualified readers and frozen public-v1
+projection. Modern Run creation provenance is immutable and separate from
+effective access, writer ownership and current verification.
+
+Workspace capture owns exact admitted Markdown Role, common, dependency and
+selected-guidance bytes. Task admission owns the accepted configuration and
+task identity. Result publication owns the complete immutable result identity,
+including accepted change components and checked structured output. The
+[closed digest contract](../specs/dolgorae-v014-method-and-digest-contract.md)
+separates these facts from request-envelope identity and presentation previews.
+Rust computes and validates product identities; adapters expose authorized
+read-by-key facts without private-store scraping or prompt reconstruction.
+
+Engagement and Orchestrated Session services retain their separate ownership
+and authorization boundaries. Their task records own conservative accepted/
+uncertain round accounting, original receipt linkage and current settlement
+proof. Group admission durably accepts an immutable bounded assignment set;
+member provisioning and upstream dispatch may then progress or fail separately.
+Partial dispatch cannot rewrite the group manifest. Group collection includes
+terminal and unknown members. Deterministic finding merge reads immutable
+complete sources, preserves conflicts and coverage, and makes no model call.
+An explicit synthesis uses ordinary task admission and its own round/result.
+Internal lateral queues and wait-cycle detection remain session-owned; external
+Engagements do not gain lateral messaging.
+
+Profile lifecycle owns compatible fixed read-only pools, admission leases and
+dedicated generation accounting. The selected K/cap bounds belong to the
+successor requirements. Leasing cannot transfer writer authority or make one
+member's passivation stop another. Generation shutdown still requires complete
+owned membership, workload and descendant proof. Native-subagent eligibility
+is an immutable configuration constraint, not a per-lease privilege.
+
+The existing worker and lifecycle services own close/recovery transitions and
+exact-build process proof. One retained close owner survives restart; process
+replacement does not create a new logical operation. Predictable capacity
+refusal is separate from integrity failure. Admission reserves enough durable
+space to finalize accepted work and report cleanup failures.
+
+Ledger maintenance owns immutable generation manifests, checkpoints, segment
+chains and durable watermarks. It takes the workspace lifecycle lock before
+the ledger writer lock, closes admission and establishes a safe maintenance
+boundary. Readers pin one generation and never combine old and new segments.
+New data and directory entries are synced before the atomic manifest switch;
+recovery validates the selected generation. Reader/recovery pins retain old
+generations. Profile membership compaction and explicit content retention
+preserve active/unknown references, accepted identities, receipts and audit
+continuity. Content retirement records a tombstone rather than claiming that
+the accepted operation never existed. Automatic deletion remains disabled.
+
+These boundaries select future implementation responsibilities. TASK-068
+publishes their checked shapes; later implementation Tasks provide actual
+runtime behavior and artifact-bound three-consumer qualification.
 
 #### Independent review readiness
 

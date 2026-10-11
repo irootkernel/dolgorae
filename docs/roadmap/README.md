@@ -21,13 +21,16 @@ claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
 boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
-integration. EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021, and
-EPIC-022 are PLANNED for v0.1.4, in that execution order. TASK-067 through
-TASK-089 are new planned work; TASK-027 retains its identity as EPIC-009's
+integration. EPIC-018 is ACTIVE after TASK-067 requirements and host-feasibility
+acceptance. EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
+PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
+TASK-068 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
-Adoption activates no Task and claims no implementation or consumer acceptance.
+Documentation adoption alone activates no Task and claims no implementation or
+consumer acceptance. EPIC-018 execution has begun under a separately approved
+envelope; TASK-068 checked publication and Epic closeout remain due.
 `EPIC-016` is `COMPLETE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
@@ -2309,7 +2312,7 @@ not authorize installation, a release, external review, or actual Gul QA.
 
 ## EPIC-018: Modern Public Contract and Gul Alignment
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
 
@@ -2322,7 +2325,26 @@ membership, ordering and status.
 
 ### TASK-067: Define the v0.1.4 Successor Requirements
 
-Status: `PLANNED`
+Status: `COMPLETE`
+
+The [accepted coordination decision](../specs/dolgorae-v014-contract-coordination.md#revision-2-disposition-and-proposed-owner-decision)
+selects the inspected contract sources, separate external/managed mappings and
+individual-task/synthesis receipt scope. Dolgorae owns adapter implementation,
+installation instructions and protected state; existing consumer workflow
+agents, Primary/Judge and Master retain qualification and acceptance roles.
+Both technical reviews identified no required consumer source change for this
+scope. Prepared Podway bytes are not released-runtime support; applicable
+corrections require impact assessment before a changed selection is admitted.
+
+The [requirements](../specs/dolgorae-v014-successor-requirements.md) define the
+retained/new behavior, feedback cases, closed digest/method/recovery policies,
+bounds/maintenance, H1 inventory/reproduction pins and later-record owners.
+Both actual pinned hosts passed the
+[prototype scenarios](../specs/dolgorae-v014-host-contract-qualification.md),
+including physical host loss before acknowledgement and supported lookup.
+Independent completion review accepted the requirements and bounded host feasibility.
+TASK-068, Epic validation, closeout and qualified H1 publication remain pending.
+Gul E15/H2 is not an EPIC-018 prerequisite; EPIC-019 remains unopened.
 
 Depends on: completed TASK-066.
 

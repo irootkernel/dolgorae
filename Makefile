@@ -20,7 +20,7 @@ INT_TESTS := \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
 	test-live-instruction-discovery test-live-workspace-startup test-live-workspace-policy \
-	test-native-workspace-policy-fixture test-native-caller-pipeline test-native-review-reader \
+	test-native-workspace-policy-fixture test-native-host-invocation-fixture test-native-caller-pipeline test-native-review-reader \
 	test-native-integrated-acceptance \
 	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture \
@@ -256,6 +256,22 @@ test-native-workspace-policy-fixture:
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--expected-version "$${DOLGORAE_CODEX_PINNED_VERSION}" \
 		--expected-sha256 "$${DOLGORAE_CODEX_PINNED_SHA256}"
+
+test-native-host-invocation-fixture:
+	@test "$${DOLGORAE_RUN_NATIVE_HOST_INVOCATION_FIXTURE:-}" = 1 || { \
+		echo "DOLGORAE_RUN_NATIVE_HOST_INVOCATION_FIXTURE=1 is required" >&2; \
+		exit 2; \
+	}
+	@test -n "$${DOLGORAE_HOST_FIXTURE_SCRATCH_ROOT:-}" || { \
+		echo "DOLGORAE_HOST_FIXTURE_SCRATCH_ROOT must name an existing private scratch directory" >&2; \
+		exit 2; \
+	}
+	$(CARGO) build --locked --example host_invocation_contract
+	$(PYTHON_BIN) tests/e2e/run_native_host_invocation_fixture.py \
+		--prototype "$(CURDIR)/target/debug/examples/host_invocation_contract" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
+		--claude "$${DOLGORAE_CLAUDE_BIN:-$(HOME)/.local/bin/claude}" \
+		--scratch-root "$${DOLGORAE_HOST_FIXTURE_SCRATCH_ROOT}"
 
 test-native-caller-pipeline:
 	@test "$${DOLGORAE_RUN_NATIVE_CALLER_PIPELINE:-}" = 1 || { \

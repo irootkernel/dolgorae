@@ -35,6 +35,20 @@ owns release-scoped Aquarium, Podway and Gul contract/owner/transport mappings,
 external prerequisites and runtime evidence. Its exact contract selection is
 required before successor publication; planning proves no runtime support.
 
+The [v0.1.4 successor requirements reconciliation](dolgorae-v014-successor-requirements.md)
+maps retained behavior, failure/recovery rules and adopted feedback to their
+acceptance owners. Its [method and digest contract](dolgorae-v014-method-and-digest-contract.md)
+defines method-specific effects/recovery and exact closed identity inputs.
+The reconciliation also defines H1's required artifact inventory, reproduction
+pins, later H2/H3/H4 record responsibilities and bounded measurement/campaign
+cases; TASK-068 owns their checked publication.
+The [native host qualification boundary](dolgorae-v014-host-contract-qualification.md)
+defines the selected prototype, observed scenarios, tested layers and opt-in
+reproduction; final independent and consumer acceptance remain separate.
+TASK-067 remains in progress; its open decisions and
+[external coordination requests](dolgorae-v014-contract-coordination.md) do not
+publish checked protocols or qualify a consumer route.
+
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.
 Constraints in checked JSON Schemas and rejection by an executable semantic

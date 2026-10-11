@@ -21,8 +21,8 @@ exports. Neither a completed worker nor an export advances Podway. Qualification
 of a mandatory consumer route is required even while its production/default
 activation remains a separate consumer-owned decision.
 
-The source inspections below are planning inputs, not selected installed
-consumer builds. Each repository has newer working-tree work. TASK-067 must
+The historical source inspections below are planning inputs, not selected
+installed consumer builds. TASK-067 must
 refresh the applicable owners and select exact contract-source, schema and
 descriptor revisions/digests before TASK-068 publishes H1. H1 also records agreed
 semantics, limits, supported transports and compatibility requirements, the
@@ -32,6 +32,15 @@ Final implementation revisions and artifact/package checksums for work scheduled
 in later phases remain explicitly pending until H3 or H4; the inspected source
 baselines cannot stand in for qualified final implementations.
 A release label or dated worksheet does not identify the current contract.
+
+TASK-067's [current source inspection and owner requests](dolgorae-v014-contract-coordination.md)
+refresh the historical baselines below. All listed source bytes match their
+inspected commits; Podway also has unrelated working-tree changes. Master has
+accepted the Phase 1 source/mapping selection and implementation/acceptance
+responsibilities. Independent review accepted bounded native feasibility;
+checked H1 publication and later actual consumer-runtime acceptance remain pending. The
+[successor requirements reconciliation](dolgorae-v014-successor-requirements.md)
+records the retained/new behavior map, failure rules and feedback coverage.
 
 | Consumer | Inspected committed baseline | Current owning sources and contracts |
 | --- | --- | --- |
@@ -137,11 +146,24 @@ existing implementation, evidence route and completion boundary before package
 publication. If additional consumer implementation is required, expose it here
 and in the dossier; a five-phase diagram cannot hide it.
 
+The [Aquarium request](dolgorae-v014-contract-coordination.md#request-to-aquarium-ext-aq-01)
+and [Podway request](dolgorae-v014-contract-coordination.md#request-to-podway-ext-pw-01-and-ext-pw-02)
+were sent through Sorage under Master's authorization for contract and
+responsibility-boundary review. Both revision-2 technical replies identify no
+required consumer source change for the selected individual-task/synthesis scope.
+Aquarium confirms its existing agent/Primary/Judge/Master acceptance roles;
+Podway confirms the mapping principles and prepared snapshot as a reasonable
+candidate. Master accepted the concrete source/mapping selection, Dolgorae-owned
+implementation and existing consumer acceptance roles, then directed execution
+to continue. The [revision-2 disposition](dolgorae-v014-contract-coordination.md#revision-2-disposition-and-proposed-owner-decision)
+records that decision. Phase 1 ownership/selection is settled; required native
+independent acceptance and later runtime gates remain separate.
+
 | Prerequisite | Owner and work | Required before | Current state |
 | --- | --- | --- | --- |
-| EXT-AQ-01 | Aquarium host/integration owner: decide trusted adapter ownership and implement/qualify the selected Codex/Claude Dolgorae consumer paths where absent; preserve native/Judge boundaries and current supported paths | Phase 1: named supported route, feasibility and accepted work plan; Phase 3: implementation and actual-path evidence | Unresolved. Existing native mappings and dormant Dolgorae review are not successor MCP compatibility evidence |
-| EXT-PW-01 | Podway contract/release owner: finish applicable remediated contract corrections and select coherent contract-source/manifest/catalog/schema pins for H1; supply actual consumer/adapter revisions and runtime/artifact qualification bindings at H3; Dolgorae adapter owner consumes them | Phase 1 contract publication; Phase 3 actual adapter qualification/H3 | Unresolved contract selection; current catalog is prepared, Store v15 and release/manifest compatibility must be reconciled. Final implementation/artifact pins remain pending until H3 |
-| EXT-PW-02 | Podway mapping owner with Aquarium/trusted host integration owner: accept distinct external/managed mappings; identify executable receipt composition and any necessary consumer implementation, including explicit group scope decision | Phase 1: semantics/owner/work plan; Phase 3: required supported paths qualified | Unresolved; Podway's integration candidate has no adopted implementation Epic. Do not fabricate an adapter or make a mandatory path optional |
+| EXT-AQ-01 | Dolgorae TASK-077 owns both trusted adapters, installation and protected state; authorized Aquarium-side agents check consumption, with existing Primary/Judge semantic roles and Master final acceptance | Phase 1: selected routes, feasibility and accepted work plan; Phase 3: implementation and actual-path evidence | Phase 1 source/ownership plan and bounded native feasibility accepted. No required Aquarium source change identified. Actual facade/Broker, recovery and interaction qualification is mandatory before H3/final gates. Dormant review backend stays dormant |
+| EXT-PW-01 | Podway retains its structural contract and release ownership; Dolgorae adapter owner consumes the selected coherent prepared manifest/catalog/schema snapshot and assesses applicable corrections | Phase 1 contract publication; Phase 3 actual adapter qualification/H3 | Prepared source snapshot selected, with 120 manifest-bound asset digests verified. This is not released 0.2.12 runtime support. V2DFC-017/018 changes require impact assessment; DOLV3-001..009 and final implementation/artifact pins remain due at H3 |
+| EXT-PW-02 | Dolgorae TASK-077/086 implement distinct external/managed adapters and receipt composition; authorized consumer workflow agents, Primary/Judge and Master retain consumption/semantic acceptance; Podway retains structural acceptance/progression | Phase 1: semantics/owner/work plan; Phase 3: required supported paths qualified | Individual accepted task and separate synthesis mappings adopted; complete group provenance remains executor-owned, with no group-as-one-Action or child-Action claim. No new Podway implementation identified. Actual supported getters, both mappings and receipt/recovery qualification remain mandatory before H3/final gates |
 | EXT-GU-01 | Gul E15 owner: complete E15-T21 and foundation closeout under ADR-0057, with no TASK-069 entry/completion dependency | Phase 2 and TASK-069 entry | Whole-Epic split is adopted in the current planning tree; E15-T21 remains Planned and the completed H2 pin/evidence is pending |
 | EXT-GU-02 | Gul E16 owner: complete E16-T1..T16 and product closeout, preserving retired E15-T5..T20 history/scope mapping; build intended final artifact and finish own campaign | Phase 4 and TASK-088 entry | ADR-0057 and E16 membership are adopted; E16-T1..T16 remain Planned, final artifact and H4 evidence are pending |
 

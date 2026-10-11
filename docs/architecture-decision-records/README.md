@@ -2734,3 +2734,79 @@ their separate authorization boundaries.
   that this invocation owns the server.
 - Treat process-handle preservation or an engagement ID as sufficient recovery:
   neither provides the missing one-shot lookup and authorization contract.
+
+## ADR-041: Qualify a Protected Native Host Hook Binding for External Specialist MCP
+
+Status: Selected pre-contract candidate; both actual native hosts passed the
+prototype scenarios. Master has accepted the Phase 1 source/mapping selection and
+implementation/acceptance responsibilities. Independent review accepted bounded
+native feasibility; checked H1 publication and later actual consumer-runtime
+acceptance remain pending.
+
+### Context
+
+ADR-031 requires a trusted durable invocation identity outside model arguments.
+The historical Codex 0.149.0 SR1 disposition remains unchanged. The v0.1.4
+mandatory Codex and Claude host routes need their own version-pinned proof.
+Waiting for consumer products to change does not implement the Dolgorae-owned
+adapter. Existing native host hooks offer a concrete candidate boundary.
+
+Pinned Codex 0.160.0 source exposes native session/Turn/tool-use identity to
+`PreToolUse` and forwards its replacement input to MCP. Its
+[native metadata implementation](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/mcp_tool_call.rs)
+also supplies call identity separately from model arguments. Claude's
+[PreToolUse contract](https://code.claude.com/docs/en/hooks#pretooluse)
+provides a native tool-use identity and replacement input. Source and API
+documentation establish a candidate mechanism; they do not qualify replay,
+restart, private-field delivery or response-loss behavior on actual hosts.
+
+### Decision
+
+Select a Dolgorae-owned synchronous hook plus stdio adapter for isolated
+pre-contract qualification. The hook allocates one UUIDv7 and random private
+binding and commits native-event/input linkage durably. Codex selects that
+binding using its native `_meta.threadId` and `_meta.callId`, without rewriting
+public arguments. Claude carries the opaque binding through `updatedInput`;
+the model schema excludes it and the adapter removes it before processing public
+input. The adapter verifies protected state, input digest, route and native call
+identity. Missing bindings fail closed even if the host ignores a failed hook.
+
+This is an explicit successor carrier for External Specialist MCP, not a
+reinterpretation of SR1's metadata carrier. Model-supplied identity, transport
+IDs and text equality remain inadmissible. The protected binding authenticates
+host-created identity; its delivery inside rewritten input does not make
+model-controlled input authoritative. Private bindings must remain absent
+from results, model traffic, ordinary diagnostic logs and exported evidence.
+Actual Codex JSON runtime events echo rewritten arguments, so its route MUST
+use native metadata rather than a private argument. Claude retains hook stdout
+in its native conversation journal. The selected route treats that journal as
+protected identity state under an isolated host configuration root with umask
+077 and current-user-owned 0700/0600 directories/files. The installation/state
+owner controls its retention and excludes it from evidence or consumer exports.
+This is an explicit storage boundary, not a claim that the host discards hooks.
+
+Dolgorae owns adapter implementation, protected state, installation recipe and
+operational qualification. Aquarium's consumer composition and independent
+acceptance ownership remain separate. The [successor requirements](../specs/dolgorae-v014-successor-requirements.md)
+define persistence, conflict, uncertainty and lookup rules. The
+[qualification boundary](../specs/dolgorae-v014-host-contract-qualification.md)
+records the tested layers, physical host-loss recovery and reproduction.
+Both pinned actual hosts must receive independent acceptance of the complete
+matrix before this decision can support freeze.
+Failure keeps H1 unqualified; it cannot activate a fallback or reduce scope.
+
+### Consequences and rejected alternatives
+
+No Aquarium or Podway product modification is assumed for this candidate.
+The qualification prototype does not advertise a production facade, backend
+or capability. Phase 3 still implements and qualifies actual consumer paths.
+Existing supported paths and their evidence keep their original scope.
+
+- Rely on a server-generated identity after delivery: it cannot distinguish
+  an original invocation from ambiguous replay.
+- Use JSON-RPC or process identity: these identify transport attempts, not
+  logical invocation continuity.
+- Trust a private property supplied by the model: the server requires a
+  protected pre-dispatch binding and exact input match.
+- Treat hook success or a documentation promise as qualification: actual
+  two-host admission, restart and loss tests remain mandatory.

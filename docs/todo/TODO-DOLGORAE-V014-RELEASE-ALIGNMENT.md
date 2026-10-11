@@ -8,13 +8,13 @@
 | Adopted | 2026-10-10, under Master's approved documentation plan |
 | Consumers | EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021, EPIC-022 |
 | Release pair | Dolgorae v0.1.4 and Gul v0.1.0 |
-| Lifecycle owner | [Roadmap](../roadmap/README.md); every new work unit remains PLANNED |
+| Lifecycle owner | [Roadmap](../roadmap/README.md); consult it for current execution status |
 | Starting provider revision | c1edeb17b9046a75bd8d31f67e9de934d89ed05a |
 | Starting Gul revision | 2db9c4f12f88d5ee36810377248efcaf9bf4110c |
 | Gul planning revalidation | Current ADR-0057 maps Phase 2 to E15/T21 and Phase 4 to E16-T1..T16; original E15-T5..T20 remain Historical/Retired with complete scope mapping |
 | Release consumers | Aquarium, Podway and Gul; the complete three-consumer acceptance matrix is mandatory |
 | Current contract state | Adopted work requirements; public v2 is not yet checked, agreed or implemented |
-| Execution authority | Documentation adoption only; implementation, reviews, runtime use, commits and publication retain their separate boundaries |
+| Execution authority | Initial adoption authorized documentation only; later execution requires its separately approved envelope. Implementation, reviews, runtime use, commits and publication retain their separate boundaries |
 
 The [documentation authority map](../README.md) governs this dossier. It owns
 the execution requirements and handoff map for the adopted work. Observable
@@ -121,8 +121,8 @@ cannot identify a durable invocation.
 
 | Required host | Supported version and route | Current decision |
 | --- | --- | --- |
-| Codex host | Exact executable/version and any trusted adapter version must be selected in TASK-067 and qualified before TASK-068 freeze | Unsettled; the 0.149.0 record remains historical negative evidence |
-| Claude host | Exact host product/version and any trusted adapter version must be selected in TASK-067 and qualified before TASK-068 freeze | Unsettled; support has not been established by this plan |
+| Codex host | Codex CLI 0.160.0 with the Dolgorae-owned pre-dispatch hook and native call/thread metadata binding | Bounded prototype feasibility independently accepted; exact H1 binding pending; the 0.149.0 record remains historical negative evidence |
+| Claude host | Claude Code 2.1.295 with the Dolgorae-owned pre-dispatch hook and protected opaque binding | Bounded prototype feasibility independently accepted; protected native hook journal is part of identity state; exact H1 binding pending |
 
 For each route, TASK-067 names the trusted owner that creates the logical
 invocation identity before first delivery and durably retains it with the
@@ -157,8 +157,12 @@ credentials or raw model traffic:
 
 Runtime execution of this pre-contract matrix needs separate authorization and
 documented opt-in. Static fixtures alone cannot establish host feasibility.
-Host versions and routes remain unqualified; this amendment executes no probe. Until both
-mandatory host routes and their authority rules are established, TASK-068
+The [selected qualification boundary](../specs/dolgorae-v014-host-contract-qualification.md)
+defines exact executable pins, tested layers, physical host-loss recovery and
+reproduction. Both actual candidates passed those prototype scenarios and their
+bounded feasibility was independently accepted; the coordination decision settles consumer source
+selection and implementation/acceptance ownership. Until both mandatory host
+routes and their authority rules are accepted, TASK-068
 contract freeze, TASK-069/Gate A, TASK-077 acceptance and dependent sequential
 work cannot advance. A typed unsupported response can verify
 failure handling, but cannot pass mandatory host-support acceptance or reduce
@@ -649,8 +653,10 @@ After separate account/runtime authorization and a bounded execution budget:
 6. Close normally after completion and verify terminal aggregate settlement
    and writer cleanup; interrupt acknowledgement alone is insufficient.
 
-TASK-067 defines the bounded task, approval scenario, runtime/model/effort and
-budget, with the harness/consumer owners. Record both source revisions and exact
+TASK-067's [campaign definition](../specs/dolgorae-v014-successor-requirements.md#measurement-and-real-account-campaign-definitions)
+selects the bounded task, approval scenario, runtime/model/effort and budget,
+with Gul E16-T16, TASK-079 and TASK-088 owning production and acceptance.
+Record both source revisions and exact
 artifact/package checksums, contract revision/digests, Codex runtime pin and
 harness revision, plus a bounded sanitized result for every step. Retain
 credentials only in protected isolated test state. Missing authorization or
@@ -679,7 +685,8 @@ reported for the final pair, as do Gul's device usability obligations.
 | Profile maintenance | TASK-073 | 10,000 synthetic cycles stay within the selected live journal bound and preserve membership |
 | Ledger boundary | TASK-072 | New admission receives typed capacity refusal; accepted finalization, Close and writer cleanup succeed |
 
-TASK-067 freezes test definitions and configuration. Each named Task measures
+TASK-067's [measurement definitions](../specs/dolgorae-v014-successor-requirements.md#measurement-and-real-account-campaign-definitions)
+freeze the test configuration and sample method. Each named Task measures
 its own baseline and corrected behavior against its acceptance criteria. Later
 TASK-078 pool and TASK-084 group functionality are not prerequisites for
 TASK-075 completion. Gul produces final-pair measurements in Phase 4;
