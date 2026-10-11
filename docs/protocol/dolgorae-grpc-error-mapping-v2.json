@@ -1,0 +1,496 @@
+{
+  "contract_id": "dolgorae.grpc-error-mapping/v2",
+  "schema_version": 2,
+  "error_detail_version": 2,
+  "detail": "dolgorae.public.v2.DolgoraeErrorDetail",
+  "effect_states": [
+    "none",
+    "accepted",
+    "unresolved"
+  ],
+  "classifications": {
+    "Rejected": {
+      "effect": "none",
+      "resolves_earlier_unknown": false
+    },
+    "RetrySameKey": {
+      "new_key": false,
+      "requires_method_lookup_permission": true
+    },
+    "Unknown": {
+      "effect": "unresolved",
+      "redispatch": false
+    },
+    "RecoveryNeeded": {
+      "retains_receipts": true,
+      "action": "typed_supported_recovery"
+    }
+  },
+  "transport_or_missing_detail_on_mutation": "Unknown",
+  "unknown_enum": "fail_closed",
+  "infer_from_status_text": false,
+  "error_code_carrier": "closed_by_this_policy_string",
+  "unknown_error_code_on_mutation": "Unknown_until_authoritative_lookup_or_state_read",
+  "code_status": {
+    "ACCESS_TRANSITION_UNSUPPORTED": "FAILED_PRECONDITION",
+    "ARTIFACT_INTEGRITY_FAILURE": "DATA_LOSS",
+    "ARTIFACT_NOT_FOUND": "NOT_FOUND",
+    "ARTIFACT_RANGE_INVALID": "INVALID_ARGUMENT",
+    "BACKGROUND_EXECUTION_UNVERIFIED": "FAILED_PRECONDITION",
+    "CAPABILITY_UNSUPPORTED": "FAILED_PRECONDITION",
+    "COMPATIBILITY_REJECTED": "FAILED_PRECONDITION",
+    "CONTROLLER_MISMATCH": "PERMISSION_DENIED",
+    "CONTROL_MODE_CONTROLLER_MISMATCH": "PERMISSION_DENIED",
+    "CROSS_CONTROLLER_RELEASE_REQUIRED": "ABORTED",
+    "DEDICATED_HISTORY_BARRIER_FAILED": "FAILED_PRECONDITION",
+    "DEDICATED_SERVER_START_FAILED": "UNAVAILABLE",
+    "EVENT_CURSOR_INVALID": "INVALID_ARGUMENT",
+    "FINDINGS_OUTPUT_INVALID": "FAILED_PRECONDITION",
+    "GROUP_LIMIT_EXCEEDED": "RESOURCE_EXHAUSTED",
+    "GROUP_MANIFEST_INVALID": "INVALID_ARGUMENT",
+    "IDEMPOTENCY_CONFLICT": "ABORTED",
+    "INTERACTION_ALREADY_RESOLVED": "ABORTED",
+    "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER": "PERMISSION_DENIED",
+    "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER": "PERMISSION_DENIED",
+    "INTERACTION_NOT_FOUND": "NOT_FOUND",
+    "INTERACTION_OUTCOME_UNKNOWN": "FAILED_PRECONDITION",
+    "INTERACTION_RESPONSE_INVALID": "FAILED_PRECONDITION",
+    "INTERACTION_RESPONSE_TOO_LARGE": "RESOURCE_EXHAUSTED",
+    "INTERACTION_STALE": "ABORTED",
+    "INTERNAL_ERROR": "INTERNAL",
+    "INVALID_ARGUMENT": "INVALID_ARGUMENT",
+    "LOOKUP_NAMESPACE_CORRUPT": "DATA_LOSS",
+    "LOOKUP_NAMESPACE_UNAVAILABLE": "UNAVAILABLE",
+    "MAINTENANCE_PLAN_STALE": "ABORTED",
+    "OPERATOR_MISMATCH": "PERMISSION_DENIED",
+    "OUTCOME_UNKNOWN": "FAILED_PRECONDITION",
+    "POOL_CAPACITY_EXCEEDED": "RESOURCE_EXHAUSTED",
+    "PROFILE_MISMATCH": "FAILED_PRECONDITION",
+    "PROFILE_NOT_FOUND": "NOT_FOUND",
+    "PROTOCOL_VERSION_UNSUPPORTED": "FAILED_PRECONDITION",
+    "RECOVERY_REQUIRED": "FAILED_PRECONDITION",
+    "RESULT_CONTENT_UNAVAILABLE": "FAILED_PRECONDITION",
+    "ROUND_LIMIT_EXCEEDED": "RESOURCE_EXHAUSTED",
+    "RUN_BUSY": "ABORTED",
+    "RUN_NOT_FOUND": "NOT_FOUND",
+    "RUN_STATE_CONFLICT": "ABORTED",
+    "SERVER_SHUTDOWN": "UNAVAILABLE",
+    "SESSION_CLOSE_IN_PROGRESS": "FAILED_PRECONDITION",
+    "SHARED_RUN_WRITE_FORBIDDEN": "FAILED_PRECONDITION",
+    "SLOW_CONSUMER": "RESOURCE_EXHAUSTED",
+    "SOURCE_CHANGED": "ABORTED",
+    "SOURCE_TOO_LARGE": "RESOURCE_EXHAUSTED",
+    "SPECIALIST_CONFIGURATION_MISMATCH": "FAILED_PRECONDITION",
+    "SPECIALIST_NOT_IDLE": "FAILED_PRECONDITION",
+    "STALE_WRITER_GENERATION": "ABORTED",
+    "STORAGE_CAPACITY_EXCEEDED": "RESOURCE_EXHAUSTED",
+    "THREAD_NOT_FOUND": "NOT_FOUND",
+    "THREAD_RESIDENCY_CONFLICT": "FAILED_PRECONDITION",
+    "TRANSPORT_FAILURE": "UNAVAILABLE",
+    "TURN_NOT_FOUND": "NOT_FOUND",
+    "UNSUPPORTED_SCHEMA_VERSION": "INVALID_ARGUMENT",
+    "WAIT_CYCLE": "FAILED_PRECONDITION",
+    "WORKSPACE_INITIALIZATION_CONFLICT": "ABORTED",
+    "WORKSPACE_NOT_INITIALIZED": "NOT_FOUND",
+    "WORKSPACE_STARTUP_UNSUPPORTED": "FAILED_PRECONDITION",
+    "WRITER_BUSY": "ABORTED",
+    "WRITER_HANDOFF_NOT_ALLOWED": "ABORTED",
+    "WRITER_HELD_WAIT_FORBIDDEN": "FAILED_PRECONDITION",
+    "WRITE_CONTINUATION_CONTROLLER_INVALID": "FAILED_PRECONDITION",
+    "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL": "FAILED_PRECONDITION"
+  },
+  "common_errors": [
+    "INVALID_ARGUMENT",
+    "CONTROLLER_MISMATCH",
+    "PROTOCOL_VERSION_UNSUPPORTED",
+    "INTERNAL_ERROR",
+    "TRANSPORT_FAILURE"
+  ],
+  "required_context": [
+    "method_specific_operation_kind",
+    "effect",
+    "classification",
+    "authorized_operation_or_subject_identity_when_known"
+  ],
+  "unkeyed_subjects": "typed run/member/task/group/merge/engagement/maintenance identities; never fabricate an idempotency key",
+  "methods": {
+    "ArtifactService.GetArtifact": [
+      "ARTIFACT_NOT_FOUND",
+      "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER",
+      "ARTIFACT_INTEGRITY_FAILURE"
+    ],
+    "ArtifactService.ReadArtifactChunk": [
+      "ARTIFACT_RANGE_INVALID",
+      "ARTIFACT_INTEGRITY_FAILURE",
+      "ARTIFACT_NOT_FOUND"
+    ],
+    "BrokerService.AssignSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "SPECIALIST_NOT_IDLE",
+      "ROUND_LIMIT_EXCEEDED",
+      "WAIT_CYCLE",
+      "WRITER_HELD_WAIT_FORBIDDEN"
+    ],
+    "BrokerService.AwaitSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "BrokerService.CancelSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "BrokerService.CollectSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED",
+      "ARTIFACT_INTEGRITY_FAILURE",
+      "RESULT_CONTENT_UNAVAILABLE"
+    ],
+    "BrokerService.GetManagedDelegationIdentity": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "BrokerService.ReleaseSpecialist": [
+      "CONTROLLER_MISMATCH",
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "BrokerService.SpawnSpecialist": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "POOL_CAPACITY_EXCEEDED",
+      "SPECIALIST_CONFIGURATION_MISMATCH"
+    ],
+    "ControllerService.VerifyController": [
+      "CONTROLLER_MISMATCH",
+      "CONTROL_MODE_CONTROLLER_MISMATCH"
+    ],
+    "GroupService.AssignGroup": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "GROUP_LIMIT_EXCEEDED",
+      "GROUP_MANIFEST_INVALID"
+    ],
+    "GroupService.AssignSynthesis": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "GroupService.AwaitGroup": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "GroupService.CollectGroup": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED",
+      "ARTIFACT_INTEGRITY_FAILURE",
+      "RESULT_CONTENT_UNAVAILABLE"
+    ],
+    "GroupService.MergeGroupResults": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "FINDINGS_OUTPUT_INVALID",
+      "RESULT_CONTENT_UNAVAILABLE"
+    ],
+    "InteractionService.GetControllerInteraction": [
+      "CONTROLLER_MISMATCH",
+      "INTERACTION_NOT_FOUND",
+      "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER"
+    ],
+    "InteractionService.ListPendingInteractions": [
+      "RUN_NOT_FOUND",
+      "RUN_STATE_CONFLICT"
+    ],
+    "InteractionService.ResolveInteraction": [
+      "INTERACTION_STALE",
+      "INTERACTION_ALREADY_RESOLVED",
+      "INTERACTION_RESPONSE_INVALID",
+      "INTERACTION_RESPONSE_TOO_LARGE",
+      "INTERACTION_OUTCOME_UNKNOWN"
+    ],
+    "MaintenanceService.ApplyMaintenance": [
+      "OPERATOR_MISMATCH",
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "MAINTENANCE_PLAN_STALE",
+      "STORAGE_CAPACITY_EXCEEDED",
+      "ARTIFACT_INTEGRITY_FAILURE"
+    ],
+    "MaintenanceService.GetMaintenance": [
+      "OPERATOR_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "MaintenanceService.PlanMaintenance": [
+      "OPERATOR_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "ObservationService.ListRunTimelineItems": [
+      "EVENT_CURSOR_INVALID",
+      "RUN_NOT_FOUND",
+      "ARTIFACT_INTEGRITY_FAILURE"
+    ],
+    "ObservationService.WatchRunEvents": [
+      "EVENT_CURSOR_INVALID",
+      "SLOW_CONSUMER",
+      "SERVER_SHUTDOWN",
+      "RUN_STATE_CONFLICT"
+    ],
+    "OperationService.LookupOperation": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED",
+      "LOOKUP_NAMESPACE_UNAVAILABLE",
+      "LOOKUP_NAMESPACE_CORRUPT"
+    ],
+    "OrchestrationService.GetOrchestratedSession": [
+      "RUN_NOT_FOUND",
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT"
+    ],
+    "OrchestrationService.ListOrchestratedSessionResults": [
+      "RUN_NOT_FOUND",
+      "CONTROLLER_MISMATCH",
+      "ARTIFACT_INTEGRITY_FAILURE"
+    ],
+    "ProvisioningService.InstallProvisioning": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "PROFILE_MISMATCH",
+      "SOURCE_CHANGED",
+      "SOURCE_TOO_LARGE"
+    ],
+    "ProvisioningService.ValidateProvisioning": [
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED",
+      "SOURCE_TOO_LARGE",
+      "SOURCE_CHANGED",
+      "PROFILE_MISMATCH"
+    ],
+    "RunService.CloseRun": [
+      "SESSION_CLOSE_IN_PROGRESS",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "RunService.CreateWriteContinuation": [
+      "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL",
+      "WRITE_CONTINUATION_CONTROLLER_INVALID",
+      "IDEMPOTENCY_CONFLICT"
+    ],
+    "RunService.DeleteRun": [
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT"
+    ],
+    "RunService.ForkRun": [
+      "TURN_NOT_FOUND",
+      "THREAD_NOT_FOUND",
+      "IDEMPOTENCY_CONFLICT",
+      "OUTCOME_UNKNOWN"
+    ],
+    "RunService.GetRun": [
+      "RUN_NOT_FOUND",
+      "RUN_STATE_CONFLICT"
+    ],
+    "RunService.InterruptTurn": [
+      "TURN_NOT_FOUND",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN"
+    ],
+    "RunService.ListRuns": [
+      "WORKSPACE_NOT_INITIALIZED",
+      "UNSUPPORTED_SCHEMA_VERSION"
+    ],
+    "RunService.PauseRun": [
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN"
+    ],
+    "RunService.ReconcileRun": [
+      "THREAD_RESIDENCY_CONFLICT",
+      "BACKGROUND_EXECUTION_UNVERIFIED",
+      "OUTCOME_UNKNOWN"
+    ],
+    "RunService.RecoverRun": [
+      "RECOVERY_REQUIRED",
+      "DEDICATED_HISTORY_BARRIER_FAILED",
+      "OUTCOME_UNKNOWN"
+    ],
+    "RunService.ResumeRun": [
+      "DEDICATED_SERVER_START_FAILED",
+      "THREAD_RESIDENCY_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "RunService.SetDefaultEffort": [
+      "CAPABILITY_UNSUPPORTED",
+      "RUN_STATE_CONFLICT"
+    ],
+    "RunService.StartRun": [
+      "WRITER_BUSY",
+      "WORKSPACE_STARTUP_UNSUPPORTED",
+      "DEDICATED_SERVER_START_FAILED",
+      "IDEMPOTENCY_CONFLICT",
+      "INTERNAL_ERROR"
+    ],
+    "RunService.SubmitTurn": [
+      "RUN_BUSY",
+      "WRITER_BUSY",
+      "SESSION_CLOSE_IN_PROGRESS",
+      "IDEMPOTENCY_CONFLICT",
+      "OUTCOME_UNKNOWN"
+    ],
+    "RunService.VerifyRun": [
+      "RUN_NOT_FOUND",
+      "BACKGROUND_EXECUTION_UNVERIFIED",
+      "RUN_STATE_CONFLICT"
+    ],
+    "RuntimeService.GetCapabilities": [
+      "PROTOCOL_VERSION_UNSUPPORTED"
+    ],
+    "RuntimeService.GetProfile": [
+      "PROFILE_NOT_FOUND",
+      "PROFILE_MISMATCH",
+      "COMPATIBILITY_REJECTED"
+    ],
+    "RuntimeService.InspectWorkspace": [
+      "WORKSPACE_NOT_INITIALIZED",
+      "WORKSPACE_INITIALIZATION_CONFLICT"
+    ],
+    "RuntimeService.ListProfileDiagnostics": [
+      "PROFILE_NOT_FOUND",
+      "EVENT_CURSOR_INVALID"
+    ],
+    "RuntimeService.ListProfiles": [
+      "UNSUPPORTED_SCHEMA_VERSION"
+    ],
+    "SpecialistService.AssignExternalSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "SPECIALIST_NOT_IDLE",
+      "ROUND_LIMIT_EXCEEDED",
+      "WAIT_CYCLE",
+      "WRITER_HELD_WAIT_FORBIDDEN"
+    ],
+    "SpecialistService.AwaitExternalSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "SpecialistService.CancelExternalSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "SpecialistService.CloseExternalEngagement": [
+      "CONTROLLER_MISMATCH",
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "SpecialistService.CollectExternalSpecialistTask": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED",
+      "ARTIFACT_INTEGRITY_FAILURE",
+      "RESULT_CONTENT_UNAVAILABLE"
+    ],
+    "SpecialistService.GetExternalDelegationIdentity": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "SpecialistService.GetExternalEngagement": [
+      "CONTROLLER_MISMATCH",
+      "RUN_STATE_CONFLICT",
+      "RECOVERY_REQUIRED"
+    ],
+    "SpecialistService.HireExternalSpecialist": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED",
+      "POOL_CAPACITY_EXCEEDED",
+      "SPECIALIST_CONFIGURATION_MISMATCH"
+    ],
+    "SpecialistService.OpenExternalEngagement": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "SpecialistService.ReleaseExternalSpecialist": [
+      "CONTROLLER_MISMATCH",
+      "RUN_BUSY",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN",
+      "RECOVERY_REQUIRED"
+    ],
+    "WriterService.AcquireWriter": [
+      "WRITER_BUSY",
+      "SHARED_RUN_WRITE_FORBIDDEN",
+      "ACCESS_TRANSITION_UNSUPPORTED",
+      "RUN_STATE_CONFLICT"
+    ],
+    "WriterService.CancelWriterHandoff": [
+      "STALE_WRITER_GENERATION",
+      "WRITER_HANDOFF_NOT_ALLOWED"
+    ],
+    "WriterService.CommitWriterHandoff": [
+      "STALE_WRITER_GENERATION",
+      "WRITER_HANDOFF_NOT_ALLOWED",
+      "OUTCOME_UNKNOWN"
+    ],
+    "WriterService.GetWorkspaceWriterStatus": [
+      "WORKSPACE_NOT_INITIALIZED",
+      "RUN_STATE_CONFLICT"
+    ],
+    "WriterService.PrepareWriterHandoff": [
+      "WRITER_HANDOFF_NOT_ALLOWED",
+      "STALE_WRITER_GENERATION",
+      "WRITER_BUSY"
+    ],
+    "WriterService.ReleaseWriter": [
+      "RUN_BUSY",
+      "CROSS_CONTROLLER_RELEASE_REQUIRED",
+      "RUN_STATE_CONFLICT",
+      "OUTCOME_UNKNOWN"
+    ]
+  }
+}

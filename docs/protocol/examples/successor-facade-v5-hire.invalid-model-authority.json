@@ -1,0 +1,12 @@
+{
+  "schema": "dolgorae.external-specialist-request/v5",
+  "operation": "hire_external_specialist",
+  "scope_kind": "external_engagement",
+  "scope_ref": "engagement:fixture",
+  "provisioning_ref": "provisioning:fixture",
+  "role_ref": "reviewer",
+  "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+  "idempotency_key": "hire-original-key",
+  "expected_revision": 1,
+  "trusted_invocation_ref": "01900000-0000-7000-8000-000000000068"
+}

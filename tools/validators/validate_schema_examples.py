@@ -20,6 +20,10 @@ def schema_name(example_name: str) -> str:
     # Explicit v2 names validate successor payloads; executable E2E checks
     # validate the current machine/v2 producers.
     prefixes = {
+        "v014-identity-": "dolgorae-v014-identities-v1.schema.json",
+        "v014-state-": "dolgorae-successor-state-v1.schema.json",
+        "successor-machine-v5-": "dolgorae-machine-v5.schema.json",
+        "successor-facade-v5-": "dolgorae-external-specialist-facade-v5.schema.json",
         "session-policy-v3-": "dolgorae-session-policy-v3.schema.json",
         "instruction-migration-": "dolgorae-instruction-migration-v1.schema.json",
         "worker-runtime-v2-": "dolgorae-worker-runtime-v2.schema.json",
@@ -75,6 +79,10 @@ def schema_name(example_name: str) -> str:
 
 
 def validation_schema(example_name: str, schema: dict[str, object]) -> dict[str, object]:
+    if example_name.startswith("successor-machine-v5-normalized."):
+        return {"$ref": "https://dolgorae.local/schema/machine-output/v5#/$defs/normalized_fixture_suite"}
+    if example_name == "successor-facade-v5-methods.valid.json":
+        return {"$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/contract_fixture_suite"}
     if example_name.startswith("workspace-capability-v2.invalid-"):
         return {"$ref": "https://dolgorae.local/schema/capabilities/v2#/properties/caller_workspace"}
     if example_name.startswith("workspace-policy-input-v3."):
@@ -102,6 +110,93 @@ def repaired_negative_example(
     example_name: str, instance: dict[str, object]
 ) -> dict[str, object]:
     repaired = copy.deepcopy(instance)
+    if example_name == "successor-machine-v5-normalized.invalid-protected-answer.json":
+        del repaired["cases"][4]["input"]["protected_answer_sha256"]
+        return repaired
+    successor_repairs = {
+        "v014-identity-error-recovery.invalid-none.json":
+            (("required_action",), "recover_run"),
+        "v014-identity-error-recovery.invalid-fix-request.json":
+            (("required_action",), "recover_run"),
+        "v014-identity-error-recovery.invalid-replay-same-key.json":
+            (("required_action",), "recover_run"),
+        "v014-identity-error-retry.invalid-none.json":
+            (("required_action",), "replay_same_key"),
+        "v014-identity-role-snapshot.invalid-domain-substitution.json":
+            (("schema",), "dolgorae.role-snapshot/v1"),
+        "v014-identity-admitted-configuration.invalid-shared-write.json":
+            (("requested_access",), "read_only"),
+        "v014-identity-complete-result.invalid-incomplete.json":
+            (("attachments",), []),
+        "v014-identity-mutation-envelope.invalid-overflow.json":
+            (("controller_generation",), 9007199254740991),
+        "v014-identity-lookup-absent.invalid-incomplete-proof.json":
+            (("proof", "complete"), True),
+        "v014-identity-lookup-absent.invalid-unknown-state.json":
+            (("state",), "absent"),
+        "v014-identity-delegation-external.invalid-wrong-scope.json":
+            (("scope_kind",), "external_engagement"),
+        "v014-identity-delegation-external.invalid-unsettled-work.json":
+            (("disposition_proof", "unresolved"), 0),
+        "v014-identity-accepted-task.invalid-image-detail.json":
+            (("images", 0, "detail"), "high"),
+        "v014-identity-lookup-submit-turn.invalid-missing-turn.json":
+            (("accepted_subjects", "turn_ref"), "turn:original"),
+        "v014-identity-lookup-accepted.invalid-empty-subjects.json":
+            (("accepted_subjects", "task_ref"), "task:fixture"),
+        "v014-identity-lookup-accepted.invalid-empty-receipt-subjects.json":
+            (("receipt", "accepted_subjects", "task_ref"), "task:fixture"),
+        "v014-identity-error-unknown.invalid-new-key-retry.json":
+            (("retry_new_key",), False),
+        "v014-state-pool.invalid-too-many-servers.json":
+            (("readonly_server_limit",), 16),
+        "v014-state-intent.invalid-old-generation.json":
+            (("schema_version",), 2),
+        "v014-state-intent.invalid-fabricated-receipt.json":
+            (("receipt",), None),
+        "v014-state-instructions.invalid-old-generation.json":
+            (("schema",), "dolgorae.instructions/v3"),
+        "v014-state-configuration.invalid-old-generation.json":
+            (("schema_version",), 4),
+        "v014-state-run.invalid-old-generation.json":
+            (("schema_version",), 2),
+        "v014-state-maintenance.invalid-live-writer.json":
+            (("live_writers",), 0),
+        "v014-identity-merged-findings.invalid-oversized-output.json":
+            (("merged_output", "byte_length"), 33554432),
+        "v014-identity-role-snapshot.invalid-empty-body.json":
+            (("role_body", "byte_length"), 1),
+        "successor-facade-v5-await-group.invalid-zero-predicate.json":
+            (("predicate", "k"), 1),
+        "successor-machine-v5-unknown.invalid-malformed-effect.json":
+            (("error", "effect"), "unresolved"),
+        "successor-machine-v5-capabilities.invalid-unqualified-availability.json":
+            (("data", "methods", 0, "available"), False),
+        "successor-machine-v5-hire-request.invalid-command-mismatch.json":
+            (("command",), "hire_external_specialist"),
+    }
+    successor_removals = {
+        "v014-identity-role-snapshot.invalid-unknown-field.json": "untrusted_path",
+        "v014-identity-mutation-envelope.invalid-secret.json": "controller_secret",
+        "successor-facade-v5-hire.invalid-model-authority.json": "trusted_invocation_ref",
+        "successor-facade-v5-hire.invalid-private-binding.json": "_dolgorae_host_binding",
+    }
+    if example_name in successor_repairs:
+        path, value = successor_repairs[example_name]
+        target = repaired
+        for component in path[:-1]:
+            target = target[component]
+        target[path[-1]] = value
+        return repaired
+    if example_name in successor_removals:
+        del repaired[successor_removals[example_name]]
+        return repaired
+    if example_name == "v014-identity-role-snapshot.invalid-too-many-dependencies.json":
+        repaired["dependencies"] = repaired["dependencies"][:64]
+        return repaired
+    if example_name == "v014-identity-group-50.invalid-too-many-entries.json":
+        repaired["entries"] = repaired["entries"][:64]
+        return repaired
     if example_name == "instruction-migration-request.invalid-implicit-choice.json":
         repaired["roles"][0]["publish"] = True
     elif example_name == "session-policy-v3-role.invalid-version.json":
@@ -448,6 +543,125 @@ def validate_successor_cases(registry: Registry, errors: list[str]) -> int:
     return checked
 
 
+def validate_v014_method_cases(registry: Registry, errors: list[str]) -> int:
+    """Check every successor facade carrier and its Machine wrapper.
+
+    The fixtures are contracts, not observations of implemented runtime support.
+    State-based errors retain subjects without inventing keyed-operation history.
+    """
+    facade = json.loads(
+        (PROTOCOL / "dolgorae-external-specialist-facade-v5.schema.json").read_text()
+    )
+    cases = json.loads(
+        (EXAMPLES / "successor-facade-v5-methods.valid.json").read_text()
+    )["cases"]
+    expected = {
+        definition.removesuffix("_request")
+        for definition in facade["$defs"]
+        if definition.endswith("_request") and definition != "public_request"
+    }
+    actual = [case["operation"] for case in cases]
+    if len(actual) != len(set(actual)) or set(actual) != expected:
+        errors.append("v014 facade fixtures must cover every concrete operation exactly once")
+    state_based = {
+        "close_external_engagement", "cancel_external_specialist_task",
+        "release_external_specialist", "cancel_specialist_task",
+        "release_specialist", "apply_maintenance",
+    }
+    checked = 0
+
+    def check(name: str, definition: str, instance: dict, valid: bool = True) -> None:
+        nonlocal checked
+        checked += 1
+        validator = Draft202012Validator(
+            {"$ref": f"https://dolgorae.local/schema/machine-output/v5#/$defs/{definition}"},
+            registry=registry, format_checker=FormatChecker(),
+        )
+        validation_errors = list(validator.iter_errors(instance))
+        if bool(validation_errors) == valid:
+            detail = validation_errors[0].message if validation_errors else "invalid instance accepted"
+            errors.append(f"v014 method {name}: {detail}")
+
+    for case in cases:
+        operation = case["operation"]
+        if any(case[field]["operation"] != operation for field in ("request", "response", "failure")):
+            errors.append(f"v014 method {operation}: carrier operation does not match fixture")
+        error = case["failure"]["error"]
+        if error["operation_kind"] != operation:
+            errors.append(f"v014 method {operation}: error operation kind differs")
+        if operation in state_based:
+            if error["operation_ref"] is not None or not any(error["subjects"].values()):
+                errors.append(f"v014 method {operation}: state-based recovery needs subjects, not a fabricated key")
+        if "receipt" in case["response"]:
+            namespace = case["response"]["receipt"]["namespace"]
+            if namespace["operation_kind"] != operation or namespace["idempotency_key"] != case["request"]["idempotency_key"]:
+                errors.append(f"v014 method {operation}: original-key receipt identity differs")
+        normalized_schema = (
+            f"https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/{operation}_normalized_body"
+        )
+        if case["normalized_body_schema"] != normalized_schema:
+            errors.append(f"v014 method {operation}: wrong normalized request schema")
+        normalization = facade["$defs"][operation + "_request"]["x-normalizationPolicy"]
+        normalized = {
+            key: value for key, value in case["request"].items()
+            if key not in normalization["excluded_envelope_fields"]
+        }
+        if normalized != case["normalized_request_body"]:
+            errors.append(f"v014 method {operation}: normalization dropped semantic input")
+        normalized_errors = list(Draft202012Validator(
+            {"$ref": normalized_schema}, registry=registry,
+            format_checker=FormatChecker(),
+        ).iter_errors(normalized))
+        checked += 1
+        if normalized_errors:
+            errors.append(f"v014 method {operation}: normalized body invalid: {normalized_errors[0].message}")
+        request = {
+            "schema": "dolgorae-machine-request/v5", "command": operation,
+            "arguments": case["request"],
+        }
+        success = {
+            "schema": "dolgorae-machine/v5", "ok": True, "command": operation,
+            "data": case["response"],
+        }
+        failure = {
+            "schema": "dolgorae-machine/v5", "ok": False, "command": operation,
+            "error": error,
+        }
+        check(operation + "-request", operation + "_machine_request", request)
+        check(operation + "-response", operation + "_success", success)
+        check(operation + "-error", "failure", failure)
+        wrong = copy.deepcopy(request)
+        wrong["arguments"]["_dolgorae_host_binding"] = "fixture-private-canary"
+        check(operation + "-model-private-binding", operation + "_machine_request", wrong, False)
+        wrong = copy.deepcopy(success)
+        wrong["data"]["operation"] = "unknown_successor_operation"
+        check(operation + "-wrong-response-operation", operation + "_success", wrong, False)
+        wrong = copy.deepcopy(failure)
+        wrong["error"]["retry_new_key"] = True
+        check(operation + "-new-key-retry", "failure", wrong, False)
+    normalized_cases = json.loads(
+        (EXAMPLES / "successor-machine-v5-normalized.valid.json").read_text()
+    )["cases"]
+    machine = json.loads((PROTOCOL / "dolgorae-machine-v5.schema.json").read_text())
+    selected = set(machine["x-normalizedOperationMap"].values())
+    if {case["schema_ref"] for case in normalized_cases} != selected:
+        errors.append("v014 existing keyed fixtures must cover all five normalized schemas")
+    for case in normalized_cases:
+        checked += 1
+        expected_ref = (
+            f"https://dolgorae.local/schema/machine-output/v5#/$defs/{case['operation']}_normalized_body"
+        )
+        if case["schema_ref"] != expected_ref:
+            errors.append(f"v014 normalized {case['operation']}: schema identity mismatch")
+        normalized_errors = list(Draft202012Validator(
+            {"$ref": expected_ref}, registry=registry,
+            format_checker=FormatChecker(),
+        ).iter_errors(case["input"]))
+        if normalized_errors:
+            errors.append(f"v014 normalized {case['operation']}: {normalized_errors[0].message}")
+    return checked
+
+
 def main() -> int:
     registry = Registry()
     for path in sorted(PROTOCOL.glob("*.json")):
@@ -488,6 +702,10 @@ def main() -> int:
             *EXAMPLES.glob("accepted-policy-session-v1-*.invalid-*.json"),
             *EXAMPLES.glob("instruction-migration-*.invalid-*.json"),
             *EXAMPLES.glob("session-policy-v3-*.invalid-*.json"),
+            *EXAMPLES.glob("v014-identity-*.invalid-*.json"),
+            *EXAMPLES.glob("v014-state-*.invalid-*.json"),
+            *EXAMPLES.glob("successor-machine-v5-*.invalid-*.json"),
+            *EXAMPLES.glob("successor-facade-v5-*.invalid-*.json"),
         ]
     )
     recognized_examples = {
@@ -524,6 +742,7 @@ def main() -> int:
             errors.append(f"{path.name}: {exc}")
 
     successor_cases = validate_successor_cases(registry, errors)
+    v014_method_cases = validate_v014_method_cases(registry, errors)
     if errors:
         print("Schema example validation failed:", file=sys.stderr)
         for error in errors:
@@ -532,7 +751,7 @@ def main() -> int:
     print(
         "Schema example validation passed: "
         f"{len(examples)} positive and {len(negative_examples)} negative examples; "
-        f"{successor_cases} successor branch cases"
+        f"{successor_cases} successor branch cases; {v014_method_cases} v014 method cases"
     )
     return 0
 

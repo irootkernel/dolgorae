@@ -1,0 +1,4517 @@
+{
+  "contract_id": "dolgorae.gul-consumer-fixtures/v2",
+  "schema_version": 2,
+  "scope": "Constructed typed wire conformance only: method_cases covers request, response and material error for all 28 new RPCs. Captured bytes and domain identities are fixture data, not accepted runtime facts; semantic admission and actual runtime acceptance remain separate gates.",
+  "positive": [
+    {
+      "id": "modern_start_requested_mode",
+      "grpc_message": "dolgorae.public.v2.StartRunRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-57b1f7850c0e",
+          "client_instance_id": "gul:fixture"
+        },
+        "workspace": {
+          "absolute_path": "/fixture/workspace",
+          "expected_workspace_id": "workspace:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "idempotencyKey": "start-original-key",
+        "provisioning": {
+          "profile_name": "fixture",
+          "role_name": "reviewer",
+          "policy_name": "fixture-policy",
+          "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+          "configuration": {
+            "schema": "dolgorae.admitted-configuration/v1",
+            "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+            "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+            "model": "fixture-model",
+            "effort": "low",
+            "purpose_kind": "PURPOSE_KIND_REVIEW",
+            "purpose_label": null,
+            "required_capabilities": [],
+            "execution_lane": "EXECUTION_LANE_DEDICATED",
+            "requested_access": "CREATION_MODE_WRITABLE",
+            "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+            "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          },
+          "agent_configuration_digest": "sha256:4f96bbb78473df5ace6e341a8222034d69a575993c75356f7454380fe94d220b"
+        },
+        "requestedMode": "CREATION_MODE_WRITABLE",
+        "executionLane": "EXECUTION_LANE_DEDICATED",
+        "purpose": "PURPOSE_KIND_REVIEW",
+        "model": "fixture-model",
+        "effort": "low",
+        "instructions": {
+          "role_name": "reviewer",
+          "common": {
+            "name": "common",
+            "utf8": "Y29tbW9u",
+            "content": {
+              "byte_length": 6,
+              "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+            }
+          },
+          "role_body": {
+            "name": "reviewer",
+            "utf8": "IyBSZXZpZXdlcgpSZXZpZXcgdGhlIGZpeHR1cmUuCg==",
+            "content": {
+              "byte_length": 31,
+              "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+            }
+          },
+          "dependencies": [],
+          "selected_guidance": [],
+          "role_snapshot": {
+            "schema": "dolgorae.role-snapshot/v1",
+            "role_body": {
+              "byte_length": 31,
+              "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+            },
+            "dependencies": [],
+            "selected_guidance": []
+          },
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "instruction_identity": {
+            "schema": "dolgorae.instruction-identity/v1",
+            "core_version": 2,
+            "core": {
+              "byte_length": 4,
+              "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+            },
+            "common": {
+              "byte_length": 6,
+              "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+            },
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "dependency_order": [],
+            "guidance_order": [],
+            "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+            "composition": {
+              "byte_length": 45,
+              "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+            }
+          },
+          "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+        },
+        "requiredAssurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL"
+      }
+    },
+    {
+      "id": "original_key_lookup_after_lost_reply",
+      "grpc_message": "dolgorae.public.v2.LookupOperationRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-2e964a726fa3",
+          "client_instance_id": "gul:fixture"
+        },
+        "controller": {
+          "absoluteFilePath": "/fixture/protected/controller",
+          "expectedControllerId": "controller-1",
+          "expectedControllerGeneration": "3"
+        },
+        "operation": {
+          "callerScope": {
+            "controllerKind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principalRef": "controller-1",
+            "controllerGeneration": "3",
+            "workspaceId": "workspace-1",
+            "runId": "run-1"
+          },
+          "operationKind": "OPERATION_KIND_SUBMIT_TURN",
+          "idempotencyKey": "submit-original-key",
+          "namespaceGeneration": "1"
+        }
+      }
+    },
+    {
+      "id": "unknown_effect_requires_lookup",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detailVersion": 2,
+        "dolgoraeErrorCode": "OUTCOME_UNKNOWN",
+        "operationKind": "OPERATION_KIND_SUBMIT_TURN",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "idempotencyKey": "submit-original-key"
+      }
+    },
+    {
+      "id": "typed_interaction_answer_fences",
+      "grpc_message": "dolgorae.public.v2.ResolveInteractionRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-c683a7c5744c",
+          "client_instance_id": "gul:fixture"
+        },
+        "run": {
+          "workspace": {
+            "absolutePath": "/fixture/workspace",
+            "expectedWorkspaceId": "workspace-1"
+          },
+          "runId": "run-1"
+        },
+        "controller": {
+          "absoluteFilePath": "/fixture/protected/controller",
+          "expectedControllerId": "controller-1",
+          "expectedControllerGeneration": "3"
+        },
+        "interactionId": "interaction-1",
+        "idempotencyKey": "resolve-original-key",
+        "answer": {
+          "decision": "INTERACTION_DECISION_ACCEPT_ONCE"
+        },
+        "expectedInteractionRevision": "2",
+        "expectedRunRevision": "8",
+        "expectedTurnId": "turn-1",
+        "expectedThreadGeneration": "1"
+      }
+    },
+    {
+      "id": "immutable_group_assignment",
+      "grpc_message": "dolgorae.public.v2.AssignGroupRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-e83efad9ec23",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "managed": {
+            "rootPrimaryRun": {
+              "workspace": {
+                "absolutePath": "/fixture/workspace",
+                "expectedWorkspaceId": "workspace-1"
+              },
+              "runId": "primary-1"
+            },
+            "sessionId": "session-1"
+          }
+        },
+        "admission": {
+          "idempotencyKey": "group-original-key",
+          "expectedRevision": "5",
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          }
+        },
+        "assignment": {
+          "schema": "dolgorae.group-assignment/v1",
+          "scopeKind": "managed",
+          "scopeRef": "session-1",
+          "entries": [
+            {
+              "entryKey": "entry-1",
+              "roleSnapshotDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agentConfigurationDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "acceptedTaskDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "lookup_operation_request",
+      "grpc_message": "dolgorae.public.v2.LookupOperationRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-dc94d3d95c18",
+          "client_instance_id": "gul:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "principal:fixture",
+            "controller_generation": 3,
+            "workspace_id": "workspace:fixture",
+            "external_engagement_id": "engagement:fixture"
+          },
+          "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+          "idempotency_key": "original:AssignExternalSpecialistTask",
+          "namespace_generation": 7
+        }
+      }
+    },
+    {
+      "id": "lookup_operation_response",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "accepted": {
+          "receipt": {
+            "operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignExternalSpecialistTask",
+              "namespace_generation": 7
+            },
+            "accepted_input_digest": "sha256:43e3843c0c74726fb3c0768d01728fb39fb0183d9568e6dfd572206c66af0bd4",
+            "receipt_id": "receipt:AssignExternalSpecialistTask",
+            "subjects": {
+              "member_id": "member:fixture",
+              "task_id": "task:fixture",
+              "result_id": "result:fixture"
+            },
+            "effect": "EFFECT_STATE_ACCEPTED",
+            "exact_replay": false
+          },
+          "result": {
+            "result_id": "result:fixture",
+            "identity": {
+              "schema": "dolgorae.complete-result/v1",
+              "source": {
+                "scope_kind": "external_engagement",
+                "scope_ref": "engagement:fixture",
+                "worker_ref": "member:fixture",
+                "task_ref": "task:fixture",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              "terminal_outcome": "TASK_OUTCOME_COMPLETED",
+              "final_response": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "structured_output_schema": null,
+              "structured_output": null,
+              "changes": [],
+              "attachments": [],
+              "safe_failure_code": null
+            },
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "final_response": {
+              "content": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "media_type": "text/plain; charset=utf-8",
+              "inline_bytes": "Rml4dHVyZSByZXZpZXdlZC4K"
+            }
+          },
+          "current_outcome": "OPERATION_OUTCOME_COMPLETED"
+        }
+      }
+    },
+    {
+      "id": "lookup_operation_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "LOOKUP_NAMESPACE_CORRUPT",
+        "operation_kind": "OPERATION_KIND_LOOKUP_OPERATION",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR"
+      }
+    },
+    {
+      "id": "validate_provisioning_request",
+      "grpc_message": "dolgorae.public.v2.ValidateProvisioningRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-90f785937820",
+          "client_instance_id": "gul:fixture"
+        },
+        "input": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "selection": {
+            "profile_name": "fixture",
+            "role_name": "reviewer",
+            "policy_name": "fixture-policy",
+            "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+            "configuration": {
+              "schema": "dolgorae.admitted-configuration/v1",
+              "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+              "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+              "model": "fixture-model",
+              "effort": "low",
+              "purpose_kind": "PURPOSE_KIND_REVIEW",
+              "purpose_label": null,
+              "required_capabilities": [],
+              "execution_lane": "EXECUTION_LANE_DEDICATED",
+              "requested_access": "CREATION_MODE_READ_ONLY",
+              "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+              "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+              "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+            },
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "instructions": {
+            "role_name": "reviewer",
+            "common": {
+              "name": "common",
+              "utf8": "Y29tbW9u",
+              "content": {
+                "byte_length": 6,
+                "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+              }
+            },
+            "role_body": {
+              "name": "reviewer",
+              "utf8": "IyBSZXZpZXdlcgpSZXZpZXcgdGhlIGZpeHR1cmUuCg==",
+              "content": {
+                "byte_length": 31,
+                "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+              }
+            },
+            "dependencies": [],
+            "selected_guidance": [],
+            "role_snapshot": {
+              "schema": "dolgorae.role-snapshot/v1",
+              "role_body": {
+                "byte_length": 31,
+                "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+              },
+              "dependencies": [],
+              "selected_guidance": []
+            },
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity": {
+              "schema": "dolgorae.instruction-identity/v1",
+              "core_version": 2,
+              "core": {
+                "byte_length": 4,
+                "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+              },
+              "common": {
+                "byte_length": 6,
+                "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+              },
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "dependency_order": [],
+              "guidance_order": [],
+              "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+              "composition": {
+                "byte_length": 45,
+                "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+              }
+            },
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          }
+        }
+      }
+    },
+    {
+      "id": "validate_provisioning_response",
+      "grpc_message": "dolgorae.public.v2.ValidateProvisioningResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "captured": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "selection": {
+            "profile_name": "fixture",
+            "role_name": "reviewer",
+            "policy_name": "fixture-policy",
+            "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+            "configuration": {
+              "schema": "dolgorae.admitted-configuration/v1",
+              "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+              "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+              "model": "fixture-model",
+              "effort": "low",
+              "purpose_kind": "PURPOSE_KIND_REVIEW",
+              "purpose_label": null,
+              "required_capabilities": [],
+              "execution_lane": "EXECUTION_LANE_DEDICATED",
+              "requested_access": "CREATION_MODE_READ_ONLY",
+              "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+              "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+              "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+            },
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "instructions": {
+            "role_name": "reviewer",
+            "common": {
+              "name": "common",
+              "utf8": "Y29tbW9u",
+              "content": {
+                "byte_length": 6,
+                "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+              }
+            },
+            "role_body": {
+              "name": "reviewer",
+              "utf8": "IyBSZXZpZXdlcgpSZXZpZXcgdGhlIGZpeHR1cmUuCg==",
+              "content": {
+                "byte_length": 31,
+                "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+              }
+            },
+            "dependencies": [],
+            "selected_guidance": [],
+            "role_snapshot": {
+              "schema": "dolgorae.role-snapshot/v1",
+              "role_body": {
+                "byte_length": 31,
+                "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+              },
+              "dependencies": [],
+              "selected_guidance": []
+            },
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity": {
+              "schema": "dolgorae.instruction-identity/v1",
+              "core_version": 2,
+              "core": {
+                "byte_length": 4,
+                "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+              },
+              "common": {
+                "byte_length": 6,
+                "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+              },
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "dependency_order": [],
+              "guidance_order": [],
+              "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+              "composition": {
+                "byte_length": 45,
+                "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+              }
+            },
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          }
+        },
+        "captured_source_bytes": 37,
+        "blockers": []
+      }
+    },
+    {
+      "id": "validate_provisioning_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "SOURCE_CHANGED",
+        "operation_kind": "OPERATION_KIND_VALIDATE_PROVISIONING",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_FIX_REQUEST"
+      }
+    },
+    {
+      "id": "install_provisioning_request",
+      "grpc_message": "dolgorae.public.v2.InstallProvisioningRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-1614cfef40f0",
+          "client_instance_id": "gul:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "idempotency_key": "original:InstallProvisioning",
+        "captured": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "selection": {
+            "profile_name": "fixture",
+            "role_name": "reviewer",
+            "policy_name": "fixture-policy",
+            "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+            "configuration": {
+              "schema": "dolgorae.admitted-configuration/v1",
+              "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+              "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+              "model": "fixture-model",
+              "effort": "low",
+              "purpose_kind": "PURPOSE_KIND_REVIEW",
+              "purpose_label": null,
+              "required_capabilities": [],
+              "execution_lane": "EXECUTION_LANE_DEDICATED",
+              "requested_access": "CREATION_MODE_READ_ONLY",
+              "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+              "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+              "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+            },
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "instructions": {
+            "role_name": "reviewer",
+            "common": {
+              "name": "common",
+              "utf8": "Y29tbW9u",
+              "content": {
+                "byte_length": 6,
+                "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+              }
+            },
+            "role_body": {
+              "name": "reviewer",
+              "utf8": "IyBSZXZpZXdlcgpSZXZpZXcgdGhlIGZpeHR1cmUuCg==",
+              "content": {
+                "byte_length": 31,
+                "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+              }
+            },
+            "dependencies": [],
+            "selected_guidance": [],
+            "role_snapshot": {
+              "schema": "dolgorae.role-snapshot/v1",
+              "role_body": {
+                "byte_length": 31,
+                "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+              },
+              "dependencies": [],
+              "selected_guidance": []
+            },
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity": {
+              "schema": "dolgorae.instruction-identity/v1",
+              "core_version": 2,
+              "core": {
+                "byte_length": 4,
+                "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+              },
+              "common": {
+                "byte_length": 6,
+                "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+              },
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "dependency_order": [],
+              "guidance_order": [],
+              "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+              "composition": {
+                "byte_length": 45,
+                "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+              }
+            },
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          }
+        },
+        "expected_policy_revision": 4
+      }
+    },
+    {
+      "id": "install_provisioning_response",
+      "grpc_message": "dolgorae.public.v2.InstallProvisioningResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "installed_policy_ref": "policy:fixture",
+        "selection": {
+          "profile_name": "fixture",
+          "role_name": "reviewer",
+          "policy_name": "fixture-policy",
+          "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+          "configuration": {
+            "schema": "dolgorae.admitted-configuration/v1",
+            "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+            "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+            "model": "fixture-model",
+            "effort": "low",
+            "purpose_kind": "PURPOSE_KIND_REVIEW",
+            "purpose_label": null,
+            "required_capabilities": [],
+            "execution_lane": "EXECUTION_LANE_DEDICATED",
+            "requested_access": "CREATION_MODE_READ_ONLY",
+            "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+            "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          },
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "provisioning_scope": "policy:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_INSTALL_PROVISIONING",
+            "idempotency_key": "original:InstallProvisioning",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:5f45332630a984c3be3b54454671173607585fbd0d54816f932850f0399cc530",
+          "receipt_id": "receipt:InstallProvisioning",
+          "subjects": {
+            "provisioning_ref": "policy:fixture"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "install_provisioning_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "PROFILE_MISMATCH",
+        "operation_kind": "OPERATION_KIND_INSTALL_PROVISIONING",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_USE_SUPPORTED_PROFILE"
+      }
+    },
+    {
+      "id": "open_external_engagement_request",
+      "grpc_message": "dolgorae.public.v2.OpenExternalEngagementRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-a1f15ccc7ca1",
+          "client_instance_id": "gul:fixture"
+        },
+        "workspace": {
+          "absolute_path": "/fixture/workspace",
+          "expected_workspace_id": "workspace:fixture"
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:OpenExternalEngagement",
+          "expected_revision": 9
+        },
+        "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf"
+      }
+    },
+    {
+      "id": "open_external_engagement_response",
+      "grpc_message": "dolgorae.public.v2.OpenExternalEngagementResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "engagement": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          },
+          "revision": 12,
+          "close_progress": "SESSION_CLOSE_PROGRESS_NONE",
+          "active_members": 1,
+          "unresolved_tasks": 0,
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_OPEN_EXTERNAL_ENGAGEMENT",
+            "idempotency_key": "original:OpenExternalEngagement",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:2782c16decb6f010a7871a176f02da92a88407e5f40c492b9e600ad94084e3dd",
+          "receipt_id": "receipt:OpenExternalEngagement",
+          "subjects": {
+            "engagement_id": "engagement:fixture"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "open_external_engagement_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "IDEMPOTENCY_CONFLICT",
+        "operation_kind": "OPERATION_KIND_OPEN_EXTERNAL_ENGAGEMENT",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_FIX_REQUEST"
+      }
+    },
+    {
+      "id": "get_external_engagement_request",
+      "grpc_message": "dolgorae.public.v2.GetExternalEngagementRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-050e42ab278a",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        }
+      }
+    },
+    {
+      "id": "get_external_engagement_response",
+      "grpc_message": "dolgorae.public.v2.GetExternalEngagementResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "engagement": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          },
+          "revision": 12,
+          "close_progress": "SESSION_CLOSE_PROGRESS_NONE",
+          "active_members": 1,
+          "unresolved_tasks": 0,
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        }
+      }
+    },
+    {
+      "id": "get_external_engagement_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "CONTROLLER_MISMATCH",
+        "operation_kind": "OPERATION_KIND_GET_EXTERNAL_ENGAGEMENT",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_VERIFY_CONTROLLER"
+      }
+    },
+    {
+      "id": "hire_external_specialist_request",
+      "grpc_message": "dolgorae.public.v2.HireExternalSpecialistRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-9016c5b6091a",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:HireExternalSpecialist",
+          "expected_revision": 9
+        },
+        "provisioning": {
+          "profile_name": "fixture",
+          "role_name": "reviewer",
+          "policy_name": "fixture-policy",
+          "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+          "configuration": {
+            "schema": "dolgorae.admitted-configuration/v1",
+            "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+            "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+            "model": "fixture-model",
+            "effort": "low",
+            "purpose_kind": "PURPOSE_KIND_REVIEW",
+            "purpose_label": null,
+            "required_capabilities": [],
+            "execution_lane": "EXECUTION_LANE_DEDICATED",
+            "requested_access": "CREATION_MODE_READ_ONLY",
+            "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+            "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          },
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+        },
+        "instructions": {
+          "role_name": "reviewer",
+          "common": {
+            "name": "common",
+            "utf8": "Y29tbW9u",
+            "content": {
+              "byte_length": 6,
+              "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+            }
+          },
+          "role_body": {
+            "name": "reviewer",
+            "utf8": "IyBSZXZpZXdlcgpSZXZpZXcgdGhlIGZpeHR1cmUuCg==",
+            "content": {
+              "byte_length": 31,
+              "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+            }
+          },
+          "dependencies": [],
+          "selected_guidance": [],
+          "role_snapshot": {
+            "schema": "dolgorae.role-snapshot/v1",
+            "role_body": {
+              "byte_length": 31,
+              "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+            },
+            "dependencies": [],
+            "selected_guidance": []
+          },
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "instruction_identity": {
+            "schema": "dolgorae.instruction-identity/v1",
+            "core_version": 2,
+            "core": {
+              "byte_length": 4,
+              "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+            },
+            "common": {
+              "byte_length": 6,
+              "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+            },
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "dependency_order": [],
+            "guidance_order": [],
+            "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+            "composition": {
+              "byte_length": 45,
+              "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+            }
+          },
+          "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+        }
+      }
+    },
+    {
+      "id": "hire_external_specialist_response",
+      "grpc_message": "dolgorae.public.v2.HireExternalSpecialistResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "member": {
+          "member_id": "member:fixture",
+          "disposition": "MEMBER_DISPOSITION_IDLE",
+          "identity": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "external": {
+                "workspace": {
+                  "absolute_path": "/fixture/workspace",
+                  "expected_workspace_id": "workspace:fixture"
+                },
+                "engagement_id": "engagement:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "rounds": 0,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
+              "idempotency_key": "original:HireExternalSpecialist",
+              "namespace_generation": 7
+            }
+          },
+          "run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          },
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "identity": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "external": {
+                "workspace": {
+                  "absolute_path": "/fixture/workspace",
+                  "expected_workspace_id": "workspace:fixture"
+                },
+                "engagement_id": "engagement:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "rounds": 0,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
+              "idempotency_key": "original:HireExternalSpecialist",
+              "namespace_generation": 7
+            }
+          },
+          "external_controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          }
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
+            "idempotency_key": "original:HireExternalSpecialist",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:bf41ba704a186c07794d2688a3055c4185ff6505da3386725035ce42f7f7d00f",
+          "receipt_id": "receipt:HireExternalSpecialist",
+          "subjects": {
+            "member_id": "member:fixture",
+            "run_id": "run:specialist"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "hire_external_specialist_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "POOL_CAPACITY_EXCEEDED",
+        "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT"
+      }
+    },
+    {
+      "id": "assign_external_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.AssignExternalSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-245eda661c8f",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:AssignExternalSpecialistTask",
+          "expected_revision": 9
+        },
+        "member_id": "member:fixture",
+        "task": {
+          "structured": {
+            "schema": "dolgorae.structured-task/v1",
+            "brief": "Review the fixture.",
+            "context": [],
+            "criteria": [
+              {
+                "criterion_id": "C1",
+                "text": "Report the fixture observation.",
+                "context_ids": []
+              }
+            ],
+            "constraints": [
+              "Do not mutate the fixture."
+            ]
+          },
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "deadline_seconds": 120
+        }
+      }
+    },
+    {
+      "id": "assign_external_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.AssignExternalSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_RUNNING",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "identity": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "external": {
+                "workspace": {
+                  "absolute_path": "/fixture/workspace",
+                  "expected_workspace_id": "workspace:fixture"
+                },
+                "engagement_id": "engagement:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_BUSY",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignExternalSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "external_controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          }
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+            "idempotency_key": "original:AssignExternalSpecialistTask",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:43e3843c0c74726fb3c0768d01728fb39fb0183d9568e6dfd572206c66af0bd4",
+          "receipt_id": "receipt:AssignExternalSpecialistTask",
+          "subjects": {
+            "member_id": "member:fixture",
+            "task_id": "task:fixture"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "assign_external_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "OUTCOME_UNKNOWN",
+        "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT",
+        "subjects": {
+          "member_id": "member:fixture",
+          "task_id": "task:fixture"
+        },
+        "operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "principal:fixture",
+            "controller_generation": 3,
+            "workspace_id": "workspace:fixture",
+            "external_engagement_id": "engagement:fixture"
+          },
+          "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+          "idempotency_key": "original:AssignExternalSpecialistTask",
+          "namespace_generation": 7
+        },
+        "idempotency_key": "original:AssignExternalSpecialistTask"
+      }
+    },
+    {
+      "id": "await_external_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.AwaitExternalSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-4ba6b932434c",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "task_id": "task:fixture",
+        "timeout_ms": 1000
+      }
+    },
+    {
+      "id": "await_external_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.AwaitExternalSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_RUNNING",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "timed_out": true
+      }
+    },
+    {
+      "id": "await_external_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_AWAIT_EXTERNAL_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_RECOVER_RUN",
+        "subjects": {
+          "task_id": "task:fixture"
+        }
+      }
+    },
+    {
+      "id": "collect_external_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.CollectExternalSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-87e76badeea4",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "task_id": "task:fixture"
+      }
+    },
+    {
+      "id": "collect_external_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.CollectExternalSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_COMPLETED",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          },
+          "result": {
+            "result_id": "result:fixture",
+            "identity": {
+              "schema": "dolgorae.complete-result/v1",
+              "source": {
+                "scope_kind": "external_engagement",
+                "scope_ref": "engagement:fixture",
+                "worker_ref": "member:fixture",
+                "task_ref": "task:fixture",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              "terminal_outcome": "TASK_OUTCOME_COMPLETED",
+              "final_response": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "structured_output_schema": null,
+              "structured_output": null,
+              "changes": [],
+              "attachments": [],
+              "safe_failure_code": null
+            },
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "final_response": {
+              "content": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "media_type": "text/plain; charset=utf-8",
+              "inline_bytes": "Rml4dHVyZSByZXZpZXdlZC4K"
+            }
+          }
+        },
+        "identity": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "external": {
+                "workspace": {
+                  "absolute_path": "/fixture/workspace",
+                  "expected_workspace_id": "workspace:fixture"
+                },
+                "engagement_id": "engagement:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "result_id": "result:fixture",
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignExternalSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "external_controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          }
+        }
+      }
+    },
+    {
+      "id": "collect_external_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RESULT_CONTENT_UNAVAILABLE",
+        "operation_kind": "OPERATION_KIND_COLLECT_EXTERNAL_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "task_id": "task:fixture",
+          "result_id": "result:fixture"
+        }
+      }
+    },
+    {
+      "id": "cancel_external_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.CancelExternalSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-1b8783fccf6e",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "task_id": "task:fixture",
+        "expected_revision": 12
+      }
+    },
+    {
+      "id": "cancel_external_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.CancelExternalSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_CANCELLED",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          },
+          "result": {
+            "result_id": "result:cancelled",
+            "identity": {
+              "schema": "dolgorae.complete-result/v1",
+              "source": {
+                "scope_kind": "external_engagement",
+                "scope_ref": "engagement:fixture",
+                "worker_ref": "member:fixture",
+                "task_ref": "task:fixture",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              "terminal_outcome": "TASK_OUTCOME_CANCELLED",
+              "final_response": null,
+              "structured_output_schema": null,
+              "structured_output": null,
+              "changes": [],
+              "attachments": [],
+              "safe_failure_code": "TASK_CANCELLED"
+            },
+            "result_digest": "sha256:e2d3471930fd55ac4f29d5cb7f65208ab9ff2c100d671ecd02c44597f13644bc"
+          }
+        }
+      }
+    },
+    {
+      "id": "cancel_external_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "OUTCOME_UNKNOWN",
+        "operation_kind": "OPERATION_KIND_CANCEL_EXTERNAL_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "subjects": {
+          "task_id": "task:fixture"
+        }
+      }
+    },
+    {
+      "id": "release_external_specialist_request",
+      "grpc_message": "dolgorae.public.v2.ReleaseExternalSpecialistRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-42f7e8b82477",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "member_id": "member:fixture",
+        "expected_revision": 12
+      }
+    },
+    {
+      "id": "release_external_specialist_response",
+      "grpc_message": "dolgorae.public.v2.ReleaseExternalSpecialistResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "member": {
+          "member_id": "member:fixture",
+          "disposition": "MEMBER_DISPOSITION_RELEASED",
+          "identity": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "external": {
+                "workspace": {
+                  "absolute_path": "/fixture/workspace",
+                  "expected_workspace_id": "workspace:fixture"
+                },
+                "engagement_id": "engagement:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "result_id": "result:fixture",
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_RELEASED",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignExternalSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          },
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        }
+      }
+    },
+    {
+      "id": "release_external_specialist_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RUN_BUSY",
+        "operation_kind": "OPERATION_KIND_RELEASE_EXTERNAL_SPECIALIST",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT",
+        "subjects": {
+          "member_id": "member:fixture"
+        }
+      }
+    },
+    {
+      "id": "get_external_delegation_identity_request",
+      "grpc_message": "dolgorae.public.v2.GetExternalDelegationIdentityRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-39cfcf67a039",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "accepted_operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "principal:fixture",
+            "controller_generation": 3,
+            "workspace_id": "workspace:fixture",
+            "external_engagement_id": "engagement:fixture"
+          },
+          "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+          "idempotency_key": "original:AssignExternalSpecialistTask",
+          "namespace_generation": 7
+        }
+      }
+    },
+    {
+      "id": "get_external_delegation_identity_response",
+      "grpc_message": "dolgorae.public.v2.GetExternalDelegationIdentityResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "identity": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "external": {
+                "workspace": {
+                  "absolute_path": "/fixture/workspace",
+                  "expected_workspace_id": "workspace:fixture"
+                },
+                "engagement_id": "engagement:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "result_id": "result:fixture",
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "external_engagement_id": "engagement:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignExternalSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "external_controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          }
+        }
+      }
+    },
+    {
+      "id": "get_external_delegation_identity_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_GET_EXTERNAL_DELEGATION_IDENTITY",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "member_id": "member:fixture",
+          "task_id": "task:fixture"
+        }
+      }
+    },
+    {
+      "id": "spawn_specialist_request",
+      "grpc_message": "dolgorae.public.v2.SpawnSpecialistRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-6eb2a9a1b63c",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:SpawnSpecialist",
+          "expected_revision": 9
+        },
+        "provisioning": {
+          "profile_name": "fixture",
+          "role_name": "reviewer",
+          "policy_name": "fixture-policy",
+          "policy_snapshot_digest": "sha256:7bcb975d95d66c729cd20c7ddc69479649773b15f586ae90722d59b2aa1c5adf",
+          "configuration": {
+            "schema": "dolgorae.admitted-configuration/v1",
+            "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+            "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+            "model": "fixture-model",
+            "effort": "low",
+            "purpose_kind": "PURPOSE_KIND_REVIEW",
+            "purpose_label": null,
+            "required_capabilities": [],
+            "execution_lane": "EXECUTION_LANE_DEDICATED",
+            "requested_access": "CREATION_MODE_READ_ONLY",
+            "required_assurance": "ASSURANCE_LEVEL_VERIFIED_THREAD_SCOPED_CONTROL",
+            "native_subagent_policy": "NATIVE_SUBAGENT_POLICY_DISABLED",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+          },
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+        },
+        "instructions": {
+          "role_name": "reviewer",
+          "common": {
+            "name": "common",
+            "utf8": "Y29tbW9u",
+            "content": {
+              "byte_length": 6,
+              "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+            }
+          },
+          "role_body": {
+            "name": "reviewer",
+            "utf8": "IyBSZXZpZXdlcgpSZXZpZXcgdGhlIGZpeHR1cmUuCg==",
+            "content": {
+              "byte_length": 31,
+              "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+            }
+          },
+          "dependencies": [],
+          "selected_guidance": [],
+          "role_snapshot": {
+            "schema": "dolgorae.role-snapshot/v1",
+            "role_body": {
+              "byte_length": 31,
+              "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+            },
+            "dependencies": [],
+            "selected_guidance": []
+          },
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "instruction_identity": {
+            "schema": "dolgorae.instruction-identity/v1",
+            "core_version": 2,
+            "core": {
+              "byte_length": 4,
+              "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+            },
+            "common": {
+              "byte_length": 6,
+              "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+            },
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "dependency_order": [],
+            "guidance_order": [],
+            "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+            "composition": {
+              "byte_length": 45,
+              "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+            }
+          },
+          "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+        }
+      }
+    },
+    {
+      "id": "spawn_specialist_response",
+      "grpc_message": "dolgorae.public.v2.SpawnSpecialistResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "member": {
+          "member_id": "member:fixture",
+          "disposition": "MEMBER_DISPOSITION_IDLE",
+          "identity": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "managed": {
+                "root_primary_run": {
+                  "workspace": {
+                    "absolute_path": "/fixture/workspace",
+                    "expected_workspace_id": "workspace:fixture"
+                  },
+                  "run_id": "run:primary"
+                },
+                "session_id": "session:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "rounds": 0,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "orchestrated_session_id": "session:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
+              "idempotency_key": "original:SpawnSpecialist",
+              "namespace_generation": 7
+            }
+          },
+          "run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          },
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "identity": {
+          "scope": {
+            "root_primary_run": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "run_id": "run:primary"
+            },
+            "session_id": "session:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "managed": {
+                "root_primary_run": {
+                  "workspace": {
+                    "absolute_path": "/fixture/workspace",
+                    "expected_workspace_id": "workspace:fixture"
+                  },
+                  "run_id": "run:primary"
+                },
+                "session_id": "session:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "rounds": 0,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "orchestrated_session_id": "session:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
+              "idempotency_key": "original:SpawnSpecialist",
+              "namespace_generation": 7
+            }
+          },
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "specialist_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          }
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "orchestrated_session_id": "session:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
+            "idempotency_key": "original:SpawnSpecialist",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:2d47ec71a40954c984c15527e09d8b548c2010e0080b343b5e05522aafe22ae3",
+          "receipt_id": "receipt:SpawnSpecialist",
+          "subjects": {
+            "member_id": "member:fixture",
+            "run_id": "run:specialist"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "spawn_specialist_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "POOL_CAPACITY_EXCEEDED",
+        "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT"
+      }
+    },
+    {
+      "id": "assign_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.AssignSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-26d7d3893b5e",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:AssignSpecialistTask",
+          "expected_revision": 9
+        },
+        "member_id": "member:fixture",
+        "task": {
+          "structured": {
+            "schema": "dolgorae.structured-task/v1",
+            "brief": "Review the fixture.",
+            "context": [],
+            "criteria": [
+              {
+                "criterion_id": "C1",
+                "text": "Report the fixture observation.",
+                "context_ids": []
+              }
+            ],
+            "constraints": [
+              "Do not mutate the fixture."
+            ]
+          },
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "deadline_seconds": 120
+        }
+      }
+    },
+    {
+      "id": "assign_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.AssignSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_RUNNING",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "identity": {
+          "scope": {
+            "root_primary_run": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "run_id": "run:primary"
+            },
+            "session_id": "session:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "managed": {
+                "root_primary_run": {
+                  "workspace": {
+                    "absolute_path": "/fixture/workspace",
+                    "expected_workspace_id": "workspace:fixture"
+                  },
+                  "run_id": "run:primary"
+                },
+                "session_id": "session:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_BUSY",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "orchestrated_session_id": "session:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "specialist_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          }
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "orchestrated_session_id": "session:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+            "idempotency_key": "original:AssignSpecialistTask",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:789c71bfe36760fdb8cc05f669f7d432eb855d2e516a7a1c7beb7faee96a8ec3",
+          "receipt_id": "receipt:AssignSpecialistTask",
+          "subjects": {
+            "member_id": "member:fixture",
+            "task_id": "task:fixture"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "assign_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "OUTCOME_UNKNOWN",
+        "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT",
+        "subjects": {
+          "member_id": "member:fixture",
+          "task_id": "task:fixture"
+        },
+        "operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "principal:fixture",
+            "controller_generation": 3,
+            "workspace_id": "workspace:fixture",
+            "orchestrated_session_id": "session:fixture"
+          },
+          "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+          "idempotency_key": "original:AssignSpecialistTask",
+          "namespace_generation": 7
+        },
+        "idempotency_key": "original:AssignSpecialistTask"
+      }
+    },
+    {
+      "id": "await_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.AwaitSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-ee588bcf32b7",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "task_id": "task:fixture",
+        "timeout_ms": 1000
+      }
+    },
+    {
+      "id": "await_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.AwaitSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_RUNNING",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "timed_out": true
+      }
+    },
+    {
+      "id": "await_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_AWAIT_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_RECOVER_RUN",
+        "subjects": {
+          "task_id": "task:fixture"
+        }
+      }
+    },
+    {
+      "id": "collect_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.CollectSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-333947e2af38",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "task_id": "task:fixture"
+      }
+    },
+    {
+      "id": "collect_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.CollectSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_COMPLETED",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          },
+          "result": {
+            "result_id": "result:fixture",
+            "identity": {
+              "schema": "dolgorae.complete-result/v1",
+              "source": {
+                "scope_kind": "orchestrated_session",
+                "scope_ref": "session:fixture",
+                "worker_ref": "member:fixture",
+                "task_ref": "task:fixture",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              "terminal_outcome": "TASK_OUTCOME_COMPLETED",
+              "final_response": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "structured_output_schema": null,
+              "structured_output": null,
+              "changes": [],
+              "attachments": [],
+              "safe_failure_code": null
+            },
+            "result_digest": "sha256:4ebe195e86fb1e8c8ffa750456fd72aca67139440e56ec6dd211205f29336e78",
+            "final_response": {
+              "content": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "media_type": "text/plain; charset=utf-8",
+              "inline_bytes": "Rml4dHVyZSByZXZpZXdlZC4K"
+            }
+          }
+        },
+        "identity": {
+          "scope": {
+            "root_primary_run": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "run_id": "run:primary"
+            },
+            "session_id": "session:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "managed": {
+                "root_primary_run": {
+                  "workspace": {
+                    "absolute_path": "/fixture/workspace",
+                    "expected_workspace_id": "workspace:fixture"
+                  },
+                  "run_id": "run:primary"
+                },
+                "session_id": "session:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "result_id": "result:fixture",
+            "result_digest": "sha256:4ebe195e86fb1e8c8ffa750456fd72aca67139440e56ec6dd211205f29336e78",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "orchestrated_session_id": "session:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "specialist_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          }
+        }
+      }
+    },
+    {
+      "id": "collect_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RESULT_CONTENT_UNAVAILABLE",
+        "operation_kind": "OPERATION_KIND_COLLECT_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "task_id": "task:fixture",
+          "result_id": "result:fixture"
+        }
+      }
+    },
+    {
+      "id": "cancel_specialist_task_request",
+      "grpc_message": "dolgorae.public.v2.CancelSpecialistTaskRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-15916bc3a8f2",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "task_id": "task:fixture",
+        "expected_revision": 12
+      }
+    },
+    {
+      "id": "cancel_specialist_task_response",
+      "grpc_message": "dolgorae.public.v2.CancelSpecialistTaskResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:fixture",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_CANCELLED",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "review",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 221,
+              "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+            },
+            "contexts": [],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          },
+          "result": {
+            "result_id": "result:cancelled",
+            "identity": {
+              "schema": "dolgorae.complete-result/v1",
+              "source": {
+                "scope_kind": "orchestrated_session",
+                "scope_ref": "session:fixture",
+                "worker_ref": "member:fixture",
+                "task_ref": "task:fixture",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              "terminal_outcome": "TASK_OUTCOME_CANCELLED",
+              "final_response": null,
+              "structured_output_schema": null,
+              "structured_output": null,
+              "changes": [],
+              "attachments": [],
+              "safe_failure_code": "TASK_CANCELLED"
+            },
+            "result_digest": "sha256:0fc555d8c022bfa1ebc36af9fb272a3ed397de45a7fbbf935442ae79eb252cd2"
+          }
+        }
+      }
+    },
+    {
+      "id": "cancel_specialist_task_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "OUTCOME_UNKNOWN",
+        "operation_kind": "OPERATION_KIND_CANCEL_SPECIALIST_TASK",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "subjects": {
+          "task_id": "task:fixture"
+        }
+      }
+    },
+    {
+      "id": "release_specialist_request",
+      "grpc_message": "dolgorae.public.v2.ReleaseSpecialistRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-429331300788",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "member_id": "member:fixture",
+        "expected_revision": 12
+      }
+    },
+    {
+      "id": "release_specialist_response",
+      "grpc_message": "dolgorae.public.v2.ReleaseSpecialistResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "member": {
+          "member_id": "member:fixture",
+          "disposition": "MEMBER_DISPOSITION_RELEASED",
+          "identity": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "managed": {
+                "root_primary_run": {
+                  "workspace": {
+                    "absolute_path": "/fixture/workspace",
+                    "expected_workspace_id": "workspace:fixture"
+                  },
+                  "run_id": "run:primary"
+                },
+                "session_id": "session:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "result_id": "result:fixture",
+            "result_digest": "sha256:4ebe195e86fb1e8c8ffa750456fd72aca67139440e56ec6dd211205f29336e78",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_RELEASED",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "orchestrated_session_id": "session:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          },
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        }
+      }
+    },
+    {
+      "id": "release_specialist_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RUN_BUSY",
+        "operation_kind": "OPERATION_KIND_RELEASE_SPECIALIST",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT",
+        "subjects": {
+          "member_id": "member:fixture"
+        }
+      }
+    },
+    {
+      "id": "get_managed_delegation_identity_request",
+      "grpc_message": "dolgorae.public.v2.GetManagedDelegationIdentityRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-33d8d0139cc8",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "session_id": "session:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "accepted_operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "principal:fixture",
+            "controller_generation": 3,
+            "workspace_id": "workspace:fixture",
+            "orchestrated_session_id": "session:fixture"
+          },
+          "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+          "idempotency_key": "original:AssignSpecialistTask",
+          "namespace_generation": 7
+        }
+      }
+    },
+    {
+      "id": "get_managed_delegation_identity_response",
+      "grpc_message": "dolgorae.public.v2.GetManagedDelegationIdentityResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "identity": {
+          "scope": {
+            "root_primary_run": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "run_id": "run:primary"
+            },
+            "session_id": "session:fixture"
+          },
+          "facts": {
+            "schema": "dolgorae.delegation-identity/v1",
+            "scope": {
+              "managed": {
+                "root_primary_run": {
+                  "workspace": {
+                    "absolute_path": "/fixture/workspace",
+                    "expected_workspace_id": "workspace:fixture"
+                  },
+                  "run_id": "run:primary"
+                },
+                "session_id": "session:fixture"
+              }
+            },
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+            "role_body_byte_length": 31,
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "result_id": "result:fixture",
+            "result_digest": "sha256:4ebe195e86fb1e8c8ffa750456fd72aca67139440e56ec6dd211205f29336e78",
+            "rounds": 1,
+            "disposition": "MEMBER_DISPOSITION_IDLE",
+            "source_revision": 12,
+            "accepted_operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "orchestrated_session_id": "session:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
+              "idempotency_key": "original:AssignSpecialistTask",
+              "namespace_generation": 7
+            }
+          },
+          "root_primary_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:primary"
+          },
+          "specialist_run": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "run_id": "run:specialist"
+          }
+        }
+      }
+    },
+    {
+      "id": "get_managed_delegation_identity_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_GET_MANAGED_DELEGATION_IDENTITY",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "member_id": "member:fixture",
+          "task_id": "task:fixture"
+        }
+      }
+    },
+    {
+      "id": "close_external_engagement_request",
+      "grpc_message": "dolgorae.public.v2.CloseExternalEngagementRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-c11df20f1ab5",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "engagement_id": "engagement:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "interrupt": false,
+        "expected_revision": 12
+      }
+    },
+    {
+      "id": "close_external_engagement_response",
+      "grpc_message": "dolgorae.public.v2.CloseExternalEngagementResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "engagement": {
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          },
+          "controller": {
+            "controller_id": "controller:fixture",
+            "generation": 3,
+            "kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "instance_id": "gul:fixture",
+            "subject_id": "principal:fixture"
+          },
+          "revision": 12,
+          "close_progress": "SESSION_CLOSE_PROGRESS_COMPLETED",
+          "active_members": 0,
+          "unresolved_tasks": 0,
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        }
+      }
+    },
+    {
+      "id": "close_external_engagement_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "OUTCOME_UNKNOWN",
+        "operation_kind": "OPERATION_KIND_CLOSE_EXTERNAL_ENGAGEMENT",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "subjects": {
+          "engagement_id": "engagement:fixture"
+        }
+      }
+    },
+    {
+      "id": "assign_group_request",
+      "grpc_message": "dolgorae.public.v2.AssignGroupRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-87a4a6397532",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "external": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          }
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:AssignGroup",
+          "expected_revision": 9
+        },
+        "assignment": {
+          "schema": "dolgorae.group-assignment/v1",
+          "scope_kind": "external_engagement",
+          "scope_ref": "engagement:fixture",
+          "entries": [
+            {
+              "entry_key": "entry-1",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+            },
+            {
+              "entry_key": "entry-2",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "assign_group_response",
+      "grpc_message": "dolgorae.public.v2.AssignGroupResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "group": {
+          "group_id": "group:fixture",
+          "assignment": {
+            "schema": "dolgorae.group-assignment/v1",
+            "scope_kind": "external_engagement",
+            "scope_ref": "engagement:fixture",
+            "entries": [
+              {
+                "entry_key": "entry-1",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              {
+                "entry_key": "entry-2",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394"
+              }
+            ]
+          },
+          "group_assignment_digest": "sha256:fa9a4ebedf9a6f479db7f4c09c201bf801656319d5af3e2b7eea2c039805b724",
+          "coverage": [
+            {
+              "entry_key": "entry-1",
+              "worker_ref": "member:fixture",
+              "task_ref": "task:fixture",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+              "state": "TASK_OUTCOME_COMPLETED",
+              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "safe_failure_code": null
+            },
+            {
+              "entry_key": "entry-2",
+              "worker_ref": "member:second",
+              "task_ref": "task:second",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+              "state": "TASK_OUTCOME_UNKNOWN",
+              "result_digest": null,
+              "safe_failure_code": "OUTCOME_UNKNOWN"
+            }
+          ],
+          "source_revision": 12
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_GROUP",
+            "idempotency_key": "original:AssignGroup",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:f63a081201b22f72a3ddb45e698ef9f446880cb68973b1aaad3f272e3a4d21e6",
+          "receipt_id": "receipt:AssignGroup",
+          "subjects": {
+            "group_id": "group:fixture"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "assign_group_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "GROUP_MANIFEST_INVALID",
+        "operation_kind": "OPERATION_KIND_ASSIGN_GROUP",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_FIX_REQUEST"
+      }
+    },
+    {
+      "id": "await_group_request",
+      "grpc_message": "dolgorae.public.v2.AwaitGroupRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-533a1c178ccc",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "external": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          }
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "group_id": "group:fixture",
+        "predicate": {
+          "kind": "WAIT_PREDICATE_KIND_ALL"
+        },
+        "timeout_ms": 1000
+      }
+    },
+    {
+      "id": "await_group_response",
+      "grpc_message": "dolgorae.public.v2.AwaitGroupResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "group": {
+          "group_id": "group:fixture",
+          "assignment": {
+            "schema": "dolgorae.group-assignment/v1",
+            "scope_kind": "external_engagement",
+            "scope_ref": "engagement:fixture",
+            "entries": [
+              {
+                "entry_key": "entry-1",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              {
+                "entry_key": "entry-2",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394"
+              }
+            ]
+          },
+          "group_assignment_digest": "sha256:fa9a4ebedf9a6f479db7f4c09c201bf801656319d5af3e2b7eea2c039805b724",
+          "coverage": [
+            {
+              "entry_key": "entry-1",
+              "worker_ref": "member:fixture",
+              "task_ref": "task:fixture",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+              "state": "TASK_OUTCOME_COMPLETED",
+              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "safe_failure_code": null
+            },
+            {
+              "entry_key": "entry-2",
+              "worker_ref": "member:second",
+              "task_ref": "task:second",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+              "state": "TASK_OUTCOME_UNKNOWN",
+              "result_digest": null,
+              "safe_failure_code": "OUTCOME_UNKNOWN"
+            }
+          ],
+          "source_revision": 12
+        },
+        "predicate_satisfied": false,
+        "timed_out": true
+      }
+    },
+    {
+      "id": "await_group_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_AWAIT_GROUP",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "group_id": "group:fixture"
+        }
+      }
+    },
+    {
+      "id": "collect_group_request",
+      "grpc_message": "dolgorae.public.v2.CollectGroupRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-3eed9eb5ed3b",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "external": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          }
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "group_id": "group:fixture",
+        "limit": 2
+      }
+    },
+    {
+      "id": "collect_group_response",
+      "grpc_message": "dolgorae.public.v2.CollectGroupResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "group": {
+          "group_id": "group:fixture",
+          "assignment": {
+            "schema": "dolgorae.group-assignment/v1",
+            "scope_kind": "external_engagement",
+            "scope_ref": "engagement:fixture",
+            "entries": [
+              {
+                "entry_key": "entry-1",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              {
+                "entry_key": "entry-2",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394"
+              }
+            ]
+          },
+          "group_assignment_digest": "sha256:fa9a4ebedf9a6f479db7f4c09c201bf801656319d5af3e2b7eea2c039805b724",
+          "coverage": [
+            {
+              "entry_key": "entry-1",
+              "worker_ref": "member:fixture",
+              "task_ref": "task:fixture",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+              "state": "TASK_OUTCOME_COMPLETED",
+              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "safe_failure_code": null
+            },
+            {
+              "entry_key": "entry-2",
+              "worker_ref": "member:second",
+              "task_ref": "task:second",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+              "state": "TASK_OUTCOME_UNKNOWN",
+              "result_digest": null,
+              "safe_failure_code": "OUTCOME_UNKNOWN"
+            }
+          ],
+          "source_revision": 12
+        },
+        "results": [
+          {
+            "result_id": "result:fixture",
+            "identity": {
+              "schema": "dolgorae.complete-result/v1",
+              "source": {
+                "scope_kind": "external_engagement",
+                "scope_ref": "engagement:fixture",
+                "worker_ref": "member:fixture",
+                "task_ref": "task:fixture",
+                "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+                "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+              },
+              "terminal_outcome": "TASK_OUTCOME_COMPLETED",
+              "final_response": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "structured_output_schema": null,
+              "structured_output": null,
+              "changes": [],
+              "attachments": [],
+              "safe_failure_code": null
+            },
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "final_response": {
+              "content": {
+                "byte_length": 18,
+                "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+              },
+              "media_type": "text/plain; charset=utf-8",
+              "inline_bytes": "Rml4dHVyZSByZXZpZXdlZC4K"
+            }
+          }
+        ],
+        "source_manifest": {
+          "content": {
+            "byte_length": 965,
+            "sha256": "sha256:8bc9b60b8b3bdde506cf78ce8fc8430156b5661e2865507e60d2e2e9a7d15681"
+          },
+          "media_type": "application/json",
+          "inline_bytes": "W3siYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6MTZmMWU3NDQ0NWY0ZWQyZjExNjBjNWQ5MjE1MjhjYjIwNDhhMDA4MDI4ZGQ1YjQyYzY3NThiZWJmZmY2NmExZCIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0xIiwicmVzdWx0X2RpZ2VzdCI6InNoYTI1NjowNGNlZTMyZGU2OGVjZTM1ZTkxMmU5OWQ0OTMyNzNiZTMwYTY3YWMzNGQwY2JiODAyZjM4NmZhOGY4NmRmMGY1Iiwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjpudWxsLCJzdGF0ZSI6ImNvbXBsZXRlZCIsInRhc2tfcmVmIjoidGFzazpmaXh0dXJlIiwid29ya2VyX3JlZiI6Im1lbWJlcjpmaXh0dXJlIn0seyJhY2NlcHRlZF90YXNrX2RpZ2VzdCI6InNoYTI1NjplODhkYTU2Y2FmNTE0NTIxNTA3YzM0Y2VkNDI1M2U2MGM3M2JjNzE1NWM4ODdiY2FmMDNhNjY2MDIwYmZhMzk0IiwiYWdlbnRfY29uZmlndXJhdGlvbl9kaWdlc3QiOiJzaGEyNTY6NmMzMGM5M2Q5OWVmNDU3NTVhOWQyYTc0YWNhODJhOGE5YTJiZGEwNTNiNmFjM2EyYmY0ZDY3NzhhNjQ4NzNhMSIsImVudHJ5X2tleSI6ImVudHJ5LTIiLCJyZXN1bHRfZGlnZXN0IjpudWxsLCJyb2xlX3NuYXBzaG90X2RpZ2VzdCI6InNoYTI1NjowZjdjOGMxYjJjMDcxYzg5MzFmNjZhNjIzMzFkYmI4ZGI5MTBlZmE4OWQ5NDQyMmEzMzcwMjgxOWUwYTljNjNmIiwic2FmZV9mYWlsdXJlX2NvZGUiOiJPVVRDT01FX1VOS05PV04iLCJzdGF0ZSI6InVua25vd24iLCJ0YXNrX3JlZiI6InRhc2s6c2Vjb25kIiwid29ya2VyX3JlZiI6Im1lbWJlcjpzZWNvbmQifV0="
+        }
+      }
+    },
+    {
+      "id": "collect_group_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RESULT_CONTENT_UNAVAILABLE",
+        "operation_kind": "OPERATION_KIND_COLLECT_GROUP",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "group_id": "group:fixture",
+          "result_id": "result:fixture"
+        }
+      }
+    },
+    {
+      "id": "merge_group_results_request",
+      "grpc_message": "dolgorae.public.v2.MergeGroupResultsRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-c688c95ea738",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "external": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          }
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:MergeGroupResults",
+          "expected_revision": 9
+        },
+        "group_id": "group:fixture",
+        "sources": [
+          {
+            "entry_key": "entry-1",
+            "worker_ref": "member:fixture",
+            "task_ref": "task:fixture",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+            "state": "TASK_OUTCOME_COMPLETED",
+            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "safe_failure_code": null
+          },
+          {
+            "entry_key": "entry-2",
+            "worker_ref": "member:second",
+            "task_ref": "task:second",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+            "state": "TASK_OUTCOME_UNKNOWN",
+            "result_digest": null,
+            "safe_failure_code": "OUTCOME_UNKNOWN"
+          }
+        ],
+        "algorithm": "merge-exact-findings-v1"
+      }
+    },
+    {
+      "id": "merge_group_results_response",
+      "grpc_message": "dolgorae.public.v2.MergeGroupResultsResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "merge_id": "merge:fixture",
+        "identity": {
+          "schema": "dolgorae.merged-findings/v1",
+          "algorithm": "merge-exact-findings-v1",
+          "group_assignment_digest": "sha256:fa9a4ebedf9a6f479db7f4c09c201bf801656319d5af3e2b7eea2c039805b724",
+          "sources": [
+            {
+              "entry_key": "entry-1",
+              "worker_ref": "member:fixture",
+              "task_ref": "task:fixture",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+              "state": "TASK_OUTCOME_COMPLETED",
+              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "safe_failure_code": null
+            },
+            {
+              "entry_key": "entry-2",
+              "worker_ref": "member:second",
+              "task_ref": "task:second",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+              "state": "TASK_OUTCOME_UNKNOWN",
+              "result_digest": null,
+              "safe_failure_code": "OUTCOME_UNKNOWN"
+            }
+          ],
+          "merged_output": {
+            "byte_length": 1655,
+            "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+          }
+        },
+        "merged_findings_digest": "sha256:b19274d78fda8de169a80aacc65ac4a4cccafff9dab9a4a330252f140800460f",
+        "merged_output": {
+          "content": {
+            "byte_length": 1655,
+            "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+          },
+          "media_type": "application/json",
+          "inline_bytes": "eyJhbGdvcml0aG0iOiJtZXJnZS1leGFjdC1maW5kaW5ncy12MSIsImNvbmZsaWN0cyI6W10sImZpbmRpbmdzIjpbXSwiZ3JvdXBfYXNzaWdubWVudF9kaWdlc3QiOiJzaGEyNTY6ZmE5YTRlYmVkZjlhNmY0NzlkYjdmNGMwOWMyMDFiZjgwMTY1NjMxOWQ1YWYzZTJiN2VlYTJjMDM5ODA1YjcyNCIsIm1pc3Npbmdfc291cmNlcyI6W3siYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6ZTg4ZGE1NmNhZjUxNDUyMTUwN2MzNGNlZDQyNTNlNjBjNzNiYzcxNTVjODg3YmNhZjAzYTY2NjAyMGJmYTM5NCIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0yIiwicmVzdWx0X2RpZ2VzdCI6bnVsbCwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjoiT1VUQ09NRV9VTktOT1dOIiwic3RhdGUiOiJ1bmtub3duIiwidGFza19yZWYiOiJ0YXNrOnNlY29uZCIsIndvcmtlcl9yZWYiOiJtZW1iZXI6c2Vjb25kIn1dLCJzY2hlbWEiOiJkb2xnb3JhZS5tZXJnZWQtZmluZGluZ3MvdjEiLCJzb3VyY2VzIjpbeyJhY2NlcHRlZF90YXNrX2RpZ2VzdCI6InNoYTI1NjoxNmYxZTc0NDQ1ZjRlZDJmMTE2MGM1ZDkyMTUyOGNiMjA0OGEwMDgwMjhkZDViNDJjNjc1OGJlYmZmZjY2YTFkIiwiYWdlbnRfY29uZmlndXJhdGlvbl9kaWdlc3QiOiJzaGEyNTY6NmMzMGM5M2Q5OWVmNDU3NTVhOWQyYTc0YWNhODJhOGE5YTJiZGEwNTNiNmFjM2EyYmY0ZDY3NzhhNjQ4NzNhMSIsImVudHJ5X2tleSI6ImVudHJ5LTEiLCJyZXN1bHRfZGlnZXN0Ijoic2hhMjU2OjA0Y2VlMzJkZTY4ZWNlMzVlOTEyZTk5ZDQ5MzI3M2JlMzBhNjdhYzM0ZDBjYmI4MDJmMzg2ZmE4Zjg2ZGYwZjUiLCJyb2xlX3NuYXBzaG90X2RpZ2VzdCI6InNoYTI1NjowZjdjOGMxYjJjMDcxYzg5MzFmNjZhNjIzMzFkYmI4ZGI5MTBlZmE4OWQ5NDQyMmEzMzcwMjgxOWUwYTljNjNmIiwic2FmZV9mYWlsdXJlX2NvZGUiOm51bGwsInN0YXRlIjoiY29tcGxldGVkIiwidGFza19yZWYiOiJ0YXNrOmZpeHR1cmUiLCJ3b3JrZXJfcmVmIjoibWVtYmVyOmZpeHR1cmUifSx7ImFjY2VwdGVkX3Rhc2tfZGlnZXN0Ijoic2hhMjU2OmU4OGRhNTZjYWY1MTQ1MjE1MDdjMzRjZWQ0MjUzZTYwYzczYmM3MTU1Yzg4N2JjYWYwM2E2NjYwMjBiZmEzOTQiLCJhZ2VudF9jb25maWd1cmF0aW9uX2RpZ2VzdCI6InNoYTI1Njo2YzMwYzkzZDk5ZWY0NTc1NWE5ZDJhNzRhY2E4MmE4YTlhMmJkYTA1M2I2YWMzYTJiZjRkNjc3OGE2NDg3M2ExIiwiZW50cnlfa2V5IjoiZW50cnktMiIsInJlc3VsdF9kaWdlc3QiOm51bGwsInJvbGVfc25hcHNob3RfZGlnZXN0Ijoic2hhMjU2OjBmN2M4YzFiMmMwNzFjODkzMWY2NmE2MjMzMWRiYjhkYjkxMGVmYTg5ZDk0NDIyYTMzNzAyODE5ZTBhOWM2M2YiLCJzYWZlX2ZhaWx1cmVfY29kZSI6Ik9VVENPTUVfVU5LTk9XTiIsInN0YXRlIjoidW5rbm93biIsInRhc2tfcmVmIjoidGFzazpzZWNvbmQiLCJ3b3JrZXJfcmVmIjoibWVtYmVyOnNlY29uZCJ9XX0="
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_MERGE_GROUP_RESULTS",
+            "idempotency_key": "original:MergeGroupResults",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:caf4811a5cbc15190c276fab1bfb5fe9d0f6764aec2fdd1b468b255a97038d5f",
+          "receipt_id": "receipt:MergeGroupResults",
+          "subjects": {
+            "group_id": "group:fixture",
+            "merge_id": "merge:fixture"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        }
+      }
+    },
+    {
+      "id": "merge_group_results_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "FINDINGS_OUTPUT_INVALID",
+        "operation_kind": "OPERATION_KIND_MERGE_GROUP_RESULTS",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_FIX_REQUEST"
+      }
+    },
+    {
+      "id": "assign_synthesis_request",
+      "grpc_message": "dolgorae.public.v2.AssignSynthesisRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-2caf5832dde3",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "external": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "engagement_id": "engagement:fixture"
+          }
+        },
+        "admission": {
+          "controller": {
+            "absolute_file_path": "/fixture/protected/controller",
+            "expected_controller_id": "controller:fixture",
+            "expected_controller_generation": 3
+          },
+          "idempotency_key": "original:AssignSynthesis",
+          "expected_revision": 9
+        },
+        "member_id": "member:fixture",
+        "merge_id": "merge:fixture",
+        "merged_findings_digest": "sha256:b19274d78fda8de169a80aacc65ac4a4cccafff9dab9a4a330252f140800460f",
+        "task": {
+          "structured": {
+            "schema": "dolgorae.structured-task/v1",
+            "brief": "Synthesize the immutable merged findings; preserve the unknown source.",
+            "context": [
+              {
+                "kind": "artifact",
+                "identity": "merge:fixture",
+                "content": {
+                  "byte_length": 1655,
+                  "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+                },
+                "media_type": "application/json"
+              }
+            ],
+            "criteria": [
+              {
+                "criterion_id": "C1",
+                "text": "Report the fixture observation.",
+                "context_ids": []
+              }
+            ],
+            "constraints": [
+              "Do not mutate the fixture."
+            ]
+          },
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "synthesis",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 464,
+              "sha256": "sha256:1c3674e08813c62caf09b38768ecf94057db8ad3b36bf6873015445ebf3faa9a"
+            },
+            "contexts": [
+              {
+                "kind": "artifact",
+                "identity": "merge:fixture",
+                "content": {
+                  "byte_length": 1655,
+                  "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+                },
+                "media_type": "application/json"
+              }
+            ],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:bd99c772bd761156c99e32fe9a038a0a043a2c14b211c37e4b49a4ded02d4ebf",
+          "deadline_seconds": 120
+        }
+      }
+    },
+    {
+      "id": "assign_synthesis_response",
+      "grpc_message": "dolgorae.public.v2.AssignSynthesisResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "task": {
+          "task_id": "task:synthesis",
+          "member_id": "member:fixture",
+          "outcome": "TASK_OUTCOME_RUNNING",
+          "identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "synthesis",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 464,
+              "sha256": "sha256:1c3674e08813c62caf09b38768ecf94057db8ad3b36bf6873015445ebf3faa9a"
+            },
+            "contexts": [
+              {
+                "kind": "artifact",
+                "identity": "merge:fixture",
+                "content": {
+                  "byte_length": 1655,
+                  "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+                },
+                "media_type": "application/json"
+              }
+            ],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "CREATION_MODE_READ_ONLY",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "accepted_task_digest": "sha256:bd99c772bd761156c99e32fe9a038a0a043a2c14b211c37e4b49a4ded02d4ebf",
+          "recovery": {
+            "state": "RECOVERY_STATE_NOT_REQUIRED",
+            "required_action": "RECOVERY_ACTION_NONE"
+          }
+        },
+        "receipt": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
+            "idempotency_key": "original:AssignSynthesis",
+            "namespace_generation": 7
+          },
+          "accepted_input_digest": "sha256:d6813b36b66769e3a2caf7ec355c3a9505668f0a408b26fa58813f2dfb369023",
+          "receipt_id": "receipt:AssignSynthesis",
+          "subjects": {
+            "member_id": "member:fixture",
+            "task_id": "task:synthesis"
+          },
+          "effect": "EFFECT_STATE_ACCEPTED",
+          "exact_replay": false
+        },
+        "identity": {
+          "schema": "dolgorae.delegation-identity/v1",
+          "scope": {
+            "external": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "engagement_id": "engagement:fixture"
+            }
+          },
+          "worker_ref": "member:fixture",
+          "task_ref": "task:synthesis",
+          "role_body_sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf",
+          "role_body_byte_length": 31,
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+          "accepted_task_digest": "sha256:bd99c772bd761156c99e32fe9a038a0a043a2c14b211c37e4b49a4ded02d4ebf",
+          "rounds": 2,
+          "disposition": "MEMBER_DISPOSITION_BUSY",
+          "source_revision": 12,
+          "accepted_operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
+            "idempotency_key": "original:AssignSynthesis",
+            "namespace_generation": 7
+          }
+        }
+      }
+    },
+    {
+      "id": "assign_synthesis_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "OUTCOME_UNKNOWN",
+        "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_UNKNOWN",
+        "action": "REQUIRED_CLIENT_ACTION_WAIT",
+        "subjects": {
+          "task_id": "task:synthesis"
+        },
+        "operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "principal:fixture",
+            "controller_generation": 3,
+            "workspace_id": "workspace:fixture",
+            "external_engagement_id": "engagement:fixture"
+          },
+          "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
+          "idempotency_key": "original:AssignSynthesis",
+          "namespace_generation": 7
+        },
+        "idempotency_key": "original:AssignSynthesis"
+      }
+    },
+    {
+      "id": "plan_maintenance_request",
+      "grpc_message": "dolgorae.public.v2.PlanMaintenanceRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-1acf99750900",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "selected_generation": 7
+        },
+        "operator": {
+          "absolute_file_path": "/fixture/protected/operator",
+          "expected_operator_id": "operator:fixture",
+          "expected_generation": 2
+        },
+        "kind": "MAINTENANCE_KIND_LEDGER_CHECKPOINT",
+        "retirement_candidates": []
+      }
+    },
+    {
+      "id": "plan_maintenance_response",
+      "grpc_message": "dolgorae.public.v2.PlanMaintenanceResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "plan": {
+          "plan_id": "plan:fixture",
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "selected_generation": 7
+          },
+          "kind": "MAINTENANCE_KIND_LEDGER_CHECKPOINT",
+          "dry_run": true,
+          "retained_references": [
+            "receipt:AssignExternalSpecialistTask",
+            "task:unknown"
+          ],
+          "proposed_retirements": [],
+          "source_watermark": 120,
+          "reclaimable_bytes": 4096,
+          "reclaimable_records": 8,
+          "plan_digest": "sha256:9009a8785fdedb36c96bd8710fb0f6bb5758e234120ad7867255fb97d96492b6"
+        }
+      }
+    },
+    {
+      "id": "plan_maintenance_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_PLAN_MAINTENANCE",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR"
+      }
+    },
+    {
+      "id": "apply_maintenance_request",
+      "grpc_message": "dolgorae.public.v2.ApplyMaintenanceRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-c76f478b83dc",
+          "client_instance_id": "gul:fixture"
+        },
+        "operator": {
+          "absolute_file_path": "/fixture/protected/operator",
+          "expected_operator_id": "operator:fixture",
+          "expected_generation": 2
+        },
+        "plan": {
+          "plan_id": "plan:fixture",
+          "scope": {
+            "workspace": {
+              "absolute_path": "/fixture/workspace",
+              "expected_workspace_id": "workspace:fixture"
+            },
+            "selected_generation": 7
+          },
+          "kind": "MAINTENANCE_KIND_LEDGER_CHECKPOINT",
+          "dry_run": true,
+          "retained_references": [
+            "receipt:AssignExternalSpecialistTask",
+            "task:unknown"
+          ],
+          "proposed_retirements": [],
+          "source_watermark": 120,
+          "reclaimable_bytes": 4096,
+          "reclaimable_records": 8,
+          "plan_digest": "sha256:9009a8785fdedb36c96bd8710fb0f6bb5758e234120ad7867255fb97d96492b6"
+        },
+        "expected_generation": 7
+      }
+    },
+    {
+      "id": "apply_maintenance_response",
+      "grpc_message": "dolgorae.public.v2.ApplyMaintenanceResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "maintenance": {
+          "maintenance_id": "maintenance:fixture",
+          "plan": {
+            "plan_id": "plan:fixture",
+            "scope": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "selected_generation": 7
+            },
+            "kind": "MAINTENANCE_KIND_LEDGER_CHECKPOINT",
+            "dry_run": true,
+            "retained_references": [
+              "receipt:AssignExternalSpecialistTask",
+              "task:unknown"
+            ],
+            "proposed_retirements": [],
+            "source_watermark": 120,
+            "reclaimable_bytes": 4096,
+            "reclaimable_records": 8,
+            "plan_digest": "sha256:9009a8785fdedb36c96bd8710fb0f6bb5758e234120ad7867255fb97d96492b6"
+          },
+          "state": "MAINTENANCE_STATE_COMPLETED",
+          "selected_generation": 8,
+          "selected_manifest_digest": "sha256:721d50a754a65bf19d6b8687f88770316f68b54d97c539d8bedc8bb42d54f4a2",
+          "durable_watermark": 120,
+          "blocker_codes": []
+        }
+      }
+    },
+    {
+      "id": "apply_maintenance_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "MAINTENANCE_PLAN_STALE",
+        "operation_kind": "OPERATION_KIND_APPLY_MAINTENANCE",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_REJECTED",
+        "action": "REQUIRED_CLIENT_ACTION_REFRESH_SNAPSHOT",
+        "subjects": {
+          "maintenance_id": "maintenance:fixture"
+        }
+      }
+    },
+    {
+      "id": "get_maintenance_request",
+      "grpc_message": "dolgorae.public.v2.GetMaintenanceRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-74a44d35e5a5",
+          "client_instance_id": "gul:fixture"
+        },
+        "scope": {
+          "workspace": {
+            "absolute_path": "/fixture/workspace",
+            "expected_workspace_id": "workspace:fixture"
+          },
+          "selected_generation": 7
+        },
+        "operator": {
+          "absolute_file_path": "/fixture/protected/operator",
+          "expected_operator_id": "operator:fixture",
+          "expected_generation": 2
+        },
+        "maintenance_id": "maintenance:fixture"
+      }
+    },
+    {
+      "id": "get_maintenance_response",
+      "grpc_message": "dolgorae.public.v2.GetMaintenanceResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "maintenance": {
+          "maintenance_id": "maintenance:fixture",
+          "plan": {
+            "plan_id": "plan:fixture",
+            "scope": {
+              "workspace": {
+                "absolute_path": "/fixture/workspace",
+                "expected_workspace_id": "workspace:fixture"
+              },
+              "selected_generation": 7
+            },
+            "kind": "MAINTENANCE_KIND_LEDGER_CHECKPOINT",
+            "dry_run": true,
+            "retained_references": [
+              "receipt:AssignExternalSpecialistTask",
+              "task:unknown"
+            ],
+            "proposed_retirements": [],
+            "source_watermark": 120,
+            "reclaimable_bytes": 4096,
+            "reclaimable_records": 8,
+            "plan_digest": "sha256:9009a8785fdedb36c96bd8710fb0f6bb5758e234120ad7867255fb97d96492b6"
+          },
+          "state": "MAINTENANCE_STATE_COMPLETED",
+          "selected_generation": 8,
+          "selected_manifest_digest": "sha256:721d50a754a65bf19d6b8687f88770316f68b54d97c539d8bedc8bb42d54f4a2",
+          "durable_watermark": 120,
+          "blocker_codes": []
+        }
+      }
+    },
+    {
+      "id": "get_maintenance_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_GET_MAINTENANCE",
+        "effect": "EFFECT_STATE_NONE",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR",
+        "subjects": {
+          "maintenance_id": "maintenance:fixture"
+        }
+      }
+    },
+    {
+      "id": "lookup_closed_not_accepted",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "not_accepted": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+            "idempotency_key": "original:AssignExternalSpecialistTask",
+            "namespace_generation": 7
+          },
+          "input_digest": "sha256:43e3843c0c74726fb3c0768d01728fb39fb0183d9568e6dfd572206c66af0bd4",
+          "definitive_refusal_code": "SPECIALIST_NOT_IDLE",
+          "original_key_retry_permitted": true
+        }
+      }
+    },
+    {
+      "id": "lookup_closed_unresolved",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "unresolved": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+            "idempotency_key": "original:AssignExternalSpecialistTask",
+            "namespace_generation": 7
+          },
+          "known_subjects": {
+            "member_id": "member:fixture",
+            "task_id": "task:fixture"
+          },
+          "effect": "EFFECT_STATE_UNRESOLVED",
+          "required_action": "REQUIRED_CLIENT_ACTION_RECOVER_RUN"
+        }
+      }
+    },
+    {
+      "id": "lookup_closed_absent",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "absent": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "principal:fixture",
+              "controller_generation": 3,
+              "workspace_id": "workspace:fixture",
+              "external_engagement_id": "engagement:fixture"
+            },
+            "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
+            "idempotency_key": "original:AssignExternalSpecialistTask",
+            "namespace_generation": 7
+          },
+          "retained_namespace_fence": "namespace:workspace:fixture:generation:7",
+          "durable_watermark": 120,
+          "complete_authoritative_lookup": true
+        }
+      }
+    },
+    {
+      "id": "accepted_image_high",
+      "grpc_message": "dolgorae.public.v2.AcceptedImageRef",
+      "grpc_json": {
+        "content": {
+          "byte_length": 68,
+          "sha256": "sha256:7327cacfa499a4dd82c7a88bb49d01d23dbf56a2b9eb7a9053cf9dd547b94da4"
+        },
+        "media_type": "image/png",
+        "detail": "IMAGE_DETAIL_HIGH"
+      }
+    },
+    {
+      "id": "lookup_submit_turn_running",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "accepted": {
+          "receipt": {
+            "operation": {
+              "caller_scope": {
+                "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+                "principal_ref": "principal:fixture",
+                "controller_generation": 3,
+                "workspace_id": "workspace:fixture",
+                "run_id": "run:fixture"
+              },
+              "operation_kind": "OPERATION_KIND_SUBMIT_TURN",
+              "idempotency_key": "original:SubmitTurn",
+              "namespace_generation": 7
+            },
+            "accepted_input_digest": "sha256:e38ca9f48f5ac9171a758fb5efc35e07a2421e26646f4977ff58b006e0165fe9",
+            "receipt_id": "receipt:SubmitTurn",
+            "subjects": {
+              "run_id": "run:fixture",
+              "turn_id": "turn:original"
+            },
+            "effect": "EFFECT_STATE_ACCEPTED",
+            "exact_replay": false
+          },
+          "current_outcome": "OPERATION_OUTCOME_RUNNING"
+        }
+      }
+    }
+  ],
+  "negative": [
+    {
+      "id": "unknown_field",
+      "grpc_message": "dolgorae.public.v2.StartRunRequest",
+      "grpc_json": {
+        "modelSuppliedAuthority": "forbidden"
+      },
+      "expected": "strict_decode_refusal"
+    },
+    {
+      "id": "unknown_string_enum",
+      "grpc_message": "dolgorae.public.v2.StartRunRequest",
+      "grpc_json": {
+        "requestedMode": "CREATION_MODE_FUTURE"
+      },
+      "expected": "strict_decode_refusal"
+    },
+    {
+      "id": "unknown_numeric_enum",
+      "grpc_message": "dolgorae.public.v2.StartRunRequest",
+      "grpc_json": {
+        "requestedMode": 999
+      },
+      "expected": "decode_preserves_value_but_decision_refuses"
+    },
+    {
+      "id": "two_lookup_outcomes",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "accepted": {},
+        "absent": {}
+      },
+      "expected": "strict_decode_refusal"
+    },
+    {
+      "id": "accepted_image_original_unsupported",
+      "grpc_message": "dolgorae.public.v2.AcceptedImageRef",
+      "grpc_json": {
+        "content": {
+          "byte_length": 68,
+          "sha256": "sha256:7327cacfa499a4dd82c7a88bb49d01d23dbf56a2b9eb7a9053cf9dd547b94da4"
+        },
+        "media_type": "image/png",
+        "detail": "IMAGE_DETAIL_ORIGINAL"
+      },
+      "expected": "strict_decode_refusal"
+    }
+  ],
+  "method_cases": {
+    "OperationService.LookupOperation": {
+      "request": "lookup_operation_request",
+      "response": "lookup_operation_response",
+      "error": "lookup_operation_error",
+      "effect_class": "R",
+      "notes": "Exact accepted union recovers the original member/task/result; namespace corruption is recovery, never absence."
+    },
+    "ProvisioningService.ValidateProvisioning": {
+      "request": "validate_provisioning_request",
+      "response": "validate_provisioning_response",
+      "error": "validate_provisioning_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "ProvisioningService.InstallProvisioning": {
+      "request": "install_provisioning_request",
+      "response": "install_provisioning_response",
+      "error": "install_provisioning_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.OpenExternalEngagement": {
+      "request": "open_external_engagement_request",
+      "response": "open_external_engagement_response",
+      "error": "open_external_engagement_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.GetExternalEngagement": {
+      "request": "get_external_engagement_request",
+      "response": "get_external_engagement_response",
+      "error": "get_external_engagement_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.HireExternalSpecialist": {
+      "request": "hire_external_specialist_request",
+      "response": "hire_external_specialist_response",
+      "error": "hire_external_specialist_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.AssignExternalSpecialistTask": {
+      "request": "assign_external_specialist_task_request",
+      "response": "assign_external_specialist_task_response",
+      "error": "assign_external_specialist_task_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.AwaitExternalSpecialistTask": {
+      "request": "await_external_specialist_task_request",
+      "response": "await_external_specialist_task_response",
+      "error": "await_external_specialist_task_error",
+      "effect_class": "R",
+      "notes": "Timeout ends only this wait; the same task remains running."
+    },
+    "SpecialistService.CollectExternalSpecialistTask": {
+      "request": "collect_external_specialist_task_request",
+      "response": "collect_external_specialist_task_response",
+      "error": "collect_external_specialist_task_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.CancelExternalSpecialistTask": {
+      "request": "cancel_external_specialist_task_request",
+      "response": "cancel_external_specialist_task_response",
+      "error": "cancel_external_specialist_task_error",
+      "effect_class": "S",
+      "notes": "An uncertain unkeyed cancel names the existing task; it does not invent a replay key."
+    },
+    "SpecialistService.ReleaseExternalSpecialist": {
+      "request": "release_external_specialist_request",
+      "response": "release_external_specialist_response",
+      "error": "release_external_specialist_error",
+      "effect_class": "S",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.GetExternalDelegationIdentity": {
+      "request": "get_external_delegation_identity_request",
+      "response": "get_external_delegation_identity_response",
+      "error": "get_external_delegation_identity_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "BrokerService.SpawnSpecialist": {
+      "request": "spawn_specialist_request",
+      "response": "spawn_specialist_response",
+      "error": "spawn_specialist_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "BrokerService.AssignSpecialistTask": {
+      "request": "assign_specialist_task_request",
+      "response": "assign_specialist_task_response",
+      "error": "assign_specialist_task_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "BrokerService.AwaitSpecialistTask": {
+      "request": "await_specialist_task_request",
+      "response": "await_specialist_task_response",
+      "error": "await_specialist_task_error",
+      "effect_class": "R",
+      "notes": "Timeout ends only this wait; the same task remains running."
+    },
+    "BrokerService.CollectSpecialistTask": {
+      "request": "collect_specialist_task_request",
+      "response": "collect_specialist_task_response",
+      "error": "collect_specialist_task_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "BrokerService.CancelSpecialistTask": {
+      "request": "cancel_specialist_task_request",
+      "response": "cancel_specialist_task_response",
+      "error": "cancel_specialist_task_error",
+      "effect_class": "S",
+      "notes": "An uncertain unkeyed cancel names the existing task; it does not invent a replay key."
+    },
+    "BrokerService.ReleaseSpecialist": {
+      "request": "release_specialist_request",
+      "response": "release_specialist_response",
+      "error": "release_specialist_error",
+      "effect_class": "S",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "BrokerService.GetManagedDelegationIdentity": {
+      "request": "get_managed_delegation_identity_request",
+      "response": "get_managed_delegation_identity_response",
+      "error": "get_managed_delegation_identity_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "SpecialistService.CloseExternalEngagement": {
+      "request": "close_external_engagement_request",
+      "response": "close_external_engagement_response",
+      "error": "close_external_engagement_error",
+      "effect_class": "S",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "GroupService.AssignGroup": {
+      "request": "assign_group_request",
+      "response": "assign_group_response",
+      "error": "assign_group_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "GroupService.AwaitGroup": {
+      "request": "await_group_request",
+      "response": "await_group_response",
+      "error": "await_group_error",
+      "effect_class": "R",
+      "notes": "Completed and unknown source both remain covered; all-predicate timeout does not cancel either task."
+    },
+    "GroupService.CollectGroup": {
+      "request": "collect_group_request",
+      "response": "collect_group_response",
+      "error": "collect_group_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "GroupService.MergeGroupResults": {
+      "request": "merge_group_results_request",
+      "response": "merge_group_results_response",
+      "error": "merge_group_results_error",
+      "effect_class": "K",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "GroupService.AssignSynthesis": {
+      "request": "assign_synthesis_request",
+      "response": "assign_synthesis_response",
+      "error": "assign_synthesis_error",
+      "effect_class": "K",
+      "notes": "Explicit synthesis has a separate task identity and its own accepted round; merge performs no model call."
+    },
+    "MaintenanceService.PlanMaintenance": {
+      "request": "plan_maintenance_request",
+      "response": "plan_maintenance_response",
+      "error": "plan_maintenance_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "MaintenanceService.ApplyMaintenance": {
+      "request": "apply_maintenance_request",
+      "response": "apply_maintenance_response",
+      "error": "apply_maintenance_error",
+      "effect_class": "S",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "MaintenanceService.GetMaintenance": {
+      "request": "get_maintenance_request",
+      "response": "get_maintenance_response",
+      "error": "get_maintenance_error",
+      "effect_class": "R",
+      "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    }
+  },
+  "constructed_identity_inputs": {
+    "role_snapshot": {
+      "schema": "dolgorae.role-snapshot/v1",
+      "role_body": {
+        "byte_length": 31,
+        "sha256": "sha256:004c9749080eef522e3aece8ec9cfc420ae95f89290dd34e0f0788a0ac50dabf"
+      },
+      "dependencies": [],
+      "selected_guidance": []
+    },
+    "instruction_identity": {
+      "schema": "dolgorae.instruction-identity/v1",
+      "core_version": 2,
+      "core": {
+        "byte_length": 4,
+        "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+      },
+      "common": {
+        "byte_length": 6,
+        "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+      },
+      "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+      "dependency_order": [],
+      "guidance_order": [],
+      "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+      "composition": {
+        "byte_length": 45,
+        "sha256": "sha256:f009879ef0857c9e523169d9c4540391a88b01463fe24acd0a7df7ebd989adfc"
+      }
+    },
+    "admitted_configuration": {
+      "schema": "dolgorae.admitted-configuration/v1",
+      "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+      "profile_binding_digest": "sha256:1a5e8f0a712ec12b55f479123c7e43141b8ab3880d7334718b1845c026ffb7a1",
+      "model": "fixture-model",
+      "effort": "low",
+      "purpose_kind": "review",
+      "purpose_label": null,
+      "required_capabilities": [],
+      "execution_lane": "dedicated",
+      "requested_access": "read_only",
+      "required_assurance": "verified_thread_scoped_control",
+      "native_subagent_policy": "disabled",
+      "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee"
+    },
+    "accepted_task": {
+      "schema": "dolgorae.accepted-task/v1",
+      "purpose": "review",
+      "task_body_schema": "dolgorae.structured-task/v1",
+      "task_body": {
+        "byte_length": 221,
+        "sha256": "sha256:af96ae725c099e0862b35ff866dc2bbb266a3f904f9b13a39b72a05dc436790e"
+      },
+      "contexts": [],
+      "images": [],
+      "expected_output_schema": "structured_findings_v1",
+      "execution_intent": "read_only",
+      "admitted_model": "fixture-model",
+      "admitted_effort": "low",
+      "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+      "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+    },
+    "complete_result": {
+      "schema": "dolgorae.complete-result/v1",
+      "source": {
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "worker_ref": "member:fixture",
+        "task_ref": "task:fixture",
+        "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+        "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+        "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+      },
+      "terminal_outcome": "completed",
+      "final_response": {
+        "byte_length": 18,
+        "sha256": "sha256:d9b0872b76b1c25d3bc78f88a14f8c2e7576897b049222e5427a2d7804eb92a9"
+      },
+      "structured_output_schema": null,
+      "structured_output": null,
+      "changes": [],
+      "attachments": [],
+      "safe_failure_code": null
+    },
+    "group_assignment": {
+      "schema": "dolgorae.group-assignment/v1",
+      "scope_kind": "external_engagement",
+      "scope_ref": "engagement:fixture",
+      "entries": [
+        {
+          "entry_key": "entry-1",
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+        },
+        {
+          "entry_key": "entry-2",
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+          "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394"
+        }
+      ]
+    },
+    "merged_findings": {
+      "schema": "dolgorae.merged-findings/v1",
+      "algorithm": "merge-exact-findings-v1",
+      "group_assignment_digest": "sha256:fa9a4ebedf9a6f479db7f4c09c201bf801656319d5af3e2b7eea2c039805b724",
+      "sources": [
+        {
+          "entry_key": "entry-1",
+          "worker_ref": "member:fixture",
+          "task_ref": "task:fixture",
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "state": "completed",
+          "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+          "safe_failure_code": null
+        },
+        {
+          "entry_key": "entry-2",
+          "worker_ref": "member:second",
+          "task_ref": "task:second",
+          "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+          "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+          "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+          "state": "unknown",
+          "result_digest": null,
+          "safe_failure_code": "OUTCOME_UNKNOWN"
+        }
+      ],
+      "merged_output": {
+        "byte_length": 1655,
+        "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+      }
+    }
+  }
+}

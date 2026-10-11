@@ -1,0 +1,1052 @@
+{
+  "schema": "dolgorae.digest-vectors/v1",
+  "digest_algorithm": "sha256-domain-lf-rfc8785",
+  "contract_only": true,
+  "vectors": [
+    {
+      "id": "role-base",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 20,
+          "sha256": "sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb"
+    },
+    {
+      "id": "instruction-base",
+      "domain": "dolgorae.instruction-identity/v1",
+      "input": {
+        "schema": "dolgorae.instruction-identity/v1",
+        "core_version": 1,
+        "core": {
+          "byte_length": 4,
+          "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+        },
+        "common": {
+          "byte_length": 6,
+          "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+        },
+        "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+        "dependency_order": [
+          "a"
+        ],
+        "guidance_order": [
+          "g2",
+          "g1"
+        ],
+        "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+        "composition": {
+          "byte_length": 77,
+          "sha256": "sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f"
+        }
+      },
+      "canonical_utf8": "{\"common\":{\"byte_length\":6,\"sha256\":\"sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8\"},\"composition\":{\"byte_length\":77,\"sha256\":\"sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f\"},\"composition_version\":\"core-common-role-dependencies-guidance-lf2/v1\",\"core\":{\"byte_length\":4,\"sha256\":\"sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c\"},\"core_version\":1,\"dependency_order\":[\"a\"],\"guidance_order\":[\"g2\",\"g1\"],\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.instruction-identity/v1\"}",
+      "expected_digest": "sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387"
+    },
+    {
+      "id": "configuration-base",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "input": {
+        "schema": "dolgorae.admitted-configuration/v1",
+        "profile_binding_schema": "dolgorae.profile-run-binding/v1",
+        "profile_binding_digest": "sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48",
+        "model": "gpt-5.6-luna",
+        "effort": "low",
+        "purpose_kind": "review",
+        "purpose_label": null,
+        "required_capabilities": [
+          "artifact.read",
+          "task.assign"
+        ],
+        "execution_lane": "dedicated",
+        "requested_access": "read_only",
+        "required_assurance": "verified_thread_scoped_control",
+        "native_subagent_policy": "disabled",
+        "instruction_identity_digest": "sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387"
+      },
+      "canonical_utf8": "{\"effort\":\"low\",\"execution_lane\":\"dedicated\",\"instruction_identity_digest\":\"sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387\",\"model\":\"gpt-5.6-luna\",\"native_subagent_policy\":\"disabled\",\"profile_binding_digest\":\"sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48\",\"profile_binding_schema\":\"dolgorae.profile-run-binding/v1\",\"purpose_kind\":\"review\",\"purpose_label\":null,\"requested_access\":\"read_only\",\"required_assurance\":\"verified_thread_scoped_control\",\"required_capabilities\":[\"artifact.read\",\"task.assign\"],\"schema\":\"dolgorae.admitted-configuration/v1\"}",
+      "expected_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110"
+    },
+    {
+      "id": "task-base",
+      "domain": "dolgorae.accepted-task/v1",
+      "input": {
+        "schema": "dolgorae.accepted-task/v1",
+        "purpose": "review",
+        "task_body_schema": "dolgorae.task-text/v1",
+        "task_body": {
+          "byte_length": 27,
+          "sha256": "sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c"
+        },
+        "contexts": [
+          {
+            "kind": "accepted_context",
+            "identity": "ctx:a",
+            "content": {
+              "byte_length": 5,
+              "sha256": "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
+            },
+            "media_type": "text/plain"
+          },
+          {
+            "kind": "accepted_context",
+            "identity": "ctx:b",
+            "content": {
+              "byte_length": 4,
+              "sha256": "sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753"
+            },
+            "media_type": "text/plain"
+          }
+        ],
+        "images": [],
+        "expected_output_schema": "dolgorae.specialist-findings/v1",
+        "execution_intent": "read_only",
+        "admitted_model": "gpt-5.6-luna",
+        "admitted_effort": "low",
+        "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+        "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110"
+      },
+      "canonical_utf8": "{\"admitted_effort\":\"low\",\"admitted_model\":\"gpt-5.6-luna\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"contexts\":[{\"content\":{\"byte_length\":5,\"sha256\":\"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8\"},\"identity\":\"ctx:a\",\"kind\":\"accepted_context\",\"media_type\":\"text/plain\"},{\"content\":{\"byte_length\":4,\"sha256\":\"sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753\"},\"identity\":\"ctx:b\",\"kind\":\"accepted_context\",\"media_type\":\"text/plain\"}],\"execution_intent\":\"read_only\",\"expected_output_schema\":\"dolgorae.specialist-findings/v1\",\"images\":[],\"purpose\":\"review\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.accepted-task/v1\",\"task_body\":{\"byte_length\":27,\"sha256\":\"sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c\"},\"task_body_schema\":\"dolgorae.task-text/v1\"}",
+      "expected_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+    },
+    {
+      "id": "mutation-base",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "dolgorae.assign-task-request/v1",
+        "operation_kind": "assign_task",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "controller_principal": "controller:fixture",
+        "controller_generation": 1,
+        "idempotency_key": "original-key",
+        "trusted_invocation_ref": "0199c001-0000-7000-8000-000000000001",
+        "request_body": {
+          "byte_length": 128,
+          "sha256": "sha256:f85ab84c7d5499daff95537250e65d96b3d0dad02c01cbaf6394143ac590089b"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":1,\"controller_principal\":\"controller:fixture\",\"idempotency_key\":\"original-key\",\"operation_kind\":\"assign_task\",\"request_body\":{\"byte_length\":128,\"sha256\":\"sha256:f85ab84c7d5499daff95537250e65d96b3d0dad02c01cbaf6394143ac590089b\"},\"request_schema\":\"dolgorae.assign-task-request/v1\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"trusted_invocation_ref\":\"0199c001-0000-7000-8000-000000000001\",\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:412ca58546f4847022342de9310bc6a9568fd8f5b09ac051602b8dbacefe9379"
+    },
+    {
+      "id": "result-base",
+      "domain": "dolgorae.complete-result/v1",
+      "input": {
+        "schema": "dolgorae.complete-result/v1",
+        "source": {
+          "scope_kind": "external_engagement",
+          "scope_ref": "engagement:fixture",
+          "worker_ref": "worker:fixture",
+          "task_ref": "task:fixture",
+          "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+          "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+          "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+        },
+        "terminal_outcome": "completed",
+        "final_response": {
+          "byte_length": 19,
+          "sha256": "sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a"
+        },
+        "structured_output_schema": null,
+        "structured_output": null,
+        "changes": [
+          {
+            "kind": "rename",
+            "path": "src/new.rs",
+            "old_path": "src/old.rs",
+            "before": {
+              "byte_length": 6,
+              "sha256": "sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb"
+            },
+            "after": {
+              "byte_length": 5,
+              "sha256": "sha256:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8"
+            },
+            "before_mode": 33188,
+            "after_mode": 33188
+          }
+        ],
+        "attachments": [],
+        "safe_failure_code": null
+      },
+      "canonical_utf8": "{\"attachments\":[],\"changes\":[{\"after\":{\"byte_length\":5,\"sha256\":\"sha256:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8\"},\"after_mode\":33188,\"before\":{\"byte_length\":6,\"sha256\":\"sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb\"},\"before_mode\":33188,\"kind\":\"rename\",\"old_path\":\"src/old.rs\",\"path\":\"src/new.rs\"}],\"final_response\":{\"byte_length\":19,\"sha256\":\"sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a\"},\"safe_failure_code\":null,\"schema\":\"dolgorae.complete-result/v1\",\"source\":{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},\"structured_output\":null,\"structured_output_schema\":null,\"terminal_outcome\":\"completed\"}",
+      "expected_digest": "sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968"
+    },
+    {
+      "id": "group-base",
+      "domain": "dolgorae.group-assignment/v1",
+      "input": {
+        "schema": "dolgorae.group-assignment/v1",
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "entries": [
+          {
+            "entry_key": "entry:a",
+            "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+            "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+            "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "entry_key": "entry:b",
+            "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+            "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+            "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "canonical_utf8": "{\"entries\":[{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"entry_key\":\"entry:a\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\"},{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"entry_key\":\"entry:b\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\"}],\"schema\":\"dolgorae.group-assignment/v1\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\"}",
+      "expected_digest": "sha256:7671763d25b205f913b626c24f66b5a914ef8cdf241e6b57254ac6ce2eb8b944"
+    },
+    {
+      "id": "merge-base",
+      "domain": "dolgorae.merged-findings/v1",
+      "input": {
+        "schema": "dolgorae.merged-findings/v1",
+        "algorithm": "merge-exact-findings-v1",
+        "group_assignment_digest": "sha256:7671763d25b205f913b626c24f66b5a914ef8cdf241e6b57254ac6ce2eb8b944",
+        "sources": [
+          {
+            "entry_key": "entry:a",
+            "worker_ref": "worker:fixture",
+            "task_ref": "task:fixture",
+            "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+            "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+            "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b",
+            "state": "completed",
+            "result_digest": "sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968",
+            "safe_failure_code": null
+          },
+          {
+            "entry_key": "entry:b",
+            "worker_ref": null,
+            "task_ref": null,
+            "role_snapshot_digest": null,
+            "agent_configuration_digest": null,
+            "accepted_task_digest": null,
+            "state": "unknown",
+            "result_digest": null,
+            "safe_failure_code": null
+          }
+        ],
+        "merged_output": {
+          "byte_length": 15,
+          "sha256": "sha256:9d0f2143c61cfbb6c0cf0425ce8b447811a32d48ec37333ba8b3700218631b36"
+        }
+      },
+      "canonical_utf8": "{\"algorithm\":\"merge-exact-findings-v1\",\"group_assignment_digest\":\"sha256:7671763d25b205f913b626c24f66b5a914ef8cdf241e6b57254ac6ce2eb8b944\",\"merged_output\":{\"byte_length\":15,\"sha256\":\"sha256:9d0f2143c61cfbb6c0cf0425ce8b447811a32d48ec37333ba8b3700218631b36\"},\"schema\":\"dolgorae.merged-findings/v1\",\"sources\":[{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"entry_key\":\"entry:a\",\"result_digest\":\"sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"safe_failure_code\":null,\"state\":\"completed\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},{\"accepted_task_digest\":null,\"agent_configuration_digest\":null,\"entry_key\":\"entry:b\",\"result_digest\":null,\"role_snapshot_digest\":null,\"safe_failure_code\":null,\"state\":\"unknown\",\"task_ref\":null,\"worker_ref\":null}]}",
+      "expected_digest": "sha256:cbb97ba2d12f59c834822b71e4fe4680a0e2d2afba46153991e5158e6fb69b5d"
+    },
+    {
+      "id": "role-lf",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 5,
+          "sha256": "sha256:c73b73af8851e9e91bc6b4dc12e7dace0a2bfb931c1d0b8b36ef367319f58cd1"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":5,\"sha256\":\"sha256:c73b73af8851e9e91bc6b4dc12e7dace0a2bfb931c1d0b8b36ef367319f58cd1\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:482991f9d0b8c76f3bba32c6bd0a931935286c96bdd83b2b545c6f6f6066e8f6"
+    },
+    {
+      "id": "role-crlf",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 6,
+          "sha256": "sha256:893e89e669b5a4f9e5136d565f51e341a0c5e5531816c9c1a806d90df66a45f4"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":6,\"sha256\":\"sha256:893e89e669b5a4f9e5136d565f51e341a0c5e5531816c9c1a806d90df66a45f4\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:61b196c4d5a1e4855a178648a667ee1a78c92c5952647383324629d42eab6f57"
+    },
+    {
+      "id": "role-composed",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 5,
+          "sha256": "sha256:850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":5,\"sha256\":\"sha256:850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:38dc3974adaf3994729db1d1913aa0f00b411bccf083de40303c6e12e7cd04a1"
+    },
+    {
+      "id": "role-decomposed",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 6,
+          "sha256": "sha256:81ef060bcd98adc7824eb5c1ada83c32491b16018e11e79f00ab9d09e04b015a"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":6,\"sha256\":\"sha256:81ef060bcd98adc7824eb5c1ada83c32491b16018e11e79f00ab9d09e04b015a\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:6a89138c4c84dfb7fe182e808806a3a549d67d6825769fb8d0fdfc19b4b7742b"
+    },
+    {
+      "id": "role-one-byte-a",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 1,
+          "sha256": "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":1,\"sha256\":\"sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:4d6f16810bae801dfe54c6f2169e67d2b7b89131f3b4ceb704422a2083dd5502"
+    },
+    {
+      "id": "role-one-byte-b",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 1,
+          "sha256": "sha256:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          },
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":1,\"sha256\":\"sha256:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_digest": "sha256:27fee9b0f2923429181db58f19c3013be2f02b2c901878a4538c809cd8df402b"
+    },
+    {
+      "id": "result-empty-permitted",
+      "domain": "dolgorae.complete-result/v1",
+      "input": {
+        "schema": "dolgorae.complete-result/v1",
+        "source": {
+          "scope_kind": "external_engagement",
+          "scope_ref": "engagement:fixture",
+          "worker_ref": "worker:fixture",
+          "task_ref": "task:fixture",
+          "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+          "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+          "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+        },
+        "terminal_outcome": "completed",
+        "final_response": {
+          "byte_length": 0,
+          "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "structured_output_schema": null,
+        "structured_output": null,
+        "changes": [
+          {
+            "kind": "rename",
+            "path": "src/new.rs",
+            "old_path": "src/old.rs",
+            "before": {
+              "byte_length": 6,
+              "sha256": "sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb"
+            },
+            "after": {
+              "byte_length": 5,
+              "sha256": "sha256:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8"
+            },
+            "before_mode": 33188,
+            "after_mode": 33188
+          }
+        ],
+        "attachments": [],
+        "safe_failure_code": null
+      },
+      "canonical_utf8": "{\"attachments\":[],\"changes\":[{\"after\":{\"byte_length\":5,\"sha256\":\"sha256:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8\"},\"after_mode\":33188,\"before\":{\"byte_length\":6,\"sha256\":\"sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb\"},\"before_mode\":33188,\"kind\":\"rename\",\"old_path\":\"src/old.rs\",\"path\":\"src/new.rs\"}],\"final_response\":{\"byte_length\":0,\"sha256\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"safe_failure_code\":null,\"schema\":\"dolgorae.complete-result/v1\",\"source\":{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},\"structured_output\":null,\"structured_output_schema\":null,\"terminal_outcome\":\"completed\"}",
+      "expected_digest": "sha256:2a3c749ff7fdc9c79ef7861bbc64e8bf3e2cbbd42f4ec20aec84f689fdccc5b8"
+    },
+    {
+      "id": "task-reordered-contexts",
+      "domain": "dolgorae.accepted-task/v1",
+      "input": {
+        "schema": "dolgorae.accepted-task/v1",
+        "purpose": "review",
+        "task_body_schema": "dolgorae.task-text/v1",
+        "task_body": {
+          "byte_length": 27,
+          "sha256": "sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c"
+        },
+        "contexts": [
+          {
+            "kind": "accepted_context",
+            "identity": "ctx:b",
+            "content": {
+              "byte_length": 4,
+              "sha256": "sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753"
+            },
+            "media_type": "text/plain"
+          },
+          {
+            "kind": "accepted_context",
+            "identity": "ctx:a",
+            "content": {
+              "byte_length": 5,
+              "sha256": "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
+            },
+            "media_type": "text/plain"
+          }
+        ],
+        "images": [],
+        "expected_output_schema": "dolgorae.specialist-findings/v1",
+        "execution_intent": "read_only",
+        "admitted_model": "gpt-5.6-luna",
+        "admitted_effort": "low",
+        "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+        "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110"
+      },
+      "canonical_utf8": "{\"admitted_effort\":\"low\",\"admitted_model\":\"gpt-5.6-luna\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"contexts\":[{\"content\":{\"byte_length\":4,\"sha256\":\"sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753\"},\"identity\":\"ctx:b\",\"kind\":\"accepted_context\",\"media_type\":\"text/plain\"},{\"content\":{\"byte_length\":5,\"sha256\":\"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8\"},\"identity\":\"ctx:a\",\"kind\":\"accepted_context\",\"media_type\":\"text/plain\"}],\"execution_intent\":\"read_only\",\"expected_output_schema\":\"dolgorae.specialist-findings/v1\",\"images\":[],\"purpose\":\"review\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.accepted-task/v1\",\"task_body\":{\"byte_length\":27,\"sha256\":\"sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c\"},\"task_body_schema\":\"dolgorae.task-text/v1\"}",
+      "expected_digest": "sha256:0fa34914f54d5598ab695ad4ee94670c5a15628fe996796941fd1c54e6373613"
+    },
+    {
+      "id": "role-reordered-guidance",
+      "domain": "dolgorae.role-snapshot/v1",
+      "input": {
+        "schema": "dolgorae.role-snapshot/v1",
+        "role_body": {
+          "byte_length": 20,
+          "sha256": "sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d"
+        },
+        "dependencies": [
+          {
+            "name": "a",
+            "content": {
+              "byte_length": 11,
+              "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+            }
+          }
+        ],
+        "selected_guidance": [
+          {
+            "name": "g1",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+            }
+          },
+          {
+            "name": "g2",
+            "content": {
+              "byte_length": 13,
+              "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+            }
+          }
+        ]
+      },
+      "canonical_utf8": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"}]}",
+      "expected_digest": "sha256:cbcb0e91e04b67d96b9d324b2d83e0e2df0f586a440c1286cb7cf74cf18b737f"
+    },
+    {
+      "id": "configuration-explicit-label",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "input": {
+        "schema": "dolgorae.admitted-configuration/v1",
+        "profile_binding_schema": "dolgorae.profile-run-binding/v1",
+        "profile_binding_digest": "sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48",
+        "model": "gpt-5.6-luna",
+        "effort": "low",
+        "purpose_kind": "review",
+        "purpose_label": "review-label",
+        "required_capabilities": [
+          "artifact.read",
+          "task.assign"
+        ],
+        "execution_lane": "dedicated",
+        "requested_access": "read_only",
+        "required_assurance": "verified_thread_scoped_control",
+        "native_subagent_policy": "disabled",
+        "instruction_identity_digest": "sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387"
+      },
+      "canonical_utf8": "{\"effort\":\"low\",\"execution_lane\":\"dedicated\",\"instruction_identity_digest\":\"sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387\",\"model\":\"gpt-5.6-luna\",\"native_subagent_policy\":\"disabled\",\"profile_binding_digest\":\"sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48\",\"profile_binding_schema\":\"dolgorae.profile-run-binding/v1\",\"purpose_kind\":\"review\",\"purpose_label\":\"review-label\",\"requested_access\":\"read_only\",\"required_assurance\":\"verified_thread_scoped_control\",\"required_capabilities\":[\"artifact.read\",\"task.assign\"],\"schema\":\"dolgorae.admitted-configuration/v1\"}",
+      "expected_digest": "sha256:16c514aebe2daea1e9fe58ffbe7dc84ff47eddf6f166bd355155abdbc5969ad0"
+    },
+    {
+      "id": "result-omitted-change",
+      "domain": "dolgorae.complete-result/v1",
+      "input": {
+        "schema": "dolgorae.complete-result/v1",
+        "source": {
+          "scope_kind": "external_engagement",
+          "scope_ref": "engagement:fixture",
+          "worker_ref": "worker:fixture",
+          "task_ref": "task:fixture",
+          "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+          "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+          "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+        },
+        "terminal_outcome": "completed",
+        "final_response": {
+          "byte_length": 19,
+          "sha256": "sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a"
+        },
+        "structured_output_schema": null,
+        "structured_output": null,
+        "changes": [],
+        "attachments": [],
+        "safe_failure_code": null
+      },
+      "canonical_utf8": "{\"attachments\":[],\"changes\":[],\"final_response\":{\"byte_length\":19,\"sha256\":\"sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a\"},\"safe_failure_code\":null,\"schema\":\"dolgorae.complete-result/v1\",\"source\":{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},\"structured_output\":null,\"structured_output_schema\":null,\"terminal_outcome\":\"completed\"}",
+      "expected_digest": "sha256:f115fd6ddf4435f182b9e75db7611ff76ed3fbf4b688f3caffff668f8197d36f"
+    },
+    {
+      "id": "instruction-max-safe-integer",
+      "domain": "dolgorae.instruction-identity/v1",
+      "input": {
+        "schema": "dolgorae.instruction-identity/v1",
+        "core_version": 9007199254740991,
+        "core": {
+          "byte_length": 4,
+          "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+        },
+        "common": {
+          "byte_length": 6,
+          "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+        },
+        "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+        "dependency_order": [
+          "a"
+        ],
+        "guidance_order": [
+          "g2",
+          "g1"
+        ],
+        "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+        "composition": {
+          "byte_length": 77,
+          "sha256": "sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f"
+        }
+      },
+      "canonical_utf8": "{\"common\":{\"byte_length\":6,\"sha256\":\"sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8\"},\"composition\":{\"byte_length\":77,\"sha256\":\"sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f\"},\"composition_version\":\"core-common-role-dependencies-guidance-lf2/v1\",\"core\":{\"byte_length\":4,\"sha256\":\"sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c\"},\"core_version\":9007199254740991,\"dependency_order\":[\"a\"],\"guidance_order\":[\"g2\",\"g1\"],\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.instruction-identity/v1\"}",
+      "expected_digest": "sha256:64448e83500aff5a2054fc1766d9895312b7b25613532a9d44ee7905324445d2"
+    },
+    {
+      "id": "mutation-non-mcp-null",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "dolgorae.assign-task-request/v1",
+        "operation_kind": "assign_task",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "controller_principal": "controller:fixture",
+        "controller_generation": 1,
+        "idempotency_key": "original-key",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 128,
+          "sha256": "sha256:f85ab84c7d5499daff95537250e65d96b3d0dad02c01cbaf6394143ac590089b"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":1,\"controller_principal\":\"controller:fixture\",\"idempotency_key\":\"original-key\",\"operation_kind\":\"assign_task\",\"request_body\":{\"byte_length\":128,\"sha256\":\"sha256:f85ab84c7d5499daff95537250e65d96b3d0dad02c01cbaf6394143ac590089b\"},\"request_schema\":\"dolgorae.assign-task-request/v1\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:75c2e1f1efe3727499357594261033315f72688ee2e1be0a1c7f00590786ae4e"
+    },
+    {
+      "id": "task-image-high",
+      "domain": "dolgorae.accepted-task/v1",
+      "input": {
+        "schema": "dolgorae.accepted-task/v1",
+        "purpose": "review",
+        "task_body_schema": "dolgorae.task-text/v1",
+        "task_body": {
+          "byte_length": 27,
+          "sha256": "sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c"
+        },
+        "contexts": [
+          {
+            "kind": "accepted_context",
+            "identity": "ctx:a",
+            "content": {
+              "byte_length": 5,
+              "sha256": "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
+            },
+            "media_type": "text/plain"
+          },
+          {
+            "kind": "accepted_context",
+            "identity": "ctx:b",
+            "content": {
+              "byte_length": 4,
+              "sha256": "sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753"
+            },
+            "media_type": "text/plain"
+          }
+        ],
+        "images": [
+          {
+            "content": {
+              "byte_length": 68,
+              "sha256": "sha256:7327cacfa499a4dd82c7a88bb49d01d23dbf56a2b9eb7a9053cf9dd547b94da4"
+            },
+            "media_type": "image/png",
+            "detail": "high"
+          }
+        ],
+        "expected_output_schema": "dolgorae.specialist-findings/v1",
+        "execution_intent": "read_only",
+        "admitted_model": "gpt-5.6-luna",
+        "admitted_effort": "low",
+        "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+        "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110"
+      },
+      "canonical_utf8": "{\"admitted_effort\":\"low\",\"admitted_model\":\"gpt-5.6-luna\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"contexts\":[{\"content\":{\"byte_length\":5,\"sha256\":\"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8\"},\"identity\":\"ctx:a\",\"kind\":\"accepted_context\",\"media_type\":\"text/plain\"},{\"content\":{\"byte_length\":4,\"sha256\":\"sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753\"},\"identity\":\"ctx:b\",\"kind\":\"accepted_context\",\"media_type\":\"text/plain\"}],\"execution_intent\":\"read_only\",\"expected_output_schema\":\"dolgorae.specialist-findings/v1\",\"images\":[{\"content\":{\"byte_length\":68,\"sha256\":\"sha256:7327cacfa499a4dd82c7a88bb49d01d23dbf56a2b9eb7a9053cf9dd547b94da4\"},\"detail\":\"high\",\"media_type\":\"image/png\"}],\"purpose\":\"review\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.accepted-task/v1\",\"task_body\":{\"byte_length\":27,\"sha256\":\"sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c\"},\"task_body_schema\":\"dolgorae.task-text/v1\"}",
+      "expected_digest": "sha256:c8aa34af9b1039555e5b419f3824a96a264389ebd854be10ccefc192d523dada"
+    },
+    {
+      "id": "mutation-submit-turn",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body",
+        "operation_kind": "submit_turn",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": null,
+        "scope_ref": null,
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:SubmitTurn",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 214,
+          "sha256": "sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:SubmitTurn\",\"operation_kind\":\"submit_turn\",\"request_body\":{\"byte_length\":214,\"sha256\":\"sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":null,\"scope_ref\":null,\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:e38ca9f48f5ac9171a758fb5efc35e07a2421e26646f4977ff58b006e0165fe9"
+    }
+  ],
+  "invalid": [
+    {
+      "id": "duplicate-member",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"schema\":\"dolgorae.role-snapshot/v1\",\"schema\":\"dolgorae.role-snapshot/v1\",\"role_body\":null,\"dependencies\":[],\"selected_guidance\":[]}",
+      "expected_error": "invalid_json"
+    },
+    {
+      "id": "decoded-duplicate-member",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"schema\":\"dolgorae.role-snapshot/v1\",\"sch\\u0065ma\":\"dolgorae.role-snapshot/v1\"}",
+      "expected_error": "invalid_json"
+    },
+    {
+      "id": "lone-surrogate",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"schema\":\"dolgorae.role-snapshot/v1\",\"role_body\":\"\\ud800\"}",
+      "expected_error": "invalid_json"
+    },
+    {
+      "id": "lexical-float",
+      "domain": "dolgorae.instruction-identity/v1",
+      "raw_json": "{\"common\":{\"byte_length\":6,\"sha256\":\"sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8\"},\"composition\":{\"byte_length\":77,\"sha256\":\"sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f\"},\"composition_version\":\"core-common-role-dependencies-guidance-lf2/v1\",\"core\":{\"byte_length\":4,\"sha256\":\"sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c\"},\"core_version\":1.0,\"dependency_order\":[\"a\"],\"guidance_order\":[\"g2\",\"g1\"],\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.instruction-identity/v1\"}",
+      "expected_error": "invalid_integer"
+    },
+    {
+      "id": "integer-overflow",
+      "domain": "dolgorae.instruction-identity/v1",
+      "raw_json": "{\"common\":{\"byte_length\":6,\"sha256\":\"sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8\"},\"composition\":{\"byte_length\":77,\"sha256\":\"sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f\"},\"composition_version\":\"core-common-role-dependencies-guidance-lf2/v1\",\"core\":{\"byte_length\":4,\"sha256\":\"sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c\"},\"core_version\":9007199254740992,\"dependency_order\":[\"a\"],\"guidance_order\":[\"g2\",\"g1\"],\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.instruction-identity/v1\"}",
+      "expected_error": "invalid_integer"
+    },
+    {
+      "id": "negative-integer",
+      "domain": "dolgorae.instruction-identity/v1",
+      "raw_json": "{\"common\":{\"byte_length\":6,\"sha256\":\"sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8\"},\"composition\":{\"byte_length\":77,\"sha256\":\"sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f\"},\"composition_version\":\"core-common-role-dependencies-guidance-lf2/v1\",\"core\":{\"byte_length\":4,\"sha256\":\"sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c\"},\"core_version\":-1,\"dependency_order\":[\"a\"],\"guidance_order\":[\"g2\",\"g1\"],\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.instruction-identity/v1\"}",
+      "expected_error": "invalid_integer"
+    },
+    {
+      "id": "nonfinite-number",
+      "domain": "dolgorae.instruction-identity/v1",
+      "raw_json": "{\"common\":{\"byte_length\":6,\"sha256\":\"sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8\"},\"composition\":{\"byte_length\":77,\"sha256\":\"sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f\"},\"composition_version\":\"core-common-role-dependencies-guidance-lf2/v1\",\"core\":{\"byte_length\":4,\"sha256\":\"sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c\"},\"core_version\":NaN,\"dependency_order\":[\"a\"],\"guidance_order\":[\"g2\",\"g1\"],\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"schema\":\"dolgorae.instruction-identity/v1\"}",
+      "expected_error": "invalid_json"
+    },
+    {
+      "id": "unknown-root-field",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}],\"unexpected\":null}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "unknown-nested-field",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\",\"unexpected\":null},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "missing-explicit-null",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "raw_json": "{\"effort\":\"low\",\"execution_lane\":\"dedicated\",\"instruction_identity_digest\":\"sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387\",\"model\":\"gpt-5.6-luna\",\"native_subagent_policy\":\"disabled\",\"profile_binding_digest\":\"sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48\",\"profile_binding_schema\":\"dolgorae.profile-run-binding/v1\",\"purpose_kind\":\"review\",\"requested_access\":\"read_only\",\"required_assurance\":\"verified_thread_scoped_control\",\"required_capabilities\":[\"artifact.read\",\"task.assign\"],\"schema\":\"dolgorae.admitted-configuration/v1\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "unknown-enum",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "raw_json": "{\"effort\":\"low\",\"execution_lane\":\"future_lane\",\"instruction_identity_digest\":\"sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387\",\"model\":\"gpt-5.6-luna\",\"native_subagent_policy\":\"disabled\",\"profile_binding_digest\":\"sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48\",\"profile_binding_schema\":\"dolgorae.profile-run-binding/v1\",\"purpose_kind\":\"review\",\"purpose_label\":null,\"requested_access\":\"read_only\",\"required_assurance\":\"verified_thread_scoped_control\",\"required_capabilities\":[\"artifact.read\",\"task.assign\"],\"schema\":\"dolgorae.admitted-configuration/v1\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "shared-writer",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "raw_json": "{\"effort\":\"low\",\"execution_lane\":\"shared_readonly\",\"instruction_identity_digest\":\"sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387\",\"model\":\"gpt-5.6-luna\",\"native_subagent_policy\":\"disabled\",\"profile_binding_digest\":\"sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48\",\"profile_binding_schema\":\"dolgorae.profile-run-binding/v1\",\"purpose_kind\":\"review\",\"purpose_label\":null,\"requested_access\":\"canonical_workspace_write\",\"required_assurance\":\"verified_thread_scoped_control\",\"required_capabilities\":[\"artifact.read\",\"task.assign\"],\"schema\":\"dolgorae.admitted-configuration/v1\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "unordered-capabilities",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "raw_json": "{\"effort\":\"low\",\"execution_lane\":\"dedicated\",\"instruction_identity_digest\":\"sha256:16fbcb8ef72a0d695653a97be20e11240ebf40439fd53ff5f4aa19295a6d9387\",\"model\":\"gpt-5.6-luna\",\"native_subagent_policy\":\"disabled\",\"profile_binding_digest\":\"sha256:0c59dc0f2e7d14723d66a5a01736cc4340a3a8d8a51685d3b7eed8e01f34fc48\",\"profile_binding_schema\":\"dolgorae.profile-run-binding/v1\",\"purpose_kind\":\"review\",\"purpose_label\":null,\"requested_access\":\"read_only\",\"required_assurance\":\"verified_thread_scoped_control\",\"required_capabilities\":[\"task.assign\",\"artifact.read\"],\"schema\":\"dolgorae.admitted-configuration/v1\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "duplicate-source-alias",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"},{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "unsafe-source-alias",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"../unsafe\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "source-alias-utf8-overflow",
+      "domain": "dolgorae.role-snapshot/v1",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "unordered-group",
+      "domain": "dolgorae.group-assignment/v1",
+      "raw_json": "{\"entries\":[{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"entry_key\":\"entry:b\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\"},{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"entry_key\":\"entry:a\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\"}],\"schema\":\"dolgorae.group-assignment/v1\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "unknown-source-terminal-digest",
+      "domain": "dolgorae.merged-findings/v1",
+      "raw_json": "{\"algorithm\":\"merge-exact-findings-v1\",\"group_assignment_digest\":\"sha256:7671763d25b205f913b626c24f66b5a914ef8cdf241e6b57254ac6ce2eb8b944\",\"merged_output\":{\"byte_length\":15,\"sha256\":\"sha256:9d0f2143c61cfbb6c0cf0425ce8b447811a32d48ec37333ba8b3700218631b36\"},\"schema\":\"dolgorae.merged-findings/v1\",\"sources\":[{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"entry_key\":\"entry:a\",\"result_digest\":\"sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"safe_failure_code\":null,\"state\":\"completed\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},{\"accepted_task_digest\":null,\"agent_configuration_digest\":null,\"entry_key\":\"entry:b\",\"result_digest\":\"sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968\",\"role_snapshot_digest\":null,\"safe_failure_code\":null,\"state\":\"unknown\",\"task_ref\":null,\"worker_ref\":null}]}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "success-with-failure-code",
+      "domain": "dolgorae.complete-result/v1",
+      "raw_json": "{\"attachments\":[],\"changes\":[{\"after\":{\"byte_length\":5,\"sha256\":\"sha256:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8\"},\"after_mode\":33188,\"before\":{\"byte_length\":6,\"sha256\":\"sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb\"},\"before_mode\":33188,\"kind\":\"rename\",\"old_path\":\"src/old.rs\",\"path\":\"src/new.rs\"}],\"final_response\":{\"byte_length\":19,\"sha256\":\"sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a\"},\"safe_failure_code\":\"OUTCOME_UNKNOWN\",\"schema\":\"dolgorae.complete-result/v1\",\"source\":{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},\"structured_output\":null,\"structured_output_schema\":null,\"terminal_outcome\":\"completed\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "rename-without-old-path",
+      "domain": "dolgorae.complete-result/v1",
+      "raw_json": "{\"attachments\":[],\"changes\":[{\"after\":{\"byte_length\":5,\"sha256\":\"sha256:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8\"},\"after_mode\":33188,\"before\":{\"byte_length\":6,\"sha256\":\"sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb\"},\"before_mode\":33188,\"kind\":\"rename\",\"old_path\":null,\"path\":\"src/new.rs\"}],\"final_response\":{\"byte_length\":19,\"sha256\":\"sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a\"},\"safe_failure_code\":null,\"schema\":\"dolgorae.complete-result/v1\",\"source\":{\"accepted_task_digest\":\"sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"scope_kind\":\"external_engagement\",\"scope_ref\":\"engagement:fixture\",\"task_ref\":\"task:fixture\",\"worker_ref\":\"worker:fixture\"},\"structured_output\":null,\"structured_output_schema\":null,\"terminal_outcome\":\"completed\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "domain-substitution",
+      "domain": "dolgorae.admitted-configuration/v1",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"a\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "task-image-original-unsupported",
+      "domain": "dolgorae.accepted-task/v1",
+      "raw_json": "{\"schema\":\"dolgorae.accepted-task/v1\",\"purpose\":\"review\",\"task_body_schema\":\"dolgorae.task-text/v1\",\"task_body\":{\"byte_length\":27,\"sha256\":\"sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c\"},\"contexts\":[{\"kind\":\"accepted_context\",\"identity\":\"ctx:a\",\"content\":{\"byte_length\":5,\"sha256\":\"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8\"},\"media_type\":\"text/plain\"},{\"kind\":\"accepted_context\",\"identity\":\"ctx:b\",\"content\":{\"byte_length\":4,\"sha256\":\"sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753\"},\"media_type\":\"text/plain\"}],\"images\":[{\"content\":{\"byte_length\":68,\"sha256\":\"sha256:7327cacfa499a4dd82c7a88bb49d01d23dbf56a2b9eb7a9053cf9dd547b94da4\"},\"media_type\":\"image/png\",\"detail\":\"original\"}],\"expected_output_schema\":\"dolgorae.specialist-findings/v1\",\"execution_intent\":\"read_only\",\"admitted_model\":\"gpt-5.6-luna\",\"admitted_effort\":\"low\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\"}",
+      "expected_error": "invalid_identity"
+    }
+  ],
+  "relations": [
+    {
+      "kind": "different",
+      "left": "role-lf",
+      "right": "role-crlf"
+    },
+    {
+      "kind": "different",
+      "left": "role-composed",
+      "right": "role-decomposed"
+    },
+    {
+      "kind": "different",
+      "left": "role-one-byte-a",
+      "right": "role-one-byte-b"
+    },
+    {
+      "kind": "different",
+      "left": "task-base",
+      "right": "task-reordered-contexts"
+    },
+    {
+      "kind": "different",
+      "left": "role-base",
+      "right": "role-reordered-guidance"
+    },
+    {
+      "kind": "different",
+      "left": "configuration-base",
+      "right": "configuration-explicit-label"
+    },
+    {
+      "kind": "different",
+      "left": "result-base",
+      "right": "result-omitted-change"
+    },
+    {
+      "kind": "different",
+      "left": "mutation-base",
+      "right": "mutation-non-mcp-null"
+    }
+  ],
+  "sources": [
+    {
+      "id": "role-body",
+      "utf8": "Review exact bytes.\n",
+      "content": {
+        "byte_length": 20,
+        "sha256": "sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d"
+      }
+    },
+    {
+      "id": "core",
+      "utf8": "core",
+      "content": {
+        "byte_length": 4,
+        "sha256": "sha256:0d45f5fd462b8c70bffb10021ac1bcff3f58f29b1faf7568595095427d42812c"
+      }
+    },
+    {
+      "id": "common",
+      "utf8": "common",
+      "content": {
+        "byte_length": 6,
+        "sha256": "sha256:92a5dc04bd6f9fb8f29f8066fed8a5c1e81bc59ad48a11283b63736867e4f2a8"
+      }
+    },
+    {
+      "id": "dependency",
+      "utf8": "dependency\n",
+      "content": {
+        "byte_length": 11,
+        "sha256": "sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4"
+      }
+    },
+    {
+      "id": "guidance-two",
+      "utf8": "guidance two\n",
+      "content": {
+        "byte_length": 13,
+        "sha256": "sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e"
+      }
+    },
+    {
+      "id": "guidance-one",
+      "utf8": "guidance one\n",
+      "content": {
+        "byte_length": 13,
+        "sha256": "sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e"
+      }
+    },
+    {
+      "id": "composition",
+      "utf8": "core\n\ncommon\n\nReview exact bytes.\n\n\ndependency\n\n\nguidance two\n\n\nguidance one\n",
+      "content": {
+        "byte_length": 77,
+        "sha256": "sha256:e2525235649fba6a75411a06b2b539fa2af8db8d6956ac138ef6f0d8a0ad5a4f"
+      }
+    },
+    {
+      "id": "empty",
+      "utf8": "",
+      "content": {
+        "byte_length": 0,
+        "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "submit-turn-normalized-body",
+      "utf8": "{\"effort\":\"low\",\"images\":[],\"message\":{\"byte_length\":36,\"sha256\":\"sha256:6cf9a020e665405e74a4d82dc2c0e240541d09ae217d871c1ad826b367304a39\"},\"model\":\"gpt-5.6-luna\",\"run_ref\":\"run:fixture\",\"write_intent\":\"read_only\"}",
+      "content": {
+        "byte_length": 214,
+        "sha256": "sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3"
+      }
+    }
+  ]
+}

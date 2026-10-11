@@ -1,0 +1,307 @@
+{
+  "schema": "dolgorae.group-assignment/v1",
+  "scope_kind": "external_engagement",
+  "scope_ref": "engagement:fixture",
+  "entries": [
+    {
+      "entry_key": "task-001",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-002",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-003",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-004",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-005",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-006",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-007",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-008",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-009",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-010",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-011",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-012",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-013",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-014",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-015",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-016",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-017",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-018",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-019",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-020",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-021",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-022",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-023",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-024",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-025",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-026",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-027",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-028",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-029",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-030",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-031",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-032",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-033",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-034",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-035",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-036",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-037",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-038",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-039",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-040",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-041",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-042",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-043",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-044",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-045",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-046",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-047",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-048",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-049",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    {
+      "entry_key": "task-050",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    }
+  ]
+}

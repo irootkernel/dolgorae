@@ -1,0 +1,2846 @@
+{
+  "schema": "dolgorae.acceptance-fixtures/v1",
+  "contract_only": true,
+  "runtime_acceptance": false,
+  "cases": [
+    {
+      "id": "op-absence",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "absent"
+      ]
+    },
+    {
+      "id": "op-post-acceptance-loss",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b",
+            "expected_revision": 999
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "accepted",
+        "replayed"
+      ]
+    },
+    {
+      "id": "op-preacceptance-loss",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "mark_unresolved",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "unresolved",
+        "unresolved",
+        "recovery_needed"
+      ]
+    },
+    {
+      "id": "op-changed-request",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "idempotency_conflict",
+        "accepted"
+      ]
+    },
+    {
+      "id": "op-restart",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "restart"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "restarted",
+        "accepted",
+        "replayed"
+      ]
+    },
+    {
+      "id": "op-definitive-refusal",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "refuse",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "not_accepted",
+        "not_accepted",
+        "accepted",
+        "replayed"
+      ]
+    },
+    {
+      "id": "op-corrupt-namespace",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "corrupt"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "corrupt",
+        "recovery_needed"
+      ]
+    },
+    {
+      "id": "op-unavailable-namespace",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "unavailable"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "unavailable",
+        "recovery_needed"
+      ]
+    },
+    {
+      "id": "op-foreign-scope",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:foreign",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "unauthorized"
+      ]
+    },
+    {
+      "id": "op-foreign-controller",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:foreign",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "unauthorized"
+      ]
+    },
+    {
+      "id": "op-stale-generation",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 2,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "unauthorized"
+      ]
+    },
+    {
+      "id": "op-retired-content",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "retire_content"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "content_retired",
+        "accepted",
+        "replayed"
+      ]
+    },
+    {
+      "id": "op-tombstone",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "delete_subject"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "deleted",
+        "accepted",
+        "replayed"
+      ]
+    },
+    {
+      "id": "op-new-revision-refusal",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b",
+            "expected_revision": 999
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "stale_revision",
+        "absent"
+      ]
+    },
+    {
+      "id": "op-lookup-without-body",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "admit",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key"
+          }
+        ]
+      },
+      "expected": [
+        "accepted",
+        "accepted"
+      ]
+    },
+    {
+      "id": "op-expiry-preserves-unknown",
+      "family": "OP",
+      "scenario": "operation_history",
+      "input": {
+        "actions": [
+          {
+            "action": "mark_unresolved",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          },
+          {
+            "action": "deadline"
+          },
+          {
+            "action": "lookup",
+            "scope": "workspace:a/engagement:a",
+            "principal": "controller:a",
+            "generation": 1,
+            "kind": "assign_task",
+            "key": "original-key",
+            "digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b"
+          }
+        ]
+      },
+      "expected": [
+        "unresolved",
+        "unchanged",
+        "unresolved"
+      ]
+    },
+    {
+      "id": "error-missing-detail",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": null
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-unknown-code",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Rejected",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "FUTURE_ERROR",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-refusal",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Rejected",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Rejected"
+    },
+    {
+      "id": "error-recovery",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RecoveryNeeded",
+          "effect": "unresolved",
+          "detail_version": 2,
+          "error_code": "RECOVERY_REQUIRED",
+          "required_action": "recover_run"
+        }
+      },
+      "expected": "RecoveryNeeded"
+    },
+    {
+      "id": "error-contradictory-effect",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Rejected",
+          "effect": "accepted",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-retry-needs-lookup",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RetrySameKey",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "replay_same_key"
+        },
+        "lookup": "unresolved"
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-original-key-retry",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RetrySameKey",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "replay_same_key"
+        },
+        "lookup": "not_accepted"
+      },
+      "expected": "RetrySameKey"
+    },
+    {
+      "id": "secret-replay",
+      "family": "INT",
+      "scenario": "secret_resolution",
+      "input": {
+        "first_answer": "SECRET-FIRST-CANARY",
+        "replay_answer": "SECRET-CHANGED-CANARY",
+        "key": "secret-key"
+      },
+      "expected": {
+        "replayed": true,
+        "stored_secret": false,
+        "receipt_equal": true
+      }
+    },
+    {
+      "id": "unknown-no-redispatch",
+      "family": "DELEG",
+      "scenario": "rounds",
+      "input": {
+        "actions": [
+          "accepted",
+          "replay",
+          "wait",
+          "collect",
+          "unknown",
+          "merge",
+          "synthesis",
+          "refused"
+        ],
+        "max_rounds": 3
+      },
+      "expected": {
+        "rounds_used": 3,
+        "next_admission": false
+      }
+    },
+    {
+      "id": "podway-group-not-one-action",
+      "family": "DELEG",
+      "scenario": "rounds",
+      "input": {
+        "actions": [
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted",
+          "accepted"
+        ],
+        "max_rounds": 32
+      },
+      "expected": {
+        "rounds_used": 50,
+        "next_admission": false
+      }
+    },
+    {
+      "id": "receipt-idle",
+      "family": "DELEG",
+      "scenario": "disposition",
+      "input": {
+        "state": "idle",
+        "fresh_after_result": true,
+        "outstanding": 0
+      },
+      "expected": true
+    },
+    {
+      "id": "receipt-stale-idle",
+      "family": "DELEG",
+      "scenario": "disposition",
+      "input": {
+        "state": "idle",
+        "fresh_after_result": false,
+        "outstanding": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "receipt-unresolved",
+      "family": "DELEG",
+      "scenario": "disposition",
+      "input": {
+        "state": "idle",
+        "fresh_after_result": true,
+        "outstanding": 1
+      },
+      "expected": false
+    },
+    {
+      "id": "receipt-released",
+      "family": "DELEG",
+      "scenario": "disposition",
+      "input": {
+        "state": "released",
+        "fresh_after_result": true,
+        "outstanding": 0
+      },
+      "expected": true
+    },
+    {
+      "id": "receipt-interrupt-ack",
+      "family": "DELEG",
+      "scenario": "disposition",
+      "input": {
+        "state": "interrupt_acknowledged",
+        "fresh_after_result": true,
+        "outstanding": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "merge-conflicts-and-gaps",
+      "family": "FIND",
+      "scenario": "merge",
+      "input": {
+        "sources": [
+          {
+            "entry_key": "a",
+            "state": "completed",
+            "findings": [
+              {
+                "finding_key": "path:line:claim",
+                "claim": "Same checked claim",
+                "kind": "defect",
+                "stance": "supports",
+                "confidence": "medium",
+                "evidence": [
+                  {
+                    "kind": "accepted_context",
+                    "identity": "evidence:fixture",
+                    "content": {
+                      "byte_length": 6,
+                      "sha256": "sha256:aae0be9d77399ad9f744f6721542e4c8321560f96b050c55a6880251ea23e577"
+                    }
+                  }
+                ],
+                "covered_questions": [
+                  "correctness"
+                ],
+                "limitations": []
+              }
+            ]
+          },
+          {
+            "entry_key": "b",
+            "state": "completed",
+            "findings": [
+              {
+                "finding_key": "path:line:claim",
+                "claim": "Same checked claim",
+                "kind": "defect",
+                "stance": "supports",
+                "confidence": "medium",
+                "evidence": [
+                  {
+                    "kind": "accepted_context",
+                    "identity": "evidence:fixture",
+                    "content": {
+                      "byte_length": 6,
+                      "sha256": "sha256:aae0be9d77399ad9f744f6721542e4c8321560f96b050c55a6880251ea23e577"
+                    }
+                  }
+                ],
+                "covered_questions": [
+                  "correctness"
+                ],
+                "limitations": []
+              },
+              {
+                "finding_key": "path:line:claim",
+                "claim": "Different checked claim",
+                "kind": "defect",
+                "stance": "supports",
+                "confidence": "medium",
+                "evidence": [
+                  {
+                    "kind": "accepted_context",
+                    "identity": "evidence:fixture",
+                    "content": {
+                      "byte_length": 6,
+                      "sha256": "sha256:aae0be9d77399ad9f744f6721542e4c8321560f96b050c55a6880251ea23e577"
+                    }
+                  }
+                ],
+                "covered_questions": [
+                  "correctness"
+                ],
+                "limitations": []
+              }
+            ]
+          },
+          {
+            "entry_key": "c",
+            "state": "failed",
+            "findings": []
+          },
+          {
+            "entry_key": "d",
+            "state": "unknown",
+            "findings": []
+          },
+          {
+            "entry_key": "e",
+            "state": "missing",
+            "findings": []
+          }
+        ]
+      },
+      "expected": {
+        "unique_findings": 2,
+        "conflict_keys": [
+          "path:line:claim"
+        ],
+        "coverage": [
+          "a",
+          "b",
+          "c",
+          "d",
+          "e"
+        ],
+        "model_calls": 0
+      }
+    },
+    {
+      "id": "await-timeout-retains-work",
+      "family": "FIND",
+      "scenario": "await",
+      "input": {
+        "states": [
+          "completed",
+          "unknown",
+          "running"
+        ],
+        "predicate": "all",
+        "k": null,
+        "timeout": true
+      },
+      "expected": {
+        "satisfied": false,
+        "states": [
+          "completed",
+          "unknown",
+          "running"
+        ]
+      }
+    },
+    {
+      "id": "await-any",
+      "family": "FIND",
+      "scenario": "await",
+      "input": {
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ],
+        "predicate": "any",
+        "k": null,
+        "timeout": false
+      },
+      "expected": {
+        "satisfied": true,
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "await-all",
+      "family": "FIND",
+      "scenario": "await",
+      "input": {
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ],
+        "predicate": "all",
+        "k": null,
+        "timeout": false
+      },
+      "expected": {
+        "satisfied": false,
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "await-k",
+      "family": "FIND",
+      "scenario": "await",
+      "input": {
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ],
+        "predicate": "k",
+        "k": 2,
+        "timeout": false
+      },
+      "expected": {
+        "satisfied": true,
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "await-invalid-k",
+      "family": "FIND",
+      "scenario": "await",
+      "input": {
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ],
+        "predicate": "k",
+        "k": 4,
+        "timeout": false
+      },
+      "expected": {
+        "satisfied": false,
+        "states": [
+          "completed",
+          "failed",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "fixed-readonly-cannot-promote",
+      "family": "SCHED",
+      "scenario": "lane_admission",
+      "input": {
+        "lane": "shared_readonly",
+        "access": "canonical_workspace_write",
+        "native_subagents": "disabled"
+      },
+      "expected": false
+    },
+    {
+      "id": "shared-native-subagents-denied",
+      "family": "SCHED",
+      "scenario": "lane_admission",
+      "input": {
+        "lane": "shared_readonly",
+        "access": "read_only",
+        "native_subagents": "enabled"
+      },
+      "expected": false
+    },
+    {
+      "id": "dedicated-native-subagents",
+      "family": "SCHED",
+      "scenario": "lane_admission",
+      "input": {
+        "lane": "dedicated",
+        "access": "read_only",
+        "native_subagents": "enabled"
+      },
+      "expected": true
+    },
+    {
+      "id": "maintenance-unknown-preserved",
+      "family": "STORE",
+      "scenario": "maintenance",
+      "input": {
+        "active": 0,
+        "unknown": 1,
+        "live_writer": false,
+        "capacity_full": true,
+        "corrupt": false
+      },
+      "expected": {
+        "apply": false,
+        "finalization_allowed": true,
+        "failure": "busy"
+      }
+    },
+    {
+      "id": "maintenance-corruption",
+      "family": "STORE",
+      "scenario": "maintenance",
+      "input": {
+        "active": 0,
+        "unknown": 0,
+        "live_writer": false,
+        "capacity_full": true,
+        "corrupt": true
+      },
+      "expected": {
+        "apply": false,
+        "finalization_allowed": false,
+        "failure": "integrity"
+      }
+    },
+    {
+      "id": "maintenance-capacity-reserve",
+      "family": "STORE",
+      "scenario": "maintenance",
+      "input": {
+        "active": 0,
+        "unknown": 0,
+        "live_writer": false,
+        "capacity_full": true,
+        "corrupt": false
+      },
+      "expected": {
+        "apply": true,
+        "finalization_allowed": true,
+        "failure": "capacity"
+      }
+    },
+    {
+      "id": "lifecycle-interrupt-is-not-terminal",
+      "family": "LIFE",
+      "scenario": "terminal_proof",
+      "input": {
+        "interrupt_ack": true,
+        "terminal_receipt": false,
+        "descendants_absent": false
+      },
+      "expected": false
+    },
+    {
+      "id": "lifecycle-release-proof",
+      "family": "LIFE",
+      "scenario": "terminal_proof",
+      "input": {
+        "interrupt_ack": true,
+        "terminal_receipt": true,
+        "descendants_absent": true
+      },
+      "expected": true
+    },
+    {
+      "id": "creation-mode-immutable",
+      "family": "ID",
+      "scenario": "creation_mode",
+      "input": {
+        "requested": "writable",
+        "observed_access": "read_only",
+        "writer_holder": "other-run"
+      },
+      "expected": {
+        "mode": "writable",
+        "observed_access": "read_only"
+      }
+    },
+    {
+      "id": "heartbeat-advisory",
+      "family": "OBS",
+      "scenario": "heartbeat",
+      "input": {
+        "committed_cursor": 10,
+        "heartbeat_head": 99,
+        "gap": false,
+        "stream_ended": false
+      },
+      "expected": {
+        "reconnect": false,
+        "committed_cursor": 10
+      }
+    },
+    {
+      "id": "heartbeat-real-gap",
+      "family": "OBS",
+      "scenario": "heartbeat",
+      "input": {
+        "committed_cursor": 10,
+        "heartbeat_head": 99,
+        "gap": true,
+        "stream_ended": false
+      },
+      "expected": {
+        "reconnect": true,
+        "committed_cursor": 10
+      }
+    },
+    {
+      "id": "history-degradation-independent",
+      "family": "OBS",
+      "scenario": "history",
+      "input": {
+        "timeline_ok": false,
+        "snapshot_ok": true,
+        "interactions_ok": true,
+        "aggregate_ok": true
+      },
+      "expected": {
+        "snapshot_committed": true,
+        "actions_available": true,
+        "history_degraded": true
+      }
+    },
+    {
+      "id": "history-page-commit-mask",
+      "family": "OBS",
+      "scenario": "page_commit",
+      "input": {
+        "refresh_mask": [
+          "interaction"
+        ],
+        "pages": [
+          3,
+          4,
+          2
+        ]
+      },
+      "expected": {
+        "commits": [
+          3,
+          7,
+          9
+        ],
+        "refresh": [
+          "interaction"
+        ]
+      }
+    },
+    {
+      "id": "settling-needs-attention",
+      "family": "OBS",
+      "scenario": "stream_interest",
+      "input": {
+        "lifecycle": "settling",
+        "progress": false,
+        "pending_interaction": false
+      },
+      "expected": {
+        "retain_active_stream": false,
+        "slow_observe": true
+      }
+    },
+    {
+      "id": "checked-safe-projection",
+      "family": "OBS",
+      "scenario": "safe_projection",
+      "input": {
+        "raw_command": "echo SECRET-CANARY",
+        "safe_command": "echo [redacted]",
+        "status": "completed",
+        "elapsed_millis": 7
+      },
+      "expected": {
+        "command": "echo [redacted]",
+        "status": "completed",
+        "elapsed_millis": 7
+      }
+    },
+    {
+      "id": "unavailable-is-not-support",
+      "family": "REL",
+      "scenario": "capability",
+      "input": {
+        "advertised": false,
+        "schema_exists": true,
+        "fixture_passed": true
+      },
+      "expected": false
+    },
+    {
+      "id": "contract-fixture-not-runtime-acceptance",
+      "family": "REL",
+      "scenario": "qualification",
+      "input": {
+        "contract_valid": true,
+        "actual_consumer": false,
+        "final_artifact_bound": false,
+        "independent_acceptance": false
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-source_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "source_bytes",
+        "value": 65536
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-source_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "source_bytes",
+        "value": 65537
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-source_bytes-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "source_bytes",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-source_alias_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "source_alias_bytes",
+        "value": 256
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-source_alias_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "source_alias_bytes",
+        "value": 257
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-source_alias_bytes-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "source_alias_bytes",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-dependencies-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "dependencies",
+        "value": 64
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-dependencies-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "dependencies",
+        "value": 65
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-guidance-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "guidance",
+        "value": 64
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-guidance-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "guidance",
+        "value": 65
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-pool_k-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "pool_k",
+        "value": 16
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-pool_k-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "pool_k",
+        "value": 17
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-pool_k-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "pool_k",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-generation_cap-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "generation_cap",
+        "value": 32
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-generation_cap-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "generation_cap",
+        "value": 33
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-generation_cap-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "generation_cap",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-group_entries-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "group_entries",
+        "value": 64
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-group_entries-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "group_entries",
+        "value": 65
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-group_entries-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "group_entries",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-group_manifest_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "group_manifest_bytes",
+        "value": 1048576
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-group_manifest_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "group_manifest_bytes",
+        "value": 1048577
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-group_manifest_bytes-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "group_manifest_bytes",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-findings_per_source-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "findings_per_source",
+        "value": 64
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-findings_per_source-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "findings_per_source",
+        "value": 65
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-merged_findings-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "merged_findings",
+        "value": 4096
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-merged_findings-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "merged_findings",
+        "value": 4097
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-merged_artifact_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "merged_artifact_bytes",
+        "value": 33554432
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-merged_artifact_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "merged_artifact_bytes",
+        "value": 33554433
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-inline_result_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "inline_result_bytes",
+        "value": 1048576
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-inline_result_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "inline_result_bytes",
+        "value": 1048577
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-result_artifact_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "result_artifact_bytes",
+        "value": 33554432
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-result_artifact_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "result_artifact_bytes",
+        "value": 33554433
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-artifact_chunk_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "artifact_chunk_bytes",
+        "value": 1048576
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-artifact_chunk_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "artifact_chunk_bytes",
+        "value": 1048577
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-artifact_chunk_bytes-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "artifact_chunk_bytes",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-run_artifact_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "run_artifact_bytes",
+        "value": 268435456
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-run_artifact_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "run_artifact_bytes",
+        "value": 268435457
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-timeline_page_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "timeline_page_bytes",
+        "value": 4194304
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-timeline_page_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "timeline_page_bytes",
+        "value": 4194305
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-stream_envelopes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "stream_envelopes",
+        "value": 32
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-stream_envelopes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "stream_envelopes",
+        "value": 33
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-stream_queue_bytes-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "stream_queue_bytes",
+        "value": 4194304
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-stream_queue_bytes-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "stream_queue_bytes",
+        "value": 4194305
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-stall_millis-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "stall_millis",
+        "value": 5000
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-stall_millis-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "stall_millis",
+        "value": 5001
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-ledger_bytes-exact",
+      "family": "STORE",
+      "scenario": "limit",
+      "input": {
+        "name": "ledger_bytes",
+        "value": 536870912
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-ledger_bytes-plus-one",
+      "family": "STORE",
+      "scenario": "limit",
+      "input": {
+        "name": "ledger_bytes",
+        "value": 536870913
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-ledger_records-exact",
+      "family": "STORE",
+      "scenario": "limit",
+      "input": {
+        "name": "ledger_records",
+        "value": 1000000
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-ledger_records-plus-one",
+      "family": "STORE",
+      "scenario": "limit",
+      "input": {
+        "name": "ledger_records",
+        "value": 1000001
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-podway_rounds-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "podway_rounds",
+        "value": 32
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-podway_rounds-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "podway_rounds",
+        "value": 33
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-podway_rounds-below-min",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "podway_rounds",
+        "value": 0
+      },
+      "expected": false
+    },
+    {
+      "id": "bound-gul_streams-exact",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "gul_streams",
+        "value": 6
+      },
+      "expected": true
+    },
+    {
+      "id": "bound-gul_streams-plus-one",
+      "family": "ID",
+      "scenario": "limit",
+      "input": {
+        "name": "gul_streams",
+        "value": 7
+      },
+      "expected": false
+    },
+    {
+      "id": "complete-result-chunks",
+      "family": "DELEG",
+      "scenario": "complete_content",
+      "input": {
+        "chunks": [
+          "Complete ",
+          "response.\n"
+        ],
+        "content": {
+          "byte_length": 19,
+          "sha256": "sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a"
+        },
+        "accepted_link": true
+      },
+      "expected": true
+    },
+    {
+      "id": "incomplete-result-preview",
+      "family": "DELEG",
+      "scenario": "complete_content",
+      "input": {
+        "chunks": [
+          "Complete "
+        ],
+        "content": {
+          "byte_length": 19,
+          "sha256": "sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a"
+        },
+        "accepted_link": true
+      },
+      "expected": false
+    },
+    {
+      "id": "changed-result-byte",
+      "family": "DELEG",
+      "scenario": "complete_content",
+      "input": {
+        "chunks": [
+          "Complete response!\n"
+        ],
+        "content": {
+          "byte_length": 19,
+          "sha256": "sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a"
+        },
+        "accepted_link": true
+      },
+      "expected": false
+    },
+    {
+      "id": "unaccepted-uploader-hash",
+      "family": "DELEG",
+      "scenario": "complete_content",
+      "input": {
+        "chunks": [
+          "Complete response.\n"
+        ],
+        "content": {
+          "byte_length": 19,
+          "sha256": "sha256:66871edf1d4a1c761a5c20cd1b2dd388a7d1d44ec3fbe75708e90ce37d0f827a"
+        },
+        "accepted_link": false
+      },
+      "expected": false
+    },
+    {
+      "id": "group-fifty",
+      "family": "FIND",
+      "scenario": "limit",
+      "input": {
+        "name": "group_entries",
+        "value": 50
+      },
+      "expected": true
+    },
+    {
+      "id": "error-empty-code",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Rejected",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-missing-version",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Rejected",
+          "effect": "none",
+          "detail_version": null,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-future-version",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Rejected",
+          "effect": "none",
+          "detail_version": 99,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-unknown-classification",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "Future",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-recoveryneeded-none",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RecoveryNeeded",
+          "effect": "unresolved",
+          "detail_version": 2,
+          "error_code": "RECOVERY_REQUIRED",
+          "required_action": "none"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-recoveryneeded-fix_request",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RecoveryNeeded",
+          "effect": "unresolved",
+          "detail_version": 2,
+          "error_code": "RECOVERY_REQUIRED",
+          "required_action": "fix_request"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-recoveryneeded-replay_same_key",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RecoveryNeeded",
+          "effect": "unresolved",
+          "detail_version": 2,
+          "error_code": "RECOVERY_REQUIRED",
+          "required_action": "replay_same_key"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-recoveryneeded-missing-action",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RecoveryNeeded",
+          "effect": "unresolved",
+          "detail_version": 2,
+          "error_code": "RECOVERY_REQUIRED"
+        }
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-retrysamekey-none",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RetrySameKey",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "none"
+        },
+        "lookup": "not_accepted"
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-retrysamekey-fix_request",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RetrySameKey",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT",
+          "required_action": "fix_request"
+        },
+        "lookup": "not_accepted"
+      },
+      "expected": "Unknown"
+    },
+    {
+      "id": "error-retrysamekey-missing-action",
+      "family": "OP",
+      "scenario": "classify",
+      "input": {
+        "mutation": true,
+        "detail": {
+          "classification": "RetrySameKey",
+          "effect": "none",
+          "detail_version": 2,
+          "error_code": "INVALID_ARGUMENT"
+        },
+        "lookup": "not_accepted"
+      },
+      "expected": "Unknown"
+    }
+  ],
+  "feedback_coverage": [
+    {
+      "feedback": "CD-01",
+      "family": "LIFE",
+      "requirement": "rebuild while idle/busy retains cross-build mutation refusal and typed recovery",
+      "contract_cases": [
+        "lifecycle-interrupt-is-not-terminal"
+      ],
+      "runtime_owners": [
+        "TASK-071"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-02",
+      "family": "OBS",
+      "requirement": "count executable/schema probes with config/file invalidation",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-03",
+      "family": "OBS",
+      "requirement": "bounded durable waits reuse executing-build evidence",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-04",
+      "family": "STORE",
+      "requirement": "capacity reserve and interrupted segment/checkpoint maintenance",
+      "contract_cases": [
+        "maintenance-unknown-preserved"
+      ],
+      "runtime_owners": [
+        "TASK-072"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-05",
+      "family": "STORE",
+      "requirement": "Profile compaction and durable cleanup failure at crash boundaries",
+      "contract_cases": [
+        "maintenance-unknown-preserved"
+      ],
+      "runtime_owners": [
+        "TASK-073"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-06",
+      "family": "LIFE",
+      "requirement": "worker failure/poisoned journal retains intent and recoverability",
+      "contract_cases": [
+        "lifecycle-interrupt-is-not-terminal"
+      ],
+      "runtime_owners": [
+        "TASK-074"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-07",
+      "family": "STORE",
+      "requirement": "indexed reads, content deduplication and explicit retention integrity",
+      "contract_cases": [
+        "maintenance-unknown-preserved"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-08",
+      "family": "OBS",
+      "requirement": "steady calls spawn no Git; identity changes invalidate observation",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-09",
+      "family": "ID",
+      "requirement": "modern public projection coexists with frozen accepted legacy records",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "runtime_owners": [
+        "TASK-067",
+        "TASK-078"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-10",
+      "family": "ID",
+      "requirement": "selected guidance is captured; ambient discovery stays suppressed",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "runtime_owners": [
+        "TASK-076"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-11",
+      "family": "SCHED",
+      "requirement": "pool isolation, generation cap/warning and subagent policy",
+      "contract_cases": [
+        "fixed-readonly-cannot-promote"
+      ],
+      "runtime_owners": [
+        "TASK-078"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-12",
+      "family": "REL",
+      "requirement": "consumer inventory/migration precedes retirement; frozen regressions remain",
+      "contract_cases": [
+        "contract-fixture-not-runtime-acceptance"
+      ],
+      "runtime_owners": [
+        "TASK-087"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-13",
+      "family": "REL",
+      "requirement": "recursive architecture guards enforce justified component boundaries",
+      "contract_cases": [
+        "contract-fixture-not-runtime-acceptance"
+      ],
+      "runtime_owners": [
+        "TASK-087"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "CD-14",
+      "family": "REL",
+      "requirement": "protoc/build/CI identities and exact released artifacts are reproducible",
+      "contract_cases": [
+        "contract-fixture-not-runtime-acceptance"
+      ],
+      "runtime_owners": [
+        "TASK-067",
+        "TASK-087",
+        "TASK-089"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-01",
+      "family": "LIFE",
+      "requirement": "close resumes with current Primary revision, retained cause and actions",
+      "contract_cases": [
+        "lifecycle-interrupt-is-not-terminal"
+      ],
+      "runtime_owners": [
+        "TASK-071"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-02",
+      "family": "INT",
+      "requirement": "unsupported variants produce safe opened/resolved timeline history",
+      "contract_cases": [
+        "secret-replay"
+      ],
+      "runtime_owners": [
+        "TASK-079"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-03",
+      "family": "ID",
+      "requirement": "modern Runs do not break v1 listing or shared writer status",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "runtime_owners": [
+        "TASK-078"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-04",
+      "family": "ID",
+      "requirement": "fresh modern Role/policy provisioning and Profile rebinding",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "runtime_owners": [
+        "TASK-078"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-05",
+      "family": "OP",
+      "requirement": "definitive refusal resolves intent; original-key restart retry admits once",
+      "contract_cases": [
+        "op-post-acceptance-loss"
+      ],
+      "runtime_owners": [
+        "TASK-070"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-06",
+      "family": "OBS",
+      "requirement": "ledger tailing and idle wake/backoff isolate stream work budgets",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-07",
+      "family": "OBS",
+      "requirement": "cheap shared display sampling retains fresh mutation safety proof",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-08",
+      "family": "OBS",
+      "requirement": "Profile lookup invalidates cached executable/schema on configuration drift",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-09",
+      "family": "OP",
+      "requirement": "method-specific effects, writer-holder diagnostics and response-loss lookup",
+      "contract_cases": [
+        "op-post-acceptance-loss"
+      ],
+      "runtime_owners": [
+        "TASK-068",
+        "TASK-070"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-10",
+      "family": "OBS",
+      "requirement": "redacted command/completion/change/error events reject secret canaries",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-079"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-11",
+      "family": "INT",
+      "requirement": "versioned permission/MCP routing preserves old unsupported history",
+      "contract_cases": [
+        "secret-replay"
+      ],
+      "runtime_owners": [
+        "TASK-079"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-12",
+      "family": "LIFE",
+      "requirement": "typed build blockers, bounded server work and safe diagnostics",
+      "contract_cases": [
+        "lifecycle-interrupt-is-not-terminal"
+      ],
+      "runtime_owners": [
+        "TASK-071",
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-13",
+      "family": "OP",
+      "requirement": "authorized lookup needs neither attachment paths nor reconstructed request",
+      "contract_cases": [
+        "op-post-acceptance-loss"
+      ],
+      "runtime_owners": [
+        "TASK-070"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-14",
+      "family": "OBS",
+      "requirement": "bounded forward/tail pages recover complete artifact-backed large content",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-068",
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-15",
+      "family": "REL",
+      "requirement": "tested intended release artifact is distinct from development identity",
+      "contract_cases": [
+        "contract-fixture-not-runtime-acceptance"
+      ],
+      "runtime_owners": [
+        "TASK-087",
+        "TASK-089"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "GI-16",
+      "family": "OBS",
+      "requirement": "aggregate reads reuse observations and derive availability from source facts",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "runtime_owners": [
+        "TASK-075",
+        "TASK-078"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-A1",
+      "family": "DELEG",
+      "requirement": "accepted identity, full result, rounds, disposition and lookup agree",
+      "contract_cases": [
+        "unknown-no-redispatch"
+      ],
+      "runtime_owners": [
+        "TASK-076"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-A2",
+      "family": "ID",
+      "requirement": "bounded inline Role captures exact dependency bytes",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "runtime_owners": [
+        "TASK-076"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-A3",
+      "family": "DELEG",
+      "requirement": "both pinned trusted host routes pass replay/conflict/restart/loss matrix",
+      "contract_cases": [
+        "unknown-no-redispatch"
+      ],
+      "runtime_owners": [
+        "TASK-067",
+        "TASK-068",
+        "TASK-077"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-A4",
+      "family": "DELEG",
+      "requirement": "versioned Podway exports pass external/managed known answers",
+      "contract_cases": [
+        "unknown-no-redispatch"
+      ],
+      "runtime_owners": [
+        "TASK-077",
+        "TASK-086"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-A5",
+      "family": "ID",
+      "requirement": "selected guidance participates in captured instruction identity",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "runtime_owners": [
+        "TASK-076"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-A6",
+      "family": "INT",
+      "requirement": "ownerless interaction declines/interrupts within bounded policy",
+      "contract_cases": [
+        "secret-replay"
+      ],
+      "runtime_owners": [
+        "TASK-079"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-B1",
+      "family": "FIND",
+      "requirement": "checked finding evidence, coverage and limitations precede publication",
+      "contract_cases": [
+        "merge-conflicts-and-gaps"
+      ],
+      "runtime_owners": [
+        "TASK-084"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-B2",
+      "family": "FIND",
+      "requirement": "immutable group assignment and any/all/k wait recover terminal/unknown members",
+      "contract_cases": [
+        "merge-conflicts-and-gaps"
+      ],
+      "runtime_owners": [
+        "TASK-084"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-B3",
+      "family": "FIND",
+      "requirement": "deterministic merge preserves conflicts/gaps and algorithm/source identity",
+      "contract_cases": [
+        "merge-conflicts-and-gaps"
+      ],
+      "runtime_owners": [
+        "TASK-085"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-B4",
+      "family": "FIND",
+      "requirement": "explicit synthesis adds its own round/result; Podway receipt scope is accepted",
+      "contract_cases": [
+        "merge-conflicts-and-gaps"
+      ],
+      "runtime_owners": [
+        "TASK-085",
+        "TASK-086"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-C1",
+      "family": "STORE",
+      "requirement": "capacity/observation prerequisites hold under larger fan-out",
+      "contract_cases": [
+        "maintenance-unknown-preserved"
+      ],
+      "runtime_owners": [
+        "TASK-072",
+        "TASK-073",
+        "TASK-075"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-C2",
+      "family": "SCHED",
+      "requirement": "configured K isolates fixed read-only members and suppresses native subagents",
+      "contract_cases": [
+        "fixed-readonly-cannot-promote"
+      ],
+      "runtime_owners": [
+        "TASK-078"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-C3",
+      "family": "SCHED",
+      "requirement": "external assignments retain queue/reuse/deadline/activation recovery",
+      "contract_cases": [
+        "fixed-readonly-cannot-promote"
+      ],
+      "runtime_owners": [
+        "TASK-080",
+        "TASK-082"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-C4",
+      "family": "SCHED",
+      "requirement": "internal lateral delivery and wait-cycle rules pass integrated acceptance",
+      "contract_cases": [
+        "fixed-readonly-cannot-promote"
+      ],
+      "runtime_owners": [
+        "TASK-081",
+        "TASK-083",
+        "TASK-027"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    },
+    {
+      "feedback": "EN-D",
+      "family": "INT",
+      "requirement": "current Controller owns command/permission/MCP answers or explicit decline",
+      "contract_cases": [
+        "secret-replay"
+      ],
+      "runtime_owners": [
+        "TASK-079"
+      ],
+      "runtime_acceptance": "pending_later_owner",
+      "contract_coverage": "family_invariant_only; named runtime requirement remains mandatory"
+    }
+  ],
+  "gul_foundation_coverage": [
+    {
+      "feedback": "G4-1",
+      "contract_cases": [
+        "heartbeat-advisory"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    },
+    {
+      "feedback": "G4-2",
+      "contract_cases": [
+        "creation-mode-immutable"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    },
+    {
+      "feedback": "G4-3",
+      "contract_cases": [
+        "error-recovery"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    },
+    {
+      "feedback": "G4-4",
+      "contract_cases": [
+        "history-degradation-independent"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    },
+    {
+      "feedback": "G4-5",
+      "contract_cases": [
+        "history-page-commit-mask"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    },
+    {
+      "feedback": "G4-6",
+      "contract_cases": [
+        "settling-needs-attention"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    },
+    {
+      "feedback": "G4-7",
+      "contract_cases": [
+        "checked-safe-projection"
+      ],
+      "owner": "Gul E15-T21",
+      "runtime_owner": "Gul E16 / TASK-088",
+      "status": "pending_gul_h2"
+    }
+  ],
+  "export_vectors": [
+    {
+      "mapping": "dolgorae.podway-external/v1",
+      "adapter_id": "dolgorae.fixture-adapter",
+      "adapter_version": "contract-fixture/v1",
+      "binding_ref": "binding:fixture",
+      "primary_host": "external",
+      "scope_kind": "external_engagement",
+      "scope_ref": "external_engagement:fixture",
+      "supervisor_ref": "controller:fixture",
+      "worker_ref": "worker:fixture",
+      "task_ref": "task:fixture",
+      "role_ref": "role:fixture",
+      "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+      "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+      "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b",
+      "result_digest": "sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968",
+      "rounds_used": 3,
+      "worker_disposition": "idle"
+    },
+    {
+      "mapping": "dolgorae.podway-managed/v1",
+      "adapter_id": "dolgorae.fixture-adapter",
+      "adapter_version": "contract-fixture/v1",
+      "binding_ref": "binding:fixture",
+      "primary_host": "managed",
+      "scope_kind": "orchestrated_session",
+      "scope_ref": "orchestrated_session:fixture",
+      "supervisor_ref": "controller:fixture",
+      "worker_ref": "worker:fixture",
+      "task_ref": "task:fixture",
+      "role_ref": "role:fixture",
+      "role_snapshot_digest": "sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb",
+      "agent_configuration_digest": "sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110",
+      "accepted_task_digest": "sha256:a2be8dd3836f31a66b700da0a284b3c6dab9ea13d989b8008b4ef2fa96b1907b",
+      "result_digest": "sha256:68743de30edd1b6104ba93a11a43dbc8eecbec58400e3dcafcaef715dc7a8968",
+      "rounds_used": 3,
+      "worker_disposition": "idle"
+    }
+  ],
+  "qualification_boundaries": {
+    "h1": "qualified contract and pre-contract native feasibility only",
+    "h2": "Gul E15 including T21 completed foundation; EPIC-019 remains stopped until accepted return",
+    "h3": "final intended provider and actual Aquarium/Podway artifacts and runtime qualification",
+    "h4": "Gul intended final artifact and complete actual-client campaign",
+    "gate_d": "TASK-088 independent final-pair verification and TASK-089 final acceptance"
+  },
+  "size_proofs": {
+    "utf8_json_string_worst_expansion": 6,
+    "group_entry_key_max_utf8_bytes": 256,
+    "scope_ref_max_utf8_bytes": 512,
+    "group_entries_max": 64,
+    "group_entry_skeleton_bytes": 313,
+    "group_skeleton_bytes": 105,
+    "full_group_encoded_upper_bound": 121576,
+    "group_encoded_limit": 1048576,
+    "coverage_source_skeleton_bytes": 478,
+    "full_coverage_encoded_upper_bound": 572288,
+    "collection_page_encoded_limit": 4194304,
+    "maximum_findings_before_equivalence": 4096,
+    "maximum_claim_bytes_alone": 33554432,
+    "merged_artifact_limit": 33554432,
+    "over_limit_policy": "typed_capacity_refusal_preserving_complete_source_and_coverage_references",
+    "complete_32mib_artifact": {
+      "byte_length": 33554432,
+      "sha256": "sha256:05f052c8f6da8ee5228ec291820b559c4be183773b9e97a6b82e30dacff85dd3",
+      "chunk_byte_length": 1048576,
+      "chunk_count": 32,
+      "byte_pattern": "ASCII x"
+    }
+  }
+}

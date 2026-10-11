@@ -1,0 +1,20 @@
+{
+  "schema": "dolgorae.instruction-identity/v1",
+  "core_version": 2,
+  "core": {
+    "byte_length": 4,
+    "sha256": "sha256:70ea1983c983deacc1b61805aea3d43648afd932f346fb2e5d9b15facd4035c2"
+  },
+  "common": {
+    "byte_length": 6,
+    "sha256": "sha256:309955e00850b8afeb148450c7208585a85f8b652d5c625c777726f44837f69c"
+  },
+  "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+  "dependency_order": [],
+  "guidance_order": [],
+  "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+  "composition": {
+    "byte_length": 36,
+    "sha256": "sha256:1d382b5e2df6dbe73b2000e5b77d9a9b7e1f3779e49344b95b82c278355bd384"
+  }
+}

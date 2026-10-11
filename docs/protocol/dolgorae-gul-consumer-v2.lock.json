@@ -1,0 +1,1019 @@
+{
+  "contract_id": "dolgorae.h1-contract-lock/v1",
+  "schema_version": 1,
+  "producer": {
+    "epic": "EPIC-018",
+    "task": "TASK-068",
+    "requirements_commit": "063d96c97f633cc6cbb611319c19da5a4fbacb82"
+  },
+  "package_generation": "H1/public-v2/gul-consumer-v2/machine-v5/facade-v5",
+  "identity": "raw SHA-256 of this lock plus every enumerated artifact; containing completion commit supplies Git revision",
+  "toolchain": {
+    "rust": "1.97.1",
+    "buf": "1.69.0",
+    "go": "1.26.6",
+    "protoc": "36.2",
+    "protoc_gen_go": "1.36.11",
+    "protoc_gen_go_grpc": "1.6.1"
+  },
+  "generation": {
+    "public": "python3 tools/validators/generate_public_v2.py --write",
+    "policies": "python3 tools/validators/generate_h1_policies.py",
+    "lock": "python3 tools/validators/generate_h1_lock.py",
+    "verify": "make PYTHON_BIN=.venv/bin/python test"
+  },
+  "persisted_generations": {
+    "modern_run_manifest": "3 -> 4",
+    "agent_configuration": "3 -> 4",
+    "instructions": "2 -> 3",
+    "run_state": "1 -> 2",
+    "idempotency_intent": "1 -> 2",
+    "audit_record": "2 unchanged",
+    "profile_membership": "2 unchanged",
+    "workspace_record": "1 unchanged",
+    "profile_server_state": "2 unchanged"
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "991b26a260da8fda4028c1d10a3da9f70a8cb955bcdd59bafa2991b118d7116f",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "f929591c3edb0574a90013f28ea2869dcd5297ab8ae75ac85a95efad48099dab",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "Makefile",
+      "sha256": "2ae3e28c0df6301263afc8e5d6b0c411bc62684af851e066c8595ce83275abd3",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/dolgorae/public/v2/dolgorae.proto",
+      "sha256": "f334bf8b0c2f7042ed9c76bcee915a599b78e774ff455bdb4d6face6d83318a9",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/dolgorae-accepted-policy-session-v1.schema.json",
+      "sha256": "c17b7f818d9f2465bf64729beac0f59c52cf19cad6a31a16fb7254dbf363c59a",
+      "generation": "https://dolgorae.local/schema/accepted-policy-session/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-agent-configuration-input-v2.schema.json",
+      "sha256": "695d54c5e1cc6e0df926c90908b9539661cf8be26c5df1e27aa3eb0c171a82b5",
+      "generation": "https://dolgorae.local/schema/agent-configuration-input/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-agent-configuration-v1.schema.json",
+      "sha256": "40f0b82ad03b8b11b0b0b35fe0e4e2f9c45548a56416c9810f741ed42888226e",
+      "generation": "https://dolgorae.local/schema/agent-configuration/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-agent-configuration-v2.schema.json",
+      "sha256": "0c12cbd954eab5c4c08ea0211be3f3b314fe64fc3f273241716f7b3b17158e50",
+      "generation": "https://dolgorae.local/schema/agent-configuration/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-artifact-v1.schema.json",
+      "sha256": "319111668259e41dfaa19725c98f704d0098399051346268946eceaa2c93a67b",
+      "generation": "https://dolgorae.local/schema/artifact/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-audit-record-v2.schema.json",
+      "sha256": "f5ee7ce7fc8f8cffdbcb40aae148d915095d06cb2b7fb2bb3f6182b22a4926ee",
+      "generation": "https://dolgorae.local/schema/audit-record/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-capabilities-v1.schema.json",
+      "sha256": "bdcb76265d6508f73b791e5f289e09f28fda9a6dcc67a5ca03c2a425e8ea9b79",
+      "generation": "https://dolgorae.local/schema/capabilities/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-capabilities-v2.json",
+      "sha256": "24b37042b25d799205e50a4b22d6dff0dae01c86a49b7f92e8a02a072d4df3f8",
+      "generation": "dolgorae.capability-policy/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-error-contract-v1.json",
+      "sha256": "cabe4bb7f237933d16778e1658c4ca812b732cd89dcbd7a06d0c1457dbf3f2cd",
+      "generation": "https://dolgorae.local/schema/error-contract/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-event-delivery-v1.schema.json",
+      "sha256": "ede6538acf16895092f2ec9f68b194da15e93f5985ec87d32e9d449ff18c4dc1",
+      "generation": "https://dolgorae.local/schema/event-delivery/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-event-record-v1.schema.json",
+      "sha256": "ee57cbf80be94eecbe858a93228626fd623cb9b503480095eeb5388c57ef6f27",
+      "generation": "https://dolgorae.local/schema/client-event-record/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-external-specialist-facade-v1.schema.json",
+      "sha256": "7427285884a82e2ed29ffd7316ea71495de2405bd975385be8d91b4b05ffcacf",
+      "generation": "https://dolgorae.local/schema/external-specialist-facade/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-external-specialist-facade-v5.schema.json",
+      "sha256": "8f83b7272fcb62a1e93f7c762a08c19ff1253cfa995c5d3e529ef779623d5d0a",
+      "generation": "https://dolgorae.local/schema/external-specialist-facade/v5"
+    },
+    {
+      "path": "docs/protocol/dolgorae-global-profile-binding-v2.schema.json",
+      "sha256": "a273a588d2d8b130e4e1689332c94729a785f1d517d8dcb084c4f9beca24a1e2",
+      "generation": "https://dolgorae.local/schema/global-profile-binding/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-global-profile-registry-v1.schema.json",
+      "sha256": "021c0cfa3c78f5977dd25c4280d6b3a2742842d58476c02d63eed6d9a3f6bd4f",
+      "generation": "https://dolgorae.local/schema/global-profile-registry/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-grpc-client-policy-v2.json",
+      "sha256": "760a5dd6a8270d24c83ccbeecf342230ef5c18e3f6b4d17f3274c02895096347",
+      "generation": "dolgorae.grpc-client-policy/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-grpc-error-mapping-v2.json",
+      "sha256": "274a5dc51c705373bca159a44691737e55ca6f8bfd5cb3ceb6fab0b7287485a7",
+      "generation": "dolgorae.grpc-error-mapping/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json",
+      "sha256": "fed4c5a31b221c8a7c4943c8b46d1e881e70cf593912aef091c4efbec17adf9e",
+      "generation": "dolgorae.gul-consumer-fixtures/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-gul-consumer-v2.json",
+      "sha256": "801bba03e7305f06285ff56cb82befc2bc0f657d236ed016113b53d39832acaf",
+      "generation": "dolgorae.gul-consumer/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-idempotency-intent-v1.schema.json",
+      "sha256": "4f270a6b32009360f970dba04516ec405f26420a73ac82be6f06e42042a86093",
+      "generation": "https://dolgorae.local/schema/idempotency-intent/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-interaction-summary-v1.schema.json",
+      "sha256": "dd337129090c61682767944c342a3ce9e3d8cef07b82337b83f8a91a292fd0ef",
+      "generation": "https://dolgorae.local/schema/interaction-summary/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-interaction-v1.schema.json",
+      "sha256": "83f942021f61b422ae077ae677b54eec5dc7c1a6e4e8c09921dc8968d2c29894",
+      "generation": "https://dolgorae.local/schema/interaction/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-local-profile-registry-v1.schema.json",
+      "sha256": "6ec9f328277de82ed4792cb288d1ccc635a46540e6e3822b3111b5ec87bce85e",
+      "generation": "https://dolgorae.local/schema/local-profile-registry/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-machine-v1.schema.json",
+      "sha256": "19b97f95a5ea1d5e25d10662d476fb9cefb5c98358c0de5f51b583d7a7a6a630",
+      "generation": "https://dolgorae.local/schema/machine-output/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-machine-v5.schema.json",
+      "sha256": "b85e372bfdeaecfe0dfa762b03b8cf23647050278350cfb5892fead66d763358",
+      "generation": "https://dolgorae.local/schema/machine-output/v5"
+    },
+    {
+      "path": "docs/protocol/dolgorae-one-shot-operation-v1.schema.json",
+      "sha256": "d0f33a707986f7eea28407e735f747d9525e916f24149749ff0945f1038220c3",
+      "generation": "https://dolgorae.local/schema/one-shot-operation/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-profile-event-v1.schema.json",
+      "sha256": "e796df62c171c18d2cf035d7875868bf11310d6ccfd665fa39e320d4becb3443",
+      "generation": "https://dolgorae.local/schema/profile-event/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-profile-membership-v2.schema.json",
+      "sha256": "5f24e1f5d4c2099844b0e4ca1285b94254d3daf4d25cfaa55d04fced1096a666",
+      "generation": "https://dolgorae.local/schema/profile-membership/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-profile-server-state-v1.schema.json",
+      "sha256": "25634f96c4e07b6eaff4a039b30f98449afe16f97951f95208acbaa434e915c2",
+      "generation": "https://dolgorae.local/schema/profile-server-state/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-profile-server-state-v2.schema.json",
+      "sha256": "1ec5ac94920ae6203ce59d02ae035e713f6c6a577c5deeb844abd906fa245e41",
+      "generation": "https://dolgorae.local/schema/profile-server-state/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-public-v2.descriptor.json",
+      "sha256": "d54ebb56ba46042f65e0acedfd2a83a00d167193dad9e136ad6298b239223c07",
+      "generation": "dolgorae.public.v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-public-v2.descriptor.pb",
+      "sha256": "1a659046670feff58c5097ac639dd8854c4b534d3bc2fb6366abad98b4caa232",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/dolgorae-review-output-diagnostic-v1.schema.json",
+      "sha256": "57c896efb8e85fc82b154dc49d081ff1dc2c605e559d3f5aa6d7695b2922a300",
+      "generation": "https://dolgorae.local/schema/review-output-diagnostic/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-review-target-v1.schema.json",
+      "sha256": "bbd9fbba03630dd279319e43b3e66950165bc7d81da12e099b7d66dde9fefbcf",
+      "generation": "https://dolgorae.local/schema/review-target/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-review-target-v2.schema.json",
+      "sha256": "c17a086c2cf73e6b408273b508729ff3cd4bf3d2bb393c10b982e161338db940",
+      "generation": "https://dolgorae.local/schema/review-target/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-rpc-mutation-policy-v2.json",
+      "sha256": "9d7dab54c3f74a17a09ed1d8727dd2e4eff95ab8ab6af4cd594df1fefda3f4d5",
+      "generation": "dolgorae.rpc-mutation-policy/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-run-manifest-v1.schema.json",
+      "sha256": "50e968da7336fe6a109c70312f69f07927cddbfaf3126f1dac9f4955534d087a",
+      "generation": "https://dolgorae.local/schema/run-manifest/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-run-manifest-v2.schema.json",
+      "sha256": "6ee38fde259bf884c7760de203ce58b4ea0962f775ec74d3db3793e1e9874b58",
+      "generation": "https://dolgorae.local/schema/run-manifest/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-run-state-v1.schema.json",
+      "sha256": "27c88dfd5231104d91c38d66d2cccc7bf3747380fdd5fe04f9cf7c264039e018",
+      "generation": "https://dolgorae.local/schema/run-state/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-specialist-policy-input-v2.schema.json",
+      "sha256": "b576b2e4bcabf3d2c2edd4aa175eb7a68afc462f6ed9ea08afa0dbb1f7557cac",
+      "generation": "https://dolgorae.local/schema/specialist-policy-input/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-specialist-policy-v1.schema.json",
+      "sha256": "a7fe102e33c5fbff5f87111e862478402989636fe5cb4631bf92adabe6e0158c",
+      "generation": "https://dolgorae.local/schema/specialist-policy/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-specialist-review-tool-v1.schema.json",
+      "sha256": "fd5f5dda6920f35399b8deebbf858d66d370d34aa425021471bbdd1c6c9cbd63",
+      "generation": "https://dolgorae.local/schema/specialist-review-tool/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-specialist-review-tool-v2.schema.json",
+      "sha256": "fc273fd6488ac0d2bd56b03db0a33032b22e1fc21d873722a18afabcfa3a51f0",
+      "generation": "https://dolgorae.local/schema/specialist-review-tool/v2"
+    },
+    {
+      "path": "docs/protocol/dolgorae-specialist-review-tool-v3.schema.json",
+      "sha256": "124f39341770fbe092c224d8e237ca877b48f955547798f504cb7e9c729ac405",
+      "generation": "https://dolgorae.local/schema/specialist-review-tool/v3"
+    },
+    {
+      "path": "docs/protocol/dolgorae-stamped-client-event-v1.schema.json",
+      "sha256": "7708a5f130b8066e3a9691ae727376888204be9862c0326d4f3c7c97409be7e5",
+      "generation": "https://dolgorae.local/schema/stamped-client-event/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-successor-state-v1.schema.json",
+      "sha256": "c77cb0bdb11655c08a5e1b4248a89826b75945c5de38dff90f4d34b098294ade",
+      "generation": "https://dolgorae.local/schema/successor-state/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-timeline-v1.schema.json",
+      "sha256": "cabf2c2411197d4cc5d1e903f0016a5d6b975dd11eefce2d4809bf1526d0af50",
+      "generation": "https://dolgorae.local/schema/controller-timeline/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-v014-acceptance-fixtures-v1.json",
+      "sha256": "02b821dc6d9e07ba14955429fa379585d7ddd4fe5b210e1bd3193ccb7c2ade01",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/dolgorae-v014-digest-vectors-v1.json",
+      "sha256": "87d91cb178f38bfe9e7f748b7cb53c376102a2510041a8a1ea0527bb84b613cc",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/dolgorae-v014-identities-v1.schema.json",
+      "sha256": "c552bb6cc7e32c47a90a17648c49272bea7a2e7b843a69ba9281eb90ff4d8cba",
+      "generation": "https://dolgorae.local/schema/v014-identities/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-workspace-execution-v1.schema.json",
+      "sha256": "dfdda7e4731ac0ddec80f43d737525cc6c73c682efb40c6dd5a28d4615c2d9da",
+      "generation": "https://dolgorae.local/schema/workspace-execution/v1"
+    },
+    {
+      "path": "docs/protocol/dolgorae-workspace-record-v1.schema.json",
+      "sha256": "937b7dfc73457f39757554f0865e4a02a9943743b1dc30ec20713b3a1671945f",
+      "generation": "https://dolgorae.local/schema/workspace-record/v1"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-await-group.invalid-zero-predicate.json",
+      "sha256": "f7bf05c585f7573f08dd98bd47441a4243c4f080275f398f02eb3dce696d2c45",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-await-group.valid.json",
+      "sha256": "ce7d6dc6d74285d8061b37fd264173d2591d2d5b0e67d5127338cdfa52b565c9",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-hire.invalid-model-authority.json",
+      "sha256": "ea3fd443278651b8bfb6f7d1928c8b208bd3c5411fa5f3e1127d79bb63dcaa68",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-hire.invalid-private-binding.json",
+      "sha256": "9346b552940180cc73c78ce5c9c2d7fe8a224067331e9ded48761aaa77c33e31",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-hire.valid.json",
+      "sha256": "d75e40f0983fb7f0a1e21f0b07ce6ade4a554d20cda45dc0eeaf60e9bdc40711",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-methods.valid.json",
+      "sha256": "ccdd8312086b3b76a7a4b5e8810e272b0abe6c38dd5c3c3a2bee059ec46e28f9",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-facade-v5-transport.valid.json",
+      "sha256": "9d6dd909652fc274f59eb2cd94efd744457f08a02c933d71d77525f7d819f77c",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-capabilities.invalid-unqualified-availability.json",
+      "sha256": "0e692ac63649157bd7e6a6acb02912ed84b1c5f0ca5c230dc886b2bbd13f8adb",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-capabilities.valid.json",
+      "sha256": "494047b659d6563b7553fb4b7a7ac59410295b16146b3224d383e958359d9a21",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-hire-request.invalid-command-mismatch.json",
+      "sha256": "13ffd588ddf8f2e793b53d6796951f5503120f6b8c77c8f8de8b2524be5f32fc",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-hire-request.valid.json",
+      "sha256": "d2e5b6856cb0eb439c89ed70134519a1d42e78010b561ec3bd54249a0904ad15",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-normalized.invalid-protected-answer.json",
+      "sha256": "6e0524c0efe2edf3bdeeda3fba12376f0a0cb83b50f97e7165cd3075f193e901",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-normalized.valid.json",
+      "sha256": "96cedaea52772f20d6fc6e928d8e2a9c8289a2da6f2a4720806faf0d92016d22",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-unknown.invalid-malformed-effect.json",
+      "sha256": "c25df170e62d176b5bb9468354bba28a57d78bbe8c77bd83ae1d3eea0c67cbc1",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/successor-machine-v5-unknown.valid.json",
+      "sha256": "ff056eec119f55132e96912eb165234b83cd98b170f82ccee25db1ecfd5d7446",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-accepted-task.invalid-image-detail.json",
+      "sha256": "e6aa4a8c218c87e7db75336013b0471ff2c624a6cba7810e93d00e3d2481a042",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-accepted-task.valid.json",
+      "sha256": "ce76ded37150e0879ba7f6d845090f206cb85c22d7bb2417de5dbe3aa9ceb96b",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-admitted-configuration.invalid-shared-write.json",
+      "sha256": "3ce2913b4180d8cde3d6f3aecf95595092f883243da9cf305452fb416fb6aa3b",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-admitted-configuration.valid.json",
+      "sha256": "9ebba940800097cad3f387300d3cf306d6c8788c9bf598db6a2841a187eab53a",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-complete-result.invalid-incomplete.json",
+      "sha256": "2151f8182f285bc618a6e1c6ce4e05b80c43e9d4649003315b2fda71ffa8689a",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-complete-result.valid.json",
+      "sha256": "94f8fe64bb70817f9ff637017f850592d8e2dbe05a2ef17faccd9451e83d11fc",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-delegation-external.invalid-unsettled-work.json",
+      "sha256": "ea774ca9b7623fa7c3db9d8aad41254900441d33bf6f8510a804c02bde622650",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-delegation-external.invalid-wrong-scope.json",
+      "sha256": "63553c33d1deb0a3d53b70ecc33cbb7289bebb4e683de3c231ed131a9eb28abe",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-delegation-external.valid.json",
+      "sha256": "1c1f5e2fa4c6dfc7f822f9b6a0becb94fcc0791c221e3cff7f46bdf8c6bb5984",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-delegation-managed.valid.json",
+      "sha256": "a316251a244ef9f0200c47e20eca6e88082a1b7bda0bf910fb4e2a94e5fabca6",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-recovery.invalid-fix-request.json",
+      "sha256": "42618596bed62af23c3e5d27c89105a3f433fb59ca9b614cbf29994f4f7d3fe1",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-recovery.invalid-none.json",
+      "sha256": "d59b57c9523048aa3c66b275a2d9fc718f5642ab66f8c6bfb8541decca71f77e",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-recovery.invalid-replay-same-key.json",
+      "sha256": "feee4095b01f9a509f7b5deb42508a877b032a273e1202ce4705e4d598b85c4a",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-recovery.valid.json",
+      "sha256": "23c2af70744ce802c2234f57f97d0a4697908c82a97cd733186b40586c603b4d",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-retry.invalid-none.json",
+      "sha256": "c57fca451237b0a2c5670a3b3b1c9997fcee0513ebf80ccefe936e3d4b7813e0",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-retry.valid.json",
+      "sha256": "ba18d9e35bfb1f8151a751fa6dc4ed5d6a4f917ec74f7306b46d087980b7dc6d",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-unknown.invalid-new-key-retry.json",
+      "sha256": "f1af983ad37ef3169ad639731f601c214275b61aebeb567f1f554db98d8cfc4d",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-error-unknown.valid.json",
+      "sha256": "3cf7132cda76b0b4a0826b7842a894737284d8e39e22b70ddfe99e43174c3bcf",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-findings.valid.json",
+      "sha256": "f22579e525466624bc12f0edc22f960376a7a9cce1f7aa48c25adea7352640bc",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-group-50.invalid-too-many-entries.json",
+      "sha256": "7102b0be54d8030b8e647532016886405a66da5b2f431a0dfea5f1537d7a575e",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-group-50.valid.json",
+      "sha256": "c9cd9822798832283b8bec6a4748dae693eaa0463b3758f8c4ca34235f800b76",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-group-assignment.valid.json",
+      "sha256": "0fbfb7a1bce7997fa40a5733cadfb0da3417b1d4dc31d0dc10ef229745c1ed4e",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-instruction-identity.valid.json",
+      "sha256": "4d2e128d9a92b2a79956351d85496ac567cfb84961b115cae4916dcd870b71d6",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-absent.invalid-incomplete-proof.json",
+      "sha256": "9a3a72de14d974cde1415a8d0f86d22e59d2160e7007932d92a30e29c5126c89",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-absent.invalid-unknown-state.json",
+      "sha256": "0c6f5e7395f8a2a8845c953314e8ff2b308cb5dd5fd97895adb9eb3233a58d37",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-absent.valid.json",
+      "sha256": "f77565385244be955efac8101bd8426710da6164fae406abc66f55584ad78875",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-accepted.invalid-empty-receipt-subjects.json",
+      "sha256": "17db5f9cd48fa82fb4cf1aba93ab4ed8c138de20fee59519acce4f5528ba94c4",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-accepted.invalid-empty-subjects.json",
+      "sha256": "6aa9491e86a47e80d4464419993bb9cec6f907b96b376bb3a995fa38746bf643",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-accepted.valid.json",
+      "sha256": "bf0f2cfdaae432a0a87899b53f12957f9ecd62f95c63a7870b2fac07f0dee857",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-not_accepted.valid.json",
+      "sha256": "6b95688204a178fc016773dee8414d3a96aa8779ac9810ea6734bac9f8d0a4a4",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-submit-turn.invalid-missing-turn.json",
+      "sha256": "d7ac43ce78e64887276e55dcab87c05596a590b84014f8ed98a347f5eb192920",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-submit-turn.valid.json",
+      "sha256": "379391bb58755d908229e274c8a67221aaae53d0a1ea57b4cb27499252b650ce",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-lookup-unresolved.valid.json",
+      "sha256": "bc413f01328a30888ccae5fdfa11489093164ab4499b6efbbd1a1f02d165d088",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-merged-findings.invalid-oversized-output.json",
+      "sha256": "5da8ac2bb38efe13ccbbe7c4f23d8b982732480b76943600372166831a9dcd69",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-merged-findings.valid.json",
+      "sha256": "5bbff05e91159ecc32532b8d9105e101f01875f0ad72220bb9aa772a6acdabb8",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-mutation-envelope.invalid-overflow.json",
+      "sha256": "605cca626b8aa9ffcea154c46091df965d04a0975c2a2561ec638ce56445e08b",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-mutation-envelope.invalid-secret.json",
+      "sha256": "56496b9578b6efdbaa994410ab96220a01d26b36829d61c5568c696ff1ac1b11",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-mutation-envelope.valid.json",
+      "sha256": "007775f7ec1049d7f2af88edde29d3413d0e0af60490893e18c3dda2438bd004",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-role-snapshot.invalid-domain-substitution.json",
+      "sha256": "72493f0f63ee7a4a490cd8a639afd192a2a5b237061a8426bb33b952a7c8d3c1",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-role-snapshot.invalid-empty-body.json",
+      "sha256": "53bac3c8c1984fb87b6b265647b9a3182644240b600ab13d892087bba3ddc08a",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-role-snapshot.invalid-too-many-dependencies.json",
+      "sha256": "2e63b054df22b5301cc854672bded94adfda716ac50ec43721b4ccbcdf442222",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-role-snapshot.invalid-unknown-field.json",
+      "sha256": "421116cd8213feb645eb15ddcae40acbdf30eb2b78db07918c32bfe7ebda418b",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-role-snapshot.valid.json",
+      "sha256": "c5c6beef5e689eae39594e6aca71d39f0b322f6aa7f84a5cee5d478f19528478",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-identity-trusted-context.valid.json",
+      "sha256": "1e678d0dee487d15dbc33af8460f36b02dbd7e4dff4bb8d80d0208eced9d21d5",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-configuration.invalid-old-generation.json",
+      "sha256": "827eb2a339f6198a67f4a9affee17577da7f095121f0a02b80711033c0d54211",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-configuration.valid.json",
+      "sha256": "b9bdafee446296e0cdd4e02a1c9e024404aaa05a6a64112473b3564e7b42f3c0",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-generation.valid.json",
+      "sha256": "fb622fc1bfadadd5a0c52dfa69566098e548ef17b3b3318f82b7bf1ce8f4d390",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-instructions.invalid-old-generation.json",
+      "sha256": "6ab0ae0de80802cc7a6a851b2f0899f6f64eeed1797090c1b53c38827d9aa240",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-instructions.valid.json",
+      "sha256": "0e3bb02649a33b4dac8f46b6819b12c1654d1638c4af1d9be668d39c04a7ceaf",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-intent.invalid-fabricated-receipt.json",
+      "sha256": "0628211ba351d249fe31ea62375f1c8b7125eb470f280934bdb70c3c1a5993e3",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-intent.invalid-old-generation.json",
+      "sha256": "53c08af60a7390f47d06903a7356ce4909ff217518c11863754ff1034603f273",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-intent.valid.json",
+      "sha256": "d9975c3725cc5b1a54b9c68c32e6cc322f6327006fd70b3b1eb31e8915a1f724",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-maintenance.invalid-live-writer.json",
+      "sha256": "8c9d8bb4a39c9daed1c481255410817094f77e45673941ab3922bd4fee9ff96e",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-maintenance.valid.json",
+      "sha256": "2b7115ef2a432666eabbaaf3d4b95ec0e92f7cddd52c3351a929de73ab4a9a2a",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-pool.invalid-too-many-servers.json",
+      "sha256": "779e77d1cddc54c43a8356ac7e0381f78f501ce791b80c7111987d69e9abd2c0",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-pool.valid.json",
+      "sha256": "c0b55edc1e670be2a6b378caac3ce219ffe0c734e888f1ed3ad38911d76e22d3",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-run.invalid-old-generation.json",
+      "sha256": "ee4db4c92305e6ddc38df8f6cd189ee84f7703718aa737986bd046347b7bccb4",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/examples/v014-state-run.valid.json",
+      "sha256": "adc21f9bd4745d3d4659f0304b158705df5dd3c2fbe2bda3b0e5ca8ad7541b10",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/client/contract.go",
+      "sha256": "d1b2db790e86004c9cd99ade79f48d2ebd0e48c01c7e091fd9ecac0ef22d0e5d",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/client/contract_test.go",
+      "sha256": "b7e8670197cc95520bb66fad4b62f82dc56dce673fff6b56dbf47e4a55211aef",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/client/known_error_codes.go",
+      "sha256": "10f5aa6a085dd6e19ad6951db5ee9e126b6a6ef6fd72fdf35dac76076dc2a6cc",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae.pb.go",
+      "sha256": "1bae29db195ecfd56581e7dd0878f2d43f3cd7125990419265c0f7f51436c099",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae_grpc.pb.go",
+      "sha256": "19217f4b590dba79cfcdd4e4bf3f5d6fab6e4fb360365b16c274960106eb7927",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/go.mod",
+      "sha256": "f32a047e05d6b068390a21b441fd6f5f8b11652e66af863df1602c400dd946b7",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v2/go/go.sum",
+      "sha256": "fa8b94e328cae88eb7b9bba0a2994b4251ebb10d4907cbb33dc17f9a9dccb654",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/specs/dolgorae-consumer-acceptance-v014.md",
+      "sha256": "0fda2f9a22a49639bf439ed2af11b17faae77d9e470041b626ff5e754778116e",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/specs/dolgorae-v014-contract-coordination.md",
+      "sha256": "52abf83c421fbfa9981ab033eb757d1c9dd43f7289e85a8d3bb1926aaa59619b",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/specs/dolgorae-v014-h1-package.md",
+      "sha256": "61e366357906118acbc2bb9bcd052ce78dc216ef7ae90419a9b97737a20f3e60",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/specs/dolgorae-v014-host-contract-qualification.md",
+      "sha256": "77ec6fb5a29a2436243c1027f3b88ed8a0a9ac8809969b1a5954fabc6ee29b8d",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/specs/dolgorae-v014-method-and-digest-contract.md",
+      "sha256": "a1438bc40456190a3f5762a69016bb9bc72bd467f72f185655e9062f2c9e4366",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "docs/specs/dolgorae-v014-successor-requirements.md",
+      "sha256": "3d6c447aeac1fcfb6f97b9abff2bdc0f36e492a9521ef25211b9e2aaacfb0a8a",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "examples/host_invocation_contract.rs",
+      "sha256": "dce7544eaa6249b831799342473b8c2544169a887516995f8d2b25072437fc5f",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "src/jcs.rs",
+      "sha256": "ee74dfde513eaa5f57a97ae4d6861a41ae956b0e30962125dcb66acb85fd0317",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tests/e2e/host_invocation_fault_proxy.py",
+      "sha256": "e0d15d5ee8e6eec27bd689f2988a604ae056e38cb0728d1fe524864f8fd03371",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tests/e2e/run_native_host_invocation_fixture.py",
+      "sha256": "553788b5d6a1f4432f36ce49f460094e4a5529d862df4a71d887f35ea8054b41",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tests/successor_contract.rs",
+      "sha256": "7d843b6cd75e3dc8a8ecc4985023133b186d79701a253187a161e57be6461b27",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validation/requirements.txt",
+      "sha256": "811cc005d1bcd2564f0aac1b9f3fe210c8449e321fa880edd3d3b63eb038cee1",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validators/generate_h1_lock.py",
+      "sha256": "7f92fcb737aec879f801600bbde42e9c6d0d743b9e7c1bb86cb5d9fe2547cce7",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validators/generate_h1_policies.py",
+      "sha256": "27a96a85226c8e03cc119351088466acb844f4fb3aea6a1531bf916c2e1cbec6",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validators/generate_public_v2.py",
+      "sha256": "ff51aeb6fd9a25f5533d8650ce8b53f34ee29e50fdccbbe38893d228f70c75c8",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validators/package_h1.py",
+      "sha256": "835b2c914c284583df429bafb40dbc474f655279746de948b46e7cdef3d8f927",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validators/validate_h1_contract.py",
+      "sha256": "0ad1ec33bfd6131a080559bfd76e90e350738c22f89d773d4c93a7825023c0fe",
+      "generation": "H1-contract-input"
+    },
+    {
+      "path": "tools/validators/validate_schema_examples.py",
+      "sha256": "0e9cc97bc2d9e3857b3e316a391a01707ac92eeacebf0c43ce5024953eed5297",
+      "generation": "H1-contract-input"
+    }
+  ],
+  "frozen_v1_artifacts": [
+    {
+      "path": "docs/protocol/dolgorae/public/v1/dolgorae.proto",
+      "sha256": "561ccf51658b50703f9fb1a37c4de7c52188b34ab4db2ac9885ef3ccabdf0e48"
+    },
+    {
+      "path": "docs/protocol/dolgorae-public-v1.descriptor.pb",
+      "sha256": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5"
+    },
+    {
+      "path": "docs/protocol/baselines/dolgorae-public-v1-task-053.descriptor.pb",
+      "sha256": "28b132842bbeb48123c2b7cc529de689e6e6286b0783cbde8551d17ba4921ed5"
+    },
+    {
+      "path": "docs/protocol/baselines/dolgorae-public-v1-pre-task-053.descriptor.pb",
+      "sha256": "c29b70f6d1bfca5447ddfc396cb62a9ff4f3bbd10532518af78e4726b7de1252"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v1/go/dolgorae/public/v1/dolgorae.pb.go",
+      "sha256": "85d9cccd749cd08bba58684f5ca2a37eb3f6a78e7314096e694ffada653bfefd"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v1/go/dolgorae/public/v1/dolgorae_grpc.pb.go",
+      "sha256": "03cfc01df9abda25add84f9bdf6703a99d935b130ff8b19a3a6e0a1b4a9221f4"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v1/go/dolgorae/public/v1/compat_test.go",
+      "sha256": "0669b0d33cd84d460dc3e4a2517c318598671b4a7b445595a232a32887eb77af"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v1/go/go.mod",
+      "sha256": "504909e5de2a3e7f0470968c5966d15a3ce5d7e9cd60b9190e47a8175767b084"
+    },
+    {
+      "path": "docs/protocol/generated/gul-consumer-v1/go/go.sum",
+      "sha256": "fa8b94e328cae88eb7b9bba0a2994b4251ebb10d4907cbb33dc17f9a9dccb654"
+    },
+    {
+      "path": "docs/protocol/generated/pre-task-053-low-level/go/dolgorae/public/v1/dolgorae.pb.go",
+      "sha256": "674e143d89ac60771b621f806c3b7f37e41797a799e9185effddd689130faa5a"
+    },
+    {
+      "path": "docs/protocol/generated/pre-task-053-low-level/go/dolgorae/public/v1/dolgorae_grpc.pb.go",
+      "sha256": "d576b72dc75ddf922890296b6e080173cb81846e6a89b3b86de37545b809378e"
+    },
+    {
+      "path": "docs/protocol/generated/pre-task-053-low-level/go/dolgorae/public/v1/compat_test.go",
+      "sha256": "c1e940d42bd800119431be21e9581370ae9d0641305e835d9ae686c86a700e59"
+    },
+    {
+      "path": "docs/protocol/generated/pre-task-053-low-level/go/go.mod",
+      "sha256": "2c193d169ef8b75c7d5778a396c45a0a6f9c52755b78d01fd0b5461daa086284"
+    },
+    {
+      "path": "docs/protocol/generated/pre-task-053-low-level/go/go.sum",
+      "sha256": "fa8b94e328cae88eb7b9bba0a2994b4251ebb10d4907cbb33dc17f9a9dccb654"
+    },
+    {
+      "path": "docs/protocol/dolgorae-gul-consumer-v1.json",
+      "sha256": "8211b403960edc114ac9f874d4c739e2a23674504d8dbb304284b5ef31eaa71b"
+    },
+    {
+      "path": "docs/protocol/dolgorae-gul-consumer-v1.fixtures.json",
+      "sha256": "18a5a48b3240eb684225f5f1d7f41538dc874c724268c7794e481119907a5274"
+    },
+    {
+      "path": "docs/protocol/dolgorae-controller-credential-v1.schema.json",
+      "sha256": "6e888023fa6f12964afbd2867832944307dc626cad3fe6c6bc517768ab98b84f"
+    },
+    {
+      "path": "docs/protocol/dolgorae-capabilities-v1.schema.json",
+      "sha256": "bdcb76265d6508f73b791e5f289e09f28fda9a6dcc67a5ca03c2a425e8ea9b79"
+    },
+    {
+      "path": "docs/protocol/dolgorae-grpc-conformance-v1.json",
+      "sha256": "5abffb57914829399bde0c2fc9b7852e143cab847e8ad40b7beee077bfa1fb72"
+    },
+    {
+      "path": "docs/protocol/dolgorae-grpc-client-policy-v1.json",
+      "sha256": "01237c8f8f7c43934fee457b587c46f288a4ec9bf68081ef7719d1ce31edf3fd"
+    },
+    {
+      "path": "docs/protocol/dolgorae-grpc-error-mapping-v1.json",
+      "sha256": "e50a3cfec9e6d9beb95edd21e9427bff28cf11c452d3a4369ba8d5eeb20f2b08"
+    },
+    {
+      "path": "docs/protocol/dolgorae-rpc-mutation-policy-v1.json",
+      "sha256": "2c2e62ef464c4fa587f9023a404cd83de0622bffda5bd05eca852f70eba73e06"
+    },
+    {
+      "path": "docs/protocol/dolgorae-gul-consumer-v1.lock.json",
+      "sha256": "ed0f04fb60dc067738183a769889b243ff842c221d8e972b8c77e7d36c7defd0"
+    }
+  ],
+  "selected_external_sources": [
+    {
+      "consumer": "Aquarium",
+      "revision": "1e1e9293ade2f884757ee51a675d130e1acdaf04",
+      "path": "docs/specs/agent-orchestration.md",
+      "sha256": "f1665f913ee7b8f833ee84cdc93668c1b86f60a9bd093a0551d5270c3c5087b9"
+    },
+    {
+      "consumer": "Aquarium",
+      "revision": "1e1e9293ade2f884757ee51a675d130e1acdaf04",
+      "path": "plugins/aquarium/references/agent-orchestration.md",
+      "sha256": "61c40f36c17942cf750990ae300785263e891409099b3b6d44d66ef8851337cd"
+    },
+    {
+      "consumer": "Aquarium",
+      "revision": "1e1e9293ade2f884757ee51a675d130e1acdaf04",
+      "path": "plugins/aquarium/references/native-agent-mappings.md",
+      "sha256": "c5c3244b6db4e855c1ef149ae362a725c7ef5cc750e828c7aa78bea8a8354cf7"
+    },
+    {
+      "consumer": "Aquarium",
+      "revision": "1e1e9293ade2f884757ee51a675d130e1acdaf04",
+      "path": "plugins/aquarium/references/dolgorae-review-contract.md",
+      "sha256": "5c061f0e8d9b026f358adfa9efccc7f17abdb1cea5f3e10f50ebb6f8f2a8df9f"
+    },
+    {
+      "consumer": "Podway",
+      "revision": "4101a014a187d175e6c7cd53df9b671d613ba625",
+      "path": "docs/specs/interfaces/supervised-delegation.md",
+      "sha256": "7d5bb0a770739c50d9d623aed437f2870cfb5656432548fe7615dd478cef093b"
+    },
+    {
+      "consumer": "Podway",
+      "revision": "4101a014a187d175e6c7cd53df9b671d613ba625",
+      "path": "docs/specs/interfaces/automation-client-contract.md",
+      "sha256": "9642d9205e90ddd51fb641cf64ff6108652b8968256a93c985d2229206545f29"
+    },
+    {
+      "consumer": "Podway",
+      "revision": "4101a014a187d175e6c7cd53df9b671d613ba625",
+      "path": "release/dolgorae-adapter-contract-v3.json",
+      "sha256": "0d2af732e6f61f3e5c86d7b5a2223977f312fba77b75112fa709e5b91e7d633c"
+    },
+    {
+      "consumer": "Podway",
+      "revision": "4101a014a187d175e6c7cd53df9b671d613ba625",
+      "path": "contracts/contract-manifest-v2.json",
+      "sha256": "35d5938a97163e1f4dbcab1c53c0a3711552e4313ea4c94165e94eb6ad06462e"
+    },
+    {
+      "consumer": "Podway",
+      "revision": "4101a014a187d175e6c7cd53df9b671d613ba625",
+      "path": "docs/todo/TODO-podway-supervised-delegation-integration.md",
+      "sha256": "a062e198171eee75c1c134f065a7b3b8a59218e5e6701047dca382c446eba76a"
+    },
+    {
+      "consumer": "Gul",
+      "revision": "04ef1e577013439b9c691cd50410d665dd0c97b0",
+      "path": "docs/roadmap.md",
+      "sha256": "b1a1ccf31b2d142fb5dcd3dabe5499d6fdddd23d3a70df992635bdc4fb0b6041"
+    },
+    {
+      "consumer": "Gul",
+      "revision": "04ef1e577013439b9c691cd50410d665dd0c97b0",
+      "path": "docs/todo/GUL-REBUILD.md",
+      "sha256": "15f448e39ffa77402fb70fadcde54abf23826b57231fc2eb1de5e7160f10ede0"
+    }
+  ],
+  "external_selection": {
+    "authority": "Master-approved source and responsibility decision",
+    "consumer_source_change_identified": false,
+    "prepared_podway_is_released_support": false,
+    "provider_implementation_owners": [
+      "TASK-076",
+      "TASK-077",
+      "TASK-086"
+    ],
+    "independent_final_acceptance": "TASK-088",
+    "release_binding": "TASK-089"
+  },
+  "native_feasibility": {
+    "qualification": "docs/specs/dolgorae-v014-host-contract-qualification.md",
+    "scope": "account-free actual native host contract prototype, not production facade/consumer acceptance",
+    "hosts": [
+      {
+        "product": "Codex CLI",
+        "version": "0.160.0",
+        "sha256": "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"
+      },
+      {
+        "product": "Claude Code",
+        "version": "2.1.295",
+        "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+      }
+    ],
+    "tested_prototype_sha256": "c102900c494017c611a70ef248b8c7f99ef7154bcbbea743a92bfc9b109bffc3",
+    "historical_0_149_mcp_unavailable": "unchanged"
+  },
+  "later_handoffs": {
+    "H2": {
+      "producer": "Gul E15 including E15-T21 and whole-Epic closeout",
+      "consumer": "TASK-069/EPIC-019",
+      "status": "not_started"
+    },
+    "H3": {
+      "producer": "TASK-087/EPIC-021",
+      "consumer": "Gul E16",
+      "status": "future_runtime_qualification"
+    },
+    "H4": {
+      "producer": "Gul E16 including E16-T16 and whole-Epic closeout",
+      "consumer": "TASK-088/089",
+      "status": "future_final_campaign"
+    }
+  },
+  "runtime_availability": "unavailable_until_explicit_negotiated_implementation",
+  "release_acceptance": false
+}

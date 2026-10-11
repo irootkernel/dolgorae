@@ -1,0 +1,522 @@
+package client_test
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	client "github.com/rootkernel/dolgorae/contracts/gul-consumer-v2/client"
+	pb "github.com/rootkernel/dolgorae/contracts/gul-consumer-v2/dolgorae/public/v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+)
+
+func TestStrictDecisionDecode(t *testing.T) {
+	for _, payload := range []string{
+		`{"effect":"EFFECT_STATE_FUTURE"}`,
+		`{"effect":99}`,
+		`{"classification":99}`,
+		`{"operationKind":99}`,
+		`{"extra":true}`,
+		`{"operation":{"callerScope":{"controllerKind":99}}}`,
+	} {
+		if err := client.Decode([]byte(payload), &pb.DolgoraeErrorDetail{}); err == nil {
+			t.Fatalf("unsupported decision detail accepted: %s", payload)
+		}
+	}
+	if err := client.Decode([]byte(`{"effect":"EFFECT_STATE_UNRESOLVED","classification":"FAILURE_CLASSIFICATION_UNKNOWN"}`), &pb.DolgoraeErrorDetail{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMutationUncertaintyCannotBecomeRefusal(t *testing.T) {
+	for _, detail := range []*pb.DolgoraeErrorDetail{
+		nil, {},
+		{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, Classification: pb.FailureClassification_FAILURE_CLASSIFICATION_REJECTED, Effect: pb.EffectState_EFFECT_STATE_ACCEPTED},
+		{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, Classification: pb.FailureClassification(99), Effect: pb.EffectState_EFFECT_STATE_NONE},
+	} {
+		if client.MutationClassification(detail) != pb.FailureClassification_FAILURE_CLASSIFICATION_UNKNOWN {
+			t.Fatalf("incomplete or contradictory mutation detail became a known refusal: %v", detail)
+		}
+	}
+	refused := &pb.DolgoraeErrorDetail{DetailVersion: 2, DolgoraeErrorCode: "INVALID_ARGUMENT", Action: pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_FIX_REQUEST, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, Classification: pb.FailureClassification_FAILURE_CLASSIFICATION_REJECTED, Effect: pb.EffectState_EFFECT_STATE_NONE}
+	if client.MutationClassification(refused) != pb.FailureClassification_FAILURE_CLASSIFICATION_REJECTED {
+		t.Fatal("typed no-effect refusal lost")
+	}
+	for _, corrupt := range []func(*pb.DolgoraeErrorDetail){
+		func(d *pb.DolgoraeErrorDetail) { d.DolgoraeErrorCode = "FUTURE_CODE" },
+		func(d *pb.DolgoraeErrorDetail) { d.DolgoraeErrorCode = "" },
+		func(d *pb.DolgoraeErrorDetail) { d.DetailVersion = 0 },
+		func(d *pb.DolgoraeErrorDetail) { d.DetailVersion = 99 },
+		func(d *pb.DolgoraeErrorDetail) { d.Action = pb.RequiredClientAction(99) },
+		func(d *pb.DolgoraeErrorDetail) { d.Action = pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_UNSPECIFIED },
+		func(d *pb.DolgoraeErrorDetail) {
+			d.Operation = &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN}
+		},
+	} {
+		detail := proto.Clone(refused).(*pb.DolgoraeErrorDetail)
+		corrupt(detail)
+		if client.MutationClassification(detail) != pb.FailureClassification_FAILURE_CLASSIFICATION_UNKNOWN {
+			t.Fatalf("malformed detail resolved uncertainty: %v", detail)
+		}
+	}
+}
+
+func TestMutationClassificationRequiresCompatibleAction(t *testing.T) {
+	for _, classification := range []pb.FailureClassification{
+		pb.FailureClassification_FAILURE_CLASSIFICATION_RETRY_SAME_KEY,
+		pb.FailureClassification_FAILURE_CLASSIFICATION_RECOVERY_NEEDED,
+	} {
+		for _, effect := range []pb.EffectState{
+			pb.EffectState_EFFECT_STATE_NONE,
+			pb.EffectState_EFFECT_STATE_ACCEPTED,
+			pb.EffectState_EFFECT_STATE_UNRESOLVED,
+		} {
+			for value := range pb.RequiredClientAction_name {
+				action := pb.RequiredClientAction(value)
+				allowed := action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RETRY_EXACT_IDEMPOTENCY_KEY
+				if classification == pb.FailureClassification_FAILURE_CLASSIFICATION_RECOVERY_NEEDED {
+					allowed = action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECONCILE_OPERATION ||
+						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECOVER_RUN ||
+						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESTORE_STATE ||
+						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESUME_MAINTENANCE
+				}
+				detail := &pb.DolgoraeErrorDetail{DetailVersion: 2, DolgoraeErrorCode: "RECOVERY_REQUIRED",
+					OperationKind:  pb.OperationKind_OPERATION_KIND_START_RUN,
+					Classification: classification, Effect: effect, Action: action}
+				expected := pb.FailureClassification_FAILURE_CLASSIFICATION_UNKNOWN
+				if allowed {
+					expected = classification
+				}
+				if actual := client.MutationClassification(detail); actual != expected {
+					t.Fatalf("classification=%v effect=%v action=%v: got %v, want %v", classification, effect, action, actual, expected)
+				}
+			}
+		}
+	}
+}
+
+func TestDescriptorDoesNotAdvertiseRuntimeMethods(t *testing.T) {
+	capabilities := &pb.GetCapabilitiesResponse{Context: &pb.ResponseContext{ProtocolVersion: 2, ServerInstanceId: "fixture-instance"}, DescriptorSha256: "fixture-digest", SupportedMethods: []string{"RuntimeService.GetCapabilities"}}
+	if err := client.RequireMethods(capabilities, "fixture-digest", "RuntimeService.GetCapabilities"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RequireMethods(capabilities, "fixture-digest", "RunService.StartRun"); err == nil {
+		t.Fatal("published StartRun descriptor activated unavailable method")
+	}
+	if err := client.RequireMethods(capabilities, "different-descriptor"); err == nil {
+		t.Fatal("descriptor skew accepted")
+	}
+	capabilities.Context.ProtocolVersion = 1
+	if err := client.RequireMethods(capabilities, "fixture-digest"); err == nil {
+		t.Fatal("v1 contract silently admitted as v2")
+	}
+}
+
+// Generated service declarations supply no default implementation. This fixture
+// checks that their default servers refuse execution; it does not certify the
+// production provider's registration or future v2 capability advertisement.
+func TestPublishedServicesRemainUnimplementedByDefault(t *testing.T) {
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	pb.RegisterRuntimeServiceServer(server, &pb.UnimplementedRuntimeServiceServer{})
+	pb.RegisterRunServiceServer(server, &pb.UnimplementedRunServiceServer{})
+	pb.RegisterOperationServiceServer(server, &pb.UnimplementedOperationServiceServer{})
+	pb.RegisterProvisioningServiceServer(server, &pb.UnimplementedProvisioningServiceServer{})
+	pb.RegisterSpecialistServiceServer(server, &pb.UnimplementedSpecialistServiceServer{})
+	pb.RegisterBrokerServiceServer(server, &pb.UnimplementedBrokerServiceServer{})
+	pb.RegisterGroupServiceServer(server, &pb.UnimplementedGroupServiceServer{})
+	pb.RegisterMaintenanceServiceServer(server, &pb.UnimplementedMaintenanceServiceServer{})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	connection, err := grpc.NewClient("passthrough:///unimplemented", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithDisableRetry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	methods := []struct {
+		name     string
+		request  proto.Message
+		response proto.Message
+	}{
+		{"RuntimeService/GetCapabilities", &pb.GetCapabilitiesRequest{}, &pb.GetCapabilitiesResponse{}},
+		{"RunService/StartRun", &pb.StartRunRequest{}, &pb.StartRunResponse{}},
+		{"OperationService/LookupOperation", &pb.LookupOperationRequest{}, &pb.LookupOperationResponse{}},
+		{"ProvisioningService/InstallProvisioning", &pb.InstallProvisioningRequest{}, &pb.InstallProvisioningResponse{}},
+		{"SpecialistService/HireExternalSpecialist", &pb.HireExternalSpecialistRequest{}, &pb.HireExternalSpecialistResponse{}},
+		{"BrokerService/SpawnSpecialist", &pb.SpawnSpecialistRequest{}, &pb.SpawnSpecialistResponse{}},
+		{"GroupService/AssignGroup", &pb.AssignGroupRequest{}, &pb.AssignGroupResponse{}},
+		{"MaintenanceService/ApplyMaintenance", &pb.ApplyMaintenanceRequest{}, &pb.ApplyMaintenanceResponse{}},
+	}
+	for _, method := range methods {
+		err := connection.Invoke(ctx, "/dolgorae.public.v2."+method.name, method.request, method.response)
+		if status.Code(err) != codes.Unimplemented {
+			t.Fatalf("published default %s became executable: %v", method.name, err)
+		}
+	}
+}
+
+type responseLossServer struct {
+	pb.UnimplementedRunServiceServer
+	pb.UnimplementedOperationServiceServer
+	starts   atomic.Int32
+	submits  atomic.Int32
+	lookups  atomic.Int32
+	original *pb.OperationRef
+}
+
+func (server *responseLossServer) StartRun(_ context.Context, request *pb.StartRunRequest) (*pb.StartRunResponse, error) {
+	server.starts.Add(1)
+	if request.IdempotencyKey != server.original.IdempotencyKey {
+		return nil, status.Error(codes.InvalidArgument, "wrong original key")
+	}
+	return nil, status.Error(codes.Unavailable, "fixture drops reply after acceptance")
+}
+
+func (server *responseLossServer) LookupOperation(_ context.Context, request *pb.LookupOperationRequest) (*pb.LookupOperationResponse, error) {
+	server.lookups.Add(1)
+	if !proto.Equal(request.Operation, server.original) {
+		return nil, status.Error(codes.PermissionDenied, "wrong original scope/key/generation")
+	}
+	subjects := &pb.SubjectIdentities{RunId: proto.String("original-run")}
+	if server.original.GetOperationKind() == pb.OperationKind_OPERATION_KIND_SUBMIT_TURN {
+		subjects.TurnId = proto.String("original-turn")
+	}
+	return &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Accepted{Accepted: &pb.AcceptedOperation{
+		CurrentOutcome: pb.OperationOutcome_OPERATION_OUTCOME_RUNNING,
+		Receipt:        &pb.OperationReceipt{Operation: server.original, ReceiptId: "retained-receipt", AcceptedInputDigest: "sha256:" + strings.Repeat("0", 64), Effect: pb.EffectState_EFFECT_STATE_ACCEPTED, Subjects: subjects},
+	}}}, nil
+}
+
+func (server *responseLossServer) SubmitTurn(_ context.Context, request *pb.SubmitTurnRequest) (*pb.SubmitTurnAccepted, error) {
+	server.submits.Add(1)
+	if request.IdempotencyKey != server.original.IdempotencyKey {
+		return nil, status.Error(codes.InvalidArgument, "wrong original key")
+	}
+	return nil, status.Error(codes.Unavailable, "fixture drops reply after Turn acceptance")
+}
+
+func TestUnresolvedLookupPermitsOnlyRecoveryActions(t *testing.T) {
+	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	allowed := map[pb.RequiredClientAction]bool{
+		pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECONCILE_OPERATION: true,
+		pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECOVER_RUN:         true,
+		pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESTORE_STATE:       true,
+		pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESUME_MAINTENANCE:  true,
+	}
+	for number := range pb.RequiredClientAction_name {
+		action := pb.RequiredClientAction(number)
+		response := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Unresolved{Unresolved: &pb.UnresolvedOperation{Operation: original, Effect: pb.EffectState_EFFECT_STATE_UNRESOLVED, RequiredAction: action}}}
+		if valid := client.ValidateLookup(response, original) == nil; valid != allowed[action] {
+			t.Fatalf("unresolved lookup admitted unsafe action %v: valid=%v", action, valid)
+		}
+	}
+}
+
+func TestAcceptedLookupRequiresDigestSubjectAndCurrentOutcome(t *testing.T) {
+	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	valid := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Accepted{Accepted: &pb.AcceptedOperation{
+		CurrentOutcome: pb.OperationOutcome_OPERATION_OUTCOME_PENDING,
+		Receipt:        &pb.OperationReceipt{Operation: original, ReceiptId: "retained-receipt", AcceptedInputDigest: "sha256:" + strings.Repeat("a", 64), Effect: pb.EffectState_EFFECT_STATE_ACCEPTED, Subjects: &pb.SubjectIdentities{RunId: proto.String("original-run")}},
+	}}}
+	for _, corrupt := range []func(*pb.AcceptedOperation){
+		func(a *pb.AcceptedOperation) { a.Receipt.AcceptedInputDigest = "garbage" },
+		func(a *pb.AcceptedOperation) { a.Receipt.AcceptedInputDigest = "sha256:" + strings.Repeat("A", 64) },
+		func(a *pb.AcceptedOperation) { a.Receipt.Subjects = &pb.SubjectIdentities{} },
+		func(a *pb.AcceptedOperation) {
+			a.Receipt.Subjects = &pb.SubjectIdentities{TaskId: proto.String("foreign-kind")}
+		},
+		func(a *pb.AcceptedOperation) { a.CurrentOutcome = pb.OperationOutcome_OPERATION_OUTCOME_UNSPECIFIED },
+		func(a *pb.AcceptedOperation) { a.CurrentOutcome = pb.OperationOutcome(99) },
+	} {
+		bad := proto.Clone(valid).(*pb.LookupOperationResponse)
+		corrupt(bad.GetAccepted())
+		if err := client.ValidateLookup(bad, original); err == nil {
+			t.Fatalf("incomplete acceptance admitted: %v", bad)
+		}
+	}
+	for _, outcome := range []pb.OperationOutcome{pb.OperationOutcome_OPERATION_OUTCOME_PENDING, pb.OperationOutcome_OPERATION_OUTCOME_RUNNING, pb.OperationOutcome_OPERATION_OUTCOME_COMPLETED, pb.OperationOutcome_OPERATION_OUTCOME_FAILED, pb.OperationOutcome_OPERATION_OUTCOME_CANCELLED, pb.OperationOutcome_OPERATION_OUTCOME_EXPIRED, pb.OperationOutcome_OPERATION_OUTCOME_UNKNOWN} {
+		valid.GetAccepted().CurrentOutcome = outcome
+		if err := client.ValidateLookup(valid, original); err != nil {
+			t.Fatalf("closed current outcome %v refused: %v", outcome, err)
+		}
+	}
+	refused := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_NotAccepted{NotAccepted: &pb.NotAcceptedOperation{Operation: original, InputDigest: "garbage", DefinitiveRefusalCode: "INVALID_ARGUMENT"}}}
+	if err := client.ValidateLookup(refused, original); err == nil {
+		t.Fatal("malformed refusal input digest admitted")
+	}
+	refused.GetNotAccepted().InputDigest = "sha256:" + strings.Repeat("a", 64)
+	if err := client.ValidateLookup(refused, original); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnsetLookupAndUnprovedAbsenceFailClosed(t *testing.T) {
+	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	for _, response := range []*pb.LookupOperationResponse{
+		nil, {},
+		{Result: &pb.LookupOperationResponse_Absent{Absent: &pb.AbsentOperation{Operation: original}}},
+		{Result: &pb.LookupOperationResponse_Accepted{Accepted: &pb.AcceptedOperation{}}},
+		{Result: &pb.LookupOperationResponse_Unresolved{Unresolved: &pb.UnresolvedOperation{Operation: original, Effect: pb.EffectState(99)}}},
+	} {
+		if err := client.ValidateLookup(response, original); err == nil {
+			t.Fatalf("unproved lookup resolved original uncertainty: %v", response)
+		}
+	}
+	absent := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Absent{Absent: &pb.AbsentOperation{Operation: original, RetainedNamespaceFence: "retained-generation-7", CompleteAuthoritativeLookup: true}}}
+	if err := client.ValidateLookup(absent, original); err != nil {
+		t.Fatal(err)
+	}
+	wrong := proto.Clone(original).(*pb.OperationRef)
+	wrong.NamespaceGeneration++
+	if err := client.ValidateLookup(absent, wrong); err == nil {
+		t.Fatal("cross-generation absence admitted")
+	}
+}
+
+// This in-process fixture verifies the consumer's wire behavior only. Actual
+// provider acceptance/recovery remains a separate later runtime gate.
+func TestLostStartResponseUsesExactOriginalLookup(t *testing.T) {
+	original := &pb.OperationRef{CallerScope: &pb.CallerScope{PrincipalRef: "controller", ControllerGeneration: 3, WorkspaceId: "workspace", Aggregate: &pb.CallerScope_ProvisioningScope{ProvisioningScope: "run-start"}}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	fixture := &responseLossServer{original: original}
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	pb.RegisterRunServiceServer(server, fixture)
+	pb.RegisterOperationServiceServer(server, fixture)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	connection, err := grpc.NewClient("passthrough:///fixture", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithDisableRetry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = pb.NewRunServiceClient(connection).StartRun(ctx, &pb.StartRunRequest{Context: &pb.RequestContext{ProtocolVersion: 2}, IdempotencyKey: original.IdempotencyKey})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected lost response: %v", err)
+	}
+	lookupContext := &pb.RequestContext{ProtocolVersion: 2, ClientRequestId: "019a0000-0000-7000-8000-000000000001", ClientInstanceId: "fixture-client"}
+	result, err := client.ResolveStartRunLoss(ctx, pb.NewOperationServiceClient(connection), lookupContext, &pb.ControllerCarrierRef{ExpectedControllerId: "controller", ExpectedControllerGeneration: 3}, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.GetAccepted().GetReceipt().GetSubjects().GetRunId() != "original-run" || fixture.starts.Load() != 1 || fixture.lookups.Load() != 1 {
+		t.Fatalf("original acceptance not recovered without redispatch: %v starts=%d lookups=%d", result, fixture.starts.Load(), fixture.lookups.Load())
+	}
+	wrong := proto.Clone(original).(*pb.OperationRef)
+	wrong.NamespaceGeneration++
+	if _, err := client.ResolveStartRunLoss(ctx, pb.NewOperationServiceClient(connection), lookupContext, nil, wrong); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("wrong namespace generation accepted: %v", err)
+	}
+}
+
+func TestLostSubmitResponseRecoversOriginalTurnWithoutRedispatch(t *testing.T) {
+	original := &pb.OperationRef{CallerScope: &pb.CallerScope{PrincipalRef: "controller", ControllerGeneration: 3, WorkspaceId: "workspace", Aggregate: &pb.CallerScope_RunId{RunId: "original-run"}}, OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: "original-submit-key", NamespaceGeneration: 7}
+	fixture := &responseLossServer{original: original}
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	pb.RegisterRunServiceServer(server, fixture)
+	pb.RegisterOperationServiceServer(server, fixture)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	connection, err := grpc.NewClient("passthrough:///submit-fixture", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithDisableRetry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = pb.NewRunServiceClient(connection).SubmitTurn(ctx, &pb.SubmitTurnRequest{IdempotencyKey: original.IdempotencyKey, Run: &pb.RunRef{RunId: "original-run"}, Message: "accepted once"})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected lost submit response: %v", err)
+	}
+	result, err := pb.NewOperationServiceClient(connection).LookupOperation(ctx, &pb.LookupOperationRequest{Operation: original})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ValidateLookup(result, original); err != nil {
+		t.Fatal(err)
+	}
+	if result.GetAccepted().GetReceipt().GetSubjects().GetTurnId() != "original-turn" || fixture.submits.Load() != 1 || fixture.lookups.Load() != 1 {
+		t.Fatal("original Turn not recovered without redispatch")
+	}
+	result.GetAccepted().GetReceipt().GetSubjects().TurnId = nil
+	if err := client.ValidateLookup(result, original); err == nil {
+		t.Fatal("accepted SubmitTurn without original Turn identity admitted")
+	}
+}
+
+func TestPortableFixturesDecodeAgainstGeneratedTypes(t *testing.T) {
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	for {
+		path = filepath.Join(directory, "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json")
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			t.Fatal("v2 consumer fixtures missing")
+		}
+		directory = parent
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type wireFixture struct {
+		ID      string          `json:"id"`
+		Message string          `json:"grpc_message"`
+		JSON    json.RawMessage `json:"grpc_json"`
+	}
+	var fixtures struct {
+		Positive    []wireFixture `json:"positive"`
+		Negative    []wireFixture `json:"negative"`
+		MethodCases map[string]struct {
+			Request     string `json:"request"`
+			Response    string `json:"response"`
+			Error       string `json:"error"`
+			EffectClass string `json:"effect_class"`
+		} `json:"method_cases"`
+	}
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixtures.Positive) == 0 {
+		t.Fatal("no portable v2 fixture messages")
+	}
+	decoded := make(map[string]proto.Message)
+	for _, fixture := range fixtures.Positive {
+		if !strings.HasPrefix(fixture.Message, "dolgorae.public.v2.") {
+			t.Fatalf("fixture %s claims a different contract", fixture.ID)
+		}
+		messageType, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(fixture.Message))
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := messageType.New().Interface()
+		if err := client.Decode(fixture.JSON, message); err != nil {
+			t.Fatalf("fixture %s: %v", fixture.ID, err)
+		}
+		if _, exists := decoded[fixture.ID]; exists {
+			t.Fatalf("duplicate fixture identity %s", fixture.ID)
+		}
+		decoded[fixture.ID] = message
+		if lookup, ok := message.(*pb.LookupOperationResponse); ok {
+			var original *pb.OperationRef
+			switch outcome := lookup.Result.(type) {
+			case *pb.LookupOperationResponse_Accepted:
+				original = outcome.Accepted.GetReceipt().GetOperation()
+			case *pb.LookupOperationResponse_NotAccepted:
+				original = outcome.NotAccepted.GetOperation()
+			case *pb.LookupOperationResponse_Unresolved:
+				original = outcome.Unresolved.GetOperation()
+			case *pb.LookupOperationResponse_Absent:
+				original = outcome.Absent.GetOperation()
+			}
+			if err := client.ValidateLookup(lookup, original); err != nil {
+				t.Fatalf("lookup fixture %s: %v", fixture.ID, err)
+			}
+		}
+	}
+	imageJSON, err := os.ReadFile(filepath.Join(directory, "docs/protocol/examples/v014-identity-accepted-task.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity struct {
+		Images []struct {
+			Content struct {
+				ByteLength uint64 `json:"byte_length"`
+				SHA256     string `json:"sha256"`
+			} `json:"content"`
+			MediaType string `json:"media_type"`
+			Detail    string `json:"detail"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(imageJSON, &identity); err != nil || len(identity.Images) != 1 {
+		t.Fatalf("nonempty JSON image identity missing: %v", err)
+	}
+	image := decoded["accepted_image_high"].(*pb.AcceptedImageRef)
+	if identity.Images[0].Detail != "high" || image.Detail != pb.ImageDetail_IMAGE_DETAIL_HIGH || image.MediaType != identity.Images[0].MediaType || image.Content.ByteLength != identity.Images[0].Content.ByteLength || image.Content.Sha256 != identity.Images[0].Content.SHA256 {
+		t.Fatal("JSON/protobuf accepted image identity differs")
+	}
+	newServices := map[protoreflect.Name]bool{"OperationService": true, "ProvisioningService": true, "SpecialistService": true, "BrokerService": true, "GroupService": true, "MaintenanceService": true}
+	seen := 0
+	services := pb.File_dolgorae_public_v2_dolgorae_proto.Services()
+	for index := 0; index < services.Len(); index++ {
+		service := services.Get(index)
+		if !newServices[service.Name()] {
+			continue
+		}
+		for index := 0; index < service.Methods().Len(); index++ {
+			method := service.Methods().Get(index)
+			name := string(service.Name()) + "." + string(method.Name())
+			entry, exists := fixtures.MethodCases[name]
+			if !exists {
+				t.Fatalf("missing request/response/error fixture case: %s", name)
+			}
+			request, response, failure := decoded[entry.Request], decoded[entry.Response], decoded[entry.Error]
+			if request == nil || response == nil || failure == nil || request.ProtoReflect().Descriptor().FullName() != method.Input().FullName() || response.ProtoReflect().Descriptor().FullName() != method.Output().FullName() {
+				t.Fatalf("method %s fixture carriers do not match the descriptor", name)
+			}
+			requestValue := request.ProtoReflect()
+			requestContext := requestValue.Get(requestValue.Descriptor().Fields().ByName("context")).Message().Interface().(*pb.RequestContext)
+			if requestContext.ProtocolVersion != 2 || requestContext.ClientRequestId == "" || requestContext.ClientInstanceId == "" {
+				t.Fatalf("method %s fixture lacks request identity", name)
+			}
+			responseValue := response.ProtoReflect()
+			responseContext := responseValue.Get(responseValue.Descriptor().Fields().ByName("context")).Message().Interface().(*pb.ResponseContext)
+			if responseContext.ProtocolVersion != 2 || responseContext.ServerInstanceId == "" {
+				t.Fatalf("method %s fixture lacks response identity", name)
+			}
+			detail, ok := failure.(*pb.DolgoraeErrorDetail)
+			if !ok || detail.DetailVersion != 2 || detail.DolgoraeErrorCode == "" || detail.OperationKind == pb.OperationKind_OPERATION_KIND_UNSPECIFIED || detail.Effect == pb.EffectState_EFFECT_STATE_UNSPECIFIED || detail.Classification == pb.FailureClassification_FAILURE_CLASSIFICATION_UNSPECIFIED {
+				t.Fatalf("method %s fixture lacks typed error/effect identity", name)
+			}
+			kindName := strings.ReplaceAll(strings.TrimPrefix(detail.OperationKind.String(), "OPERATION_KIND_"), "_", "")
+			if kindName != strings.ToUpper(string(method.Name())) {
+				t.Fatalf("method %s error identifies a different operation kind", name)
+			}
+			if entry.EffectClass == "S" && (detail.Subjects == nil || detail.Operation != nil || detail.IdempotencyKey != nil) {
+				t.Fatalf("unkeyed %s error must name subjects without fabricating a key", name)
+			}
+			seen++
+		}
+	}
+	if seen != 28 || len(fixtures.MethodCases) != seen {
+		t.Fatalf("new-method fixture coverage differs: seen=%d cases=%d", seen, len(fixtures.MethodCases))
+	}
+	if len(fixtures.Negative) == 0 {
+		t.Fatal("no portable negative v2 fixture messages")
+	}
+	for _, fixture := range fixtures.Negative {
+		if !strings.HasPrefix(fixture.Message, "dolgorae.public.v2.") {
+			t.Fatalf("negative fixture %s claims a different contract", fixture.ID)
+		}
+		messageType, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(fixture.Message))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Decode(fixture.JSON, messageType.New().Interface()); err == nil {
+			t.Fatalf("negative fixture %s was admitted", fixture.ID)
+		}
+	}
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "dolgorae.external-specialist-request/v5",
+  "operation": "await_group",
+  "scope_kind": "external_engagement",
+  "scope_ref": "engagement:fixture",
+  "group_ref": "group:fixture",
+  "predicate": {
+    "kind": "k",
+    "k": 0
+  },
+  "timeout_seconds": 1
+}

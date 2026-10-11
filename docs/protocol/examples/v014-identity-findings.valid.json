@@ -1,0 +1,32 @@
+{
+  "schema": "structured_findings_v1",
+  "findings": [
+    {
+      "finding_key": "contract-001",
+      "claim": "Accepted source bytes must be retained.",
+      "kind": "requirement",
+      "stance": "supports",
+      "confidence": "high",
+      "evidence": [
+        {
+          "kind": "accepted_context",
+          "identity": "context:fixture",
+          "content": {
+            "byte_length": 30,
+            "sha256": "sha256:b1f42a880e6a6d41cbc690aa44d97a8b2d0a8a8bf591715d0ffea7856138523f"
+          }
+        }
+      ],
+      "covered_questions": [
+        "C1"
+      ],
+      "limitations": [
+        "Structural fixture; runtime admission remains unavailable."
+      ]
+    }
+  ],
+  "covered_questions": [
+    "C1"
+  ],
+  "limitations": []
+}

@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Publish a separate public-v2 and Gul consumer-v2 contract package with typed
+  recovery, immutable delegation identities, bounded group/findings fixtures
+  and qualified native host feasibility, preserving the frozen v1 package.
 - Start Runs in caller-owned workspaces with explicit Markdown Roles, verified
   access, checked direct review reads, and reusable v4 Reviewer tasks.
 - Migrate legacy JSON Roles and policy inputs through explicit source, name,

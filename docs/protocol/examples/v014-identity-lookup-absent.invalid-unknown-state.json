@@ -1,0 +1,22 @@
+{
+  "schema": "dolgorae.operation-lookup/v1",
+  "namespace": {
+    "controller_principal": "controller:fixture",
+    "controller_generation": 1,
+    "workspace_ref": "workspace:fixture",
+    "scope_kind": "external_engagement",
+    "scope_ref": "engagement:fixture",
+    "operation_kind": "assign_external_specialist_task",
+    "idempotency_key": "fixture-original-key"
+  },
+  "state": "unknown",
+  "proof": {
+    "authoritative": true,
+    "complete": true,
+    "retained_namespace_generation": 1,
+    "durable_watermark": 10,
+    "tombstones_checked": true,
+    "matching_operation": false,
+    "matching_tombstone": false
+  }
+}

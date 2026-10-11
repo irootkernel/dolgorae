@@ -1,0 +1,16 @@
+{
+  "schema": "dolgorae.mutation-envelope/v1",
+  "request_schema": "dolgorae.external-specialist-request/v5",
+  "operation_kind": "assign_external_specialist_task",
+  "workspace_ref": "workspace:fixture",
+  "scope_kind": "external_engagement",
+  "scope_ref": "engagement:fixture",
+  "controller_principal": "controller:fixture",
+  "controller_generation": 9007199254740992,
+  "idempotency_key": "fixture-original-key",
+  "trusted_invocation_ref": "01900000-0000-7000-8000-000000000068",
+  "request_body": {
+    "byte_length": 32,
+    "sha256": "sha256:94730dfb62fff4ed1eda042919d3c09aee2547ffcb576a9edf48d06643a47f49"
+  }
+}

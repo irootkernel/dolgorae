@@ -45,9 +45,11 @@ cases; TASK-068 owns their checked publication.
 The [native host qualification boundary](dolgorae-v014-host-contract-qualification.md)
 defines the selected prototype, observed scenarios, tested layers and opt-in
 reproduction; final independent and consumer acceptance remain separate.
-TASK-067 remains in progress; its open decisions and
-[external coordination requests](dolgorae-v014-contract-coordination.md) do not
-publish checked protocols or qualify a consumer route.
+TASK-067's accepted decisions and
+[external coordination decision](dolgorae-v014-contract-coordination.md)
+govern the [H1 publication candidate](dolgorae-v014-h1-package.md).
+TASK-068 owns checked publication; actual consumer runtime qualification
+retains its later gates.
 
 Only the uppercase key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are
 normative; lowercase prose is descriptive and grants no additional authority.

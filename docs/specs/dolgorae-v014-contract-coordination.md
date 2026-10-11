@@ -15,7 +15,8 @@ withhold formal work-plan/contract-selection approval and runtime acceptance.
 Master subsequently approved the concrete source selection and responsibility
 split below and directed execution to continue. This adopts the H1 plan;
 it does not relabel either technical review as runtime acceptance.
-H1 and its qualified contract lock remain pending TASK-068 and Epic closeout.
+The [H1 contract lock](dolgorae-v014-h1-package.md) binds this decision;
+the roadmap records TASK-068 acceptance and EPIC-018 handoff.
 The [consumer acceptance specification](dolgorae-consumer-acceptance-v014.md)
 owns the mandatory requirements; the [roadmap](../roadmap/README.md) owns status.
 Master has authorized Dolgorae to transmit the two contract-confirmation

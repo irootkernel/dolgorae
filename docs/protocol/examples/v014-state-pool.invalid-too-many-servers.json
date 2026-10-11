@@ -1,0 +1,7 @@
+{
+  "schema": "dolgorae.pool-configuration/v1",
+  "readonly_server_limit": 17,
+  "dedicated_generation_cap": 8,
+  "sixth_generation_warning": 6,
+  "native_subagent_default": "disabled"
+}

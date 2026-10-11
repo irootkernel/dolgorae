@@ -1,0 +1,26 @@
+{
+  "contract_id": "dolgorae.grpc-client-policy/v2",
+  "schema_version": 2,
+  "transparent_mutation_retries": false,
+  "hedging": false,
+  "wait_for_ready_on_mutations": false,
+  "lookup_requires_original_scope_and_key": true,
+  "protected_answer_persistence": false,
+  "protected_answer_automatic_replay": false,
+  "secret_resolution": "winning key returns only non-secret receipt; pending secret requires explicit re-entry",
+  "receive_message_max_bytes": 8388608,
+  "page_metadata_max_bytes": 1048576,
+  "artifact_chunk_max_bytes": 1048576,
+  "refresh_concurrency": 6,
+  "heartbeat_heads": "advisory_only_not_ingestion_or_delivery_cursors",
+  "timeline_failure": "independent_pending_interaction_refresh_remains_available",
+  "refresh": "coalesced_mask_and_page_atomic_ingest_under_captured_heads",
+  "unknown_enum": "preserve_readable_opaque_value_but_refuse_decision_or_mutation",
+  "settling": "show_attention_until_authoritative_terminal_proof",
+  "stream_end": {
+    "RUN_TERMINAL": "fetch_final_snapshots",
+    "SERVER_SHUTDOWN": "renegotiate_then_resume_committed_cursor",
+    "SLOW_CONSUMER": "refresh_then_resume_committed_cursor",
+    "TRANSPORT_FAILURE": "not_run_failure"
+  }
+}

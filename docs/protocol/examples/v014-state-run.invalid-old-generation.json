@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "state_variant": "dedicated_unstarted",
+  "control_mode": "direct_interactive",
+  "purpose": {
+    "kind": "review",
+    "external_label": null
+  },
+  "execution_lane": "dedicated",
+  "effective_policy": {
+    "access": "unknown",
+    "verification": "unverified",
+    "policy_epoch": 0,
+    "thread_generation": 0,
+    "server_epoch": null,
+    "writer_generation": null
+  },
+  "writer_authority": {
+    "state": "none",
+    "writer_generation": 0,
+    "transaction_id": null,
+    "reconciliation_action": null
+  },
+  "server_lane": {
+    "kind": "dedicated",
+    "lane_id": null,
+    "process_generation": null,
+    "server_epoch": null,
+    "state": "absent",
+    "socket_identity_sha256": null
+  },
+  "workload_background_state": {
+    "state": "unverified",
+    "mechanism": "dedicated_lane_process_census",
+    "census_revision": null,
+    "observed_process_count": null,
+    "quiescent_since": null,
+    "consecutive_empty_samples": 0
+  },
+  "requested_assurance": "verified_thread_scoped_control",
+  "achieved_assurance": "best_effort_personal_alpha",
+  "instruction_contract": {
+    "schema": "dolgorae.instructions/v3",
+    "core_prefix_version": 2,
+    "instruction_identity_digest": "sha256:22bcd0acb32f5ab59a185a64240b0be873bf2a22a1676ba92f41dce22458ecd6"
+  },
+  "lineage": null,
+  "creation_mode": "read_only",
+  "admitted_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+  "queue_revision": 0,
+  "pool_lease_ref": null,
+  "lifecycle_operation_ref": null
+}

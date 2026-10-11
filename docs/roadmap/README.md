@@ -24,13 +24,13 @@ live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is ACTIVE after TASK-067 requirements and host-feasibility
 acceptance. EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
 PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
-TASK-068 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
+TASK-068 is COMPLETE; TASK-069 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
 Documentation adoption alone activates no Task and claims no implementation or
 consumer acceptance. EPIC-018 execution has begun under a separately approved
-envelope; TASK-068 checked publication and Epic closeout remain due.
+envelope; checked H1 contracts are ready for Epic validation and closeout.
 `EPIC-016` is `COMPLETE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
@@ -2343,7 +2343,8 @@ Both actual pinned hosts passed the
 [prototype scenarios](../specs/dolgorae-v014-host-contract-qualification.md),
 including physical host loss before acknowledgement and supported lookup.
 Independent completion review accepted the requirements and bounded host feasibility.
-TASK-068, Epic validation, closeout and qualified H1 publication remain pending.
+TASK-068 checked contracts are complete; Epic validation, closeout and H1
+delivery remain pending.
 Gul E15/H2 is not an EPIC-018 prerequisite; EPIC-019 remains unopened.
 
 Depends on: completed TASK-066.
@@ -2356,7 +2357,12 @@ Handoff: Adopted requirements, three-consumer matrix and old/new behavior map fo
 
 ### TASK-068: Publish Checked Successor Protocols and Fixtures
 
-Status: `PLANNED`
+Status: `COMPLETE`
+
+The [checked H1 package](../specs/dolgorae-v014-h1-package.md) includes the
+separate successor protocols, generated clients, policies, fixtures and immutable
+lock. Repository checks and independent completion review passed. Epic validation
+and the committed delivery archive remain due before handoff.
 
 Depends on: TASK-067.
 

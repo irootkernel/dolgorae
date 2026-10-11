@@ -9,6 +9,7 @@ BUF_VERSION := 1.69.0
 GO_VERSION := go1.26.6
 
 INT_TESTS := \
+	--test successor_contract \
 	--test conformance_contract \
 	--test ledger_contract \
 	--test run_record_contract \
@@ -76,6 +77,9 @@ test-prepare:
 	$(PYTHON_BIN) tools/validators/validate_json_schemas.py
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
 	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
+	$(PYTHON_BIN) tools/validators/validate_h1_contract.py
+	$(PYTHON_BIN) tools/validators/generate_public_v2.py
+	cd docs/protocol/generated/gul-consumer-v2/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	cd docs/protocol/generated/pre-task-053-low-level/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	cd tests/e2e/private_boundary_client && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...

@@ -1,0 +1,10 @@
+{
+  "schema": "dolgorae.trusted-invocation-context/v1",
+  "invocation_ref": "01900000-0000-7000-8000-000000000068",
+  "host_route": "codex-0.160.0",
+  "state_generation": 1,
+  "accepted_public_input_digest": "sha256:7aa1729304005ac7dbbae61518cb8cbb0bf9c71d6b08221a930c89105f160566",
+  "native_event_digest": "sha256:80a1843cf960f9f8dddf9bb8bca3fac71783ca63bee17a64e3cdfa2dee9c8a21",
+  "server_binding": "dolgorae",
+  "tool_binding": "dolgorae_assign"
+}

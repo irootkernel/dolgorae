@@ -1,8 +1,9 @@
 # Dolgorae v0.1.4 method and digest contract
 
-Status: TASK-067 successor contract decisions accepted. TASK-068 has not
-published checked shapes or a qualified H1 package. These decisions do not
-advertise runtime support or record external owner acceptance.
+Status: TASK-067 successor contract decisions accepted. The
+[H1 package](dolgorae-v014-h1-package.md) binds TASK-068's checked shapes;
+the roadmap owns their acceptance and handoff status. These contracts do not
+advertise runtime support or record external consumer-runtime acceptance.
 
 The [alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md),
 [caller-workspace specification](caller-workspaces-v1.md),

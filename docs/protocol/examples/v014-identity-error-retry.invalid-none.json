@@ -1,0 +1,10 @@
+{
+  "schema": "dolgorae.successor-error/v1",
+  "code": "RECOVERY_REQUIRED",
+  "operation_kind": "assign_external_specialist_task",
+  "operation_ref": "01900000-0000-7000-8000-000000000068",
+  "effect": "unresolved",
+  "classification": "RetrySameKey",
+  "required_action": "none",
+  "retry_new_key": false
+}

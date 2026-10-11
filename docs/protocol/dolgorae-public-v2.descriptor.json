@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "package": "dolgorae.public.v2",
+  "protocol_version": 2,
+  "minimum_client_protocol_version": 2,
+  "maximum_client_protocol_version": 2,
+  "source": "dolgorae/public/v2/dolgorae.proto",
+  "source_sha256": "f334bf8b0c2f7042ed9c76bcee915a599b78e774ff455bdb4d6face6d83318a9",
+  "descriptor": "dolgorae-public-v2.descriptor.pb",
+  "descriptor_sha256": "1a659046670feff58c5097ac639dd8854c4b534d3bc2fb6366abad98b4caa232",
+  "include_imports": true,
+  "include_source_info": true,
+  "runtime_availability": "not_activated_by_publication",
+  "compatibility": "separate_public_v2_package_frozen_public_v1_unchanged",
+  "generator": {
+    "versions": {
+      "protoc": "libprotoc 36.2",
+      "buf": "1.69.0",
+      "protoc-gen-go": "protoc-gen-go v1.36.11",
+      "protoc-gen-go-grpc": "protoc-gen-go-grpc 1.6.1"
+    },
+    "command": [
+      "protoc",
+      "--proto_path=docs/protocol",
+      "--proto_path=<protoc-include>",
+      "--include_imports",
+      "--include_source_info",
+      "--descriptor_set_out=<output>/dolgorae-public-v2.descriptor.pb",
+      "--go_out=<output>",
+      "--go_opt=paths=source_relative",
+      "--go-grpc_out=<output>",
+      "--go-grpc_opt=paths=source_relative",
+      "dolgorae/public/v2/dolgorae.proto"
+    ],
+    "script": "tools/validators/generate_public_v2.py",
+    "script_sha256": "ff51aeb6fd9a25f5533d8650ce8b53f34ee29e50fdccbbe38893d228f70c75c8",
+    "inputs": [
+      {
+        "path": "dolgorae/public/v2/dolgorae.proto",
+        "sha256": "f334bf8b0c2f7042ed9c76bcee915a599b78e774ff455bdb4d6face6d83318a9"
+      },
+      {
+        "path": "google/protobuf/timestamp.proto",
+        "sha256": "fa6c44dca2c90a2aaf3a1e4776cef2e9177f70fba365f236269f0f41ac166c96"
+      }
+    ],
+    "go_module": "github.com/rootkernel/dolgorae/contracts/gul-consumer-v2",
+    "outputs": [
+      {
+        "path": "dolgorae-public-v2.descriptor.pb",
+        "sha256": "1a659046670feff58c5097ac639dd8854c4b534d3bc2fb6366abad98b4caa232"
+      },
+      {
+        "path": "generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae.pb.go",
+        "sha256": "1bae29db195ecfd56581e7dd0878f2d43f3cd7125990419265c0f7f51436c099"
+      },
+      {
+        "path": "generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae_grpc.pb.go",
+        "sha256": "19217f4b590dba79cfcdd4e4bf3f5d6fab6e4fb360365b16c274960106eb7927"
+      }
+    ]
+  }
+}

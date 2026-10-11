@@ -1,0 +1,61 @@
+{
+  "schema": "dolgorae.operation-lookup/v1",
+  "namespace": {
+    "controller_principal": "controller:fixture",
+    "controller_generation": 1,
+    "workspace_ref": "workspace:fixture",
+    "scope_kind": "external_engagement",
+    "scope_ref": "engagement:fixture",
+    "operation_kind": "assign_external_specialist_task",
+    "idempotency_key": "fixture-original-key"
+  },
+  "state": "accepted",
+  "operation_ref": "01900000-0000-7000-8000-000000000068",
+  "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+  "receipt": {
+    "schema": "dolgorae.operation-receipt/v1",
+    "operation_ref": "01900000-0000-7000-8000-000000000068",
+    "namespace": {
+      "controller_principal": "controller:fixture",
+      "controller_generation": 1,
+      "workspace_ref": "workspace:fixture",
+      "scope_kind": "external_engagement",
+      "scope_ref": "engagement:fixture",
+      "operation_kind": "assign_external_specialist_task",
+      "idempotency_key": "fixture-original-key"
+    },
+    "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+    "accepted_subjects": {
+      "run_ref": "run:fixture",
+      "member_ref": "member:fixture",
+      "task_ref": "task:fixture",
+      "group_ref": null,
+      "result_ref": null,
+      "merge_ref": null,
+      "engagement_ref": null,
+      "maintenance_ref": null,
+      "provisioning_ref": null,
+      "turn_ref": null,
+      "interaction_ref": null
+    },
+    "receipt_digest": "sha256:4178578f056ef0e02789168399c12ca6aefe9ba58cc7eac956ecf5fce450223b",
+    "accepted_revision": 1,
+    "result_digest": null
+  },
+  "accepted_subjects": {
+    "run_ref": "run:fixture",
+    "member_ref": "member:fixture",
+    "task_ref": "task:fixture",
+    "group_ref": null,
+    "result_ref": null,
+    "merge_ref": null,
+    "engagement_ref": null,
+    "maintenance_ref": null,
+    "provisioning_ref": null,
+    "turn_ref": null,
+    "interaction_ref": null
+  },
+  "current_outcome": "running",
+  "result_ref": null,
+  "result_digest": null
+}

@@ -1,7 +1,9 @@
 # v0.1.4 native host contract qualification
 
 Status: Both pinned actual hosts passed the isolated prototype scenarios below.
-Independent Task review accepted bounded feasibility; checked H1 publication remains pending.
+Independent Task review accepted bounded feasibility. The
+[H1 package](dolgorae-v014-h1-package.md) binds these inputs and assurance limits;
+the roadmap owns checked publication and handoff status.
 The source selection and responsibility split are accepted. This document
 defines the candidate boundary and reproduction;
 it is not a production facade or final consumer runtime acceptance record.

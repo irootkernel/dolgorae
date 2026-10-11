@@ -495,6 +495,10 @@ the accepted operation never existed. Automatic deletion remains disabled.
 These boundaries select future implementation responsibilities. TASK-068
 publishes their checked shapes; later implementation Tasks provide actual
 runtime behavior and artifact-bound three-consumer qualification.
+The [H1 package](../specs/dolgorae-v014-h1-package.md) selects changed manifest,
+configuration, instructions, Run-state and intent generations individually.
+Audit, membership, workspace and Profile-server records retain their existing
+generations; new group, pool, queue and maintenance sidecars carry new state.
 
 #### Independent review readiness
 

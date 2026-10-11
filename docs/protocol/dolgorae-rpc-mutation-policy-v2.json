@@ -1,0 +1,1096 @@
+{
+  "contract_id": "dolgorae.rpc-mutation-policy/v2",
+  "schema_version": 2,
+  "authority": "docs/specs/dolgorae-v014-method-and-digest-contract.md",
+  "effects": {
+    "R": "bounded read",
+    "K": "intent before effect, receipt before acknowledgement",
+    "S": "state mutation with authoritative-state loss recovery",
+    "V": "bounded verification",
+    "E": "read-only event stream"
+  },
+  "methods": {
+    "ArtifactService.GetArtifact": {
+      "effect_class": "R",
+      "material_errors": [
+        "ARTIFACT_NOT_FOUND",
+        "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER",
+        "ARTIFACT_INTEGRITY_FAILURE"
+      ],
+      "recovery": "Verify authorized metadata and content availability; a retired body cannot erase retained identity",
+      "request": "GetArtifactRequest",
+      "response": "GetArtifactResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "ArtifactService.ReadArtifactChunk": {
+      "effect_class": "R",
+      "material_errors": [
+        "ARTIFACT_RANGE_INVALID",
+        "ARTIFACT_INTEGRITY_FAILURE",
+        "ARTIFACT_NOT_FOUND"
+      ],
+      "recovery": "Use bounded valid offsets, verify complete length/hash, and refuse partial bytes as a complete result",
+      "request": "ReadArtifactChunkRequest",
+      "response": "ReadArtifactChunkResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "BrokerService.AssignSpecialistTask": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "SPECIALIST_NOT_IDLE",
+        "ROUND_LIMIT_EXCEEDED",
+        "WAIT_CYCLE",
+        "WRITER_HELD_WAIT_FORBIDDEN"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch.",
+      "request": "AssignSpecialistTaskRequest",
+      "response": "AssignSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "BrokerService.AwaitSpecialistTask": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Timeout ends only this wait; observe the same task/group without cancellation or redispatch.",
+      "request": "AwaitSpecialistTaskRequest",
+      "response": "AwaitSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "BrokerService.CancelSpecialistTask": {
+      "effect_class": "S",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read the same durable lifecycle owner and current generation/workload proof; acknowledgement is not terminal/released proof.",
+      "request": "CancelSpecialistTaskRequest",
+      "response": "CancelSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "BrokerService.CollectSpecialistTask": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED",
+        "ARTIFACT_INTEGRITY_FAILURE",
+        "RESULT_CONTENT_UNAVAILABLE"
+      ],
+      "recovery": "Read complete authorized result references and coverage; retain identity when content is unavailable.",
+      "request": "CollectSpecialistTaskRequest",
+      "response": "CollectSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "BrokerService.GetManagedDelegationIdentity": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Refresh the same authorized scope and exact identity; unavailable or corrupt state cannot prove absence.",
+      "request": "GetManagedDelegationIdentityRequest",
+      "response": "GetManagedDelegationIdentityResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "BrokerService.ReleaseSpecialist": {
+      "effect_class": "S",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read the same durable lifecycle owner and current generation/workload proof; acknowledgement is not terminal/released proof.",
+      "request": "ReleaseSpecialistRequest",
+      "response": "ReleaseSpecialistResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "BrokerService.SpawnSpecialist": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "POOL_CAPACITY_EXCEEDED",
+        "SPECIALIST_CONFIGURATION_MISMATCH"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Preserve original member, admission reservation and cleanup owner.",
+      "request": "SpawnSpecialistRequest",
+      "response": "SpawnSpecialistResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "ControllerService.VerifyController": {
+      "effect_class": "V",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "CONTROL_MODE_CONTROLLER_MISMATCH"
+      ],
+      "recovery": "Revalidate the explicit carrier; no retry with inferred or model-supplied authority",
+      "request": "VerifyControllerRequest",
+      "response": "VerifyControllerResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "GroupService.AssignGroup": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "GROUP_LIMIT_EXCEEDED",
+        "GROUP_MANIFEST_INVALID"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Recover partial acceptance per immutable entry without repeating uncertain tasks.",
+      "request": "AssignGroupRequest",
+      "response": "AssignGroupResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "GroupService.AssignSynthesis": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Synthesis is a separate ordinary accepted task and consumes its own conservative round.",
+      "request": "AssignSynthesisRequest",
+      "response": "AssignSynthesisResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "GroupService.AwaitGroup": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Timeout ends only this wait; observe the same task/group without cancellation or redispatch.",
+      "request": "AwaitGroupRequest",
+      "response": "AwaitGroupResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "GroupService.CollectGroup": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED",
+        "ARTIFACT_INTEGRITY_FAILURE",
+        "RESULT_CONTENT_UNAVAILABLE"
+      ],
+      "recovery": "Read complete authorized result references and coverage; retain identity when content is unavailable.",
+      "request": "CollectGroupRequest",
+      "response": "CollectGroupResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "GroupService.MergeGroupResults": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "FINDINGS_OUTPUT_INVALID",
+        "RESULT_CONTENT_UNAVAILABLE"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Reproduce sorted exact findings; retain missing/unknown/failed coverage and perform no implicit synthesis.",
+      "request": "MergeGroupResultsRequest",
+      "response": "MergeGroupResultsResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "InteractionService.GetControllerInteraction": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "INTERACTION_NOT_FOUND",
+        "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER"
+      ],
+      "recovery": "Verify current Controller and refetch current interaction; no observer fallback for protected payload",
+      "request": "GetControllerInteractionRequest",
+      "response": "GetControllerInteractionResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "InteractionService.ListPendingInteractions": {
+      "effect_class": "R",
+      "material_errors": [
+        "RUN_NOT_FOUND",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Refresh pending summary independently of timeline degradation",
+      "request": "ListPendingInteractionsRequest",
+      "response": "ListPendingInteractionsResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "InteractionService.ResolveInteraction": {
+      "effect_class": "K",
+      "material_errors": [
+        "INTERACTION_STALE",
+        "INTERACTION_ALREADY_RESOLVED",
+        "INTERACTION_RESPONSE_INVALID",
+        "INTERACTION_RESPONSE_TOO_LARGE",
+        "INTERACTION_OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Lookup non-secret resolution receipt/refetch interaction; winning secret key returns receipt without body comparison; pending secret input requires explicit re-entry and MUST NOT be automatically replayed",
+      "request": "ResolveInteractionRequest",
+      "response": "ResolveInteractionResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "MaintenanceService.ApplyMaintenance": {
+      "effect_class": "S",
+      "material_errors": [
+        "OPERATOR_MISMATCH",
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "MAINTENANCE_PLAN_STALE",
+        "STORAGE_CAPACITY_EXCEEDED",
+        "ARTIFACT_INTEGRITY_FAILURE"
+      ],
+      "recovery": "Resume the recorded maintenance generation after supported recovery; preserve active/unknown references and receipts; capacity refusal differs from corruption.",
+      "request": "ApplyMaintenanceRequest",
+      "response": "ApplyMaintenanceResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "MaintenanceService.GetMaintenance": {
+      "effect_class": "R",
+      "material_errors": [
+        "OPERATOR_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Refresh the same authorized scope and exact identity; unavailable or corrupt state cannot prove absence.",
+      "request": "GetMaintenanceRequest",
+      "response": "GetMaintenanceResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "MaintenanceService.PlanMaintenance": {
+      "effect_class": "R",
+      "material_errors": [
+        "OPERATOR_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Refresh explicit operator scope and generation; dry-run cannot collect or change state.",
+      "request": "PlanMaintenanceRequest",
+      "response": "PlanMaintenanceResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "ObservationService.ListRunTimelineItems": {
+      "effect_class": "R",
+      "material_errors": [
+        "EVENT_CURSOR_INVALID",
+        "RUN_NOT_FOUND",
+        "ARTIFACT_INTEGRITY_FAILURE"
+      ],
+      "recovery": "Preserve captured head and opaque page cursor; fetch complete oversized content through checked artifacts",
+      "request": "ListRunTimelineItemsRequest",
+      "response": "ListRunTimelineItemsResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "ObservationService.WatchRunEvents": {
+      "effect_class": "E",
+      "material_errors": [
+        "EVENT_CURSOR_INVALID",
+        "SLOW_CONSUMER",
+        "SERVER_SHUTDOWN",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Reconnect from committed delivered cursor; missing historical stamp requires snapshot rebase, never invented delivery",
+      "request": "WatchRunEventsRequest",
+      "response": "RunEventEnvelope",
+      "stream": true,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "OperationService.LookupOperation": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED",
+        "LOOKUP_NAMESPACE_UNAVAILABLE",
+        "LOOKUP_NAMESPACE_CORRUPT"
+      ],
+      "recovery": "Return exactly accepted/not_accepted/unresolved/absent under retained principal, generation, scope, kind and original key; missing index is recovery, not absence.",
+      "request": "LookupOperationRequest",
+      "response": "LookupOperationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "OrchestrationService.GetOrchestratedSession": {
+      "effect_class": "R",
+      "material_errors": [
+        "RUN_NOT_FOUND",
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Refresh original root/session and retained close operation; never reinterpret it as an external Engagement",
+      "request": "GetOrchestratedSessionRequest",
+      "response": "GetOrchestratedSessionResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "OrchestrationService.ListOrchestratedSessionResults": {
+      "effect_class": "R",
+      "material_errors": [
+        "RUN_NOT_FOUND",
+        "CONTROLLER_MISMATCH",
+        "ARTIFACT_INTEGRITY_FAILURE"
+      ],
+      "recovery": "Read complete authorized results with source identities; summary availability does not prove full-result availability",
+      "request": "ListOrchestratedSessionResultsRequest",
+      "response": "ListOrchestratedSessionResultsResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "ProvisioningService.InstallProvisioning": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "PROFILE_MISMATCH",
+        "SOURCE_CHANGED",
+        "SOURCE_TOO_LARGE"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch.",
+      "request": "InstallProvisioningRequest",
+      "response": "InstallProvisioningResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "ProvisioningService.ValidateProvisioning": {
+      "effect_class": "R",
+      "material_errors": [
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED",
+        "SOURCE_TOO_LARGE",
+        "SOURCE_CHANGED",
+        "PROFILE_MISMATCH"
+      ],
+      "recovery": "Recapture explicitly selected safe sources before a new validation; validation cannot install or allocate.",
+      "request": "ValidateProvisioningRequest",
+      "response": "ValidateProvisioningResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RunService.CloseRun": {
+      "effect_class": "S",
+      "material_errors": [
+        "SESSION_CLOSE_IN_PROGRESS",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read durable close operation and owned aggregate; continue the same owner through supported reconcile/recover; never resubmit accepted session-close intent",
+      "request": "CloseRunRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.CreateWriteContinuation": {
+      "effect_class": "K",
+      "material_errors": [
+        "WRITE_CONTINUATION_SOURCE_NOT_TERMINAL",
+        "WRITE_CONTINUATION_CONTROLLER_INVALID",
+        "IDEMPOTENCY_CONFLICT"
+      ],
+      "recovery": "Lookup original continuation key and destination; use a new same-principal Controller only as explicitly required by admission",
+      "request": "CreateWriteContinuationRequest",
+      "response": "CreateWriteContinuationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.DeleteRun": {
+      "effect_class": "S",
+      "material_errors": [
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Inspect Run/tombstone and prior authorized confirmation; no automatic repeated deletion or receipt removal",
+      "request": "DeleteRunRequest",
+      "response": "DeleteRunResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.ForkRun": {
+      "effect_class": "K",
+      "material_errors": [
+        "TURN_NOT_FOUND",
+        "THREAD_NOT_FOUND",
+        "IDEMPOTENCY_CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Lookup original fork key and destination; preserve accepted history/provenance boundary",
+      "request": "ForkRunRequest",
+      "response": "StartRunResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.GetRun": {
+      "effect_class": "R",
+      "material_errors": [
+        "RUN_NOT_FOUND",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Obtain a fresh compatible snapshot; a missing Run cannot authorize resubmission of earlier work",
+      "request": "GetRunRequest",
+      "response": "GetRunResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RunService.InterruptTurn": {
+      "effect_class": "S",
+      "material_errors": [
+        "TURN_NOT_FOUND",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Read Run and original Turn; interrupt acknowledgement is not terminal proof; reconcile uncertain execution",
+      "request": "InterruptTurnRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.ListRuns": {
+      "effect_class": "R",
+      "material_errors": [
+        "WORKSPACE_NOT_INITIALIZED",
+        "UNSUPPORTED_SCHEMA_VERSION"
+      ],
+      "recovery": "Refresh workspace/capabilities; mixed modern and accepted legacy manifests MUST remain individually readable",
+      "request": "ListRunsRequest",
+      "response": "ListRunsResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RunService.PauseRun": {
+      "effect_class": "S",
+      "material_errors": [
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Read pause/Turn/background state; reconcile before another lifecycle request",
+      "request": "PauseRunRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.ReconcileRun": {
+      "effect_class": "S",
+      "material_errors": [
+        "THREAD_RESIDENCY_CONFLICT",
+        "BACKGROUND_EXECUTION_UNVERIFIED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Read updated state and exact generation before another explicitly selected reconciliation",
+      "request": "ReconcileRunRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.RecoverRun": {
+      "effect_class": "S",
+      "material_errors": [
+        "RECOVERY_REQUIRED",
+        "DEDICATED_HISTORY_BARRIER_FAILED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Read retained operation/generation and perform its prescribed recovery; a failed recovery cannot authorize redispatch",
+      "request": "RecoverRunRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.ResumeRun": {
+      "effect_class": "S",
+      "material_errors": [
+        "DEDICATED_SERVER_START_FAILED",
+        "THREAD_RESIDENCY_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read original Run/generation; supported reconcile/recover may resume it; failure cannot authorize a replacement thread",
+      "request": "ResumeRunRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.SetDefaultEffort": {
+      "effect_class": "S",
+      "material_errors": [
+        "CAPABILITY_UNSUPPORTED",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Read accepted current effort and revision before any new mutation",
+      "request": "SetDefaultEffortRequest",
+      "response": "RunMutationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.StartRun": {
+      "effect_class": "K",
+      "material_errors": [
+        "WRITER_BUSY",
+        "WORKSPACE_STARTUP_UNSUPPORTED",
+        "DEDICATED_SERVER_START_FAILED",
+        "IDEMPOTENCY_CONFLICT",
+        "INTERNAL_ERROR"
+      ],
+      "recovery": "Lookup the original Controller/workspace/start key; replay only that identity or recover its original Run",
+      "request": "StartRunRequest",
+      "response": "StartRunResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.SubmitTurn": {
+      "effect_class": "K",
+      "material_errors": [
+        "RUN_BUSY",
+        "WRITER_BUSY",
+        "SESSION_CLOSE_IN_PROGRESS",
+        "IDEMPOTENCY_CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Lookup original submit key without reopening attachments; accepted means observe that Turn, unresolved means reconcile, authoritative non-acceptance permits exact-key replay",
+      "request": "SubmitTurnRequest",
+      "response": "SubmitTurnAccepted",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "RunService.VerifyRun": {
+      "effect_class": "V",
+      "material_errors": [
+        "RUN_NOT_FOUND",
+        "BACKGROUND_EXECUTION_UNVERIFIED",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Refresh original Run's verification; a verification result grants no lifecycle or writer effect",
+      "request": "VerifyRunRequest",
+      "response": "VerifyRunResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RuntimeService.GetCapabilities": {
+      "effect_class": "R",
+      "material_errors": [
+        "PROTOCOL_VERSION_UNSUPPORTED"
+      ],
+      "recovery": "Negotiate a supported range; discard cached admission on server-instance change",
+      "request": "GetCapabilitiesRequest",
+      "response": "GetCapabilitiesResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RuntimeService.GetProfile": {
+      "effect_class": "R",
+      "material_errors": [
+        "PROFILE_NOT_FOUND",
+        "PROFILE_MISMATCH",
+        "COMPATIBILITY_REJECTED"
+      ],
+      "recovery": "Reselect an explicitly supported Profile or refresh its observation; never substitute a Profile silently",
+      "request": "GetProfileRequest",
+      "response": "GetProfileResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RuntimeService.InspectWorkspace": {
+      "effect_class": "R",
+      "material_errors": [
+        "WORKSPACE_NOT_INITIALIZED",
+        "WORKSPACE_INITIALIZATION_CONFLICT"
+      ],
+      "recovery": "Read the selected workspace again; never initialize it as a read fallback",
+      "request": "InspectWorkspaceRequest",
+      "response": "InspectWorkspaceResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RuntimeService.ListProfileDiagnostics": {
+      "effect_class": "R",
+      "material_errors": [
+        "PROFILE_NOT_FOUND",
+        "EVENT_CURSOR_INVALID"
+      ],
+      "recovery": "Refresh Profile identity or restart diagnostics from an explicitly chosen valid cursor",
+      "request": "ListProfileDiagnosticsRequest",
+      "response": "ListProfileDiagnosticsResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "RuntimeService.ListProfiles": {
+      "effect_class": "R",
+      "material_errors": [
+        "UNSUPPORTED_SCHEMA_VERSION"
+      ],
+      "recovery": "Refresh compatible capabilities and reissue the bounded read",
+      "request": "ListProfilesRequest",
+      "response": "ListProfilesResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "SpecialistService.AssignExternalSpecialistTask": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "SPECIALIST_NOT_IDLE",
+        "ROUND_LIMIT_EXCEEDED",
+        "WAIT_CYCLE",
+        "WRITER_HELD_WAIT_FORBIDDEN"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch.",
+      "request": "AssignExternalSpecialistTaskRequest",
+      "response": "AssignExternalSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "SpecialistService.AwaitExternalSpecialistTask": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Timeout ends only this wait; observe the same task/group without cancellation or redispatch.",
+      "request": "AwaitExternalSpecialistTaskRequest",
+      "response": "AwaitExternalSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "SpecialistService.CancelExternalSpecialistTask": {
+      "effect_class": "S",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read the same durable lifecycle owner and current generation/workload proof; acknowledgement is not terminal/released proof.",
+      "request": "CancelExternalSpecialistTaskRequest",
+      "response": "CancelExternalSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "SpecialistService.CloseExternalEngagement": {
+      "effect_class": "S",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read the same durable lifecycle owner and current generation/workload proof; acknowledgement is not terminal/released proof.",
+      "request": "CloseExternalEngagementRequest",
+      "response": "CloseExternalEngagementResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "SpecialistService.CollectExternalSpecialistTask": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED",
+        "ARTIFACT_INTEGRITY_FAILURE",
+        "RESULT_CONTENT_UNAVAILABLE"
+      ],
+      "recovery": "Read complete authorized result references and coverage; retain identity when content is unavailable.",
+      "request": "CollectExternalSpecialistTaskRequest",
+      "response": "CollectExternalSpecialistTaskResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "SpecialistService.GetExternalDelegationIdentity": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Refresh the same authorized scope and exact identity; unavailable or corrupt state cannot prove absence.",
+      "request": "GetExternalDelegationIdentityRequest",
+      "response": "GetExternalDelegationIdentityResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "SpecialistService.GetExternalEngagement": {
+      "effect_class": "R",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_STATE_CONFLICT",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Refresh the same authorized scope and exact identity; unavailable or corrupt state cannot prove absence.",
+      "request": "GetExternalEngagementRequest",
+      "response": "GetExternalEngagementResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "SpecialistService.HireExternalSpecialist": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED",
+        "POOL_CAPACITY_EXCEEDED",
+        "SPECIALIST_CONFIGURATION_MISMATCH"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Preserve original member, admission reservation and cleanup owner.",
+      "request": "HireExternalSpecialistRequest",
+      "response": "HireExternalSpecialistResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "SpecialistService.OpenExternalEngagement": {
+      "effect_class": "K",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch.",
+      "request": "OpenExternalEngagementRequest",
+      "response": "OpenExternalEngagementResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": "OperationService.LookupOperation",
+      "missing_mutation_detail": "Unknown"
+    },
+    "SpecialistService.ReleaseExternalSpecialist": {
+      "effect_class": "S",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "RUN_BUSY",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "RECOVERY_REQUIRED"
+      ],
+      "recovery": "Read the same durable lifecycle owner and current generation/workload proof; acknowledgement is not terminal/released proof.",
+      "request": "ReleaseExternalSpecialistRequest",
+      "response": "ReleaseExternalSpecialistResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "WriterService.AcquireWriter": {
+      "effect_class": "S",
+      "material_errors": [
+        "WRITER_BUSY",
+        "SHARED_RUN_WRITE_FORBIDDEN",
+        "ACCESS_TRANSITION_UNSUPPORTED",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Read writer holder/generation and Run policy proof; fixed read-only pooled Runs remain non-promotable",
+      "request": "AcquireWriterRequest",
+      "response": "WriterState",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "WriterService.CancelWriterHandoff": {
+      "effect_class": "S",
+      "material_errors": [
+        "STALE_WRITER_GENERATION",
+        "WRITER_HANDOFF_NOT_ALLOWED"
+      ],
+      "recovery": "Read existing handoff and holder; cancellation response is not proof that another handoff did not commit",
+      "request": "CancelWriterHandoffRequest",
+      "response": "WriterHandoffResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "WriterService.CommitWriterHandoff": {
+      "effect_class": "S",
+      "material_errors": [
+        "STALE_WRITER_GENERATION",
+        "WRITER_HANDOFF_NOT_ALLOWED",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Read current holder/handoff and exact generation; reconcile uncertain authority before mutation",
+      "request": "CommitWriterHandoffRequest",
+      "response": "WriterHandoffResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "WriterService.GetWorkspaceWriterStatus": {
+      "effect_class": "R",
+      "material_errors": [
+        "WORKSPACE_NOT_INITIALIZED",
+        "RUN_STATE_CONFLICT"
+      ],
+      "recovery": "Refresh workspace and holder Run; report holder identity only under supported authorization",
+      "request": "GetWorkspaceWriterStatusRequest",
+      "response": "GetWorkspaceWriterStatusResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": null
+    },
+    "WriterService.PrepareWriterHandoff": {
+      "effect_class": "S",
+      "material_errors": [
+        "WRITER_HANDOFF_NOT_ALLOWED",
+        "STALE_WRITER_GENERATION",
+        "WRITER_BUSY"
+      ],
+      "recovery": "Read current handoff and writer generation; no newly prepared transfer from an uncertain earlier response",
+      "request": "PrepareWriterHandoffRequest",
+      "response": "WriterHandoffResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    },
+    "WriterService.ReleaseWriter": {
+      "effect_class": "S",
+      "material_errors": [
+        "RUN_BUSY",
+        "CROSS_CONTROLLER_RELEASE_REQUIRED",
+        "RUN_STATE_CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ],
+      "recovery": "Read policy and writer guard; preserve reservation until read-only enforcement and descendant absence are proven",
+      "request": "ReleaseWriterRequest",
+      "response": "WriterState",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
+    }
+  }
+}

@@ -1,0 +1,465 @@
+{
+  "schema": "dolgorae.role-snapshot/v1",
+  "role_body": {
+    "byte_length": 22,
+    "sha256": "sha256:95d04f18cfa23937df28bf77bb1d9ba3f910783cf3f7477d2bb67e5011e8ae06"
+  },
+  "dependencies": [
+    {
+      "name": "dep-00",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-01",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-02",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-03",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-04",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-05",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-06",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-07",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-08",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-09",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-10",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-11",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-12",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-13",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-14",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-15",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-16",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-17",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-18",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-19",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-20",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-21",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-22",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-23",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-24",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-25",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-26",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-27",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-28",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-29",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-30",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-31",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-32",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-33",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-34",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-35",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-36",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-37",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-38",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-39",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-40",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-41",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-42",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-43",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-44",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-45",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-46",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-47",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-48",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-49",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-50",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-51",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-52",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-53",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-54",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-55",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-56",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-57",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-58",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-59",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-60",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-61",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-62",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-63",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    },
+    {
+      "name": "dep-64",
+      "content": {
+        "byte_length": 1,
+        "sha256": "sha256:3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      }
+    }
+  ],
+  "selected_guidance": []
+}

@@ -38,7 +38,8 @@ refresh the historical baselines below. All listed source bytes match their
 inspected commits; Podway also has unrelated working-tree changes. Master has
 accepted the Phase 1 source/mapping selection and implementation/acceptance
 responsibilities. Independent review accepted bounded native feasibility;
-checked H1 publication and later actual consumer-runtime acceptance remain pending. The
+[H1 publication](dolgorae-v014-h1-package.md) binds this matrix; the roadmap
+records its acceptance. Later actual consumer-runtime acceptance remains pending. The
 [successor requirements reconciliation](dolgorae-v014-successor-requirements.md)
 records the retained/new behavior map, failure rules and feedback coverage.
 
