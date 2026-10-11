@@ -194,9 +194,10 @@
         "OUTCOME_UNKNOWN",
         "RECOVERY_REQUIRED",
         "GROUP_LIMIT_EXCEEDED",
-        "GROUP_MANIFEST_INVALID"
+        "GROUP_MANIFEST_INVALID",
+        "STORAGE_CAPACITY_EXCEEDED"
       ],
-      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Recover partial acceptance per immutable entry without repeating uncertain tasks.",
+      "recovery": "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch. Validate and durably capture each checked entry input against installed provisioning and manifest digests before receipt, then provision/dispatch. Accepted-key replay never reopens input files; recover per immutable entry without repeating uncertain tasks.",
       "request": "AssignGroupRequest",
       "response": "AssignGroupResponse",
       "stream": false,
@@ -338,7 +339,7 @@
         "STORAGE_CAPACITY_EXCEEDED",
         "ARTIFACT_INTEGRITY_FAILURE"
       ],
-      "recovery": "Resume the recorded maintenance generation after supported recovery; preserve active/unknown references and receipts; capacity refusal differs from corruption.",
+      "recovery": "Before Apply retain plan.plan_id, operator, workspace and generation. maintenance_id equals plan_id; after reply loss GetMaintenance reads that original identity without reapplying, including after generation switch. Preserve retained bindings/references/receipts; unavailable/corrupt lookup cannot prove not applied.",
       "request": "ApplyMaintenanceRequest",
       "response": "ApplyMaintenanceResponse",
       "stream": false,
@@ -352,9 +353,12 @@
       "material_errors": [
         "OPERATOR_MISMATCH",
         "RUN_STATE_CONFLICT",
-        "RECOVERY_REQUIRED"
+        "RECOVERY_REQUIRED",
+        "MAINTENANCE_NOT_APPLIED",
+        "LOOKUP_NAMESPACE_UNAVAILABLE",
+        "LOOKUP_NAMESPACE_CORRUPT"
       ],
-      "recovery": "Refresh the same authorized scope and exact identity; unavailable or corrupt state cannot prove absence.",
+      "recovery": "Read the original plan ID as maintenance ID with retained operator/workspace/generation; retained binding survives generation switch. Only complete integrity-checked original namespace can prove MAINTENANCE_NOT_APPLIED; unavailable or corrupt state requires recovery.",
       "request": "GetMaintenanceRequest",
       "response": "GetMaintenanceResponse",
       "stream": false,

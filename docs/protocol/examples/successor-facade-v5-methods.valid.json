@@ -1897,12 +1897,22 @@
               "entry_key": "task-001",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21"
             }
           ]
         },
         "idempotency_key": "group-original-key",
-        "expected_revision": 1
+        "expected_revision": 1,
+        "inputs": [
+          {
+            "entry_key": "task-001",
+            "absolute_file_path": "/fixture/workspace/inputs/task-001.json",
+            "content": {
+              "byte_length": 971,
+              "sha256": "sha256:68eaa91a35dd8ada80026418dd8506cc73127ec6777be7d9d8cb2e6035beffb8"
+            }
+          }
+        ]
       },
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_group_normalized_body",
       "normalized_request_body": {
@@ -1915,16 +1925,25 @@
               "entry_key": "task-001",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21"
             }
           ]
-        }
+        },
+        "inputs": [
+          {
+            "entry_key": "task-001",
+            "content": {
+              "byte_length": 971,
+              "sha256": "sha256:68eaa91a35dd8ada80026418dd8506cc73127ec6777be7d9d8cb2e6035beffb8"
+            }
+          }
+        ]
       },
       "response": {
         "schema": "dolgorae.external-specialist-response/v5",
         "operation": "assign_group",
         "group_ref": "group:fixture",
-        "manifest_digest": "sha256:e0a1c5391812ce96673b8a7e1939b07a48bc43323e63c2783b8618c90b71657c",
+        "manifest_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
         "receipt": {
           "schema": "dolgorae.operation-receipt/v1",
           "operation_ref": "01900000-0000-7000-8000-000000000068",
@@ -2443,7 +2462,7 @@
         "schema": "dolgorae.external-specialist-response/v5",
         "operation": "plan_maintenance",
         "plan": {
-          "plan_ref": "plan:fixture",
+          "plan_ref": "019a0000-0000-7000-8000-000000000018",
           "workspace_ref": "workspace:fixture",
           "selected_generation": 1,
           "dry_run": true,
@@ -2490,23 +2509,47 @@
       "request": {
         "schema": "dolgorae.external-specialist-request/v5",
         "operation": "apply_maintenance",
-        "plan_ref": "plan:fixture",
-        "expected_manifest_digest": "sha256:917e1297245f39d0b7b5fcde724a295a9767397338f0f6cdaf0e2e1bd2d19baf",
+        "plan": {
+          "plan_ref": "019a0000-0000-7000-8000-000000000018",
+          "workspace_ref": "workspace:fixture",
+          "selected_generation": 1,
+          "dry_run": true,
+          "kind": "ledger_checkpoint",
+          "admission_closed": true,
+          "active_writers": 0,
+          "unknown_workload": 0,
+          "protected_reference_count": 1,
+          "retire_content": [],
+          "retained_receipt_count": 1,
+          "expected_manifest_digest": "sha256:917e1297245f39d0b7b5fcde724a295a9767397338f0f6cdaf0e2e1bd2d19baf"
+        },
         "explicit_operator_approval": true
       },
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/apply_maintenance_normalized_body",
       "normalized_request_body": {
-        "plan_ref": "plan:fixture",
-        "expected_manifest_digest": "sha256:917e1297245f39d0b7b5fcde724a295a9767397338f0f6cdaf0e2e1bd2d19baf",
+        "plan": {
+          "plan_ref": "019a0000-0000-7000-8000-000000000018",
+          "workspace_ref": "workspace:fixture",
+          "selected_generation": 1,
+          "dry_run": true,
+          "kind": "ledger_checkpoint",
+          "admission_closed": true,
+          "active_writers": 0,
+          "unknown_workload": 0,
+          "protected_reference_count": 1,
+          "retire_content": [],
+          "retained_receipt_count": 1,
+          "expected_manifest_digest": "sha256:917e1297245f39d0b7b5fcde724a295a9767397338f0f6cdaf0e2e1bd2d19baf"
+        },
         "explicit_operator_approval": true
       },
       "response": {
         "schema": "dolgorae.external-specialist-response/v5",
         "operation": "apply_maintenance",
         "maintenance": {
-          "operation_ref": "01900000-0000-7000-8000-000000000068",
+          "operation_ref": "019a0000-0000-7000-8000-000000000018",
           "plan": {
-            "plan_ref": "plan:fixture",
+            "plan_ref": "019a0000-0000-7000-8000-000000000018",
             "workspace_ref": "workspace:fixture",
             "selected_generation": 1,
             "dry_run": true,
@@ -2546,7 +2589,7 @@
             "result_ref": null,
             "merge_ref": null,
             "engagement_ref": null,
-            "maintenance_ref": "maintenance:fixture",
+            "maintenance_ref": "019a0000-0000-7000-8000-000000000018",
             "provisioning_ref": null,
             "turn_ref": null,
             "interaction_ref": null
@@ -2559,19 +2602,23 @@
       "request": {
         "schema": "dolgorae.external-specialist-request/v5",
         "operation": "get_maintenance",
-        "operation_ref": "01900000-0000-7000-8000-000000000068"
+        "plan_ref": "019a0000-0000-7000-8000-000000000018",
+        "workspace_ref": "workspace:fixture",
+        "selected_generation": 1
       },
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/get_maintenance_normalized_body",
       "normalized_request_body": {
-        "operation_ref": "01900000-0000-7000-8000-000000000068"
+        "plan_ref": "019a0000-0000-7000-8000-000000000018",
+        "workspace_ref": "workspace:fixture",
+        "selected_generation": 1
       },
       "response": {
         "schema": "dolgorae.external-specialist-response/v5",
         "operation": "get_maintenance",
         "maintenance": {
-          "operation_ref": "01900000-0000-7000-8000-000000000068",
+          "operation_ref": "019a0000-0000-7000-8000-000000000018",
           "plan": {
-            "plan_ref": "plan:fixture",
+            "plan_ref": "019a0000-0000-7000-8000-000000000018",
             "workspace_ref": "workspace:fixture",
             "selected_generation": 1,
             "dry_run": true,

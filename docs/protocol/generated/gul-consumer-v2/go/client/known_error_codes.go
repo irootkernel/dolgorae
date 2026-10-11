@@ -61,6 +61,8 @@ func knownErrorCode(code string) bool {
 		return true
 	case "LOOKUP_NAMESPACE_UNAVAILABLE":
 		return true
+	case "MAINTENANCE_NOT_APPLIED":
+		return true
 	case "MAINTENANCE_PLAN_STALE":
 		return true
 	case "OPERATOR_MISMATCH":

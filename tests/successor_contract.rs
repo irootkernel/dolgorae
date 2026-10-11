@@ -77,6 +77,16 @@ fn wire_group_fixtures_preserve_closed_identity_and_scope() {
         };
         let identity = wire_group_identity(assignment)
             .unwrap_or_else(|error| panic!("fixture {}: {error}", fixture["id"]));
+        if let Some(group) = request.get("group") {
+            assert_eq!(
+                group["group_assignment_digest"],
+                checked_digest("dolgorae.group-assignment/v1", &identity.to_string())
+                    .unwrap()
+                    .0,
+                "group digest in {}",
+                fixture["id"]
+            );
+        }
         if let Some(scope) = request.get("scope") {
             if let Some(managed) = scope.get("managed") {
                 assert_eq!(identity["scope_kind"], "orchestrated_session");
@@ -1429,4 +1439,246 @@ fn inline_encoded_pages_and_complete_chunked_artifacts_enforce_separate_byte_lim
     assert_eq!(page.to_string().len(), 4_194_304);
     let page_plus_one = json!({"final_response":"x".repeat(4_194_305 - overhead)});
     assert_eq!(page_plus_one.to_string().len(), 4_194_305);
+}
+
+// Contract admission model; production group admission remains TASK-084.
+fn capture_group_inputs(
+    manifest: &Value,
+    sources: &Value,
+    files: &BTreeMap<String, String>,
+    installed: &Value,
+) -> Result<Vec<Value>, &'static str> {
+    validate_identity("dolgorae.group-assignment/v1", manifest)?;
+    let entries = array(&manifest["entries"])?;
+    let sources = array(sources)?;
+    if entries.len() != sources.len() || serde_json::to_vec(sources).unwrap().len() > 2_097_152 {
+        return Err("group_input_invalid");
+    }
+    let mut captures = Vec::new();
+    for (entry, source) in entries.iter().zip(sources) {
+        closed(source, &["entry_key", "absolute_file_path", "content"])?;
+        if source["entry_key"] != entry["entry_key"] {
+            return Err("group_input_invalid");
+        }
+        let path = string(&source["absolute_file_path"])?;
+        if !path.starts_with("/fixture/workspace/inputs/")
+            || path.len() > 4096
+            || path.split('/').any(|part| part == "..")
+        {
+            return Err("group_input_invalid");
+        }
+        let bytes = files.get(path).ok_or("group_input_missing")?.as_bytes();
+        if bytes.len() > 134_217_728
+            || source["content"]["byte_length"] != bytes.len()
+            || source["content"]["sha256"] != format!("sha256:{}", jcs::sha256_hex(bytes))
+        {
+            return Err("group_input_invalid");
+        }
+        let parsed = jcs::parse(std::str::from_utf8(bytes).map_err(|_| "group_input_invalid")?)
+            .map_err(|_| "group_input_invalid")?;
+        let canonical = jcs::canonicalize(&parsed).map_err(|_| "group_input_invalid")?;
+        if canonical != bytes {
+            return Err("group_input_invalid");
+        }
+        let input: Value = serde_json::from_slice(bytes).map_err(|_| "group_input_invalid")?;
+        closed(&input, &["schema", "provisioning_ref", "assignment"])?;
+        if input["schema"] != "dolgorae.group-task-input/v1"
+            || input["provisioning_ref"] != installed["provisioning_ref"]
+        {
+            return Err("group_input_invalid");
+        }
+        let assignment = &input["assignment"];
+        closed(
+            assignment,
+            &["task_body", "accepted_task_identity", "deadline_seconds"],
+        )?;
+        if !(1..=3600).contains(
+            &assignment["deadline_seconds"]
+                .as_u64()
+                .ok_or("group_input_invalid")?,
+        ) {
+            return Err("group_input_invalid");
+        }
+        let identity = &assignment["accepted_task_identity"];
+        validate_identity("dolgorae.accepted-task/v1", identity)?;
+        let body = jcs::canonicalize(
+            &jcs::parse(&assignment["task_body"].to_string()).map_err(|_| "group_input_invalid")?,
+        )
+        .map_err(|_| "group_input_invalid")?;
+        if identity["task_body_schema"] != "dolgorae.structured-task/v1"
+            || identity["task_body"]["byte_length"] != body.len()
+            || identity["task_body"]["sha256"] != format!("sha256:{}", jcs::sha256_hex(&body))
+        {
+            return Err("group_input_invalid");
+        }
+        for field in ["role_snapshot_digest", "agent_configuration_digest"] {
+            if identity[field] != installed[field] || identity[field] != entry[field] {
+                return Err("group_input_invalid");
+            }
+        }
+        if checked_digest("dolgorae.accepted-task/v1", &identity.to_string())?.0
+            != entry["accepted_task_digest"]
+        {
+            return Err("group_input_invalid");
+        }
+        captures.push(json!({"entry_key":entry["entry_key"],"content":source["content"],"provisioning_ref":input["provisioning_ref"],"bytes":input}));
+    }
+    Ok(captures)
+}
+
+#[test]
+fn cold_group_captures_complete_inputs_before_receipt_and_rejects_missing_or_mismatch() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let wire = &fixture["positive"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "assign_group_request")
+        .unwrap()["grpc_json"];
+    let supplied = array(&fixture["group_input_fixtures"]["sources"]).unwrap();
+    let files: BTreeMap<String, String> = supplied
+        .iter()
+        .map(|source| {
+            (
+                source["source"]["absolute_file_path"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                source["utf8"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let installed = &supplied[0]["installed_provisioning"];
+    let captures =
+        capture_group_inputs(&wire["assignment"], &wire["inputs"], &files, installed).unwrap();
+    assert_eq!(captures.len(), 2);
+    // A cold group needs no prior member or individual Task acceptance.
+    for count in [1, 50, 64] {
+        let mut manifest = wire["assignment"].clone();
+        let mut entries = Vec::new();
+        let mut sources = Vec::new();
+        let mut cold_files = BTreeMap::new();
+        for index in 0..count {
+            let key = format!("cold-{index:03}");
+            let mut entry = manifest["entries"][0].clone();
+            entry["entry_key"] = json!(key);
+            let mut source = wire["inputs"][0].clone();
+            source["entry_key"] = json!(key);
+            let path = format!("/fixture/workspace/inputs/{key}.json");
+            source["absolute_file_path"] = json!(path);
+            let mut input: Value =
+                serde_json::from_str(supplied[0]["utf8"].as_str().unwrap()).unwrap();
+            input["assignment"]["task_body"]["brief"] = json!(format!("Complete new task {key}."));
+            let body = jcs::canonicalize(
+                &jcs::parse(&input["assignment"]["task_body"].to_string()).unwrap(),
+            )
+            .unwrap();
+            input["assignment"]["accepted_task_identity"]["task_body"] = json!({"byte_length":body.len(),"sha256":format!("sha256:{}",jcs::sha256_hex(&body))});
+            entry["accepted_task_digest"] = json!(
+                checked_digest(
+                    "dolgorae.accepted-task/v1",
+                    &input["assignment"]["accepted_task_identity"].to_string()
+                )
+                .unwrap()
+                .0
+            );
+            let bytes = jcs::canonicalize(&jcs::parse(&input.to_string()).unwrap()).unwrap();
+            source["content"] = json!({"byte_length":bytes.len(),"sha256":format!("sha256:{}",jcs::sha256_hex(&bytes))});
+            cold_files.insert(path, String::from_utf8(bytes).unwrap());
+            entries.push(entry);
+            sources.push(source);
+        }
+        manifest["entries"] = json!(entries);
+        let captures =
+            capture_group_inputs(&manifest, &json!(sources), &cold_files, installed).unwrap();
+        assert_eq!(captures.len(), count);
+        // Committed captures remain materializable after source removal and restart.
+        cold_files.clear();
+        assert!(capture_group_inputs(&manifest, &json!(sources), &cold_files, installed).is_err());
+        for capture in captures {
+            assert_eq!(
+                capture["bytes"]["assignment"]["accepted_task_identity"]["role_snapshot_digest"],
+                installed["role_snapshot_digest"]
+            );
+        }
+    }
+    let mut missing = files.clone();
+    missing.remove(wire["inputs"][0]["absolute_file_path"].as_str().unwrap());
+    assert_eq!(
+        capture_group_inputs(&wire["assignment"], &wire["inputs"], &missing, installed)
+            .unwrap_err(),
+        "group_input_missing"
+    );
+    for bad in 0..6 {
+        let mut sources = wire["inputs"].clone();
+        let mut manifest = wire["assignment"].clone();
+        let mut selected = files.clone();
+        match bad {
+            0 => {
+                sources.as_array_mut().unwrap().pop();
+            }
+            1 => sources[1] = sources[0].clone(),
+            2 => {
+                manifest["entries"][0]["accepted_task_digest"] =
+                    json!(format!("sha256:{}", "f".repeat(64)))
+            }
+            3 => sources[0]["content"]["byte_length"] = json!(1),
+            4 => sources[0]["absolute_file_path"] = json!("/fixture/workspace/inputs/../secret"),
+            _ => {
+                let path = sources[0]["absolute_file_path"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                selected.insert(path, "{\"schema\":1,\"schema\":2}".to_owned());
+            }
+        }
+        assert!(
+            capture_group_inputs(&manifest, &sources, &selected, installed).is_err(),
+            "bad case{bad}"
+        );
+    }
+    // Changed bytes cannot hide behind a recomputed outer hash: task identity is checked.
+    let mut corrupted: Value = serde_json::from_str(supplied[0]["utf8"].as_str().unwrap()).unwrap();
+    corrupted["assignment"]["task_body"]["brief"] = json!("changed");
+    let changed = jcs::canonicalize(&jcs::parse(&corrupted.to_string()).unwrap()).unwrap();
+    let mut sources = wire["inputs"].clone();
+    sources[0]["content"] = json!({"byte_length":changed.len(),"sha256":format!("sha256:{}",jcs::sha256_hex(&changed))});
+    let mut changed_files = files.clone();
+    changed_files.insert(
+        sources[0]["absolute_file_path"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        String::from_utf8(changed).unwrap(),
+    );
+    assert!(
+        capture_group_inputs(&wire["assignment"], &sources, &changed_files, installed).is_err()
+    );
+    let mut foreign = installed.clone();
+    foreign["agent_configuration_digest"] = json!(format!("sha256:{}", "e".repeat(64)));
+    assert!(capture_group_inputs(&wire["assignment"], &wire["inputs"], &files, &foreign).is_err());
+    // Six escaped bytes per UTF-8 byte covers the original rich task limits.
+    let task_upper_bound =
+        65_536 + 64 * (128 + 262_144 + 4096) + 64 * (128 + 8192 + 64 * 128) + 128;
+    let schema: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-external-specialist-facade-v5.schema.json"
+    ))
+    .unwrap();
+    let definitions = &schema["$defs"];
+    let capture_limit = definitions["group_task_input"]["x-maxEncodedBytes"]
+        .as_u64()
+        .unwrap();
+    let inputs = &definitions["assign_group_request"]["properties"]["inputs"];
+    let path_limit =
+        definitions["group_task_source"]["properties"]["absolute_file_path"]["x-maxUtf8Bytes"]
+            .as_u64()
+            .unwrap();
+    assert!(6 * task_upper_bound + 1_048_576 < capture_limit);
+    assert!(
+        inputs["maxItems"].as_u64().unwrap() * (6 * (256 + path_limit) + 1024)
+            < inputs["x-maxEncodedBytes"].as_u64().unwrap()
+    );
 }

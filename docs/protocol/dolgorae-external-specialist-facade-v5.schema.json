@@ -428,7 +428,7 @@
       ],
       "properties": {
         "plan_ref": {
-          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
         },
         "workspace_ref": {
           "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
@@ -486,7 +486,8 @@
         }
       },
       "x-invariants": [
-        "Lifecycle lock precedes ledger writer lock. Applying requires explicit operator authority and current-generation dry-run with no live or unknown writer/workload. Protected references and all identity/receipt metadata survive."
+        "Lifecycle lock precedes ledger writer lock. Applying requires explicit operator authority and current-generation dry-run with no live or unknown writer/workload. Protected references and all identity/receipt metadata survive.",
+        "plan_ref is known before Apply and equals maintenance operation_ref. Durable original-scope/generation lookup survives generation retirement; unavailable/corrupt state cannot prove not applied."
       ]
     },
     "maintenance_observation": {
@@ -2002,7 +2003,8 @@
         "scope_ref",
         "manifest",
         "idempotency_key",
-        "expected_revision"
+        "expected_revision",
+        "inputs"
       ],
       "properties": {
         "schema": {
@@ -2040,6 +2042,15 @@
               "type": "null"
             }
           ]
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/group_task_source"
+          },
+          "x-maxEncodedBytes": 2097152
         }
       },
       "x-normalizedBodySchema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_group_normalized_body",
@@ -2053,9 +2064,12 @@
           "expected_revision"
         ],
         "unknown_fields": "reject before normalization",
-        "semantic_inputs": "retain every remaining field and exact value; resolve defaults once before digesting",
+        "semantic_inputs": "Retain manifest and sorted entry_key/content pairs; capture and validate exact source bytes before acceptance; exclude only absolute_file_path after capture. Accepted-key replay never reopens sources.",
         "controller_secrets": "transport only; excluded from all public and normalized bodies"
-      }
+      },
+      "x-invariants": [
+        "Each manifest entry has exactly one materializable input with matching Role/configuration/task digests. Persist captures then group receipt before member provisioning or dispatch; GROUP_MANIFEST_INVALID has no effect."
+      ]
     },
     "assign_group_response": {
       "type": "object",
@@ -2546,9 +2560,8 @@
       "required": [
         "schema",
         "operation",
-        "plan_ref",
-        "expected_manifest_digest",
-        "explicit_operator_approval"
+        "explicit_operator_approval",
+        "plan"
       ],
       "properties": {
         "schema": {
@@ -2557,14 +2570,11 @@
         "operation": {
           "const": "apply_maintenance"
         },
-        "plan_ref": {
-          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
-        },
-        "expected_manifest_digest": {
-          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
-        },
         "explicit_operator_approval": {
           "const": true
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
         }
       },
       "x-normalizedBodySchema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/apply_maintenance_normalized_body",
@@ -2604,7 +2614,9 @@
       "required": [
         "schema",
         "operation",
-        "operation_ref"
+        "plan_ref",
+        "workspace_ref",
+        "selected_generation"
       ],
       "properties": {
         "schema": {
@@ -2613,8 +2625,16 @@
         "operation": {
           "const": "get_maintenance"
         },
-        "operation_ref": {
+        "plan_ref": {
           "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "selected_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "x-normalizedBodySchema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/get_maintenance_normalized_body",
@@ -3148,11 +3168,20 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "manifest"
+        "manifest",
+        "inputs"
       ],
       "properties": {
         "manifest": {
           "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/group_assignment"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/group_input_identity"
+          }
         }
       }
     },
@@ -3304,19 +3333,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "plan_ref",
-        "expected_manifest_digest",
-        "explicit_operator_approval"
+        "explicit_operator_approval",
+        "plan"
       ],
       "properties": {
-        "plan_ref": {
-          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
-        },
-        "expected_manifest_digest": {
-          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
-        },
         "explicit_operator_approval": {
           "const": true
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
         }
       }
     },
@@ -3324,11 +3349,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "operation_ref"
+        "plan_ref",
+        "workspace_ref",
+        "selected_generation"
       ],
       "properties": {
-        "operation_ref": {
+        "plan_ref": {
           "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "selected_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       }
     },
@@ -3634,6 +3669,76 @@
           },
           "minItems": 28,
           "maxItems": 28
+        }
+      }
+    },
+    "group_task_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "provisioning_ref",
+        "assignment"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.group-task-input/v1"
+        },
+        "provisioning_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "assignment": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assignment"
+        }
+      },
+      "x-maxEncodedBytes": 134217728
+    },
+    "group_task_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "absolute_file_path",
+        "content"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "absolute_file_path": {
+          "type": "string",
+          "pattern": "^/",
+          "minLength": 1,
+          "maxLength": 4096,
+          "x-maxUtf8Bytes": 4096
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        }
+      },
+      "x-invariants": [
+        "Explicit regular source inside authorized workspace; no symlinks, escape or source race. Exact JCS group_task_input bytes, at most128MiB, captured before receipt; source path supplies no authority."
+      ]
+    },
+    "group_input_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "content"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
         }
       }
     }

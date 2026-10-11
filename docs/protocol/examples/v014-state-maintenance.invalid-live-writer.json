@@ -1,8 +1,8 @@
 {
   "schema": "dolgorae.maintenance-state/v1",
-  "operation_ref": "01900000-0000-7000-8000-000000000068",
+  "operation_ref": "019a0000-0000-7000-8000-000000000018",
   "plan": {
-    "plan_ref": "plan:fixture",
+    "plan_ref": "019a0000-0000-7000-8000-000000000018",
     "workspace_ref": "workspace:fixture",
     "selected_generation": 1,
     "dry_run": true,
@@ -52,5 +52,7 @@
     }
   ],
   "retained_receipt_count": 1,
-  "automatic_deletion": false
+  "automatic_deletion": false,
+  "operator_id": "operator:fixture",
+  "operator_generation": 3
 }

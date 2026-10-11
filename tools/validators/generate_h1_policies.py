@@ -53,20 +53,23 @@ def main():
                 recovery = "Recapture explicitly selected safe sources before a new validation; validation cannot install or allocate."
             elif action == "PlanMaintenance":
                 recovery = "Refresh explicit operator scope and generation; dry-run cannot collect or change state."
+            elif action == "GetMaintenance":
+                errors += ["MAINTENANCE_NOT_APPLIED", "LOOKUP_NAMESPACE_UNAVAILABLE", "LOOKUP_NAMESPACE_CORRUPT"]
+                recovery = "Read the original plan ID as maintenance ID with retained operator/workspace/generation; retained binding survives generation switch. Only complete integrity-checked original namespace can prove MAINTENANCE_NOT_APPLIED; unavailable or corrupt state requires recovery."
         elif action.startswith(("Cancel", "Release", "Close", "Apply")):
             effect = "S"
             errors = ["CONTROLLER_MISMATCH", "RUN_BUSY", "RUN_STATE_CONFLICT", "OUTCOME_UNKNOWN", "RECOVERY_REQUIRED"]
             recovery = "Read the same durable lifecycle owner and current generation/workload proof; acknowledgement is not terminal/released proof."
             if action == "ApplyMaintenance":
                 errors += ["MAINTENANCE_PLAN_STALE", "STORAGE_CAPACITY_EXCEEDED", "ARTIFACT_INTEGRITY_FAILURE"]
-                recovery = "Resume the recorded maintenance generation after supported recovery; preserve active/unknown references and receipts; capacity refusal differs from corruption."
+                recovery = "Before Apply retain plan.plan_id, operator, workspace and generation. maintenance_id equals plan_id; after reply loss GetMaintenance reads that original identity without reapplying, including after generation switch. Preserve retained bindings/references/receipts; unavailable/corrupt lookup cannot prove not applied."
         else:
             effect = "K"
             errors = ["CONTROLLER_MISMATCH", "IDEMPOTENCY_CONFLICT", "RUN_STATE_CONFLICT", "OUTCOME_UNKNOWN", "RECOVERY_REQUIRED"]
             recovery = "Lookup the original principal/generation/scope/kind/key before replay; accepted returns retained receipt before new revision checks; unresolved cannot redispatch."
             if action == "AssignGroup":
-                errors += ["GROUP_LIMIT_EXCEEDED", "GROUP_MANIFEST_INVALID"]
-                recovery += " Recover partial acceptance per immutable entry without repeating uncertain tasks."
+                errors += ["GROUP_LIMIT_EXCEEDED", "GROUP_MANIFEST_INVALID", "STORAGE_CAPACITY_EXCEEDED"]
+                recovery += " Validate and durably capture each checked entry input against installed provisioning and manifest digests before receipt, then provision/dispatch. Accepted-key replay never reopens input files; recover per immutable entry without repeating uncertain tasks."
             elif action == "MergeGroupResults":
                 errors += ["FINDINGS_OUTPUT_INVALID", "RESULT_CONTENT_UNAVAILABLE"]
                 recovery += " Reproduce sorted exact findings; retain missing/unknown/failed coverage and perform no implicit synthesis."
@@ -101,7 +104,8 @@ def main():
     statuses = {code: status for status, codes in historical_mapping["status_overrides"].items() for code in codes}
     statuses.update({"LOOKUP_NAMESPACE_CORRUPT": "DATA_LOSS", "LOOKUP_NAMESPACE_UNAVAILABLE": "UNAVAILABLE",
                      "RESULT_CONTENT_UNAVAILABLE": "FAILED_PRECONDITION", "SOURCE_CHANGED": "ABORTED",
-                     "GROUP_MANIFEST_INVALID": "INVALID_ARGUMENT", "MAINTENANCE_PLAN_STALE": "ABORTED"})
+                     "GROUP_MANIFEST_INVALID": "INVALID_ARGUMENT", "MAINTENANCE_PLAN_STALE": "ABORTED",
+                     "MAINTENANCE_NOT_APPLIED": "NOT_FOUND"})
     for code in ["SOURCE_TOO_LARGE", "GROUP_LIMIT_EXCEEDED", "POOL_CAPACITY_EXCEEDED", "ROUND_LIMIT_EXCEEDED", "STORAGE_CAPACITY_EXCEEDED"]:
         statuses[code] = "RESOURCE_EXHAUSTED"
     codes = sorted({code for row in rows.values() for code in row["material_errors"]} | {

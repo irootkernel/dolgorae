@@ -144,6 +144,23 @@ they do not claim that a particular RPC or model tool is already exposed.
 | Cancel task / release member / close aggregate | S; authenticated current owner and current task/member/aggregate identity | Read same durable lifecycle owner and membership/workload proof; interrupt acknowledgement alone cannot establish `released` or terminal outcome |
 | Operator maintenance / explicit result retention or GC | S; explicit operator scope, generation and dry-run plan | Preserve active/unknown references and identity receipts; interrupted operation resumes its recorded generation; predictable capacity refusal differs from corruption |
 
+`PlanMaintenance.plan_id` is a UUIDv7 allocated for the returned dry-run plan;
+planning creates no maintenance effect. The caller retains that ID, operator
+identity, workspace and selected generation before `ApplyMaintenance`.
+`maintenance_id` (facade `operation_ref`) MUST equal this original plan ID.
+`GetMaintenance` uses it with the original authorized scope, even after the
+selected generation changes. Apply durably binds at most one maintenance owner
+to that plan under the lifecycle lock before any effect. Recovery and generation
+retirement retain the binding. After reply loss, read this owner before any new
+mutation; do not allocate a replacement ID or repeat Apply automatically.
+`MAINTENANCE_NOT_APPLIED` proves no owner only after a complete, integrity-checked
+read of the retained plan namespace. An unavailable or corrupt namespace requires
+recovery and cannot return that refusal. The refusal grants no new mutation
+authority. Facade Apply carries the complete retained dry-run plan and explicit
+approval, matching public Apply; it cannot depend on a planning-side cache.
+The facade getter retains `plan_ref`, workspace and selected generation;
+operator authority remains in trusted transport, outside model arguments.
+
 The public `OperationRef` consists of the retained `CallerScope`, operation kind
 and original idempotency key. Consumers MUST retain these facts before the
 initial mutation. The Controller kind, normalized principal and generation come
@@ -452,6 +469,46 @@ record separately links each entry to its task/member identity and current
 provisioning/dispatch state. Partial progress cannot change the manifest or
 erase a member. Wait predicates and observation timestamps are excluded.
 TASK-068 must prove worst-case size and include the mandatory 50-task case.
+
+`AssignGroup.inputs` supplies exactly one `GroupTaskSource` per manifest entry,
+sorted by the same unique entry key. Each source contains an explicitly selected
+absolute file path and a `BytesRef` of its complete JCS
+`dolgorae.group-task-input/v1` document. The checked facade definition
+`group_task_input` owns that closed document: `{schema, provisioning_ref,
+assignment}`, where `assignment` is the existing rich facade task assignment.
+`provisioning_ref` selects the immutable installed provisioning snapshot returned
+by Install (public `installed_policy_ref`); it does not hire or dispatch a member.
+The snapshot supplies the accepted Role, configuration and instruction bytes.
+Public-v2 and Machine/facade-v5 use this same file format. A digest alone or an
+earlier individual Assign is not an input supply path.
+
+The provider reads only these explicit regular files within the authorized
+workspace, rejecting symlinks, path escape, source races, duplicate JSON keys,
+unknown fields, unavailable snapshots, hash/length mismatch and invalid tasks
+before group acceptance. A source is at most 128 MiB; the selected task schema's
+existing rich context and criterion bounds still apply. This ceiling covers its
+worst-case escaped JSON without replacing rich tasks with legacy objectives.
+Referenced evidence remains subject to complete authorized content reads.
+Validate each task body and accepted-task identity against actual captured bytes
+and the installed provisioning snapshot, then match all three manifest digests.
+Missing, duplicate, extra or mismatched entry input returns
+`GROUP_MANIFEST_INVALID` with no acceptance or dispatch.
+
+Capture the complete validated input bytes and provisioning snapshot references
+durably before committing the group receipt, and commit that receipt before any
+member provisioning or dispatch. Group state retains one content-addressed input
+capture per entry; recovery never reopens a source file. Each stored capture
+chunk is at most 8 MiB; the 256-MiB per-Run quota and reserved capacity apply.
+Capture references identify the complete chunked snapshot, without increasing
+existing individual artifact or read-chunk limits. Capacity is reserved before
+acceptance; capacity refusal has no group effect.
+The manifest and its digest remain unchanged. The normalized AssignGroup body
+contains `{manifest, inputs}`, with each input reduced to `{entry_key, content}`:
+paths locate captured bytes but are excluded from semantic identity. Same-key
+replay of accepted work returns the retained receipt before opening input files;
+changed content or manifest under that key conflicts. The input-reference list
+is at most 2 MiB encoded and each path at most 4096 UTF-8 bytes. It travels with the at-most-1-MiB manifest; task bodies stay in the
+captured snapshots.
 
 `dolgorae.merged-findings/v1` hashes:
 

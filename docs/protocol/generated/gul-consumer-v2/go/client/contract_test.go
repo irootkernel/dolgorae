@@ -497,6 +497,17 @@ func TestPortableFixturesDecodeAgainstGeneratedTypes(t *testing.T) {
 	if identity.Images[0].Detail != "high" || image.Detail != pb.ImageDetail_IMAGE_DETAIL_HIGH || image.MediaType != identity.Images[0].MediaType || image.Content.ByteLength != identity.Images[0].Content.ByteLength || image.Content.Sha256 != identity.Images[0].Content.SHA256 {
 		t.Fatal("JSON/protobuf accepted image identity differs")
 	}
+	plannedMaintenance := decoded["plan_maintenance_response"].(*pb.PlanMaintenanceResponse).Plan
+	applyMaintenance := decoded["apply_maintenance_request"].(*pb.ApplyMaintenanceRequest)
+	getMaintenance := decoded["get_maintenance_request"].(*pb.GetMaintenanceRequest)
+	if !proto.Equal(applyMaintenance.Plan, plannedMaintenance) || !proto.Equal(getMaintenance.Scope, plannedMaintenance.Scope) || getMaintenance.MaintenanceId != plannedMaintenance.PlanId {
+		t.Fatal("maintenance getter cannot be constructed from retained pre-call plan")
+	}
+	for _, owner := range []*pb.MaintenanceProjection{decoded["apply_maintenance_response"].(*pb.ApplyMaintenanceResponse).Maintenance, decoded["get_maintenance_response"].(*pb.GetMaintenanceResponse).Maintenance} {
+		if owner.MaintenanceId != plannedMaintenance.PlanId || !proto.Equal(owner.Plan, plannedMaintenance) {
+			t.Fatal("maintenance owner lost original plan identity")
+		}
+	}
 	newServices := map[protoreflect.Name]bool{"OperationService": true, "ProvisioningService": true, "SpecialistService": true, "BrokerService": true, "GroupService": true, "MaintenanceService": true}
 	seen := 0
 	services := pb.File_dolgorae_public_v2_dolgorae_proto.Services()
@@ -556,6 +567,80 @@ func TestPortableFixturesDecodeAgainstGeneratedTypes(t *testing.T) {
 		}
 		if err := client.Decode(fixture.JSON, messageType.New().Interface()); err == nil {
 			t.Fatalf("negative fixture %s was admitted", fixture.ID)
+		}
+	}
+}
+
+// H1 wire fixture only; TASK-085 must implement the durable provider binding.
+type maintenanceLossServer struct {
+	pb.UnimplementedMaintenanceServiceServer
+	applies atomic.Int32
+	plan    *pb.MaintenancePlan
+	owner   *pb.MaintenanceProjection
+}
+
+func (server *maintenanceLossServer) PlanMaintenance(_ context.Context, request *pb.PlanMaintenanceRequest) (*pb.PlanMaintenanceResponse, error) {
+	server.plan = &pb.MaintenancePlan{PlanId: "019a0000-0000-7000-8000-000000000018", Scope: proto.Clone(request.Scope).(*pb.MaintenanceScope), Kind: request.Kind, DryRun: true, PlanDigest: "sha256:" + strings.Repeat("a", 64)}
+	return &pb.PlanMaintenanceResponse{Plan: proto.Clone(server.plan).(*pb.MaintenancePlan)}, nil
+}
+
+func (server *maintenanceLossServer) ApplyMaintenance(_ context.Context, request *pb.ApplyMaintenanceRequest) (*pb.ApplyMaintenanceResponse, error) {
+	server.applies.Add(1)
+	if !proto.Equal(request.Plan, server.plan) || request.ExpectedGeneration != server.plan.Scope.SelectedGeneration {
+		return nil, status.Error(codes.Aborted, "stale plan")
+	}
+	server.owner = &pb.MaintenanceProjection{MaintenanceId: request.Plan.PlanId, Plan: proto.Clone(request.Plan).(*pb.MaintenancePlan), State: pb.MaintenanceState_MAINTENANCE_STATE_COMPLETED, SelectedGeneration: request.ExpectedGeneration + 1}
+	return nil, status.Error(codes.Unavailable, "reply lost after generation switch")
+}
+
+func (server *maintenanceLossServer) GetMaintenance(_ context.Context, request *pb.GetMaintenanceRequest) (*pb.GetMaintenanceResponse, error) {
+	if request.GetOperator().GetExpectedOperatorId() != "operator" || request.GetOperator().GetExpectedGeneration() != 3 || request.MaintenanceId != server.plan.PlanId || !proto.Equal(request.Scope, server.plan.Scope) {
+		return nil, status.Error(codes.PermissionDenied, "wrong original operator/scope/generation/plan")
+	}
+	if server.owner == nil {
+		return nil, status.Error(codes.NotFound, "MAINTENANCE_NOT_APPLIED")
+	}
+	return &pb.GetMaintenanceResponse{Maintenance: proto.Clone(server.owner).(*pb.MaintenanceProjection)}, nil
+}
+
+func TestLostFirstMaintenanceReplyUsesPreCallPlanIdentity(t *testing.T) {
+	fixture := &maintenanceLossServer{}
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	pb.RegisterMaintenanceServiceServer(server, fixture)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	connection, err := grpc.NewClient("passthrough:///maintenance-loss", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithDisableRetry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	api := pb.NewMaintenanceServiceClient(connection)
+	operator := &pb.OperatorCarrierRef{ExpectedOperatorId: "operator", ExpectedGeneration: 3}
+	planned, err := api.PlanMaintenance(ctx, &pb.PlanMaintenanceRequest{Scope: &pb.MaintenanceScope{Workspace: &pb.WorkspaceRef{ExpectedWorkspaceId: "workspace"}, SelectedGeneration: 7}, Operator: operator, Kind: pb.MaintenanceKind_MAINTENANCE_KIND_LEDGER_CHECKPOINT})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Construct the entire getter before Apply; no returned maintenance ID exists.
+	lookup := &pb.GetMaintenanceRequest{Scope: proto.Clone(planned.Plan.Scope).(*pb.MaintenanceScope), Operator: operator, MaintenanceId: planned.Plan.PlanId}
+	if _, err = api.GetMaintenance(ctx, lookup); status.Code(err) != codes.NotFound {
+		t.Fatalf("unapplied plan: %v", err)
+	}
+	_, err = api.ApplyMaintenance(ctx, &pb.ApplyMaintenanceRequest{Plan: planned.Plan, Operator: operator, ExpectedGeneration: 7})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected lost first reply: %v", err)
+	}
+	got, err := api.GetMaintenance(ctx, lookup)
+	if err != nil || got.Maintenance.MaintenanceId != lookup.MaintenanceId || got.Maintenance.SelectedGeneration != 8 || fixture.applies.Load() != 1 {
+		t.Fatalf("original maintenance not recovered: %v %v", got, err)
+	}
+	for _, change := range []func(*pb.GetMaintenanceRequest){func(r *pb.GetMaintenanceRequest) { r.MaintenanceId = "foreign" }, func(r *pb.GetMaintenanceRequest) { r.Scope.SelectedGeneration++ }, func(r *pb.GetMaintenanceRequest) { r.Operator.ExpectedGeneration++ }, func(r *pb.GetMaintenanceRequest) { r.Scope.Workspace.ExpectedWorkspaceId = "foreign" }} {
+		wrong := proto.Clone(lookup).(*pb.GetMaintenanceRequest)
+		change(wrong)
+		if _, err := api.GetMaintenance(ctx, wrong); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("foreign maintenance lookup admitted: %v", err)
 		}
 	}
 }

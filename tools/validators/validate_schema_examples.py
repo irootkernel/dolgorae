@@ -606,6 +606,26 @@ def validate_v014_method_cases(registry: Registry, errors: list[str]) -> int:
             key: value for key, value in case["request"].items()
             if key not in normalization["excluded_envelope_fields"]
         }
+        if operation == "assign_group":
+            normalized["inputs"] = [
+                {"entry_key": source["entry_key"], "content": source["content"]}
+                for source in normalized["inputs"]
+            ]
+            fixture = json.loads((PROTOCOL / "dolgorae-gul-consumer-v2.fixtures.json").read_text())
+            supplied = fixture["group_input_fixtures"]["facade_source"]
+            content = json.loads(supplied["utf8"])
+            content_errors = list(Draft202012Validator(
+                {"$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/group_task_input"},
+                registry=registry, format_checker=FormatChecker(),
+            ).iter_errors(content))
+            if content_errors:
+                errors.append(f"v014 group input: {content_errors[0].message}")
+            state_errors = list(Draft202012Validator(
+                {"$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/group_record"},
+                registry=registry, format_checker=FormatChecker(),
+            ).iter_errors(fixture["group_input_fixtures"]["persisted_group"]))
+            if state_errors:
+                errors.append(f"v014 group capture: {state_errors[0].message}")
         if normalized != case["normalized_request_body"]:
             errors.append(f"v014 method {operation}: normalization dropped semantic input")
         normalized_errors = list(Draft202012Validator(

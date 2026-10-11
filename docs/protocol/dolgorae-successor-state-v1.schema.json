@@ -134,7 +134,7 @@
         }
       },
       "x-invariants": [
-        "Accepted common/Role/dependency/guidance bodies and hashes match the complete closed identities; aggregate UTF-8 bytes≤65536, excluding core and separators.",
+        "Accepted common/Role/dependency/guidance bodies and hashes match the complete closed identities; aggregate UTF-8 bytes\u226465536, excluding core and separators.",
         "Source aliases/order/composition follow instruction-identity/v1. Recovery reconstructs only accepted bytes; no source reloading or in-place legacy rewrite."
       ]
     },
@@ -848,7 +848,8 @@
         "manifest_digest",
         "receipt",
         "revision",
-        "entries"
+        "entries",
+        "input_captures"
       ],
       "properties": {
         "schema": {
@@ -878,10 +879,19 @@
           },
           "minItems": 1,
           "maxItems": 64
+        },
+        "input_captures": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/group_input_capture"
+          }
         }
       },
       "x-invariants": [
-        "Entries correspond exactly once to immutable manifest entries. Partial progress never mutates manifest or erases unknown member/task linkage."
+        "Entries correspond exactly once to immutable manifest entries. Partial progress never mutates manifest or erases unknown member/task linkage.",
+        "Exactly one immutable validated group_task_input capture per manifest entry, with complete chunked bytes and provisioning snapshot pinned before receipt. Each capture chunk is at most8MiB and per-Run quota/capacity is reserved before acceptance. Recovery never reads original paths."
       ]
     },
     "merge_record": {
@@ -1082,7 +1092,7 @@
         }
       },
       "x-invariants": [
-        "Owned server generations≤configured K. One member passivation cannot stop another; shutdown requires whole-generation proof. No pooled member can become writable."
+        "Owned server generations\u2264configured K. One member passivation cannot stop another; shutdown requires whole-generation proof. No pooled member can become writable."
       ]
     },
     "queue_entry": {
@@ -1236,7 +1246,7 @@
         }
       },
       "x-invariants": [
-        "Entries≤selected policy capacity. Accepted task bytes and uncertainty survive restart."
+        "Entries\u2264selected policy capacity. Accepted task bytes and uncertainty survive restart."
       ]
     },
     "lifecycle_state": {
@@ -1464,7 +1474,9 @@
         "recovery_referenced_generations",
         "protected_content",
         "retained_receipt_count",
-        "automatic_deletion"
+        "automatic_deletion",
+        "operator_id",
+        "operator_generation"
       ],
       "properties": {
         "schema": {
@@ -1555,6 +1567,14 @@
         },
         "automatic_deletion": {
           "const": false
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "allOf": [
@@ -1592,7 +1612,8 @@
         }
       ],
       "x-invariants": [
-        "Lock order: lifecycle then ledger writer. Sync checkpoint/segments and directories before atomic manifest switch. Before switch select old; after switch validate/select new. Retain old generations for reader/recovery pins. Explicit GC dry-run never deletes accepted identity/receipt metadata."
+        "Lock order: lifecycle then ledger writer. Sync checkpoint/segments and directories before atomic manifest switch. Before switch select old; after switch validate/select new. Retain old generations for reader/recovery pins. Explicit GC dry-run never deletes accepted identity/receipt metadata.",
+        "operation_ref equals original plan.plan_ref; durable original operator/workspace/generation binding precedes effects and survives generation retirement."
       ]
     },
     "content_tombstone": {
@@ -1642,6 +1663,33 @@
     },
     "profile_server_state_v2": {
       "$ref": "https://dolgorae.local/schema/profile-server-state/v2"
+    },
+    "group_input_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "content",
+        "capture_ref",
+        "provisioning_ref"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "provisioning_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "capture_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        }
+      }
     }
   },
   "x-generationSelection": {

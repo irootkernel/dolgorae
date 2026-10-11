@@ -51,7 +51,7 @@
     },
     {
       "path": "docs/protocol/dolgorae/public/v2/dolgorae.proto",
-      "sha256": "785d9c0c5b852cc55917bdda3aa70b55ac6c81360971e3f2d13ebf18bf6588d2",
+      "sha256": "e0229262e9690d1ec5534e1a3e4b1d41a7ac6d9112b0d91ebc236e02cee71683",
       "generation": "H1-contract-input"
     },
     {
@@ -116,7 +116,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-external-specialist-facade-v5.schema.json",
-      "sha256": "8f83b7272fcb62a1e93f7c762a08c19ff1253cfa995c5d3e529ef779623d5d0a",
+      "sha256": "c59cd663595acae3db15a6ab1e7c36f01eb7f06c3d38712230b9537333acfc35",
       "generation": "https://dolgorae.local/schema/external-specialist-facade/v5"
     },
     {
@@ -136,12 +136,12 @@
     },
     {
       "path": "docs/protocol/dolgorae-grpc-error-mapping-v2.json",
-      "sha256": "274a5dc51c705373bca159a44691737e55ca6f8bfd5cb3ceb6fab0b7287485a7",
+      "sha256": "696d2052b4fd785e2188d9cac4f72e5dbfa23459e5c26862aa665da8a4f6b288",
       "generation": "dolgorae.grpc-error-mapping/v2"
     },
     {
       "path": "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json",
-      "sha256": "ded51af3ed9a610227d41772e7b879b60e290f6c20d1c8518b3b373b786192ba",
+      "sha256": "92f1d4e5fa8f1613c932a547c7d91722aa48174dcbe2c54ed88cf3cc9fbb2e6c",
       "generation": "dolgorae.gul-consumer-fixtures/v2"
     },
     {
@@ -206,12 +206,12 @@
     },
     {
       "path": "docs/protocol/dolgorae-public-v2.descriptor.json",
-      "sha256": "6663eacc5eb93b87763593200e3f2c83315ab3a55231c610697850df0c808cd5",
+      "sha256": "bc936cd23238f5f55c4d9c8c15355ef2fd59f8093188c1639e044333cf023597",
       "generation": "dolgorae.public.v2"
     },
     {
       "path": "docs/protocol/dolgorae-public-v2.descriptor.pb",
-      "sha256": "e2146b304d3e6845cbc9a7290347c91c1846c7f4dcaad3a8791bd36a8b29242b",
+      "sha256": "184cf5beb00063c3993e37c18a9ce4b031458295889df413984b6e468c68adf0",
       "generation": "H1-contract-input"
     },
     {
@@ -231,7 +231,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-rpc-mutation-policy-v2.json",
-      "sha256": "9d7dab54c3f74a17a09ed1d8727dd2e4eff95ab8ab6af4cd594df1fefda3f4d5",
+      "sha256": "f1d75ef1b5d64ead38652280e4a5ad6bc88bba55417fed85a88684536d153415",
       "generation": "dolgorae.rpc-mutation-policy/v2"
     },
     {
@@ -281,7 +281,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-successor-state-v1.schema.json",
-      "sha256": "c77cb0bdb11655c08a5e1b4248a89826b75945c5de38dff90f4d34b098294ade",
+      "sha256": "96617e4b46bc7ee2da518444492da0f950927105f6e400213f1cae1ae7ba291c",
       "generation": "https://dolgorae.local/schema/successor-state/v1"
     },
     {
@@ -341,7 +341,7 @@
     },
     {
       "path": "docs/protocol/examples/successor-facade-v5-methods.valid.json",
-      "sha256": "ccdd8312086b3b76a7a4b5e8810e272b0abe6c38dd5c3c3a2bee059ec46e28f9",
+      "sha256": "f5eebc8b34abdbd367a760e5eb0a37e642a0cb80bb9629b569d0a9e1d519427d",
       "generation": "H1-contract-input"
     },
     {
@@ -651,12 +651,12 @@
     },
     {
       "path": "docs/protocol/examples/v014-state-maintenance.invalid-live-writer.json",
-      "sha256": "8c9d8bb4a39c9daed1c481255410817094f77e45673941ab3922bd4fee9ff96e",
+      "sha256": "278971458db203e19e82525869925e8dee8fe75cdc3f6434b72c043455bc3a30",
       "generation": "H1-contract-input"
     },
     {
       "path": "docs/protocol/examples/v014-state-maintenance.valid.json",
-      "sha256": "2b7115ef2a432666eabbaaf3d4b95ec0e92f7cddd52c3351a929de73ab4a9a2a",
+      "sha256": "9b691ca116331d4fc7b4ccdf04739452d1c40a63c17c101024c07e024a2abf94",
       "generation": "H1-contract-input"
     },
     {
@@ -686,17 +686,17 @@
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/client/contract_test.go",
-      "sha256": "0e2b158274e7051ca76ca90765cd8710cfc4007e7a0d383cf302859aa89801b1",
+      "sha256": "e7c60b196c6cbabd4b212bb5b319827cbd68e4e100d350213e0a522db0b57f5c",
       "generation": "H1-contract-input"
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/client/known_error_codes.go",
-      "sha256": "10f5aa6a085dd6e19ad6951db5ee9e126b6a6ef6fd72fdf35dac76076dc2a6cc",
+      "sha256": "91bc46e68be45e63fda07d85040df607da0db40f40f7da89941a0a82871be80e",
       "generation": "H1-contract-input"
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae.pb.go",
-      "sha256": "8bf565ecca48a238ff679cf8edb93934fb9a40b5d9fc40827ecd5515b111bc19",
+      "sha256": "43d6b975173fc5d3d819ea128b3b7d7e606b34ff21c8d1c8d91b7adcf8c6e99e",
       "generation": "H1-contract-input"
     },
     {
@@ -736,7 +736,7 @@
     },
     {
       "path": "docs/specs/dolgorae-v014-method-and-digest-contract.md",
-      "sha256": "966e2f2911eab363ac699573b746fc970894cf9a07bafeb04b1ace97122fa286",
+      "sha256": "cb7e1cf80e787440ef8057f83f8b7f77513cfe8904bf8ed08b80069c4462a10c",
       "generation": "H1-contract-input"
     },
     {
@@ -766,7 +766,7 @@
     },
     {
       "path": "tests/successor_contract.rs",
-      "sha256": "7b025f13f8797bfca851b70146768e422b170a2b968b91e96adb67b986644d34",
+      "sha256": "db26dc8edf1b00ef5025335176a389472eaed86c279d25a78612e7513d2ce351",
       "generation": "H1-contract-input"
     },
     {
@@ -781,7 +781,7 @@
     },
     {
       "path": "tools/validators/generate_h1_policies.py",
-      "sha256": "27a96a85226c8e03cc119351088466acb844f4fb3aea6a1531bf916c2e1cbec6",
+      "sha256": "028ca97f68a881fe49f0dbc97bea48baf9ecfd4dcd29da7d1b4908752592c231",
       "generation": "H1-contract-input"
     },
     {
@@ -801,7 +801,7 @@
     },
     {
       "path": "tools/validators/validate_schema_examples.py",
-      "sha256": "0e9cc97bc2d9e3857b3e316a391a01707ac92eeacebf0c43ce5024953eed5297",
+      "sha256": "a510e023303bc4eb9fe8e296b0fdc2ef810ac5abb96970d5c251b0ab68317f97",
       "generation": "H1-contract-input"
     }
   ],

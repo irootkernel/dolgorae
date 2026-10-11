@@ -2480,11 +2480,17 @@ message WaitPredicate {
   WaitPredicateKind kind = 1;
   optional uint32 k = 2;
 }
+message GroupTaskSource {
+  string entry_key = 1;
+  string absolute_file_path = 2;
+  BytesRef content = 3;
+}
 message AssignGroupRequest {
   RequestContext context = 1;
   DelegationScope scope = 2;
   KeyedAdmission admission = 3;
   GroupAssignmentIdentity assignment = 4;
+  repeated GroupTaskSource inputs = 5;
 }
 message AssignGroupResponse {
   ResponseContext context = 1;
