@@ -3129,7 +3129,7 @@
             "operation_kind": "OPERATION_KIND_ASSIGN_GROUP",
             "idempotency_key": "original:AssignGroup"
           },
-          "accepted_input_digest": "sha256:5578aa3464af1112ed50c2fcc6116ca8347e1548c50ad38959741e66b28117d8",
+          "accepted_input_digest": "sha256:336e242fd272ff88b2d0e74711e93e6031f56f5836b425b10826a9c2be959763",
           "receipt_id": "receipt:AssignGroup",
           "subjects": {
             "group_id": "group:fixture"
@@ -3519,7 +3519,7 @@
             "operation_kind": "OPERATION_KIND_MERGE_GROUP_RESULTS",
             "idempotency_key": "original:MergeGroupResults"
           },
-          "accepted_input_digest": "sha256:772d542565e4df4e7cf767ce49cdbd301c31487e081a0f7f8be58fc1c823cc20",
+          "accepted_input_digest": "sha256:1640c61805b68ea3e26c6b947fe0b8f9362e2d852f09d75a5c5b5a0191f38e69",
           "receipt_id": "receipt:MergeGroupResults",
           "subjects": {
             "group_id": "group:fixture",
@@ -3687,7 +3687,7 @@
             "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
             "idempotency_key": "original:AssignSynthesis"
           },
-          "accepted_input_digest": "sha256:87f47892a3e6d2aba6a8d5f119067b1166795343f65319e85b6104ddb8be034b",
+          "accepted_input_digest": "sha256:fe3f7a1308b50b8eff62a57f060b4c9be376297adcf41439c60d8e71dd24d5d0",
           "receipt_id": "receipt:AssignSynthesis",
           "subjects": {
             "member_id": "member:fixture",
@@ -4590,7 +4590,7 @@
           "operation_kind": "assign_group",
           "idempotency_key": "group-original-key"
         },
-        "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+        "accepted_input_digest": "sha256:33b2bb0ca84a18835930a201fa1439acb701035b1bf8f58ca5dc7e54820ce14e",
         "accepted_subjects": {
           "run_ref": null,
           "member_ref": null,
@@ -4674,7 +4674,7 @@
       },
       "identity": {
         "schema": "dolgorae.mutation-envelope/v1",
-        "request_schema": "dolgorae.public.v2.AssignGroupRequest",
+        "request_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_group_normalized_body",
         "operation_kind": "assign_group",
         "workspace_ref": "workspace:fixture",
         "scope_kind": "external_engagement",
@@ -4723,7 +4723,7 @@
       },
       "identity": {
         "schema": "dolgorae.mutation-envelope/v1",
-        "request_schema": "dolgorae.public.v2.MergeGroupResultsRequest",
+        "request_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/merge_group_results_normalized_body",
         "operation_kind": "merge_group_results",
         "workspace_ref": "workspace:fixture",
         "scope_kind": "external_engagement",
@@ -4806,7 +4806,7 @@
       },
       "identity": {
         "schema": "dolgorae.mutation-envelope/v1",
-        "request_schema": "dolgorae.public.v2.AssignSynthesisRequest",
+        "request_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_synthesis_normalized_body",
         "operation_kind": "assign_synthesis",
         "workspace_ref": "workspace:fixture",
         "scope_kind": "external_engagement",

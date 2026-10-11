@@ -371,6 +371,10 @@ fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs(
         "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
     ))
     .unwrap();
+    let normalized_schema: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-external-specialist-facade-v5.schema.json"
+    ))
+    .unwrap();
     let cases: BTreeMap<_, _> = fixtures["positive"]
         .as_array()
         .unwrap()
@@ -397,6 +401,17 @@ fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs(
         };
         assert_eq!(body, constructed["normalized_body"]);
         let identity = &constructed["identity"];
+        assert_eq!(
+            identity["request_schema"],
+            format!(
+                "{}#/$defs/{operation}_normalized_body",
+                normalized_schema["$id"].as_str().unwrap()
+            )
+        );
+        assert_eq!(
+            normalized_schema["$defs"][format!("{operation}_normalized_body")]["additionalProperties"],
+            false
+        );
         let scope = &response["receipt"]["operation"]["caller_scope"];
         assert_eq!(
             identity["request_body"],
@@ -458,6 +473,35 @@ fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs(
         let identity = json!({"schema":"dolgorae.mutation-envelope/v1","request_schema":case["normalized_body_schema"],"operation_kind":operation,"workspace_ref":namespace["workspace_ref"],"scope_kind":namespace["scope_kind"],"scope_ref":namespace["scope_ref"],"controller_principal":namespace["controller_principal"],"controller_generation":namespace["controller_generation"],"idempotency_key":namespace["idempotency_key"],"trusted_invocation_ref":null,"request_body":fixture_bytes_ref(&fixture_canonical_bytes(&case["normalized_request_body"]))});
         assert_eq!(receipt["accepted_input_digest"], fixture_digest(&identity));
     }
+}
+
+#[test]
+fn persisted_group_preserves_the_accepted_facade_receipt() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let facade: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/examples/successor-facade-v5-methods.valid.json"
+    ))
+    .unwrap();
+    let assignment = facade["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["operation"] == "assign_group")
+        .unwrap();
+    let persisted = &fixtures["group_input_fixtures"]["persisted_group"];
+    assert_eq!(persisted["manifest"], assignment["request"]["manifest"]);
+    assert_eq!(
+        persisted["manifest_digest"],
+        assignment["response"]["manifest_digest"]
+    );
+    assert_eq!(
+        persisted["input_captures"][0]["content"],
+        assignment["request"]["inputs"][0]["content"]
+    );
+    assert_eq!(persisted["receipt"], assignment["response"]["receipt"]);
 }
 
 fn fields(domain: &str) -> &'static [&'static str] {
