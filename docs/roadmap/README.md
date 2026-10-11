@@ -21,16 +21,16 @@ claiming a live model-facing Primary tool. `EPIC-014` and `TASK-039` through
 boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
-integration. EPIC-018 is ACTIVE after TASK-067 requirements and host-feasibility
-acceptance. EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
+integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
+and qualified H1 validation. EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
 PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
 TASK-068 is COMPLETE; TASK-069 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
 Documentation adoption alone activates no Task and claims no implementation or
-consumer acceptance. EPIC-018 execution has begun under a separately approved
-envelope; checked H1 contracts are ready for Epic validation and closeout.
+consumer acceptance. EPIC-018 validation and closeout are complete; the qualified
+H1 package is ready for Master to forward to Gul E15.
 `EPIC-016` is `COMPLETE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
@@ -2312,9 +2312,16 @@ not authorize installation, a release, external review, or actual Gul QA.
 
 ## EPIC-018: Modern Public Contract and Gul Alignment
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+Canonical Outcomes: [successor requirements](../specs/dolgorae-v014-successor-requirements.md),
+[method and digest contract](../specs/dolgorae-v014-method-and-digest-contract.md),
+[H1 package](../specs/dolgorae-v014-h1-package.md),
+[consumer acceptance](../specs/dolgorae-consumer-acceptance-v014.md),
+[coordination decision](../specs/dolgorae-v014-contract-coordination.md),
+[host qualification](../specs/dolgorae-v014-host-contract-qualification.md),
+[state and component ownership](../architecture/README.md#planned-v014-state-and-component-ownership),
+and [ADR-041](../architecture-decision-records/README.md#adr-041-qualify-a-protected-native-host-hook-binding-for-external-specialist-mcp).
 
 Goal: Prepare and publish the qualified immutable contract package for Aquarium, Podway and Gul, with pre-contract host feasibility and explicit consumer acceptance mappings.
 
@@ -2343,8 +2350,8 @@ Both actual pinned hosts passed the
 [prototype scenarios](../specs/dolgorae-v014-host-contract-qualification.md),
 including physical host loss before acknowledgement and supported lookup.
 Independent completion review accepted the requirements and bounded host feasibility.
-TASK-068 checked contracts are complete; Epic validation, closeout and H1
-delivery remain pending.
+TASK-068 checked contracts and whole-Epic validation are complete. The qualified
+H1 delivery archive is prepared for Master to forward to Gul.
 Gul E15/H2 is not an EPIC-018 prerequisite; EPIC-019 remains unopened.
 
 Depends on: completed TASK-066.
@@ -2361,8 +2368,9 @@ Status: `COMPLETE`
 
 The [checked H1 package](../specs/dolgorae-v014-h1-package.md) includes the
 separate successor protocols, generated clients, policies, fixtures and immutable
-lock. Repository checks and independent completion review passed. Epic validation
-and the committed delivery archive remain due before handoff.
+lock. Repository checks, independent completion review and whole-Epic validation
+passed. A reproducible archive of the committed H1 package is prepared for
+handoff.
 
 Depends on: TASK-067.
 
