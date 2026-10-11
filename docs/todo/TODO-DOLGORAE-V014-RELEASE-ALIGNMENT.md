@@ -13,7 +13,7 @@
 | Starting Gul revision | 2db9c4f12f88d5ee36810377248efcaf9bf4110c |
 | Gul planning revalidation | Current ADR-0057 maps Phase 2 to E15/T21 and Phase 4 to E16-T1..T16; original E15-T5..T20 remain Historical/Retired with complete scope mapping |
 | Release consumers | Aquarium, Podway and Gul; the complete three-consumer acceptance matrix is mandatory |
-| Current contract state | Adopted work requirements; public v2 is not yet checked, agreed or implemented |
+| Current contract state | Checked public-v2 and Gul consumer-v2 contracts are bound by the immutable H1 lock; production implementation and final consumer acceptance remain pending |
 | Execution authority | Initial adoption authorized documentation only; later execution requires its separately approved envelope. Implementation, reviews, runtime use, commits and publication retain their separate boundaries |
 
 The [documentation authority map](../README.md) governs this dossier. It owns
@@ -121,8 +121,8 @@ cannot identify a durable invocation.
 
 | Required host | Supported version and route | Current decision |
 | --- | --- | --- |
-| Codex host | Codex CLI 0.160.0 with the Dolgorae-owned pre-dispatch hook and native call/thread metadata binding | Bounded prototype feasibility independently accepted; exact H1 binding pending; the 0.149.0 record remains historical negative evidence |
-| Claude host | Claude Code 2.1.295 with the Dolgorae-owned pre-dispatch hook and protected opaque binding | Bounded prototype feasibility independently accepted; protected native hook journal is part of identity state; exact H1 binding pending |
+| Codex host | Codex CLI 0.160.0 with the Dolgorae-owned pre-dispatch hook and native call/thread metadata binding | Bounded prototype feasibility independently accepted and bound by the H1 lock; the 0.149.0 record remains historical negative evidence |
+| Claude host | Claude Code 2.1.295 with the Dolgorae-owned pre-dispatch hook and protected opaque binding | Bounded prototype feasibility independently accepted and bound by the H1 lock; protected native hook journal is part of identity state |
 
 For each route, TASK-067 names the trusted owner that creates the logical
 invocation identity before first delivery and durably retains it with the

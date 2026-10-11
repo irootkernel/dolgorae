@@ -423,5 +423,5 @@ it does not establish production runtime support or actual consumer-runtime
 acceptance. The selected sources, mapping and implementation/acceptance
 responsibilities are adopted in the specification, architecture and ADR owners.
 The historical Codex 0.149.0 negative MCP disposition and frozen public-v1
-artifacts remain unchanged. TASK-068 freeze, Epic validation and H1 delivery
-remain pending.
+artifacts remain unchanged. At TASK-067 acceptance, TASK-068 freeze, Epic
+validation and H1 delivery were pending. The roadmap owns their current status.
