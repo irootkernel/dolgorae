@@ -1,4 +1,5 @@
 //! Executable H1 contract vectors, not production-runtime or consumer acceptance.
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dolgorae::jcs::{self, LosslessJson};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -131,6 +132,332 @@ fn wire_group_fixtures_preserve_closed_identity_and_scope() {
         checked += 1;
     }
     assert_eq!(checked, 5, "group wire fixture coverage changed");
+}
+
+fn fixture_canonical_bytes(value: &Value) -> Vec<u8> {
+    jcs::canonicalize(&jcs::parse(&value.to_string()).unwrap()).unwrap()
+}
+
+fn fixture_bytes_ref(bytes: &[u8]) -> Value {
+    json!({"byte_length": bytes.len(), "sha256": format!("sha256:{}", jcs::sha256_hex(bytes))})
+}
+
+fn fixture_outcome(value: &Value) -> Value {
+    json!(
+        value
+            .as_str()
+            .unwrap()
+            .strip_prefix("TASK_OUTCOME_")
+            .unwrap()
+            .to_ascii_lowercase()
+    )
+}
+
+fn fixture_wire_identity(value: &Value) -> Value {
+    let mut identity = value.clone();
+    match identity["schema"].as_str().unwrap() {
+        "dolgorae.accepted-task/v1" => {
+            identity["execution_intent"] =
+                json!(match identity["execution_intent"].as_str().unwrap() {
+                    "CREATION_MODE_READ_ONLY" => "read_only",
+                    "CREATION_MODE_WRITABLE" => "canonical_workspace_write",
+                    _ => panic!("unsupported fixture creation mode"),
+                });
+        }
+        "dolgorae.complete-result/v1" => {
+            identity["terminal_outcome"] = fixture_outcome(&identity["terminal_outcome"]);
+        }
+        "dolgorae.merged-findings/v1" => {
+            for source in identity["sources"].as_array_mut().unwrap() {
+                source["state"] = fixture_outcome(&source["state"]);
+            }
+        }
+        _ => panic!("unsupported fixture identity"),
+    }
+    identity
+}
+
+fn fixture_digest(identity: &Value) -> Value {
+    json!(
+        checked_digest(identity["schema"].as_str().unwrap(), &identity.to_string())
+            .unwrap()
+            .0
+    )
+}
+
+fn fixture_inline_json(artifact: &Value) -> Value {
+    let bytes = STANDARD
+        .decode(artifact["inline_bytes"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(artifact["content"], fixture_bytes_ref(&bytes));
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(bytes, fixture_canonical_bytes(&value));
+    value
+}
+
+fn check_wire_fixture_identities(value: &Value, counts: &mut [usize; 3]) {
+    if let Some(object) = value.as_object() {
+        let identity = &value["identity"];
+        let pair = match identity["schema"].as_str() {
+            Some("dolgorae.accepted-task/v1") => Some(("accepted_task_digest", 0)),
+            Some("dolgorae.complete-result/v1") => Some(("result_digest", 1)),
+            Some("dolgorae.merged-findings/v1") => Some(("merged_findings_digest", 2)),
+            _ => None,
+        };
+        if let Some((field, index)) = pair {
+            assert_eq!(
+                value[field],
+                fixture_digest(&fixture_wire_identity(identity))
+            );
+            if let Some(body) = value.get("structured") {
+                assert_eq!(
+                    identity["task_body"],
+                    fixture_bytes_ref(&fixture_canonical_bytes(body))
+                );
+            }
+            if let Some(artifact) = value.get("final_response") {
+                let bytes = STANDARD
+                    .decode(artifact["inline_bytes"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(artifact["content"], fixture_bytes_ref(&bytes));
+                assert_eq!(identity["final_response"], artifact["content"]);
+            }
+            counts[index] += 1;
+        }
+        for child in object.values() {
+            check_wire_fixture_identities(child, counts);
+        }
+    } else if let Some(array) = value.as_array() {
+        for child in array {
+            check_wire_fixture_identities(child, counts);
+        }
+    }
+}
+
+#[test]
+fn wire_task_and_result_fixtures_bind_exact_identities() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let mut counts = [0; 3];
+    for fixture in fixtures["positive"].as_array().unwrap() {
+        check_wire_fixture_identities(&fixture["grpc_json"], &mut counts);
+    }
+    assert_eq!(counts, [12, 6, 1]);
+}
+
+#[test]
+fn group_merge_and_synthesis_fixtures_preserve_complete_provenance() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let cases: BTreeMap<_, _> = fixtures["positive"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["id"].as_str().unwrap(), &item["grpc_json"]))
+        .collect();
+    let collect = cases["collect_group_response"];
+    let merge = cases["merge_group_results_response"];
+    let identity = fixture_wire_identity(&merge["identity"]);
+    let sources = &identity["sources"];
+    assert_eq!(
+        collect["group"]["coverage"].as_array().unwrap().len(),
+        sources.as_array().unwrap().len()
+    );
+    assert_eq!(fixture_inline_json(&collect["source_manifest"]), *sources);
+    let merged = fixture_inline_json(&merge["merged_output"]);
+    for field in ["schema", "algorithm", "group_assignment_digest", "sources"] {
+        assert_eq!(merged[field], identity[field]);
+    }
+    assert_eq!(
+        merged["missing_sources"],
+        json!(
+            sources
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|source| source["state"] == "unknown" || source["state"] == "missing")
+                .collect::<Vec<_>>()
+        )
+    );
+    assert_eq!(identity["merged_output"], merge["merged_output"]["content"]);
+    assert_eq!(
+        identity["group_assignment_digest"],
+        collect["group"]["group_assignment_digest"]
+    );
+    for (coverage, source) in collect["group"]["coverage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(sources.as_array().unwrap())
+    {
+        let mut canonical = coverage.clone();
+        canonical["state"] = fixture_outcome(&canonical["state"]);
+        assert_eq!(canonical, *source);
+        let entry = collect["group"]["assignment"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["entry_key"] == source["entry_key"])
+            .unwrap();
+        for field in [
+            "role_snapshot_digest",
+            "agent_configuration_digest",
+            "accepted_task_digest",
+        ] {
+            assert_eq!(entry[field], source[field]);
+        }
+        if source["state"] == "completed" {
+            let result = collect["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|result| result["result_digest"] == source["result_digest"])
+                .unwrap();
+            for field in [
+                "worker_ref",
+                "task_ref",
+                "role_snapshot_digest",
+                "agent_configuration_digest",
+                "accepted_task_digest",
+            ] {
+                assert_eq!(result["identity"]["source"][field], source[field]);
+            }
+        }
+    }
+    assert_eq!(
+        cases["merge_group_results_request"]["sources"],
+        collect["group"]["coverage"]
+    );
+    let synthesis = cases["assign_synthesis_request"];
+    assert_eq!(
+        synthesis["merged_findings_digest"],
+        merge["merged_findings_digest"]
+    );
+    assert_eq!(
+        synthesis["task"]["identity"]["contexts"],
+        synthesis["task"]["structured"]["context"]
+    );
+    assert_eq!(
+        synthesis["task"]["identity"]["contexts"][0]["content"],
+        merge["merged_output"]["content"]
+    );
+    let constructed = &fixtures["constructed_identity_inputs"];
+    assert_eq!(
+        constructed["accepted_task"],
+        fixture_wire_identity(
+            &cases["assign_external_specialist_task_request"]["task"]["identity"]
+        )
+    );
+    assert_eq!(
+        constructed["complete_result"],
+        fixture_wire_identity(
+            &cases["lookup_operation_response"]["accepted"]["result"]["identity"]
+        )
+    );
+    assert_eq!(
+        constructed["group_assignment"],
+        collect["group"]["assignment"]
+    );
+    assert_eq!(constructed["merged_findings"], identity);
+}
+
+#[test]
+fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let cases: BTreeMap<_, _> = fixtures["positive"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["id"].as_str().unwrap(), &item["grpc_json"]))
+        .collect();
+    for (operation, constructed) in fixtures["constructed_mutation_inputs"].as_object().unwrap() {
+        let request = cases[constructed["request_fixture"].as_str().unwrap()];
+        let response = cases[constructed["response_fixture"].as_str().unwrap()];
+        let body = match operation.as_str() {
+            "assign_group" => {
+                json!({"manifest":request["assignment"],"inputs":request["inputs"].as_array().unwrap().iter().map(|source| json!({"entry_key":source["entry_key"],"content":source["content"]})).collect::<Vec<_>>()})
+            }
+            "merge_group_results" => {
+                let sources = fixture_wire_identity(
+                    &json!({"schema":"dolgorae.merged-findings/v1","sources":request["sources"]}),
+                );
+                json!({"group_ref":request["group_id"],"group_assignment_digest":cases["collect_group_response"]["group"]["group_assignment_digest"],"sources":sources["sources"],"algorithm":request["algorithm"]})
+            }
+            "assign_synthesis" => {
+                json!({"member_ref":request["member_id"],"merged_findings_digest":request["merged_findings_digest"],"merged_input":request["task"]["identity"]["contexts"][0]["content"],"assignment":{"task_body":request["task"]["structured"],"accepted_task_identity":fixture_wire_identity(&request["task"]["identity"]),"deadline_seconds":request["task"]["deadline_seconds"]}})
+            }
+            _ => panic!("unexpected corrected mutation"),
+        };
+        assert_eq!(body, constructed["normalized_body"]);
+        let identity = &constructed["identity"];
+        let scope = &response["receipt"]["operation"]["caller_scope"];
+        assert_eq!(
+            identity["request_body"],
+            fixture_bytes_ref(&fixture_canonical_bytes(&body))
+        );
+        assert_eq!(identity["operation_kind"], *operation);
+        assert_eq!(identity["workspace_ref"], scope["workspace_id"]);
+        assert_eq!(identity["scope_ref"], scope["external_engagement_id"]);
+        assert_eq!(identity["controller_principal"], scope["principal_ref"]);
+        assert_eq!(
+            identity["controller_generation"],
+            scope["controller_generation"]
+        );
+        assert_eq!(
+            identity["idempotency_key"],
+            request["admission"]["idempotency_key"]
+        );
+        assert_eq!(
+            response["receipt"]["accepted_input_digest"],
+            fixture_digest(identity)
+        );
+    }
+    let facade: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/examples/successor-facade-v5-methods.valid.json"
+    ))
+    .unwrap();
+    let cases: BTreeMap<_, _> = facade["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["operation"].as_str().unwrap(), item))
+        .collect();
+    let group_digest = fixture_digest(&cases["assign_group"]["request"]["manifest"]);
+    for operation in ["await_group", "collect_group"] {
+        let coverage = &cases[operation]["response"]["coverage"];
+        assert_eq!(coverage["group_assignment_digest"], group_digest);
+        assert_eq!(
+            coverage["sources"][0]["accepted_task_digest"],
+            cases["assign_group"]["request"]["manifest"]["entries"][0]["accepted_task_digest"]
+        );
+    }
+    let merge = &cases["merge_group_results"]["response"];
+    assert_eq!(
+        merge["merged_identity"]["group_assignment_digest"],
+        group_digest
+    );
+    assert_eq!(
+        merge["merged_digest"],
+        fixture_digest(&merge["merged_identity"])
+    );
+    assert_eq!(
+        cases["assign_synthesis"]["request"]["merged_findings_digest"],
+        merge["merged_digest"]
+    );
+    for operation in ["assign_group", "merge_group_results", "assign_synthesis"] {
+        let case = cases[operation];
+        let receipt = &case["response"]["receipt"];
+        let namespace = &receipt["namespace"];
+        let identity = json!({"schema":"dolgorae.mutation-envelope/v1","request_schema":case["normalized_body_schema"],"operation_kind":operation,"workspace_ref":namespace["workspace_ref"],"scope_kind":namespace["scope_kind"],"scope_ref":namespace["scope_ref"],"controller_principal":namespace["controller_principal"],"controller_generation":namespace["controller_generation"],"idempotency_key":namespace["idempotency_key"],"trusted_invocation_ref":null,"request_body":fixture_bytes_ref(&fixture_canonical_bytes(&case["normalized_request_body"]))});
+        assert_eq!(receipt["accepted_input_digest"], fixture_digest(&identity));
+    }
 }
 
 fn fields(domain: &str) -> &'static [&'static str] {

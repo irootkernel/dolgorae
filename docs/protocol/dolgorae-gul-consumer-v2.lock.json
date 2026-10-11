@@ -141,7 +141,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json",
-      "sha256": "92f1d4e5fa8f1613c932a547c7d91722aa48174dcbe2c54ed88cf3cc9fbb2e6c",
+      "sha256": "6219ef0caa9309f73f5d01508d7b041e8136a850a26a0091112531a608c8bb09",
       "generation": "dolgorae.gul-consumer-fixtures/v2"
     },
     {
@@ -341,7 +341,7 @@
     },
     {
       "path": "docs/protocol/examples/successor-facade-v5-methods.valid.json",
-      "sha256": "f5eebc8b34abdbd367a760e5eb0a37e642a0cb80bb9629b569d0a9e1d519427d",
+      "sha256": "bd6a55999680bcf4d678b00757227991732195c3f2f2d2d97e4b8bba329d42ad",
       "generation": "H1-contract-input"
     },
     {
@@ -766,7 +766,7 @@
     },
     {
       "path": "tests/successor_contract.rs",
-      "sha256": "db26dc8edf1b00ef5025335176a389472eaed86c279d25a78612e7513d2ce351",
+      "sha256": "186562533b5706c68a4c718bdf03ac9f965956b0064ae02b31cfa119609122f2",
       "generation": "H1-contract-input"
     },
     {

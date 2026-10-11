@@ -1956,7 +1956,7 @@
             "operation_kind": "assign_group",
             "idempotency_key": "group-original-key"
           },
-          "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+          "accepted_input_digest": "sha256:33b2bb0ca84a18835930a201fa1439acb701035b1bf8f58ca5dc7e54820ce14e",
           "accepted_subjects": {
             "run_ref": null,
             "member_ref": null,
@@ -2030,17 +2030,17 @@
         "coverage": {
           "schema": "dolgorae.group-coverage/v1",
           "group_ref": "group:fixture",
-          "group_assignment_digest": "sha256:e0a1c5391812ce96673b8a7e1939b07a48bc43323e63c2783b8618c90b71657c",
+          "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
           "sources": [
             {
               "entry_key": "task-001",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:facade-group",
+              "task_ref": "task:facade-group",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
               "state": "completed",
-              "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+              "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
               "safe_failure_code": null
             }
           ],
@@ -2101,17 +2101,17 @@
         "coverage": {
           "schema": "dolgorae.group-coverage/v1",
           "group_ref": "group:fixture",
-          "group_assignment_digest": "sha256:e0a1c5391812ce96673b8a7e1939b07a48bc43323e63c2783b8618c90b71657c",
+          "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
           "sources": [
             {
               "entry_key": "task-001",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:facade-group",
+              "task_ref": "task:facade-group",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
               "state": "completed",
-              "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+              "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
               "safe_failure_code": null
             }
           ],
@@ -2155,17 +2155,17 @@
         "scope_kind": "external_engagement",
         "scope_ref": "engagement:fixture",
         "group_ref": "group:fixture",
-        "group_assignment_digest": "sha256:e0a1c5391812ce96673b8a7e1939b07a48bc43323e63c2783b8618c90b71657c",
+        "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
         "sources": [
           {
             "entry_key": "task-001",
-            "worker_ref": "member:fixture",
-            "task_ref": "task:fixture",
+            "worker_ref": "member:facade-group",
+            "task_ref": "task:facade-group",
             "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
             "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-            "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+            "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
             "state": "completed",
-            "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+            "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
             "safe_failure_code": null
           }
         ],
@@ -2176,17 +2176,17 @@
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/merge_group_results_normalized_body",
       "normalized_request_body": {
         "group_ref": "group:fixture",
-        "group_assignment_digest": "sha256:e0a1c5391812ce96673b8a7e1939b07a48bc43323e63c2783b8618c90b71657c",
+        "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
         "sources": [
           {
             "entry_key": "task-001",
-            "worker_ref": "member:fixture",
-            "task_ref": "task:fixture",
+            "worker_ref": "member:facade-group",
+            "task_ref": "task:facade-group",
             "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
             "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-            "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+            "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
             "state": "completed",
-            "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+            "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
             "safe_failure_code": null
           }
         ],
@@ -2198,17 +2198,17 @@
         "merged_identity": {
           "schema": "dolgorae.merged-findings/v1",
           "algorithm": "merge-exact-findings-v1",
-          "group_assignment_digest": "sha256:e0a1c5391812ce96673b8a7e1939b07a48bc43323e63c2783b8618c90b71657c",
+          "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
           "sources": [
             {
               "entry_key": "task-001",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:facade-group",
+              "task_ref": "task:facade-group",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
               "state": "completed",
-              "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+              "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
               "safe_failure_code": null
             }
           ],
@@ -2217,7 +2217,7 @@
             "sha256": "sha256:af3029b304d7ac06461cee5336ef406c5f312882308c675b957fe11741ecb38b"
           }
         },
-        "merged_digest": "sha256:9fbacc383fd05e8b392b29b65016a8b056a1915b899ce8b52190b2df94592d52",
+        "merged_digest": "sha256:6803aec4178308675c946277daf8187aa630baac77a12517edce1ec688091dfa",
         "receipt": {
           "schema": "dolgorae.operation-receipt/v1",
           "operation_ref": "01900000-0000-7000-8000-000000000068",
@@ -2230,7 +2230,7 @@
             "operation_kind": "merge_group_results",
             "idempotency_key": "merge-original-key"
           },
-          "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+          "accepted_input_digest": "sha256:38326cfaad8510d3b667a6ebed986bd0ff7d474e945b6795fb9237be065c01c2",
           "accepted_subjects": {
             "run_ref": null,
             "member_ref": null,
@@ -2285,7 +2285,7 @@
         "scope_kind": "external_engagement",
         "scope_ref": "engagement:fixture",
         "member_ref": "member:fixture",
-        "merged_findings_digest": "sha256:9fbacc383fd05e8b392b29b65016a8b056a1915b899ce8b52190b2df94592d52",
+        "merged_findings_digest": "sha256:6803aec4178308675c946277daf8187aa630baac77a12517edce1ec688091dfa",
         "merged_input": {
           "byte_length": 34,
           "sha256": "sha256:af3029b304d7ac06461cee5336ef406c5f312882308c675b957fe11741ecb38b"
@@ -2329,7 +2329,7 @@
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_synthesis_normalized_body",
       "normalized_request_body": {
         "member_ref": "member:fixture",
-        "merged_findings_digest": "sha256:9fbacc383fd05e8b392b29b65016a8b056a1915b899ce8b52190b2df94592d52",
+        "merged_findings_digest": "sha256:6803aec4178308675c946277daf8187aa630baac77a12517edce1ec688091dfa",
         "merged_input": {
           "byte_length": 34,
           "sha256": "sha256:af3029b304d7ac06461cee5336ef406c5f312882308c675b957fe11741ecb38b"
@@ -2393,7 +2393,7 @@
             "operation_kind": "assign_synthesis",
             "idempotency_key": "synthesis-original-key"
           },
-          "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+          "accepted_input_digest": "sha256:5dab6fdb63fe6f58180f150085dfb99bed30e4356ce2ed6a78c00ba6ed82d7b2",
           "accepted_subjects": {
             "run_ref": "run:fixture",
             "member_ref": "member:fixture",

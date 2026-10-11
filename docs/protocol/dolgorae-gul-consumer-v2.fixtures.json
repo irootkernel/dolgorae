@@ -299,7 +299,7 @@
                 "task_ref": "task:fixture",
                 "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
                 "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-                "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
               },
               "terminal_outcome": "TASK_OUTCOME_COMPLETED",
               "final_response": {
@@ -1154,7 +1154,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "deadline_seconds": 120
         }
       }
@@ -1188,7 +1188,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -1220,7 +1220,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-            "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
             "rounds": 1,
             "disposition": "MEMBER_DISPOSITION_BUSY",
             "source_revision": 12,
@@ -1349,7 +1349,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -1426,7 +1426,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -1442,7 +1442,7 @@
                 "task_ref": "task:fixture",
                 "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
                 "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-                "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
               },
               "terminal_outcome": "TASK_OUTCOME_COMPLETED",
               "final_response": {
@@ -1492,7 +1492,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-            "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
             "result_id": "result:fixture",
             "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
             "rounds": 1,
@@ -1590,7 +1590,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -1606,7 +1606,7 @@
                 "task_ref": "task:fixture",
                 "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
                 "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-                "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
               },
               "terminal_outcome": "TASK_OUTCOME_CANCELLED",
               "final_response": null,
@@ -2169,7 +2169,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "deadline_seconds": 120
         }
       }
@@ -2203,7 +2203,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -2241,7 +2241,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-            "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
             "rounds": 1,
             "disposition": "MEMBER_DISPOSITION_BUSY",
             "source_revision": 12,
@@ -2380,7 +2380,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -2460,7 +2460,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -2476,7 +2476,7 @@
                 "task_ref": "task:fixture",
                 "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
                 "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-                "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
               },
               "terminal_outcome": "TASK_OUTCOME_COMPLETED",
               "final_response": {
@@ -2532,7 +2532,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-            "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+            "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
             "result_id": "result:fixture",
             "result_digest": "sha256:4ebe195e86fb1e8c8ffa750456fd72aca67139440e56ec6dd211205f29336e78",
             "rounds": 1,
@@ -2640,7 +2640,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -2656,7 +2656,7 @@
                 "task_ref": "task:fixture",
                 "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
                 "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-                "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
+                "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
               },
               "terminal_outcome": "TASK_OUTCOME_CANCELLED",
               "final_response": null,
@@ -3094,19 +3094,19 @@
           "coverage": [
             {
               "entry_key": "entry-1",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:group-1",
+              "task_ref": "task:group-1",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
               "state": "TASK_OUTCOME_COMPLETED",
-              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
               "safe_failure_code": null
             },
             {
               "entry_key": "entry-2",
-              "worker_ref": "member:second",
-              "task_ref": "task:second",
+              "worker_ref": "member:group-2",
+              "task_ref": "task:group-2",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
@@ -3129,7 +3129,7 @@
             "operation_kind": "OPERATION_KIND_ASSIGN_GROUP",
             "idempotency_key": "original:AssignGroup"
           },
-          "accepted_input_digest": "sha256:f63a081201b22f72a3ddb45e698ef9f446880cb68973b1aaad3f272e3a4d21e6",
+          "accepted_input_digest": "sha256:5578aa3464af1112ed50c2fcc6116ca8347e1548c50ad38959741e66b28117d8",
           "receipt_id": "receipt:AssignGroup",
           "subjects": {
             "group_id": "group:fixture"
@@ -3214,19 +3214,19 @@
           "coverage": [
             {
               "entry_key": "entry-1",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:group-1",
+              "task_ref": "task:group-1",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
               "state": "TASK_OUTCOME_COMPLETED",
-              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
               "safe_failure_code": null
             },
             {
               "entry_key": "entry-2",
-              "worker_ref": "member:second",
-              "task_ref": "task:second",
+              "worker_ref": "member:group-2",
+              "task_ref": "task:group-2",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
@@ -3316,19 +3316,19 @@
           "coverage": [
             {
               "entry_key": "entry-1",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:group-1",
+              "task_ref": "task:group-1",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
               "state": "TASK_OUTCOME_COMPLETED",
-              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
               "safe_failure_code": null
             },
             {
               "entry_key": "entry-2",
-              "worker_ref": "member:second",
-              "task_ref": "task:second",
+              "worker_ref": "member:group-2",
+              "task_ref": "task:group-2",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
@@ -3341,14 +3341,14 @@
         },
         "results": [
           {
-            "result_id": "result:fixture",
+            "result_id": "result:group-1",
             "identity": {
               "schema": "dolgorae.complete-result/v1",
               "source": {
                 "scope_kind": "external_engagement",
                 "scope_ref": "engagement:fixture",
-                "worker_ref": "member:fixture",
-                "task_ref": "task:fixture",
+                "worker_ref": "member:group-1",
+                "task_ref": "task:group-1",
                 "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
                 "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
                 "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
@@ -3364,7 +3364,7 @@
               "attachments": [],
               "safe_failure_code": null
             },
-            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
             "final_response": {
               "content": {
                 "byte_length": 18,
@@ -3377,11 +3377,11 @@
         ],
         "source_manifest": {
           "content": {
-            "byte_length": 965,
-            "sha256": "sha256:8bc9b60b8b3bdde506cf78ce8fc8430156b5661e2865507e60d2e2e9a7d15681"
+            "byte_length": 967,
+            "sha256": "sha256:8f87dcb4298d55e07ad3fe5ceee2a8f54b02956b6c8b2ada641c935af8e5f293"
           },
           "media_type": "application/json",
-          "inline_bytes": "W3siYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6MTZmMWU3NDQ0NWY0ZWQyZjExNjBjNWQ5MjE1MjhjYjIwNDhhMDA4MDI4ZGQ1YjQyYzY3NThiZWJmZmY2NmExZCIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0xIiwicmVzdWx0X2RpZ2VzdCI6InNoYTI1NjowNGNlZTMyZGU2OGVjZTM1ZTkxMmU5OWQ0OTMyNzNiZTMwYTY3YWMzNGQwY2JiODAyZjM4NmZhOGY4NmRmMGY1Iiwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjpudWxsLCJzdGF0ZSI6ImNvbXBsZXRlZCIsInRhc2tfcmVmIjoidGFzazpmaXh0dXJlIiwid29ya2VyX3JlZiI6Im1lbWJlcjpmaXh0dXJlIn0seyJhY2NlcHRlZF90YXNrX2RpZ2VzdCI6InNoYTI1NjplODhkYTU2Y2FmNTE0NTIxNTA3YzM0Y2VkNDI1M2U2MGM3M2JjNzE1NWM4ODdiY2FmMDNhNjY2MDIwYmZhMzk0IiwiYWdlbnRfY29uZmlndXJhdGlvbl9kaWdlc3QiOiJzaGEyNTY6NmMzMGM5M2Q5OWVmNDU3NTVhOWQyYTc0YWNhODJhOGE5YTJiZGEwNTNiNmFjM2EyYmY0ZDY3NzhhNjQ4NzNhMSIsImVudHJ5X2tleSI6ImVudHJ5LTIiLCJyZXN1bHRfZGlnZXN0IjpudWxsLCJyb2xlX3NuYXBzaG90X2RpZ2VzdCI6InNoYTI1NjowZjdjOGMxYjJjMDcxYzg5MzFmNjZhNjIzMzFkYmI4ZGI5MTBlZmE4OWQ5NDQyMmEzMzcwMjgxOWUwYTljNjNmIiwic2FmZV9mYWlsdXJlX2NvZGUiOiJPVVRDT01FX1VOS05PV04iLCJzdGF0ZSI6InVua25vd24iLCJ0YXNrX3JlZiI6InRhc2s6c2Vjb25kIiwid29ya2VyX3JlZiI6Im1lbWJlcjpzZWNvbmQifV0="
+          "inline_bytes": "W3siYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6YWVkYjk4YjE5YTZhNmRhYmVjN2Q4NTBkM2ZlZTQ0ZTA2ODQzMGQ4MDkwNmJmZTI3NDg1NjgxMGYxNWFhZGNjMCIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0xIiwicmVzdWx0X2RpZ2VzdCI6InNoYTI1NjplY2ZhYWQzZDkxMGMzYzhmNjUyZDllMWEzNTUwMTZhYzg3YjFlZjM0YzYyMTlhNWJmNjk2NzIwZmEyOTJlZjdjIiwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjpudWxsLCJzdGF0ZSI6ImNvbXBsZXRlZCIsInRhc2tfcmVmIjoidGFzazpncm91cC0xIiwid29ya2VyX3JlZiI6Im1lbWJlcjpncm91cC0xIn0seyJhY2NlcHRlZF90YXNrX2RpZ2VzdCI6InNoYTI1Njo2NmE4ZDg3NGZmNzFmYzAyYzU3MTdhNDBjODIwMjU5YjdhYWY0MjA0OTcyZTBhYWU3NTYzYzNhY2FjNGE4MTllIiwiYWdlbnRfY29uZmlndXJhdGlvbl9kaWdlc3QiOiJzaGEyNTY6NmMzMGM5M2Q5OWVmNDU3NTVhOWQyYTc0YWNhODJhOGE5YTJiZGEwNTNiNmFjM2EyYmY0ZDY3NzhhNjQ4NzNhMSIsImVudHJ5X2tleSI6ImVudHJ5LTIiLCJyZXN1bHRfZGlnZXN0IjpudWxsLCJyb2xlX3NuYXBzaG90X2RpZ2VzdCI6InNoYTI1NjowZjdjOGMxYjJjMDcxYzg5MzFmNjZhNjIzMzFkYmI4ZGI5MTBlZmE4OWQ5NDQyMmEzMzcwMjgxOWUwYTljNjNmIiwic2FmZV9mYWlsdXJlX2NvZGUiOiJPVVRDT01FX1VOS05PV04iLCJzdGF0ZSI6InVua25vd24iLCJ0YXNrX3JlZiI6InRhc2s6Z3JvdXAtMiIsIndvcmtlcl9yZWYiOiJtZW1iZXI6Z3JvdXAtMiJ9XQ=="
         }
       }
     },
@@ -3432,19 +3432,19 @@
         "sources": [
           {
             "entry_key": "entry-1",
-            "worker_ref": "member:fixture",
-            "task_ref": "task:fixture",
+            "worker_ref": "member:group-1",
+            "task_ref": "task:group-1",
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
             "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
             "state": "TASK_OUTCOME_COMPLETED",
-            "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+            "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
             "safe_failure_code": null
           },
           {
             "entry_key": "entry-2",
-            "worker_ref": "member:second",
-            "task_ref": "task:second",
+            "worker_ref": "member:group-2",
+            "task_ref": "task:group-2",
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
             "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
@@ -3472,19 +3472,19 @@
           "sources": [
             {
               "entry_key": "entry-1",
-              "worker_ref": "member:fixture",
-              "task_ref": "task:fixture",
+              "worker_ref": "member:group-1",
+              "task_ref": "task:group-1",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
               "state": "TASK_OUTCOME_COMPLETED",
-              "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+              "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
               "safe_failure_code": null
             },
             {
               "entry_key": "entry-2",
-              "worker_ref": "member:second",
-              "task_ref": "task:second",
+              "worker_ref": "member:group-2",
+              "task_ref": "task:group-2",
               "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
               "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
               "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
@@ -3494,18 +3494,18 @@
             }
           ],
           "merged_output": {
-            "byte_length": 1655,
-            "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+            "byte_length": 1659,
+            "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
           }
         },
-        "merged_findings_digest": "sha256:b19274d78fda8de169a80aacc65ac4a4cccafff9dab9a4a330252f140800460f",
+        "merged_findings_digest": "sha256:b2bcc15cdd655706086b7655eefd1a1ad271c5130a6abd81ab32643ec8c97c34",
         "merged_output": {
           "content": {
-            "byte_length": 1655,
-            "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+            "byte_length": 1659,
+            "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
           },
           "media_type": "application/json",
-          "inline_bytes": "eyJhbGdvcml0aG0iOiJtZXJnZS1leGFjdC1maW5kaW5ncy12MSIsImNvbmZsaWN0cyI6W10sImZpbmRpbmdzIjpbXSwiZ3JvdXBfYXNzaWdubWVudF9kaWdlc3QiOiJzaGEyNTY6ZmE5YTRlYmVkZjlhNmY0NzlkYjdmNGMwOWMyMDFiZjgwMTY1NjMxOWQ1YWYzZTJiN2VlYTJjMDM5ODA1YjcyNCIsIm1pc3Npbmdfc291cmNlcyI6W3siYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6ZTg4ZGE1NmNhZjUxNDUyMTUwN2MzNGNlZDQyNTNlNjBjNzNiYzcxNTVjODg3YmNhZjAzYTY2NjAyMGJmYTM5NCIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0yIiwicmVzdWx0X2RpZ2VzdCI6bnVsbCwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjoiT1VUQ09NRV9VTktOT1dOIiwic3RhdGUiOiJ1bmtub3duIiwidGFza19yZWYiOiJ0YXNrOnNlY29uZCIsIndvcmtlcl9yZWYiOiJtZW1iZXI6c2Vjb25kIn1dLCJzY2hlbWEiOiJkb2xnb3JhZS5tZXJnZWQtZmluZGluZ3MvdjEiLCJzb3VyY2VzIjpbeyJhY2NlcHRlZF90YXNrX2RpZ2VzdCI6InNoYTI1NjoxNmYxZTc0NDQ1ZjRlZDJmMTE2MGM1ZDkyMTUyOGNiMjA0OGEwMDgwMjhkZDViNDJjNjc1OGJlYmZmZjY2YTFkIiwiYWdlbnRfY29uZmlndXJhdGlvbl9kaWdlc3QiOiJzaGEyNTY6NmMzMGM5M2Q5OWVmNDU3NTVhOWQyYTc0YWNhODJhOGE5YTJiZGEwNTNiNmFjM2EyYmY0ZDY3NzhhNjQ4NzNhMSIsImVudHJ5X2tleSI6ImVudHJ5LTEiLCJyZXN1bHRfZGlnZXN0Ijoic2hhMjU2OjA0Y2VlMzJkZTY4ZWNlMzVlOTEyZTk5ZDQ5MzI3M2JlMzBhNjdhYzM0ZDBjYmI4MDJmMzg2ZmE4Zjg2ZGYwZjUiLCJyb2xlX3NuYXBzaG90X2RpZ2VzdCI6InNoYTI1NjowZjdjOGMxYjJjMDcxYzg5MzFmNjZhNjIzMzFkYmI4ZGI5MTBlZmE4OWQ5NDQyMmEzMzcwMjgxOWUwYTljNjNmIiwic2FmZV9mYWlsdXJlX2NvZGUiOm51bGwsInN0YXRlIjoiY29tcGxldGVkIiwidGFza19yZWYiOiJ0YXNrOmZpeHR1cmUiLCJ3b3JrZXJfcmVmIjoibWVtYmVyOmZpeHR1cmUifSx7ImFjY2VwdGVkX3Rhc2tfZGlnZXN0Ijoic2hhMjU2OmU4OGRhNTZjYWY1MTQ1MjE1MDdjMzRjZWQ0MjUzZTYwYzczYmM3MTU1Yzg4N2JjYWYwM2E2NjYwMjBiZmEzOTQiLCJhZ2VudF9jb25maWd1cmF0aW9uX2RpZ2VzdCI6InNoYTI1Njo2YzMwYzkzZDk5ZWY0NTc1NWE5ZDJhNzRhY2E4MmE4YTlhMmJkYTA1M2I2YWMzYTJiZjRkNjc3OGE2NDg3M2ExIiwiZW50cnlfa2V5IjoiZW50cnktMiIsInJlc3VsdF9kaWdlc3QiOm51bGwsInJvbGVfc25hcHNob3RfZGlnZXN0Ijoic2hhMjU2OjBmN2M4YzFiMmMwNzFjODkzMWY2NmE2MjMzMWRiYjhkYjkxMGVmYTg5ZDk0NDIyYTMzNzAyODE5ZTBhOWM2M2YiLCJzYWZlX2ZhaWx1cmVfY29kZSI6Ik9VVENPTUVfVU5LTk9XTiIsInN0YXRlIjoidW5rbm93biIsInRhc2tfcmVmIjoidGFzazpzZWNvbmQiLCJ3b3JrZXJfcmVmIjoibWVtYmVyOnNlY29uZCJ9XX0="
+          "inline_bytes": "eyJhbGdvcml0aG0iOiJtZXJnZS1leGFjdC1maW5kaW5ncy12MSIsImNvbmZsaWN0cyI6W10sImZpbmRpbmdzIjpbXSwiZ3JvdXBfYXNzaWdubWVudF9kaWdlc3QiOiJzaGEyNTY6MGY0ZmY3ZjAwMzU3ZDRhNzY2OTE2MjFlMTlhNjk4MWUyYzA2MTAyNWIwNzMxZGIxMzQwOWVhYTA4ZmI1MTE4YiIsIm1pc3Npbmdfc291cmNlcyI6W3siYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6NjZhOGQ4NzRmZjcxZmMwMmM1NzE3YTQwYzgyMDI1OWI3YWFmNDIwNDk3MmUwYWFlNzU2M2MzYWNhYzRhODE5ZSIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0yIiwicmVzdWx0X2RpZ2VzdCI6bnVsbCwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjoiT1VUQ09NRV9VTktOT1dOIiwic3RhdGUiOiJ1bmtub3duIiwidGFza19yZWYiOiJ0YXNrOmdyb3VwLTIiLCJ3b3JrZXJfcmVmIjoibWVtYmVyOmdyb3VwLTIifV0sInNjaGVtYSI6ImRvbGdvcmFlLm1lcmdlZC1maW5kaW5ncy92MSIsInNvdXJjZXMiOlt7ImFjY2VwdGVkX3Rhc2tfZGlnZXN0Ijoic2hhMjU2OmFlZGI5OGIxOWE2YTZkYWJlYzdkODUwZDNmZWU0NGUwNjg0MzBkODA5MDZiZmUyNzQ4NTY4MTBmMTVhYWRjYzAiLCJhZ2VudF9jb25maWd1cmF0aW9uX2RpZ2VzdCI6InNoYTI1Njo2YzMwYzkzZDk5ZWY0NTc1NWE5ZDJhNzRhY2E4MmE4YTlhMmJkYTA1M2I2YWMzYTJiZjRkNjc3OGE2NDg3M2ExIiwiZW50cnlfa2V5IjoiZW50cnktMSIsInJlc3VsdF9kaWdlc3QiOiJzaGEyNTY6ZWNmYWFkM2Q5MTBjM2M4ZjY1MmQ5ZTFhMzU1MDE2YWM4N2IxZWYzNGM2MjE5YTViZjY5NjcyMGZhMjkyZWY3YyIsInJvbGVfc25hcHNob3RfZGlnZXN0Ijoic2hhMjU2OjBmN2M4YzFiMmMwNzFjODkzMWY2NmE2MjMzMWRiYjhkYjkxMGVmYTg5ZDk0NDIyYTMzNzAyODE5ZTBhOWM2M2YiLCJzYWZlX2ZhaWx1cmVfY29kZSI6bnVsbCwic3RhdGUiOiJjb21wbGV0ZWQiLCJ0YXNrX3JlZiI6InRhc2s6Z3JvdXAtMSIsIndvcmtlcl9yZWYiOiJtZW1iZXI6Z3JvdXAtMSJ9LHsiYWNjZXB0ZWRfdGFza19kaWdlc3QiOiJzaGEyNTY6NjZhOGQ4NzRmZjcxZmMwMmM1NzE3YTQwYzgyMDI1OWI3YWFmNDIwNDk3MmUwYWFlNzU2M2MzYWNhYzRhODE5ZSIsImFnZW50X2NvbmZpZ3VyYXRpb25fZGlnZXN0Ijoic2hhMjU2OjZjMzBjOTNkOTllZjQ1NzU1YTlkMmE3NGFjYTgyYThhOWEyYmRhMDUzYjZhYzNhMmJmNGQ2Nzc4YTY0ODczYTEiLCJlbnRyeV9rZXkiOiJlbnRyeS0yIiwicmVzdWx0X2RpZ2VzdCI6bnVsbCwicm9sZV9zbmFwc2hvdF9kaWdlc3QiOiJzaGEyNTY6MGY3YzhjMWIyYzA3MWM4OTMxZjY2YTYyMzMxZGJiOGRiOTEwZWZhODlkOTQ0MjJhMzM3MDI4MTllMGE5YzYzZiIsInNhZmVfZmFpbHVyZV9jb2RlIjoiT1VUQ09NRV9VTktOT1dOIiwic3RhdGUiOiJ1bmtub3duIiwidGFza19yZWYiOiJ0YXNrOmdyb3VwLTIiLCJ3b3JrZXJfcmVmIjoibWVtYmVyOmdyb3VwLTIifV19"
         },
         "receipt": {
           "operation": {
@@ -3519,7 +3519,7 @@
             "operation_kind": "OPERATION_KIND_MERGE_GROUP_RESULTS",
             "idempotency_key": "original:MergeGroupResults"
           },
-          "accepted_input_digest": "sha256:caf4811a5cbc15190c276fab1bfb5fe9d0f6764aec2fdd1b468b255a97038d5f",
+          "accepted_input_digest": "sha256:772d542565e4df4e7cf767ce49cdbd301c31487e081a0f7f8be58fc1c823cc20",
           "receipt_id": "receipt:MergeGroupResults",
           "subjects": {
             "group_id": "group:fixture",
@@ -3571,7 +3571,7 @@
         },
         "member_id": "member:fixture",
         "merge_id": "merge:fixture",
-        "merged_findings_digest": "sha256:b19274d78fda8de169a80aacc65ac4a4cccafff9dab9a4a330252f140800460f",
+        "merged_findings_digest": "sha256:b2bcc15cdd655706086b7655eefd1a1ad271c5130a6abd81ab32643ec8c97c34",
         "task": {
           "structured": {
             "schema": "dolgorae.structured-task/v1",
@@ -3581,8 +3581,8 @@
                 "kind": "artifact",
                 "identity": "merge:fixture",
                 "content": {
-                  "byte_length": 1655,
-                  "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+                  "byte_length": 1659,
+                  "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
                 },
                 "media_type": "application/json"
               }
@@ -3604,15 +3604,15 @@
             "task_body_schema": "dolgorae.structured-task/v1",
             "task_body": {
               "byte_length": 464,
-              "sha256": "sha256:1c3674e08813c62caf09b38768ecf94057db8ad3b36bf6873015445ebf3faa9a"
+              "sha256": "sha256:03978192bd084ffc2174370c940a8e00456c8ac5e43edcb1ee372c77b8d81f5c"
             },
             "contexts": [
               {
                 "kind": "artifact",
                 "identity": "merge:fixture",
                 "content": {
-                  "byte_length": 1655,
-                  "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+                  "byte_length": 1659,
+                  "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
                 },
                 "media_type": "application/json"
               }
@@ -3625,7 +3625,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:bd99c772bd761156c99e32fe9a038a0a043a2c14b211c37e4b49a4ded02d4ebf",
+          "accepted_task_digest": "sha256:979afb7cf0a5b0cda916618c903a355b49605ccf5835d6fa7eda4b6ce43d63d1",
           "deadline_seconds": 120
         }
       }
@@ -3648,15 +3648,15 @@
             "task_body_schema": "dolgorae.structured-task/v1",
             "task_body": {
               "byte_length": 464,
-              "sha256": "sha256:1c3674e08813c62caf09b38768ecf94057db8ad3b36bf6873015445ebf3faa9a"
+              "sha256": "sha256:03978192bd084ffc2174370c940a8e00456c8ac5e43edcb1ee372c77b8d81f5c"
             },
             "contexts": [
               {
                 "kind": "artifact",
                 "identity": "merge:fixture",
                 "content": {
-                  "byte_length": 1655,
-                  "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+                  "byte_length": 1659,
+                  "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
                 },
                 "media_type": "application/json"
               }
@@ -3669,7 +3669,7 @@
             "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
             "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
           },
-          "accepted_task_digest": "sha256:bd99c772bd761156c99e32fe9a038a0a043a2c14b211c37e4b49a4ded02d4ebf",
+          "accepted_task_digest": "sha256:979afb7cf0a5b0cda916618c903a355b49605ccf5835d6fa7eda4b6ce43d63d1",
           "recovery": {
             "state": "RECOVERY_STATE_NOT_REQUIRED",
             "required_action": "RECOVERY_ACTION_NONE"
@@ -3687,7 +3687,7 @@
             "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
             "idempotency_key": "original:AssignSynthesis"
           },
-          "accepted_input_digest": "sha256:d6813b36b66769e3a2caf7ec355c3a9505668f0a408b26fa58813f2dfb369023",
+          "accepted_input_digest": "sha256:87f47892a3e6d2aba6a8d5f119067b1166795343f65319e85b6104ddb8be034b",
           "receipt_id": "receipt:AssignSynthesis",
           "subjects": {
             "member_id": "member:fixture",
@@ -3714,7 +3714,7 @@
           "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
           "instruction_identity_digest": "sha256:c87908b32d1b86cd02d76de2f4f26a43341eb18e1798b6c618f8a98dbdf9e9ee",
           "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-          "accepted_task_digest": "sha256:bd99c772bd761156c99e32fe9a038a0a043a2c14b211c37e4b49a4ded02d4ebf",
+          "accepted_task_digest": "sha256:979afb7cf0a5b0cda916618c903a355b49605ccf5835d6fa7eda4b6ce43d63d1",
           "rounds": 2,
           "disposition": "MEMBER_DISPOSITION_BUSY",
           "source_revision": 12,
@@ -4464,47 +4464,47 @@
           "entry_key": "entry-1",
           "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
           "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d"
+          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
         },
         {
           "entry_key": "entry-2",
           "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
           "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-          "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394"
+          "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e"
         }
       ]
     },
     "merged_findings": {
       "schema": "dolgorae.merged-findings/v1",
       "algorithm": "merge-exact-findings-v1",
-      "group_assignment_digest": "sha256:fa9a4ebedf9a6f479db7f4c09c201bf801656319d5af3e2b7eea2c039805b724",
+      "group_assignment_digest": "sha256:0f4ff7f00357d4a76691621e19a6981e2c061025b0731db13409eaa08fb5118b",
       "sources": [
         {
           "entry_key": "entry-1",
-          "worker_ref": "member:fixture",
-          "task_ref": "task:fixture",
+          "worker_ref": "member:group-1",
+          "task_ref": "task:group-1",
           "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
           "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-          "accepted_task_digest": "sha256:16f1e74445f4ed2f1160c5d921528cb2048a008028dd5b42c6758bebfff66a1d",
+          "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
           "state": "completed",
-          "result_digest": "sha256:04cee32de68ece35e912e99d493273be30a67ac34d0cbb802f386fa8f86df0f5",
+          "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
           "safe_failure_code": null
         },
         {
           "entry_key": "entry-2",
-          "worker_ref": "member:second",
-          "task_ref": "task:second",
+          "worker_ref": "member:group-2",
+          "task_ref": "task:group-2",
           "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
           "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
-          "accepted_task_digest": "sha256:e88da56caf514521507c34ced4253e60c73bc7155c887bcaf03a666020bfa394",
+          "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
           "state": "unknown",
           "result_digest": null,
           "safe_failure_code": "OUTCOME_UNKNOWN"
         }
       ],
       "merged_output": {
-        "byte_length": 1655,
-        "sha256": "sha256:6c33f24196e1d987a86f2f0d0c2a79eba1b9afb560f24c9f544e12b8a8b72e80"
+        "byte_length": 1659,
+        "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
       }
     }
   },
@@ -4629,6 +4629,197 @@
           "provisioning_ref": "provisioning:installed-fixture"
         }
       ]
+    }
+  },
+  "constructed_mutation_inputs": {
+    "assign_group": {
+      "request_fixture": "assign_group_request",
+      "response_fixture": "assign_group_response",
+      "normalized_body": {
+        "manifest": {
+          "schema": "dolgorae.group-assignment/v1",
+          "scope_kind": "external_engagement",
+          "scope_ref": "engagement:fixture",
+          "entries": [
+            {
+              "entry_key": "entry-1",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0"
+            },
+            {
+              "entry_key": "entry-2",
+              "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+              "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+              "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e"
+            }
+          ]
+        },
+        "inputs": [
+          {
+            "entry_key": "entry-1",
+            "content": {
+              "byte_length": 970,
+              "sha256": "sha256:cfe0d8a2b513193b48890358f99ff8bf5748f4883ccb0a4a985959b87c6afac8"
+            }
+          },
+          {
+            "entry_key": "entry-2",
+            "content": {
+              "byte_length": 970,
+              "sha256": "sha256:5310d735e8b52629c556d5c2db4e96a9fd78226f76e40449a19df630bd26a274"
+            }
+          }
+        ]
+      },
+      "identity": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "dolgorae.public.v2.AssignGroupRequest",
+        "operation_kind": "assign_group",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:AssignGroup",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 1061,
+          "sha256": "sha256:526c7151a1eb99757e6a3de461529cf01b9dc7cba9cd197312d317faf9d6f1b2"
+        }
+      }
+    },
+    "merge_group_results": {
+      "request_fixture": "merge_group_results_request",
+      "response_fixture": "merge_group_results_response",
+      "normalized_body": {
+        "group_ref": "group:fixture",
+        "group_assignment_digest": "sha256:0f4ff7f00357d4a76691621e19a6981e2c061025b0731db13409eaa08fb5118b",
+        "sources": [
+          {
+            "entry_key": "entry-1",
+            "worker_ref": "member:group-1",
+            "task_ref": "task:group-1",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:aedb98b19a6a6dabec7d850d3fee44e068430d80906bfe274856810f15aadcc0",
+            "state": "completed",
+            "result_digest": "sha256:ecfaad3d910c3c8f652d9e1a355016ac87b1ef34c6219a5bf696720fa292ef7c",
+            "safe_failure_code": null
+          },
+          {
+            "entry_key": "entry-2",
+            "worker_ref": "member:group-2",
+            "task_ref": "task:group-2",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1",
+            "accepted_task_digest": "sha256:66a8d874ff71fc02c5717a40c820259b7aaf4204972e0aae7563c3acac4a819e",
+            "state": "unknown",
+            "result_digest": null,
+            "safe_failure_code": "OUTCOME_UNKNOWN"
+          }
+        ],
+        "algorithm": "merge-exact-findings-v1"
+      },
+      "identity": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "dolgorae.public.v2.MergeGroupResultsRequest",
+        "operation_kind": "merge_group_results",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:MergeGroupResults",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 1145,
+          "sha256": "sha256:42610621e4f52476079bc4cca9969518a5d8ab2e322eef017ea0ab42c5afbde5"
+        }
+      }
+    },
+    "assign_synthesis": {
+      "request_fixture": "assign_synthesis_request",
+      "response_fixture": "assign_synthesis_response",
+      "normalized_body": {
+        "member_ref": "member:fixture",
+        "merged_findings_digest": "sha256:b2bcc15cdd655706086b7655eefd1a1ad271c5130a6abd81ab32643ec8c97c34",
+        "merged_input": {
+          "byte_length": 1659,
+          "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
+        },
+        "assignment": {
+          "task_body": {
+            "schema": "dolgorae.structured-task/v1",
+            "brief": "Synthesize the immutable merged findings; preserve the unknown source.",
+            "context": [
+              {
+                "kind": "artifact",
+                "identity": "merge:fixture",
+                "content": {
+                  "byte_length": 1659,
+                  "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
+                },
+                "media_type": "application/json"
+              }
+            ],
+            "criteria": [
+              {
+                "criterion_id": "C1",
+                "text": "Report the fixture observation.",
+                "context_ids": []
+              }
+            ],
+            "constraints": [
+              "Do not mutate the fixture."
+            ]
+          },
+          "accepted_task_identity": {
+            "schema": "dolgorae.accepted-task/v1",
+            "purpose": "synthesis",
+            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body": {
+              "byte_length": 464,
+              "sha256": "sha256:03978192bd084ffc2174370c940a8e00456c8ac5e43edcb1ee372c77b8d81f5c"
+            },
+            "contexts": [
+              {
+                "kind": "artifact",
+                "identity": "merge:fixture",
+                "content": {
+                  "byte_length": 1659,
+                  "sha256": "sha256:776e812bff92f350202ac80aff7652a5cedb612ced0ec5ed31579656ea9ccbc4"
+                },
+                "media_type": "application/json"
+              }
+            ],
+            "images": [],
+            "expected_output_schema": "structured_findings_v1",
+            "execution_intent": "read_only",
+            "admitted_model": "fixture-model",
+            "admitted_effort": "low",
+            "role_snapshot_digest": "sha256:0f7c8c1b2c071c8931f66a62331dbb8db910efa89d94422a33702819e0a9c63f",
+            "agent_configuration_digest": "sha256:6c30c93d99ef45755a9d2a74aca82a8a9a2bda053b6ac3a2bf4d6778a64873a1"
+          },
+          "deadline_seconds": 120
+        }
+      },
+      "identity": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "dolgorae.public.v2.AssignSynthesisRequest",
+        "operation_kind": "assign_synthesis",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "external_engagement",
+        "scope_ref": "engagement:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:AssignSynthesis",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 1570,
+          "sha256": "sha256:84b170aa9909b35acae9d69a381d6b39eef59a6eebd214787ef6ac0d100bc655"
+        }
+      }
     }
   }
 }
