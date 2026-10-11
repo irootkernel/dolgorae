@@ -181,9 +181,18 @@ type responseLossServer struct {
 
 func (server *responseLossServer) StartRun(_ context.Context, request *pb.StartRunRequest) (*pb.StartRunResponse, error) {
 	server.starts.Add(1)
-	if request.IdempotencyKey != server.original.IdempotencyKey {
-		return nil, status.Error(codes.InvalidArgument, "wrong original key")
+	if request.GetController().GetExpectedControllerGeneration() == 0 || request.GetWorkspace().GetExpectedWorkspaceId() == "" || request.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "missing pre-call operation identity")
 	}
+	// The fixture credential's normalized principal is already known to both
+	// peers. Derive acceptance from the actual request, without a seeded receipt
+	// or a generation learned only from the response that is about to be lost.
+	server.original = &pb.OperationRef{CallerScope: &pb.CallerScope{
+		ControllerKind: pb.ControllerKind_CONTROLLER_KIND_INTERACTIVE_CLIENT,
+		PrincipalRef:   "controller", ControllerGeneration: request.Controller.ExpectedControllerGeneration,
+		WorkspaceId: request.Workspace.ExpectedWorkspaceId,
+		Aggregate:   &pb.CallerScope_ProvisioningScope{ProvisioningScope: "run-start"},
+	}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: request.IdempotencyKey}
 	return nil, status.Error(codes.Unavailable, "fixture drops reply after acceptance")
 }
 
@@ -204,14 +213,20 @@ func (server *responseLossServer) LookupOperation(_ context.Context, request *pb
 
 func (server *responseLossServer) SubmitTurn(_ context.Context, request *pb.SubmitTurnRequest) (*pb.SubmitTurnAccepted, error) {
 	server.submits.Add(1)
-	if request.IdempotencyKey != server.original.IdempotencyKey {
-		return nil, status.Error(codes.InvalidArgument, "wrong original key")
+	if request.GetController().GetExpectedControllerGeneration() == 0 || request.GetRun().GetWorkspace().GetExpectedWorkspaceId() == "" || request.GetRun().GetRunId() == "" || request.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "missing pre-call operation identity")
 	}
+	server.original = &pb.OperationRef{CallerScope: &pb.CallerScope{
+		ControllerKind: pb.ControllerKind_CONTROLLER_KIND_INTERACTIVE_CLIENT,
+		PrincipalRef:   "controller", ControllerGeneration: request.Controller.ExpectedControllerGeneration,
+		WorkspaceId: request.Run.Workspace.ExpectedWorkspaceId,
+		Aggregate:   &pb.CallerScope_RunId{RunId: request.Run.RunId},
+	}, OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: request.IdempotencyKey}
 	return nil, status.Error(codes.Unavailable, "fixture drops reply after Turn acceptance")
 }
 
 func TestUnresolvedLookupPermitsOnlyRecoveryActions(t *testing.T) {
-	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: "original-key"}
 	allowed := map[pb.RequiredClientAction]bool{
 		pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECONCILE_OPERATION: true,
 		pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECOVER_RUN:         true,
@@ -228,7 +243,7 @@ func TestUnresolvedLookupPermitsOnlyRecoveryActions(t *testing.T) {
 }
 
 func TestAcceptedLookupRequiresDigestSubjectAndCurrentOutcome(t *testing.T) {
-	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key"}
 	valid := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Accepted{Accepted: &pb.AcceptedOperation{
 		CurrentOutcome: pb.OperationOutcome_OPERATION_OUTCOME_PENDING,
 		Receipt:        &pb.OperationReceipt{Operation: original, ReceiptId: "retained-receipt", AcceptedInputDigest: "sha256:" + strings.Repeat("a", 64), Effect: pb.EffectState_EFFECT_STATE_ACCEPTED, Subjects: &pb.SubjectIdentities{RunId: proto.String("original-run")}},
@@ -266,7 +281,7 @@ func TestAcceptedLookupRequiresDigestSubjectAndCurrentOutcome(t *testing.T) {
 }
 
 func TestUnsetLookupAndUnprovedAbsenceFailClosed(t *testing.T) {
-	original := &pb.OperationRef{OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
+	original := &pb.OperationRef{CallerScope: &pb.CallerScope{ControllerGeneration: 3}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key"}
 	for _, response := range []*pb.LookupOperationResponse{
 		nil, {},
 		{Result: &pb.LookupOperationResponse_Absent{Absent: &pb.AbsentOperation{Operation: original}}},
@@ -277,12 +292,12 @@ func TestUnsetLookupAndUnprovedAbsenceFailClosed(t *testing.T) {
 			t.Fatalf("unproved lookup resolved original uncertainty: %v", response)
 		}
 	}
-	absent := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Absent{Absent: &pb.AbsentOperation{Operation: original, RetainedNamespaceFence: "retained-generation-7", CompleteAuthoritativeLookup: true}}}
+	absent := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_Absent{Absent: &pb.AbsentOperation{Operation: original, RetainedNamespaceFence: "retained-controller-generation-3", CompleteAuthoritativeLookup: true}}}
 	if err := client.ValidateLookup(absent, original); err != nil {
 		t.Fatal(err)
 	}
 	wrong := proto.Clone(original).(*pb.OperationRef)
-	wrong.NamespaceGeneration++
+	wrong.CallerScope.ControllerGeneration++
 	if err := client.ValidateLookup(absent, wrong); err == nil {
 		t.Fatal("cross-generation absence admitted")
 	}
@@ -291,8 +306,10 @@ func TestUnsetLookupAndUnprovedAbsenceFailClosed(t *testing.T) {
 // This in-process fixture verifies the consumer's wire behavior only. Actual
 // provider acceptance/recovery remains a separate later runtime gate.
 func TestLostStartResponseUsesExactOriginalLookup(t *testing.T) {
-	original := &pb.OperationRef{CallerScope: &pb.CallerScope{PrincipalRef: "controller", ControllerGeneration: 3, WorkspaceId: "workspace", Aggregate: &pb.CallerScope_ProvisioningScope{ProvisioningScope: "run-start"}}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key", NamespaceGeneration: 7}
-	fixture := &responseLossServer{original: original}
+	request := &pb.StartRunRequest{Context: &pb.RequestContext{ProtocolVersion: 2}, Workspace: &pb.WorkspaceRef{AbsolutePath: "/fixture/workspace", ExpectedWorkspaceId: "workspace"}, Controller: &pb.ControllerCarrierRef{ExpectedControllerId: "controller", ExpectedControllerGeneration: 3}, IdempotencyKey: "original-key"}
+	// Retain the credential and request facts before any mutation response.
+	original := &pb.OperationRef{CallerScope: &pb.CallerScope{ControllerKind: pb.ControllerKind_CONTROLLER_KIND_INTERACTIVE_CLIENT, PrincipalRef: "controller", ControllerGeneration: request.Controller.ExpectedControllerGeneration, WorkspaceId: request.Workspace.ExpectedWorkspaceId, Aggregate: &pb.CallerScope_ProvisioningScope{ProvisioningScope: "run-start"}}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: request.IdempotencyKey}
+	fixture := &responseLossServer{}
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
 	pb.RegisterRunServiceServer(server, fixture)
@@ -306,7 +323,7 @@ func TestLostStartResponseUsesExactOriginalLookup(t *testing.T) {
 	t.Cleanup(func() { _ = connection.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = pb.NewRunServiceClient(connection).StartRun(ctx, &pb.StartRunRequest{Context: &pb.RequestContext{ProtocolVersion: 2}, IdempotencyKey: original.IdempotencyKey})
+	_, err = pb.NewRunServiceClient(connection).StartRun(ctx, request)
 	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("expected lost response: %v", err)
 	}
@@ -319,15 +336,16 @@ func TestLostStartResponseUsesExactOriginalLookup(t *testing.T) {
 		t.Fatalf("original acceptance not recovered without redispatch: %v starts=%d lookups=%d", result, fixture.starts.Load(), fixture.lookups.Load())
 	}
 	wrong := proto.Clone(original).(*pb.OperationRef)
-	wrong.NamespaceGeneration++
+	wrong.CallerScope.ControllerGeneration++
 	if _, err := client.ResolveStartRunLoss(ctx, pb.NewOperationServiceClient(connection), lookupContext, nil, wrong); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("wrong namespace generation accepted: %v", err)
+		t.Fatalf("wrong Controller generation accepted: %v", err)
 	}
 }
 
 func TestLostSubmitResponseRecoversOriginalTurnWithoutRedispatch(t *testing.T) {
-	original := &pb.OperationRef{CallerScope: &pb.CallerScope{PrincipalRef: "controller", ControllerGeneration: 3, WorkspaceId: "workspace", Aggregate: &pb.CallerScope_RunId{RunId: "original-run"}}, OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: "original-submit-key", NamespaceGeneration: 7}
-	fixture := &responseLossServer{original: original}
+	request := &pb.SubmitTurnRequest{Context: &pb.RequestContext{ProtocolVersion: 2}, Controller: &pb.ControllerCarrierRef{ExpectedControllerId: "controller", ExpectedControllerGeneration: 3}, IdempotencyKey: "original-submit-key", Run: &pb.RunRef{Workspace: &pb.WorkspaceRef{AbsolutePath: "/fixture/workspace", ExpectedWorkspaceId: "workspace"}, RunId: "original-run"}, Message: "accepted once"}
+	original := &pb.OperationRef{CallerScope: &pb.CallerScope{ControllerKind: pb.ControllerKind_CONTROLLER_KIND_INTERACTIVE_CLIENT, PrincipalRef: "controller", ControllerGeneration: request.Controller.ExpectedControllerGeneration, WorkspaceId: request.Run.Workspace.ExpectedWorkspaceId, Aggregate: &pb.CallerScope_RunId{RunId: request.Run.RunId}}, OperationKind: pb.OperationKind_OPERATION_KIND_SUBMIT_TURN, IdempotencyKey: request.IdempotencyKey}
+	fixture := &responseLossServer{}
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
 	pb.RegisterRunServiceServer(server, fixture)
@@ -341,7 +359,7 @@ func TestLostSubmitResponseRecoversOriginalTurnWithoutRedispatch(t *testing.T) {
 	t.Cleanup(func() { _ = connection.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = pb.NewRunServiceClient(connection).SubmitTurn(ctx, &pb.SubmitTurnRequest{IdempotencyKey: original.IdempotencyKey, Run: &pb.RunRef{RunId: "original-run"}, Message: "accepted once"})
+	_, err = pb.NewRunServiceClient(connection).SubmitTurn(ctx, request)
 	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("expected lost submit response: %v", err)
 	}
@@ -435,6 +453,27 @@ func TestPortableFixturesDecodeAgainstGeneratedTypes(t *testing.T) {
 			if err := client.ValidateLookup(lookup, original); err != nil {
 				t.Fatalf("lookup fixture %s: %v", fixture.ID, err)
 			}
+		}
+	}
+	install := decoded["install_provisioning_request"].(*pb.InstallProvisioningRequest)
+	open := decoded["open_external_engagement_request"].(*pb.OpenExternalEngagementRequest)
+	for _, before := range []struct {
+		operation  *pb.OperationRef
+		controller *pb.ControllerCarrierRef
+		workspace  *pb.WorkspaceRef
+		kind       pb.OperationKind
+		key, scope string
+	}{
+		{decoded["install_provisioning_response"].(*pb.InstallProvisioningResponse).Receipt.Operation, install.Controller, install.Captured.Workspace, pb.OperationKind_OPERATION_KIND_INSTALL_PROVISIONING, install.IdempotencyKey, "provisioning-install"},
+		{decoded["open_external_engagement_response"].(*pb.OpenExternalEngagementResponse).Receipt.Operation, open.Admission.Controller, open.Workspace, pb.OperationKind_OPERATION_KIND_OPEN_EXTERNAL_ENGAGEMENT, open.Admission.IdempotencyKey, "external-engagement-open"},
+	} {
+		// The allocated policy/engagement ID cannot be an input to recovering
+		// the first lost response. Every varying identity fact exists pre-call.
+		if before.operation.GetOperationKind() != before.kind || before.operation.GetIdempotencyKey() != before.key ||
+			before.operation.GetCallerScope().GetControllerGeneration() != before.controller.GetExpectedControllerGeneration() ||
+			before.operation.GetCallerScope().GetWorkspaceId() != before.workspace.GetExpectedWorkspaceId() ||
+			before.operation.GetCallerScope().GetProvisioningScope() != before.scope {
+			t.Fatalf("pre-allocation lookup requires response-only identity: %v", before.operation)
 		}
 	}
 	imageJSON, err := os.ReadFile(filepath.Join(directory, "docs/protocol/examples/v014-identity-accepted-task.valid.json"))

@@ -144,6 +144,28 @@ they do not claim that a particular RPC or model tool is already exposed.
 | Cancel task / release member / close aggregate | S; authenticated current owner and current task/member/aggregate identity | Read same durable lifecycle owner and membership/workload proof; interrupt acknowledgement alone cannot establish `released` or terminal outcome |
 | Operator maintenance / explicit result retention or GC | S; explicit operator scope, generation and dry-run plan | Preserve active/unknown references and identity receipts; interrupted operation resumes its recorded generation; predictable capacity refusal differs from corruption |
 
+The public `OperationRef` consists of the retained `CallerScope`, operation kind
+and original idempotency key. Consumers MUST retain these facts before the
+initial mutation. The Controller kind, normalized principal and generation come
+from the selected credential; the workspace and existing aggregate come from
+the original request and prior authorized inspection. Pre-allocation operations
+use fixed `provisioning_scope` values: `run-start` for `StartRun`,
+`provisioning-install` for `InstallProvisioning` and `external-engagement-open`
+for `OpenExternalEngagement`. Installation takes its workspace identity from
+the retained `captured.workspace`. Run mutations use the original Run ID;
+fork/continuation creation uses the source Run, with the destination Controller
+for continuation admission. Other keyed delegation/group mutations use the
+existing engagement or session in their original scope. A newly allocated
+subject or the first mutation response MUST NOT be needed to construct lookup
+identity; allocated subject IDs belong to the retained receipt.
+
+`CallerScope.controller_generation` fences the public credential namespace.
+There is no additional client-selected storage/namespace generation in
+`OperationRef`. Physical storage generations and protected native-adapter
+generations remain provider-owned recovery state. The provider proves its
+retained namespace fence and durable watermark in an `absent` response;
+unavailable or corrupt generation state cannot produce authoritative absence.
+
 Lookup's normal result MUST be exactly one of:
 
 | Result | Required facts and permitted next step |
@@ -415,6 +437,12 @@ schema = "dolgorae.group-assignment/v1"
 entries = [{entry_key, role_snapshot_digest, agent_configuration_digest,
             accepted_task_digest}], sorted by unique entry_key
 ```
+
+The identity's `scope_kind` is exactly `external_engagement` or
+`orchestrated_session`, with the corresponding engagement or session ID as
+`scope_ref`. Public `DelegationScope.external` and `.managed` select those
+identities respectively; the transport labels themselves are not digest values.
+Protobuf JSON field spelling does not change the closed identity vocabulary.
 
 The group contains 1..64 entries and its complete encoded immutable manifest is
 at most 1 MiB. Entries bind task/context identities through immutable references;

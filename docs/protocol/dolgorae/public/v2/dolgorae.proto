@@ -1965,10 +1965,13 @@ message CallerScope {
   }
 }
 message OperationRef {
+  // All identity fields are retained before the initial mutation. Controller
+  // generation belongs to caller_scope; storage generations are provider state.
+  reserved 4;
+  reserved "namespace_generation";
   CallerScope caller_scope = 1;
   OperationKind operation_kind = 2;
   string idempotency_key = 3;
-  uint64 namespace_generation = 4;
 }
 message SubjectIdentities {
   optional string run_id = 1;

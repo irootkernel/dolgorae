@@ -73,10 +73,10 @@ func RequireMethods(capabilities *pb.GetCapabilitiesResponse, descriptorSHA256 s
 
 // ResolveStartRunLoss performs only the authorized original-key lookup. It
 // never reconstructs inputs or resubmits StartRun. The caller retains the exact
-// operation scope and generation before the initial request.
+// operation scope, including Controller generation, before the initial request.
 func ResolveStartRunLoss(ctx context.Context, operations pb.OperationServiceClient, requestContext *pb.RequestContext, controller *pb.ControllerCarrierRef, original *pb.OperationRef) (*pb.LookupOperationResponse, error) {
 	if original == nil || original.GetOperationKind() != pb.OperationKind_OPERATION_KIND_START_RUN ||
-		original.GetIdempotencyKey() == "" || original.GetCallerScope() == nil || original.GetNamespaceGeneration() == 0 {
+		original.GetIdempotencyKey() == "" || original.GetCallerScope() == nil || original.GetCallerScope().GetControllerGeneration() == 0 {
 		return nil, fmt.Errorf("exact original StartRun operation identity required")
 	}
 	if requestContext.GetProtocolVersion() != 2 || requestContext.GetClientRequestId() == "" || requestContext.GetClientInstanceId() == "" {
@@ -189,7 +189,7 @@ func MutationClassification(detail *pb.DolgoraeErrorDetail) pb.FailureClassifica
 	}
 	if operation := detail.GetOperation(); operation != nil &&
 		(operation.GetOperationKind() != detail.GetOperationKind() || operation.GetIdempotencyKey() == "" ||
-			operation.GetCallerScope() == nil || operation.GetNamespaceGeneration() == 0 ||
+			operation.GetCallerScope() == nil || operation.GetCallerScope().GetControllerGeneration() == 0 ||
 			(detail.IdempotencyKey != nil && detail.GetIdempotencyKey() != operation.GetIdempotencyKey())) {
 		return pb.FailureClassification_FAILURE_CLASSIFICATION_UNKNOWN
 	}

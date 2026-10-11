@@ -9,6 +9,120 @@ const ACCEPTANCE: &str = include_str!("../docs/protocol/dolgorae-v014-acceptance
 const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 type Check = Result<(), &'static str>;
 
+// Protobuf JSON accepts either spelling, but the digest object has one closed
+// vocabulary. Reject extra fields and duplicate aliases before projecting it.
+fn wire_identity_fields(value: &Value, names: &[(&str, &str)]) -> Result<Value, &'static str> {
+    let object = value.as_object().ok_or("invalid_identity")?;
+    if object.len() != names.len() {
+        return Err("invalid_identity");
+    }
+    let mut result = serde_json::Map::new();
+    for (canonical, alias) in names {
+        let value = match (object.get(*canonical), object.get(*alias)) {
+            (Some(value), None) | (None, Some(value)) => value,
+            (Some(value), Some(_)) if canonical == alias => value,
+            _ => return Err("invalid_identity"),
+        };
+        result.insert((*canonical).to_owned(), value.clone());
+    }
+    Ok(Value::Object(result))
+}
+
+fn wire_group_identity(value: &Value) -> Result<Value, &'static str> {
+    let mut identity = wire_identity_fields(
+        value,
+        &[
+            ("schema", "schema"),
+            ("scope_kind", "scopeKind"),
+            ("scope_ref", "scopeRef"),
+            ("entries", "entries"),
+        ],
+    )?;
+    identity["entries"] = Value::Array(
+        array(&identity["entries"])?
+            .iter()
+            .map(|entry| {
+                wire_identity_fields(
+                    entry,
+                    &[
+                        ("entry_key", "entryKey"),
+                        ("role_snapshot_digest", "roleSnapshotDigest"),
+                        ("agent_configuration_digest", "agentConfigurationDigest"),
+                        ("accepted_task_digest", "acceptedTaskDigest"),
+                    ],
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    validate_identity("dolgorae.group-assignment/v1", &identity)?;
+    Ok(identity)
+}
+
+#[test]
+fn wire_group_fixtures_preserve_closed_identity_and_scope() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let mut checked = 0;
+    for fixture in fixtures["positive"].as_array().unwrap() {
+        let request = &fixture["grpc_json"];
+        let assignment = request.get("assignment").or_else(|| {
+            request
+                .get("group")
+                .and_then(|group| group.get("assignment"))
+        });
+        let Some(assignment) = assignment else {
+            continue;
+        };
+        let identity = wire_group_identity(assignment)
+            .unwrap_or_else(|error| panic!("fixture {}: {error}", fixture["id"]));
+        if let Some(scope) = request.get("scope") {
+            if let Some(managed) = scope.get("managed") {
+                assert_eq!(identity["scope_kind"], "orchestrated_session");
+                assert_eq!(
+                    identity["scope_ref"],
+                    managed
+                        .get("session_id")
+                        .or_else(|| managed.get("sessionId"))
+                        .unwrap()
+                        .clone()
+                );
+            } else if let Some(external) = scope.get("external") {
+                assert_eq!(identity["scope_kind"], "external_engagement");
+                assert_eq!(
+                    identity["scope_ref"],
+                    external
+                        .get("engagement_id")
+                        .or_else(|| external.get("engagementId"))
+                        .unwrap()
+                        .clone()
+                );
+            } else {
+                panic!("unknown group scope in {}", fixture["id"]);
+            }
+        }
+        let mut invalid = assignment.clone();
+        let field = if invalid.get("scopeKind").is_some() {
+            "scopeKind"
+        } else {
+            "scope_kind"
+        };
+        invalid[field] = json!("managed");
+        assert!(
+            wire_group_identity(&invalid).is_err(),
+            "invalid scope alias admitted"
+        );
+        invalid[field] = json!("external");
+        assert!(
+            wire_group_identity(&invalid).is_err(),
+            "invalid scope alias admitted"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 5, "group wire fixture coverage changed");
+}
+
 fn fields(domain: &str) -> &'static [&'static str] {
     match domain {
         "dolgorae.role-snapshot/v1" => {

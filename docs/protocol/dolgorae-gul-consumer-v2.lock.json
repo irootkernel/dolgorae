@@ -51,7 +51,7 @@
     },
     {
       "path": "docs/protocol/dolgorae/public/v2/dolgorae.proto",
-      "sha256": "f334bf8b0c2f7042ed9c76bcee915a599b78e774ff455bdb4d6face6d83318a9",
+      "sha256": "785d9c0c5b852cc55917bdda3aa70b55ac6c81360971e3f2d13ebf18bf6588d2",
       "generation": "H1-contract-input"
     },
     {
@@ -141,7 +141,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json",
-      "sha256": "fed4c5a31b221c8a7c4943c8b46d1e881e70cf593912aef091c4efbec17adf9e",
+      "sha256": "ded51af3ed9a610227d41772e7b879b60e290f6c20d1c8518b3b373b786192ba",
       "generation": "dolgorae.gul-consumer-fixtures/v2"
     },
     {
@@ -206,12 +206,12 @@
     },
     {
       "path": "docs/protocol/dolgorae-public-v2.descriptor.json",
-      "sha256": "d54ebb56ba46042f65e0acedfd2a83a00d167193dad9e136ad6298b239223c07",
+      "sha256": "6663eacc5eb93b87763593200e3f2c83315ab3a55231c610697850df0c808cd5",
       "generation": "dolgorae.public.v2"
     },
     {
       "path": "docs/protocol/dolgorae-public-v2.descriptor.pb",
-      "sha256": "1a659046670feff58c5097ac639dd8854c4b534d3bc2fb6366abad98b4caa232",
+      "sha256": "e2146b304d3e6845cbc9a7290347c91c1846c7f4dcaad3a8791bd36a8b29242b",
       "generation": "H1-contract-input"
     },
     {
@@ -681,12 +681,12 @@
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/client/contract.go",
-      "sha256": "d1b2db790e86004c9cd99ade79f48d2ebd0e48c01c7e091fd9ecac0ef22d0e5d",
+      "sha256": "c67759fa1dcb59a4b073beaebac6cd3ce0c227923ba9927a19e83b20e657cb8c",
       "generation": "H1-contract-input"
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/client/contract_test.go",
-      "sha256": "b7e8670197cc95520bb66fad4b62f82dc56dce673fff6b56dbf47e4a55211aef",
+      "sha256": "0e2b158274e7051ca76ca90765cd8710cfc4007e7a0d383cf302859aa89801b1",
       "generation": "H1-contract-input"
     },
     {
@@ -696,7 +696,7 @@
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae.pb.go",
-      "sha256": "1bae29db195ecfd56581e7dd0878f2d43f3cd7125990419265c0f7f51436c099",
+      "sha256": "8bf565ecca48a238ff679cf8edb93934fb9a40b5d9fc40827ecd5515b111bc19",
       "generation": "H1-contract-input"
     },
     {
@@ -736,7 +736,7 @@
     },
     {
       "path": "docs/specs/dolgorae-v014-method-and-digest-contract.md",
-      "sha256": "a1438bc40456190a3f5762a69016bb9bc72bd467f72f185655e9062f2c9e4366",
+      "sha256": "966e2f2911eab363ac699573b746fc970894cf9a07bafeb04b1ace97122fa286",
       "generation": "H1-contract-input"
     },
     {
@@ -766,7 +766,7 @@
     },
     {
       "path": "tests/successor_contract.rs",
-      "sha256": "7d843b6cd75e3dc8a8ecc4985023133b186d79701a253187a161e57be6461b27",
+      "sha256": "7b025f13f8797bfca851b70146768e422b170a2b968b91e96adb67b986644d34",
       "generation": "H1-contract-input"
     },
     {

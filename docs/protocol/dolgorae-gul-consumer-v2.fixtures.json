@@ -127,8 +127,7 @@
             "runId": "run-1"
           },
           "operationKind": "OPERATION_KIND_SUBMIT_TURN",
-          "idempotencyKey": "submit-original-key",
-          "namespaceGeneration": "1"
+          "idempotencyKey": "submit-original-key"
         }
       }
     },
@@ -208,7 +207,7 @@
         },
         "assignment": {
           "schema": "dolgorae.group-assignment/v1",
-          "scopeKind": "managed",
+          "scopeKind": "orchestrated_session",
           "scopeRef": "session-1",
           "entries": [
             {
@@ -244,8 +243,7 @@
             "external_engagement_id": "engagement:fixture"
           },
           "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-          "idempotency_key": "original:AssignExternalSpecialistTask",
-          "namespace_generation": 7
+          "idempotency_key": "original:AssignExternalSpecialistTask"
         }
       }
     },
@@ -268,8 +266,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignExternalSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignExternalSpecialistTask"
             },
             "accepted_input_digest": "sha256:43e3843c0c74726fb3c0768d01728fb39fb0183d9568e6dfd572206c66af0bd4",
             "receipt_id": "receipt:AssignExternalSpecialistTask",
@@ -662,11 +659,10 @@
               "principal_ref": "principal:fixture",
               "controller_generation": 3,
               "workspace_id": "workspace:fixture",
-              "provisioning_scope": "policy:fixture"
+              "provisioning_scope": "provisioning-install"
             },
             "operation_kind": "OPERATION_KIND_INSTALL_PROVISIONING",
-            "idempotency_key": "original:InstallProvisioning",
-            "namespace_generation": 7
+            "idempotency_key": "original:InstallProvisioning"
           },
           "accepted_input_digest": "sha256:5f45332630a984c3be3b54454671173607585fbd0d54816f932850f0399cc530",
           "receipt_id": "receipt:InstallProvisioning",
@@ -754,11 +750,10 @@
               "principal_ref": "principal:fixture",
               "controller_generation": 3,
               "workspace_id": "workspace:fixture",
-              "external_engagement_id": "engagement:fixture"
+              "provisioning_scope": "external-engagement-open"
             },
             "operation_kind": "OPERATION_KIND_OPEN_EXTERNAL_ENGAGEMENT",
-            "idempotency_key": "original:OpenExternalEngagement",
-            "namespace_generation": 7
+            "idempotency_key": "original:OpenExternalEngagement"
           },
           "accepted_input_digest": "sha256:2782c16decb6f010a7871a176f02da92a88407e5f40c492b9e600ad94084e3dd",
           "receipt_id": "receipt:OpenExternalEngagement",
@@ -992,8 +987,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
-              "idempotency_key": "original:HireExternalSpecialist",
-              "namespace_generation": 7
+              "idempotency_key": "original:HireExternalSpecialist"
             }
           },
           "run": {
@@ -1045,8 +1039,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
-              "idempotency_key": "original:HireExternalSpecialist",
-              "namespace_generation": 7
+              "idempotency_key": "original:HireExternalSpecialist"
             }
           },
           "external_controller": {
@@ -1067,8 +1060,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_HIRE_EXTERNAL_SPECIALIST",
-            "idempotency_key": "original:HireExternalSpecialist",
-            "namespace_generation": 7
+            "idempotency_key": "original:HireExternalSpecialist"
           },
           "accepted_input_digest": "sha256:bf41ba704a186c07794d2688a3055c4185ff6505da3386725035ce42f7f7d00f",
           "receipt_id": "receipt:HireExternalSpecialist",
@@ -1231,8 +1223,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignExternalSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignExternalSpecialistTask"
             }
           },
           "external_controller": {
@@ -1253,8 +1244,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-            "idempotency_key": "original:AssignExternalSpecialistTask",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignExternalSpecialistTask"
           },
           "accepted_input_digest": "sha256:43e3843c0c74726fb3c0768d01728fb39fb0183d9568e6dfd572206c66af0bd4",
           "receipt_id": "receipt:AssignExternalSpecialistTask",
@@ -1290,8 +1280,7 @@
             "external_engagement_id": "engagement:fixture"
           },
           "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-          "idempotency_key": "original:AssignExternalSpecialistTask",
-          "namespace_generation": 7
+          "idempotency_key": "original:AssignExternalSpecialistTask"
         },
         "idempotency_key": "original:AssignExternalSpecialistTask"
       }
@@ -1508,8 +1497,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignExternalSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignExternalSpecialistTask"
             }
           },
           "external_controller": {
@@ -1707,8 +1695,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignExternalSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignExternalSpecialistTask"
             }
           },
           "run": {
@@ -1770,8 +1757,7 @@
             "external_engagement_id": "engagement:fixture"
           },
           "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-          "idempotency_key": "original:AssignExternalSpecialistTask",
-          "namespace_generation": 7
+          "idempotency_key": "original:AssignExternalSpecialistTask"
         }
       }
     },
@@ -1824,8 +1810,7 @@
                 "external_engagement_id": "engagement:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignExternalSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignExternalSpecialistTask"
             }
           },
           "external_controller": {
@@ -2001,8 +1986,7 @@
                 "orchestrated_session_id": "session:fixture"
               },
               "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
-              "idempotency_key": "original:SpawnSpecialist",
-              "namespace_generation": 7
+              "idempotency_key": "original:SpawnSpecialist"
             }
           },
           "run": {
@@ -2060,8 +2044,7 @@
                 "orchestrated_session_id": "session:fixture"
               },
               "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
-              "idempotency_key": "original:SpawnSpecialist",
-              "namespace_generation": 7
+              "idempotency_key": "original:SpawnSpecialist"
             }
           },
           "root_primary_run": {
@@ -2089,8 +2072,7 @@
               "orchestrated_session_id": "session:fixture"
             },
             "operation_kind": "OPERATION_KIND_SPAWN_SPECIALIST",
-            "idempotency_key": "original:SpawnSpecialist",
-            "namespace_generation": 7
+            "idempotency_key": "original:SpawnSpecialist"
           },
           "accepted_input_digest": "sha256:2d47ec71a40954c984c15527e09d8b548c2010e0080b343b5e05522aafe22ae3",
           "receipt_id": "receipt:SpawnSpecialist",
@@ -2262,8 +2244,7 @@
                 "orchestrated_session_id": "session:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignSpecialistTask"
             }
           },
           "root_primary_run": {
@@ -2291,8 +2272,7 @@
               "orchestrated_session_id": "session:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-            "idempotency_key": "original:AssignSpecialistTask",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignSpecialistTask"
           },
           "accepted_input_digest": "sha256:789c71bfe36760fdb8cc05f669f7d432eb855d2e516a7a1c7beb7faee96a8ec3",
           "receipt_id": "receipt:AssignSpecialistTask",
@@ -2328,8 +2308,7 @@
             "orchestrated_session_id": "session:fixture"
           },
           "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-          "idempotency_key": "original:AssignSpecialistTask",
-          "namespace_generation": 7
+          "idempotency_key": "original:AssignSpecialistTask"
         },
         "idempotency_key": "original:AssignSpecialistTask"
       }
@@ -2558,8 +2537,7 @@
                 "orchestrated_session_id": "session:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignSpecialistTask"
             }
           },
           "root_primary_run": {
@@ -2773,8 +2751,7 @@
                 "orchestrated_session_id": "session:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignSpecialistTask"
             }
           },
           "run": {
@@ -2839,8 +2816,7 @@
             "orchestrated_session_id": "session:fixture"
           },
           "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-          "idempotency_key": "original:AssignSpecialistTask",
-          "namespace_generation": 7
+          "idempotency_key": "original:AssignSpecialistTask"
         }
       }
     },
@@ -2899,8 +2875,7 @@
                 "orchestrated_session_id": "session:fixture"
               },
               "operation_kind": "OPERATION_KIND_ASSIGN_SPECIALIST_TASK",
-              "idempotency_key": "original:AssignSpecialistTask",
-              "namespace_generation": 7
+              "idempotency_key": "original:AssignSpecialistTask"
             }
           },
           "root_primary_run": {
@@ -3124,8 +3099,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_GROUP",
-            "idempotency_key": "original:AssignGroup",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignGroup"
           },
           "accepted_input_digest": "sha256:f63a081201b22f72a3ddb45e698ef9f446880cb68973b1aaad3f272e3a4d21e6",
           "receipt_id": "receipt:AssignGroup",
@@ -3515,8 +3489,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_MERGE_GROUP_RESULTS",
-            "idempotency_key": "original:MergeGroupResults",
-            "namespace_generation": 7
+            "idempotency_key": "original:MergeGroupResults"
           },
           "accepted_input_digest": "sha256:caf4811a5cbc15190c276fab1bfb5fe9d0f6764aec2fdd1b468b255a97038d5f",
           "receipt_id": "receipt:MergeGroupResults",
@@ -3684,8 +3657,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
-            "idempotency_key": "original:AssignSynthesis",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignSynthesis"
           },
           "accepted_input_digest": "sha256:d6813b36b66769e3a2caf7ec355c3a9505668f0a408b26fa58813f2dfb369023",
           "receipt_id": "receipt:AssignSynthesis",
@@ -3727,8 +3699,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
-            "idempotency_key": "original:AssignSynthesis",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignSynthesis"
           }
         }
       }
@@ -3755,8 +3726,7 @@
             "external_engagement_id": "engagement:fixture"
           },
           "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
-          "idempotency_key": "original:AssignSynthesis",
-          "namespace_generation": 7
+          "idempotency_key": "original:AssignSynthesis"
         },
         "idempotency_key": "original:AssignSynthesis"
       }
@@ -4017,8 +3987,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-            "idempotency_key": "original:AssignExternalSpecialistTask",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignExternalSpecialistTask"
           },
           "input_digest": "sha256:43e3843c0c74726fb3c0768d01728fb39fb0183d9568e6dfd572206c66af0bd4",
           "definitive_refusal_code": "SPECIALIST_NOT_IDLE",
@@ -4044,8 +4013,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-            "idempotency_key": "original:AssignExternalSpecialistTask",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignExternalSpecialistTask"
           },
           "known_subjects": {
             "member_id": "member:fixture",
@@ -4074,8 +4042,7 @@
               "external_engagement_id": "engagement:fixture"
             },
             "operation_kind": "OPERATION_KIND_ASSIGN_EXTERNAL_SPECIALIST_TASK",
-            "idempotency_key": "original:AssignExternalSpecialistTask",
-            "namespace_generation": 7
+            "idempotency_key": "original:AssignExternalSpecialistTask"
           },
           "retained_namespace_fence": "namespace:workspace:fixture:generation:7",
           "durable_watermark": 120,
@@ -4114,8 +4081,7 @@
                 "run_id": "run:fixture"
               },
               "operation_kind": "OPERATION_KIND_SUBMIT_TURN",
-              "idempotency_key": "original:SubmitTurn",
-              "namespace_generation": 7
+              "idempotency_key": "original:SubmitTurn"
             },
             "accepted_input_digest": "sha256:e38ca9f48f5ac9171a758fb5efc35e07a2421e26646f4977ff58b006e0165fe9",
             "receipt_id": "receipt:SubmitTurn",

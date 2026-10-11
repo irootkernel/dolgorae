@@ -16508,13 +16508,12 @@ func (*CallerScope_RunId) isCallerScope_Aggregate() {}
 func (*CallerScope_ProvisioningScope) isCallerScope_Aggregate() {}
 
 type OperationRef struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	CallerScope         *CallerScope           `protobuf:"bytes,1,opt,name=caller_scope,json=callerScope,proto3" json:"caller_scope,omitempty"`
-	OperationKind       OperationKind          `protobuf:"varint,2,opt,name=operation_kind,json=operationKind,proto3,enum=dolgorae.public.v2.OperationKind" json:"operation_kind,omitempty"`
-	IdempotencyKey      string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	NamespaceGeneration uint64                 `protobuf:"varint,4,opt,name=namespace_generation,json=namespaceGeneration,proto3" json:"namespace_generation,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	CallerScope    *CallerScope           `protobuf:"bytes,1,opt,name=caller_scope,json=callerScope,proto3" json:"caller_scope,omitempty"`
+	OperationKind  OperationKind          `protobuf:"varint,2,opt,name=operation_kind,json=operationKind,proto3,enum=dolgorae.public.v2.OperationKind" json:"operation_kind,omitempty"`
+	IdempotencyKey string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *OperationRef) Reset() {
@@ -16566,13 +16565,6 @@ func (x *OperationRef) GetIdempotencyKey() string {
 		return x.IdempotencyKey
 	}
 	return ""
-}
-
-func (x *OperationRef) GetNamespaceGeneration() uint64 {
-	if x != nil {
-		return x.NamespaceGeneration
-	}
-	return 0
 }
 
 type SubjectIdentities struct {
@@ -25748,12 +25740,11 @@ const file_dolgorae_public_v2_dolgorae_proto_rawDesc = "" +
 	"\x17orchestrated_session_id\x18\x06 \x01(\tH\x00R\x15orchestratedSessionId\x12\x17\n" +
 	"\x06run_id\x18\a \x01(\tH\x00R\x05runId\x12/\n" +
 	"\x12provisioning_scope\x18\b \x01(\tH\x00R\x11provisioningScopeB\v\n" +
-	"\taggregate\"\xf8\x01\n" +
+	"\taggregate\"\xe1\x01\n" +
 	"\fOperationRef\x12B\n" +
 	"\fcaller_scope\x18\x01 \x01(\v2\x1f.dolgorae.public.v2.CallerScopeR\vcallerScope\x12H\n" +
 	"\x0eoperation_kind\x18\x02 \x01(\x0e2!.dolgorae.public.v2.OperationKindR\roperationKind\x12'\n" +
-	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\x121\n" +
-	"\x14namespace_generation\x18\x04 \x01(\x04R\x13namespaceGeneration\"\xc7\x04\n" +
+	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKeyJ\x04\b\x04\x10\x05R\x14namespace_generation\"\xc7\x04\n" +
 	"\x11SubjectIdentities\x12\x1a\n" +
 	"\x06run_id\x18\x01 \x01(\tH\x00R\x05runId\x88\x01\x01\x12 \n" +
 	"\tmember_id\x18\x02 \x01(\tH\x01R\bmemberId\x88\x01\x01\x12\x1c\n" +
