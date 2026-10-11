@@ -141,7 +141,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json",
-      "sha256": "a7491e095f717b7625bdaa355e99c6b5ed0dc13f9e818469e8db5339db2f300c",
+      "sha256": "e0e67005e57aa3b46cb381e09b46949a177fc0e5fb8b0a1100bc295ae5cd8a3d",
       "generation": "dolgorae.gul-consumer-fixtures/v2"
     },
     {
@@ -301,7 +301,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-v014-identities-v1.schema.json",
-      "sha256": "c552bb6cc7e32c47a90a17648c49272bea7a2e7b843a69ba9281eb90ff4d8cba",
+      "sha256": "5640333e8f42e661a352e550a1b0b85a58c4a842e364018d5cc84ee6794ef5f1",
       "generation": "https://dolgorae.local/schema/v014-identities/v1"
     },
     {
@@ -736,7 +736,7 @@
     },
     {
       "path": "docs/specs/dolgorae-v014-method-and-digest-contract.md",
-      "sha256": "cb7e1cf80e787440ef8057f83f8b7f77513cfe8904bf8ed08b80069c4462a10c",
+      "sha256": "651f92f51cfc96d15cff0fc08c216c70aa1b7a424fbe2b28ec91bc3ff4cf535f",
       "generation": "H1-contract-input"
     },
     {
@@ -766,7 +766,7 @@
     },
     {
       "path": "tests/successor_contract.rs",
-      "sha256": "d1d4956b8c7508398eede1eac3fca3e9562b40048dcdad74437f3a7b40fc216d",
+      "sha256": "56263613121fed0e04f416585531bd88887b43b70edbb977887b051f08b5ffbb",
       "generation": "H1-contract-input"
     },
     {
@@ -796,7 +796,7 @@
     },
     {
       "path": "tools/validators/validate_h1_contract.py",
-      "sha256": "0ad1ec33bfd6131a080559bfd76e90e350738c22f89d773d4c93a7825023c0fe",
+      "sha256": "6a03b56dee67bfaa088fe24ae417885de36acc901b3d13cdaace2114268109a9",
       "generation": "H1-contract-input"
     },
     {

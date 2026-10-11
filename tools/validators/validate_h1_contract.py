@@ -9,6 +9,8 @@ from pathlib import Path
 
 from google.protobuf import descriptor_pool, json_format, message_factory
 from google.protobuf.descriptor_pb2 import FileDescriptorSet
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
 ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = ROOT / "docs/protocol"
@@ -20,6 +22,20 @@ def load(name):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_normalized_bodies(fixtures):
+    registry = Registry()
+    for path in sorted(PROTOCOL.glob("*.json")):
+        schema = json.loads(path.read_text())
+        if isinstance(schema, dict) and "$id" in schema:
+            registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
+    for operation, fixture in fixtures["constructed_mutation_inputs"].items():
+        validator = Draft202012Validator(
+            {"$ref": fixture["identity"]["request_schema"]}, registry=registry
+        )
+        errors = list(validator.iter_errors(fixture["normalized_body"]))
+        assert not errors, f"normalized {operation}: {errors[0].json_path}: {errors[0].message}"
 
 
 def main():
@@ -71,6 +87,7 @@ def main():
         assert loaded, "descriptor dependency cycle/missing input"
         remaining = [file for file in remaining if file not in loaded]
     fixtures = load("dolgorae-gul-consumer-v2.fixtures.json")
+    validate_normalized_bodies(fixtures)
     fixture_index = {fixture["id"]: fixture for fixture in fixtures["positive"]}
     assert len(fixture_index) == len(fixtures["positive"]), "duplicate positive fixture identity"
     frozen_files = FileDescriptorSet.FromString((PROTOCOL / "dolgorae-public-v1.descriptor.pb").read_bytes())

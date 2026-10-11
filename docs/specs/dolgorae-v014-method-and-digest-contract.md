@@ -396,6 +396,22 @@ boundary, non-secret decision or lifecycle options as applicable. Omissions and
 defaults MUST be resolved once by the owning request schema before digesting.
 Unknown fields cannot disappear through normalization.
 
+Public-v2 `AssignSynthesis` uses
+`https://dolgorae.local/schema/v014-identities/v1#/$defs/public_assign_synthesis_normalized_body`.
+Its closed body contains `member_ref`, `merged_findings_digest`, `merged_input`
+and `assignment`. The assignment retains `task_body`, `accepted_task_identity`
+and `deadline_seconds`. Its complete public `StructuredTaskBody` contains
+`schema`, `brief`, `context`, `criteria` and `constraints`; each criterion
+retains `criterion_id`, `text` and `context_ids`. Repeated fields resolve to
+explicit arrays before digesting, including empty arrays. Context and
+constraint order is preserved. The accepted task's `task_body` BytesRef binds
+these same complete JCS bytes, including every constraint. The existing rich
+brief/context/criterion bounds apply.
+The facade/v5 normalized synthesis schema owns its separate facade task-body
+vocabulary and cannot name this public structured body. Normalized-body
+validation follows nested schema references, including task and criterion
+objects; matching the outer field names alone is insufficient.
+
 Expected revision remains a new-operation admission fence and is persisted
 alongside this identity. Original acceptance replay is checked before that
 fence. The protected invocation reference is mandatory for the successor MCP

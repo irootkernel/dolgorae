@@ -3687,7 +3687,7 @@
             "operation_kind": "OPERATION_KIND_ASSIGN_SYNTHESIS",
             "idempotency_key": "original:AssignSynthesis"
           },
-          "accepted_input_digest": "sha256:fe3f7a1308b50b8eff62a57f060b4c9be376297adcf41439c60d8e71dd24d5d0",
+          "accepted_input_digest": "sha256:7a2a874b129d61899d37fd10d2cedb21b73d0a1c14b907d87fbad8d6bf4fce2c",
           "receipt_id": "receipt:AssignSynthesis",
           "subjects": {
             "member_id": "member:fixture",
@@ -4806,7 +4806,7 @@
       },
       "identity": {
         "schema": "dolgorae.mutation-envelope/v1",
-        "request_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_synthesis_normalized_body",
+        "request_schema": "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_assign_synthesis_normalized_body",
         "operation_kind": "assign_synthesis",
         "workspace_ref": "workspace:fixture",
         "scope_kind": "external_engagement",

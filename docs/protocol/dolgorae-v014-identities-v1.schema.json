@@ -3851,6 +3851,125 @@
           ]
         }
       ]
+    },
+    "public_task_criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criterion_id",
+        "text",
+        "context_ids"
+      ],
+      "properties": {
+        "criterion_id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "context_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 128
+          }
+        }
+      }
+    },
+    "public_structured_task_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "brief",
+        "context",
+        "criteria",
+        "constraints"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.structured-task/v1"
+        },
+        "brief": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "x-maxUtf8Bytes": 65536
+        },
+        "context": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/context_ref"
+          }
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_task_criterion"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "public_assign_synthesis_normalized_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "member_ref",
+        "merged_findings_digest",
+        "merged_input",
+        "assignment"
+      ],
+      "properties": {
+        "member_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "merged_findings_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "merged_input": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "assignment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task_body",
+            "accepted_task_identity",
+            "deadline_seconds"
+          ],
+          "properties": {
+            "task_body": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_structured_task_body"
+            },
+            "accepted_task_identity": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task"
+            },
+            "deadline_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "The accepted task_body BytesRef binds complete JCS public StructuredTaskBody bytes, including ordered context, criteria and constraints. Accepted contexts match the complete public context references; merged_input binds the immutable merged findings. Normalization does not change task bytes or discard unknown fields."
+      ]
     }
   },
   "x-digestEncoding": "SHA256(UTF8(exact domain) || LF || RFC8785-JCS(closed object)); lowercase sha256: wire representation",

@@ -371,8 +371,12 @@ fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs(
         "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
     ))
     .unwrap();
-    let normalized_schema: Value = serde_json::from_str(include_str!(
+    let facade_schema: Value = serde_json::from_str(include_str!(
         "../docs/protocol/dolgorae-external-specialist-facade-v5.schema.json"
+    ))
+    .unwrap();
+    let public_schema: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-v014-identities-v1.schema.json"
     ))
     .unwrap();
     let cases: BTreeMap<_, _> = fixtures["positive"]
@@ -401,15 +405,23 @@ fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs(
         };
         assert_eq!(body, constructed["normalized_body"]);
         let identity = &constructed["identity"];
+        let (normalized_schema, definition) = if operation == "assign_synthesis" {
+            (
+                &public_schema,
+                "public_assign_synthesis_normalized_body".to_owned(),
+            )
+        } else {
+            (&facade_schema, format!("{operation}_normalized_body"))
+        };
         assert_eq!(
             identity["request_schema"],
             format!(
-                "{}#/$defs/{operation}_normalized_body",
+                "{}#/$defs/{definition}",
                 normalized_schema["$id"].as_str().unwrap()
             )
         );
         assert_eq!(
-            normalized_schema["$defs"][format!("{operation}_normalized_body")]["additionalProperties"],
+            normalized_schema["$defs"][&definition]["additionalProperties"],
             false
         );
         let scope = &response["receipt"]["operation"]["caller_scope"];
