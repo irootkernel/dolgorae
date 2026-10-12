@@ -731,7 +731,7 @@
     },
     {
       "path": "docs/specs/dolgorae-v014-host-contract-qualification.md",
-      "sha256": "77ec6fb5a29a2436243c1027f3b88ed8a0a9ac8809969b1a5954fabc6ee29b8d",
+      "sha256": "b7bcd18ea398aacf57bd73053c14fe2e8cd4a9b3b6aaf60f968c46dfa532f15f",
       "generation": "H1-contract-input"
     },
     {
@@ -746,7 +746,7 @@
     },
     {
       "path": "examples/host_invocation_contract.rs",
-      "sha256": "dce7544eaa6249b831799342473b8c2544169a887516995f8d2b25072437fc5f",
+      "sha256": "cbcbec3266b120e6bf70ee2fe0718cf18fb5a46b70c67f418c9b9c9dbad76c56",
       "generation": "H1-contract-input"
     },
     {
@@ -761,7 +761,7 @@
     },
     {
       "path": "tests/e2e/run_native_host_invocation_fixture.py",
-      "sha256": "553788b5d6a1f4432f36ce49f460094e4a5529d862df4a71d887f35ea8054b41",
+      "sha256": "6c32f9993df3180111be562f55e67dc19a42ffd28faaa2cff3a107e3740ae6a2",
       "generation": "H1-contract-input"
     },
     {
@@ -776,7 +776,7 @@
     },
     {
       "path": "tools/validators/generate_h1_lock.py",
-      "sha256": "7f92fcb737aec879f801600bbde42e9c6d0d743b9e7c1bb86cb5d9fe2547cce7",
+      "sha256": "75045bcfcb55009790a205d4239c350d30fe916341b9f98dccaba861f5184036",
       "generation": "H1-contract-input"
     },
     {
@@ -994,7 +994,7 @@
         "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
       }
     ],
-    "tested_prototype_sha256": "c102900c494017c611a70ef248b8c7f99ef7154bcbbea743a92bfc9b109bffc3",
+    "tested_prototype_sha256": "d95cee443673088a75e57ba4ef67c0c245a435bc065ad0fb4473325d2f94399c",
     "historical_0_149_mcp_unavailable": "unchanged"
   },
   "later_handoffs": {

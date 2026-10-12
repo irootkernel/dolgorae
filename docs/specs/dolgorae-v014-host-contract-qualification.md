@@ -29,10 +29,10 @@ The selected prototype bytes are pinned independently of the host pins:
 
 | Prototype input/artifact | Raw-byte SHA-256 |
 | --- | --- |
-| `examples/host_invocation_contract.rs` | `dce7544eaa6249b831799342473b8c2544169a887516995f8d2b25072437fc5f` |
-| `tests/e2e/run_native_host_invocation_fixture.py` | `553788b5d6a1f4432f36ce49f460094e4a5529d862df4a71d887f35ea8054b41` |
+| `examples/host_invocation_contract.rs` | `cbcbec3266b120e6bf70ee2fe0718cf18fb5a46b70c67f418c9b9c9dbad76c56` |
+| `tests/e2e/run_native_host_invocation_fixture.py` | `6c32f9993df3180111be562f55e67dc19a42ffd28faaa2cff3a107e3740ae6a2` |
 | `tests/e2e/host_invocation_fault_proxy.py` | `e0d15d5ee8e6eec27bd689f2988a604ae056e38cb0728d1fe524864f8fd03371` |
-| Tested macOS ARM debug prototype executable | `c102900c494017c611a70ef248b8c7f99ef7154bcbbea743a92bfc9b109bffc3` |
+| Tested macOS ARM debug prototype executable | `d95cee443673088a75e57ba4ef67c0c245a435bc065ad0fb4473325d2f94399c` |
 
 The isolated campaign used the same executable and driver/proxy bytes as this
 candidate. The debug executable identifies this feasibility experiment only;
@@ -126,6 +126,13 @@ claim native automatic replay of an interrupted pending call. Backend loss tests
 and actual native host loss have separate observations. Neither establishes
 Phase 3 Specialist dispatch, complete production results, Broker operation,
 Controller interactions or consumer acceptance.
+
+For Claude, physical-loss injection waits within the same deadline for the
+original native conversation's user record to reach its journal. The proxy
+withholds the committed reply throughout that wait and until process termination.
+This qualifies exact-session resume from a retained native conversation.
+Loss before that conversation record exists is outside the resume proof;
+the prototype's trusted lookup still owns receipt recovery.
 
 ## Bounded reproduction
 

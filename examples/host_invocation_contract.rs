@@ -415,6 +415,7 @@ mod tests {
             let root =
                 std::env::temp_dir().join(format!("dolgorae-host-contract-{}", Uuid::now_v7()));
             fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
             initialize(&root, route).unwrap();
             Self(root)

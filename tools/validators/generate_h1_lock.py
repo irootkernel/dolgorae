@@ -105,7 +105,7 @@ def main():
         "native_feasibility": {"qualification": "docs/specs/dolgorae-v014-host-contract-qualification.md", "scope": "account-free actual native host contract prototype, not production facade/consumer acceptance", "hosts": [
             {"product": "Codex CLI", "version": "0.160.0", "sha256": "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"},
             {"product": "Claude Code", "version": "2.1.295", "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"}],
-            "tested_prototype_sha256": "c102900c494017c611a70ef248b8c7f99ef7154bcbbea743a92bfc9b109bffc3", "historical_0_149_mcp_unavailable": "unchanged"},
+            "tested_prototype_sha256": "d95cee443673088a75e57ba4ef67c0c245a435bc065ad0fb4473325d2f94399c", "historical_0_149_mcp_unavailable": "unchanged"},
         "later_handoffs": {"H2": {"producer": "Gul E15 including E15-T21 and whole-Epic closeout", "consumer": "TASK-069/EPIC-019", "status": "not_started"},
             "H3": {"producer": "TASK-087/EPIC-021", "consumer": "Gul E16", "status": "future_runtime_qualification"},
             "H4": {"producer": "Gul E16 including E16-T16 and whole-Epic closeout", "consumer": "TASK-088/089", "status": "future_final_campaign"}},

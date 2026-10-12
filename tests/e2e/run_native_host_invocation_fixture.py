@@ -279,7 +279,7 @@ sys.exit(result.returncode)
 
 
 def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadline: float,
-             crash_marker: Path | None = None) -> Path:
+             crash_marker: Path | None = None, require_claude_journal: bool = False) -> Path:
     stdout_path, stderr_path = root / (phase + "-stdout.local"), root / (phase + "-stderr.local")
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -296,6 +296,12 @@ def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadl
                     time.sleep(0.025)
                 if not crash_marker.exists():
                     raise ProbeFailure("native_crash_point_not_reached")
+                if require_claude_journal:
+                    session = native_session(stdout_path, "claude")
+                    while not claude_conversation_persisted(root, session):
+                        if process.poll() is not None or time.monotonic() >= deadline:
+                            raise ProbeFailure("native_crash_resume_journal_unavailable")
+                        time.sleep(0.025)
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=5)
                 code = 0
@@ -314,6 +320,20 @@ def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadl
     if code:
         raise ProbeFailure("native_" + phase + "_process_failed")
     return stdout_path
+
+
+def claude_conversation_persisted(root: Path, session: str) -> bool:
+    for path in (root / "claude" / "projects").rglob(session + ".jsonl"):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+            continue
+        for line in path.read_text().splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("type") == "user" and record.get("sessionId") == session:
+                return True
+    return False
 
 
 def native_session(path: Path, host: str) -> str:
@@ -411,7 +431,8 @@ def qualify(host: str, executable: Path, prototype: Path, scratch: Path, crash_c
         # Both actual native executions share one bounded campaign deadline.
         deadline = time.monotonic() + 90
         initial_output = run_host(argv, root, env, "initial", deadline,
-                                  root / "crash-ready.local" if crash_case else None)
+                                  root / "crash-ready.local" if crash_case else None,
+                                  require_claude_journal=crash_case and host == "claude")
         if fixture.failure or (fixture.receipt is None and not crash_case):
             raise ProbeFailure(fixture.failure or "native_initial_call_not_qualified")
         session = native_session(initial_output, host)
