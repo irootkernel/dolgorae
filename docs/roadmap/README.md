@@ -22,15 +22,15 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
-and qualified H1 validation. EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
+and qualified H1 validation. EPIC-019 is ACTIVE; EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
 PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
-TASK-068 is COMPLETE; TASK-069 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
+TASK-068 is COMPLETE; TASK-069 is COMPLETE; TASK-070 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
 Documentation adoption alone activates no Task and claims no implementation or
-consumer acceptance. EPIC-018 validation and closeout are complete; the qualified
-H1 package is ready for Master to forward to Gul E15.
+consumer acceptance. EPIC-018 validation and closeout are complete. Gul E15 has returned completed
+H2; TASK-069 independently accepts its exact H1 binding and records Gate A.
 `EPIC-016` is `COMPLETE`; `TASK-057`, `TASK-058`, `TASK-059`, and `TASK-060`
 are `COMPLETE` after EPIC-008
 and before EPIC-009. They own reliable v3 independent review and installed-skill
@@ -2384,7 +2384,7 @@ Epic acceptance: TASK-067 and TASK-068 pass. Both mandatory host routes have pre
 
 ## EPIC-019: Durable Control, Storage, and Observation Corrections
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
 
@@ -2397,7 +2397,12 @@ membership, ordering and status.
 
 ### TASK-069: Record Gate A from the Completed Gul Contract Epic
 
-Status: `PLANNED`
+Status: `COMPLETE`
+
+The [Gate A acceptance](../specs/dolgorae-v014-gate-a-acceptance.md) records the
+completed H2 pin, independent foundation assessment and watch/timing/harness
+agreement. Independent completion review accepted this contract/foundation result.
+Required later runtime qualification and the complete Phase 3/H3 remain pending.
 
 Depends on: completed TASK-068/EPIC-018 and H2 from Gul's completed contract/foundation Epic containing the permanent T21 scope and required closeout.
 

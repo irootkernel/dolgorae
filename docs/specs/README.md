@@ -35,6 +35,11 @@ owns release-scoped Aquarium, Podway and Gul contract/owner/transport mappings,
 external prerequisites and runtime evidence. Its exact contract selection is
 required before successor publication; planning proves no runtime support.
 
+The [Gate A acceptance](dolgorae-v014-gate-a-acceptance.md) records TASK-069's
+independent acceptance of completed Gul E15/H2, its immutable source binding,
+foundation scope and watch/timing/harness agreement. Later H3/H4 and actual
+Aquarium, Podway and Gul runtime qualification remain mandatory.
+
 The [v0.1.4 successor requirements reconciliation](dolgorae-v014-successor-requirements.md)
 maps retained behavior, failure/recovery rules and adopted feedback to their
 acceptance owners. Its [method and digest contract](dolgorae-v014-method-and-digest-contract.md)

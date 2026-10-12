@@ -229,7 +229,7 @@ never promote credentials, raw reports or runtime identities. Publication of a
 consumer's qualification evidence is not product release publication.
 
 The current Gul ADR-0057 and canonical roadmap adopt E15 for Phase 2 and E16
-for Phase 4. E15 retains completed E15-T1..T4 and Planned E15-T21. Historical
+for Phase 4. E15 is completed with retained E15-T1..T4 and permanent E15-T21. Historical
 E15-T5..T20 are Retired with scope mappings to Planned E16-T1..T16; this
 amendment preserves both historical IDs and new accepted owners. Gul owns its
 Task identities/statuses. References to old T5..T20 scope below describe the
@@ -248,8 +248,8 @@ Preserve Gul's accepted CAS/draft versions, conditional cleanup, immutable
 unresolved material and shared attachments; foreground allocation/fairness for
 six streams; bounded actor reads over accumulated closed history; append-only
 migration after migration 13; native harness opt-in; and isolated rehearsal
-separate from production cutover after final product closeout/Gate D. H2/H4
-closeout and actual runtime evidence remain pending.
+separate from production cutover after final product closeout/Gate D. H2 is completed in Gul; the [Gate A acceptance](../specs/dolgorae-v014-gate-a-acceptance.md)
+records Dolgorae's independent assessment. H4 and actual runtime evidence remain pending.
 
 Each handler receives exactly one Epic and this shared dossier. Preserve
 completed predecessor history. Use the repository Task and Epic acceptance
@@ -558,6 +558,10 @@ and auditability when explicitly retiring result content.
 | Gate C independent acceptance / Gate D | TASK-088 substantively verifies H4 and all three consumers on final artifacts | TASK-089 consumes completed three-consumer matrix, required gates/final QA and provenance for release handoff |
 
 ### Gate A: contract agreement
+
+The [current Gate A acceptance](../specs/dolgorae-v014-gate-a-acceptance.md)
+consumes completed Gul E15/H2 without changing the immutable H1 snapshot.
+The roadmap owns TASK-069's review and completion state.
 
 In Phase 3, TASK-069 requires both owners to acknowledge one immutable package: canonical
 requirements, source/descriptor, generated clients, policies, error table,

@@ -25,6 +25,8 @@ owns mandatory Aquarium, Podway and Gul requirements-to-evidence mappings;
 the [alignment dossier](todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) supplies
 the five-phase whole-Epic execution graph and four handoffs. Neither establishes
 implemented capabilities or runtime acceptance. The
+[Gate A acceptance](specs/dolgorae-v014-gate-a-acceptance.md) records the later
+independent H2 contract/foundation acceptance and preserves its runtime limits. The
 [review-target strategy analysis](architecture-decision-records/review-strategy-analysis.md)
 is a supporting accepted design study, not runtime or completion evidence. The
 root [contribution guide](../CONTRIBUTING.md) is an entrypoint to implementation
