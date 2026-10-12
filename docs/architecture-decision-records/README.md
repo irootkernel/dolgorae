@@ -2740,8 +2740,9 @@ their separate authorization boundaries.
 Status: Selected pre-contract candidate; both actual native hosts passed the
 prototype scenarios. Master has accepted the Phase 1 source/mapping selection and
 implementation/acceptance responsibilities. Independent review accepted bounded
-native feasibility; checked H1 publication and later actual consumer-runtime
-acceptance remain pending.
+native feasibility, and the roadmap records completed checked H1 publication.
+Production adapter implementation and actual consumer-runtime acceptance
+remain pending.
 
 ### Context
 

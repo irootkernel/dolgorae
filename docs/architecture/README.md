@@ -402,8 +402,10 @@ state generation is initialized explicitly and never recreated by normal
 delivery or lookup. Both actual hosts passed the
 [prototype scenarios](../specs/dolgorae-v014-host-contract-qualification.md),
 including physical host loss before acknowledgement and supported lookup.
-Independent acceptance remains pending; this decision advertises no product
-runtime support.
+Independent completion review accepted bounded native feasibility, and the
+roadmap records completed H1 publication. Production adapter implementation
+and actual consumer-runtime acceptance remain pending; this decision
+advertises no product runtime support.
 Reconnect, process replacement and response loss recover one logical identity;
 a deliberate new call with identical arguments remains distinct. Connection,
 stdio lifetime, JSON-RPC request ID and model-controlled text confer no such
