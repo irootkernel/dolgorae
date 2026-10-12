@@ -315,6 +315,26 @@ that identity. The [durable operation specification](../specs/dolgorae-v014-dura
 owns this diagnostic. Public-v2, H3 and actual consumer qualification remain
 separate roadmap obligations.
 
+## Retained Close and executable changes
+
+After owner or gateway loss, repeat the same Close or use authorized
+Recover/Reconcile with a current Run revision. Keep the retained operation and
+interrupt choice. An ownerless `settling` record is exposed as requiring
+recovery; an active owner remains responsible for settlement. An unknown effect
+requires authoritative history and cannot be dismissed by a later blocked
+request.
+
+When the exact selected build supports quiescent build handoff, `run recover`
+can retire a verified idle/paused old worker and publish a new generation.
+Ordinary cross-build mutation remains refused. Resolve the stable
+`RECOVERY_REQUIRED` blocker before retrying: settle work and writer authority,
+restore exact process proof, or reconcile the original admission/effect using
+the verified original build. A replaced executable pathname can invalidate
+that proof; do not signal its recorded PID merely because it still exists.
+The [owning recovery specification](../specs/dolgorae-v014-close-recovery.md)
+defines the reasons and required actions. This source implementation leaves
+public-v2, H3 and actual consumer qualification with their later owners.
+
 ## Planned v0.1.4 MCP host installation and recovery
 
 TASK-067 must name the installation/configuration owner for each supported

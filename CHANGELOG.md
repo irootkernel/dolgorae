@@ -24,6 +24,10 @@ development commits.
 
 ### Fixed
 
+- Resume retained session Close after gateway or worker loss, preserve failure
+  causes, and recover quiescent worker generations across executable changes
+  with explicit blockers.
+
 - Refuse to recreate missing isolated worktrees during External or brokered
   Specialist recovery, preserving the original launch identity and caller root.
 - Wait for External Specialist terminal evidence after an interrupt even while

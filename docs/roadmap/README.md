@@ -24,7 +24,8 @@ live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
 and qualified H1 validation. EPIC-019 is ACTIVE; EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
 PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
-TASK-068 is COMPLETE; TASK-069 and TASK-070 are COMPLETE; TASK-071 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
+TASK-068 through TASK-071 are COMPLETE; TASK-072 through TASK-089 remain
+PLANNED. TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
@@ -2352,7 +2353,8 @@ including physical host loss before acknowledgement and supported lookup.
 Independent completion review accepted the requirements and bounded host feasibility.
 TASK-068 checked contracts and whole-Epic validation are complete. The qualified
 H1 delivery archive is prepared for Master to forward to Gul.
-Gul E15/H2 is not an EPIC-018 prerequisite; EPIC-019 remains unopened.
+Gul E15/H2 is not an EPIC-018 prerequisite. At EPIC-018 closeout, EPIC-019
+remained unopened; its current delivery state is recorded in its own entry.
 
 Depends on: completed TASK-066.
 
@@ -2426,7 +2428,7 @@ Handoff: Durable submit/lookup semantics for public-v2 projection and Gul unknow
 
 ### TASK-071: Resume Session Close and Safe Build Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-070.
 

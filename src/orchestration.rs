@@ -4540,17 +4540,30 @@ impl OrchestrationStore {
         let changed = transaction
             .execute(
                 "UPDATE orchestrated_session_closes
-                 SET progress=?2,safe_error_code=?3,updated_at_ms=?4
-                 WHERE session_id=?1 AND (progress<>?2 OR safe_error_code IS NOT ?3)",
+                 SET progress=CASE WHEN progress='outcome_unknown' AND ?2='recovery_required'
+                                   THEN progress ELSE ?2 END,
+                     safe_error_code=COALESCE(?3,safe_error_code),updated_at_ms=?4
+                 WHERE session_id=?1 AND
+                       ((progress<>?2 AND NOT (progress='outcome_unknown' AND ?2='recovery_required'))
+                        OR (?3 IS NOT NULL AND safe_error_code IS NOT ?3))",
                 params![session_id.to_string(), progress, safe_error_code, now],
             )
             .map_err(internal)?;
         if changed == 1 {
+            let recorded_progress: String = transaction
+                .query_row(
+                    "SELECT progress FROM orchestrated_session_closes WHERE session_id=?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
             append_event(
                 &transaction,
                 session_id,
                 "session_close_progressed",
-                &sha256_hex(format!("{progress}\0{}", safe_error_code.unwrap_or("")).as_bytes()),
+                &sha256_hex(
+                    format!("{recorded_progress}\0{}", safe_error_code.unwrap_or("")).as_bytes(),
+                ),
                 now,
             )?;
         }
@@ -4621,11 +4634,7 @@ impl OrchestrationStore {
                         | "expired"
                 ) && let Err(error) = self.cancel_task(session_id, task.task_id, adapter)
                 {
-                    let _ = self.mark_session_close_progress(
-                        session_id,
-                        "recovery_required",
-                        Some(&error.code),
-                    );
+                    let _ = self.record_session_close_failure(session_id, &error.code);
                     return Err(error);
                 }
             }
@@ -4653,11 +4662,7 @@ impl OrchestrationStore {
             ));
         }
         if nonterminal_spawns != 0 {
-            let close = self.mark_session_close_progress(
-                session_id,
-                "recovery_required",
-                Some("RECOVERY_REQUIRED"),
-            )?;
+            let close = self.record_session_close_failure(session_id, "RECOVERY_REQUIRED")?;
             return Err(session_close_error(
                 &close,
                 "RECOVERY_REQUIRED",
@@ -4681,11 +4686,7 @@ impl OrchestrationStore {
                 let released = match self.release_specialist(session_id, member.run_id, adapter) {
                     Ok(released) => released,
                     Err(error) => {
-                        let _ = self.mark_session_close_progress(
-                            session_id,
-                            "recovery_required",
-                            Some(&error.code),
-                        );
+                        let _ = self.record_session_close_failure(session_id, &error.code);
                         return Err(error);
                     }
                 };
@@ -4736,7 +4737,7 @@ impl OrchestrationStore {
         transaction
             .execute(
                 "UPDATE orchestrated_session_closes
-                 SET progress=?2,safe_error_code=NULL,updated_at_ms=?3 WHERE session_id=?1",
+                 SET progress=?2,updated_at_ms=?3 WHERE session_id=?1",
                 params![session_id.to_string(), terminal, now],
             )
             .map_err(internal)?;
@@ -8231,6 +8232,98 @@ mod tests {
             reopened.observe_session(session.session_id).unwrap().status,
             "aborting"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn close_recovery_keeps_unknown_when_another_task_credential_is_missing() {
+        let root = root();
+        let (mut store, session, first_child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "turn-first".to_owned(),
+            }),
+            cancel: Ok(TaskCancellation::OutcomeUnknown),
+            ..FakeAdapter::default()
+        };
+        let first = store
+            .assign_task(
+                &context(session.session_id, "first-task"),
+                &task_request(first_child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        store
+            .cancel_task(session.session_id, first.task_id, &mut adapter)
+            .unwrap();
+        assert_eq!(
+            store.task(first.task_id).unwrap().state,
+            "interrupted_unknown"
+        );
+        let second_child = store
+            .request_specialist(
+                &context(session.session_id, "second-member"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap()
+            .specialist_run_id
+            .unwrap();
+        adapter.dispatch = Ok(TaskDispatch::Accepted {
+            turn_id: "turn-second".to_owned(),
+        });
+        let second = store
+            .assign_task(
+                &context(session.session_id, "second-task"),
+                &task_request(second_child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let close = store
+            .begin_session_close(session.session_id, true, 1)
+            .unwrap()
+            .0
+            .unwrap();
+        store
+            .record_session_close_failure(session.session_id, "OUTCOME_UNKNOWN")
+            .unwrap();
+        std::fs::remove_file(store.credential_root.join(format!("{second_child}.json"))).unwrap();
+        let calls = adapter.calls.len();
+        drop(store);
+
+        let mut reopened = OrchestrationStore::open(&root).unwrap();
+        for _ in 0..2 {
+            let error = reopened
+                .settle_session_close(session.session_id, &mut adapter)
+                .unwrap_err();
+            let retained = reopened.session_close(session.session_id).unwrap().unwrap();
+            assert_eq!(retained.operation_id, close.operation_id);
+            assert!(retained.interrupt);
+            assert_eq!(retained.progress, "outcome_unknown");
+            assert_eq!(
+                retained.safe_error_code.as_deref(),
+                Some(error.code.as_str())
+            );
+            assert_eq!(
+                reopened.task(first.task_id).unwrap().state,
+                "interrupted_unknown"
+            );
+            assert_eq!(reopened.task(second.task_id).unwrap().state, "running");
+            assert_eq!(adapter.calls.len(), calls);
+        }
+        // An internal failure transition also preserves uncertainty atomically.
+        assert_eq!(
+            reopened
+                .mark_session_close_progress(
+                    session.session_id,
+                    "recovery_required",
+                    Some("RECOVERY_REQUIRED")
+                )
+                .unwrap()
+                .progress,
+            "outcome_unknown"
+        );
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 

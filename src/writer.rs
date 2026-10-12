@@ -573,7 +573,12 @@ impl WriterStore {
     }
 
     /// Capture authority while a short local observer operation completes.
-    /// Callers acquire this before a Run ledger mutex and must not perform
+    /// Callers acquire this before a Run ledger mutex. The sole control-wait
+    /// exception is explicit quiescent build handoff: it already holds the Run
+    /// lifecycle and startup locks, proves no pending effect or writer holder,
+    /// then uses bounded idle Status/Shutdown and verified exit checks. Those
+    /// control paths acquire no writer/startup/home/server locks; this boundary
+    /// is released before replacement startup. Other callers must not perform
     /// network, process, or worker-control operations in the closure.
     pub fn observe_locked<T>(
         &self,

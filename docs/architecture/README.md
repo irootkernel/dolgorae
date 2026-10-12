@@ -20,6 +20,17 @@ releases only its matched reservation after sync. Controller-authorized lookup
 projects the verified ledger prefix without worker startup or attachment reads;
 the original acceptance chain hash and revision remain immutable.
 
+The [Close and build recovery implementation](../specs/dolgorae-v014-close-recovery.md)
+serializes coordinators with a permanent per-Run lifecycle lock at
+`runtime/locks/lifecycle/<run-id>.lock`. It reuses the checked startup-owner
+witness format under a distinct lock inode. The held kernel lock and current
+process identity govern observed `settling`; durable close intent and its last
+failure cause survive owner loss. Explicit build recovery also holds the
+startup boundary, verifies complete retained history and writer settlement,
+and proves old-generation absence before replacement. Orchestration owns the
+durable phase; the semantic and gateway composition layers apply live-owner
+proof to observations.
+
 Dolgorae provides one shared execution and durability core behind exactly two
 user-facing product facades.
 
@@ -2149,13 +2160,27 @@ exact ready home record and migration fence under those locks, closing the
 quiescence-to-stop admission race; release remains valid for shutdown cleanup.
 
 The global order is operator, home, server keys in binary order, handoff,
-writer, run startup locks in UUID-byte order, then in-process run mutation
-mutexes in the same order. Worker startup admission is the sole inversion: it
+Run lifecycle, writer, run startup locks in UUID-byte order, then in-process
+run mutation mutexes in the same order. Worker startup admission is an inversion: it
 takes one Run startup range before home/server revalidation and retains it
 through `bound`; no path may hold a home or server lock while waiting to acquire
 a Run startup range. Home/server locks are released before spawn; only that
 startup range spans the bounded `bound` wait and is released before `ready`
-or on failure. This is also the sole exception to the external-wait prohibition.
+or on failure.
+
+Explicit quiescent build handoff is the other bounded exception. It holds one
+Run lifecycle lease and startup range before taking the workspace writer lock.
+Under that writer boundary it proves current Controller and retained state,
+no pending admission, interaction, unresolved Submit or unknown outcome, no Run
+writer holder, and the exact idle worker with no owned workload. Only then may
+it call frozen control-v1 Status and Shutdown (each with a ten-second deadline)
+and wait up to ten seconds for verified process exit. Those idle control paths
+do not acquire writer, startup, home or server locks. Handoff acquires no upward
+lock while the writer lock is held, and releases it before replacement startup
+or home/server revalidation. The startup range remains held through replacement
+publication. This fence prevents an admission between quiescence proof and
+shutdown; it does not permit waiting for a Turn, user or unverified process.
+
 Every other operation persists a revision-bound intent and drops file locks
 before process, network, turn, or user waits, following the global order
 without acquiring upward.

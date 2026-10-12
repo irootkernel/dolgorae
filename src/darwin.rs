@@ -11,6 +11,167 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+pub(crate) struct DeadlineStream {
+    stream: UnixStream,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineStream {
+    #[cfg(test)]
+    pub(crate) fn from_connected(
+        stream: UnixStream,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self { stream, deadline })
+    }
+
+    pub(crate) fn connect(path: &Path, deadline: std::time::Instant) -> std::io::Result<Self> {
+        // SAFETY: the descriptor is immediately owned and closed on every error.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let enabled: libc::c_int = 1;
+            // SAFETY: the option points to a live integer of the supplied size.
+            if unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_NOSIGPIPE,
+                    (&enabled as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&enabled) as _,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        let stream = UnixStream::from(owned);
+        stream.set_nonblocking(true)?;
+        // SAFETY: sockaddr_un is a plain C address initialized before connect.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        address.sun_family = libc::AF_UNIX as _;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of_val(&address) as _;
+        }
+        for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as _;
+        }
+        let connected = Self { stream, deadline };
+        connected.remaining()?;
+        // SAFETY: address remains alive for this nonblocking syscall; its size
+        // and family match the owned AF_UNIX descriptor.
+        if unsafe {
+            libc::connect(
+                connected.stream.as_raw_fd(),
+                (&address as *const libc::sockaddr_un).cast(),
+                std::mem::size_of_val(&address) as _,
+            )
+        } < 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock
+                && error.raw_os_error() != Some(libc::EINPROGRESS)
+            {
+                return Err(error);
+            }
+            connected.wait(libc::POLLOUT)?;
+            if let Some(error) = connected.stream.take_error()? {
+                return Err(error);
+            }
+        }
+        Ok(connected)
+    }
+
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))
+    }
+
+    fn wait(&self, events: libc::c_short) -> std::io::Result<()> {
+        loop {
+            let remaining = self.remaining()?;
+            let milliseconds = remaining.as_millis().saturating_add(1);
+            let timeout = libc::c_int::try_from(milliseconds).unwrap_or(libc::c_int::MAX);
+            let mut poll = libc::pollfd {
+                fd: self.stream.as_raw_fd(),
+                events,
+                revents: 0,
+            };
+            // SAFETY: poll references exactly one live descriptor for this call.
+            let result = unsafe { libc::poll(&mut poll, 1, timeout) };
+            if result > 0 {
+                self.remaining()?;
+                return Ok(());
+            }
+            if result == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+impl std::io::Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            self.wait(libc::POLLIN)?;
+            match std::io::Read::read(&mut self.stream, bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+impl std::io::Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            self.wait(libc::POLLOUT)?;
+            match std::io::Write::write(&mut self.stream, bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.remaining()?;
+        std::io::Write::flush(&mut self.stream)
+    }
+}
+
 const F_SETLKWTIMEOUT: libc::c_int = 10;
 const DARWIN_NSIG: libc::c_int = 32;
 const PROC_PIDTBSDINFO: libc::c_int = 3;

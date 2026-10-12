@@ -42,6 +42,8 @@ Aquarium, Podway and Gul runtime qualification remain mandatory.
 
 The [durable Submit and operation lookup specification](dolgorae-v014-durable-operations.md)
 owns TASK-070's retained operation identity, definitive refusal and native lookup.
+The [retained Close and build recovery specification](dolgorae-v014-close-recovery.md)
+owns TASK-071's live close owner, resumed settlement and explicit build handoff.
 Later public-v2 activation and actual consumer qualification retain their owners.
 
 The [v0.1.4 successor requirements reconciliation](dolgorae-v014-successor-requirements.md)

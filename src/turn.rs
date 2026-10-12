@@ -4831,6 +4831,12 @@ pub(crate) fn validate_submit_history(records: Vec<(AuditKind, Value)>) -> Resul
     restore_turn_receipt_maps(records).map(|_| ())
 }
 
+pub(crate) fn submit_history_is_quiescent(
+    records: Vec<(AuditKind, Value)>,
+) -> Result<bool, TurnError> {
+    restore_turn_receipt_maps(records).map(|restored| restored.unresolved.is_empty())
+}
+
 fn restore_turn_receipt_maps(
     records: Vec<(AuditKind, Value)>,
 ) -> Result<RestoredTurnReceipts, TurnError> {

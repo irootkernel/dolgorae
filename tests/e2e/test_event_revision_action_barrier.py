@@ -11,6 +11,10 @@ if __name__ == "__main__":
     )
     run_case(
         "gateway_semantic_native",
+        "native_build_handoff_keeps_busy_workers_and_preserves_idle_receipts",
+    )
+    run_case(
+        "gateway_semantic_native",
         "definitive_submit_refusal_survives_gateway_and_worker_restart",
     )
     run_case(

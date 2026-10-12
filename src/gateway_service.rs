@@ -738,7 +738,7 @@ impl GatewayBackend for CoreGatewayBackend {
             self.run_controller_for(&snapshot, controller, "orchestration.session.observe")?;
         let binding = orchestrated_root_binding(&snapshot)?;
         let store = crate::orchestration::OrchestrationStore::open_observer(&state_root)?;
-        let observation = store
+        let mut observation = store
             .observe_session(snapshot.manifest.run_id)
             .map_err(|error| {
                 if error.code == "RUN_NOT_FOUND" {
@@ -758,6 +758,15 @@ impl GatewayBackend for CoreGatewayBackend {
             &carrier,
             "orchestration.session.observe",
         )?;
+        if let Some(progress) = observation.close_progress.as_mut() {
+            *progress = crate::semantic::observed_close_progress(
+                &state_root,
+                &snapshot.manifest.workspace_id,
+                snapshot.manifest.run_id,
+                progress,
+            )
+            .to_owned();
+        }
         Ok(pb::GetOrchestratedSessionResponse {
             context: Some(self.context()),
             session: Some(project_orchestrated_session(observation, workspace)?),

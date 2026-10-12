@@ -49,6 +49,12 @@ or authoritative absence without reopening attachments. See the
 [durable operation contract](docs/specs/dolgorae-v014-durable-operations.md).
 This native diagnostic does not establish public-v2 or consumer runtime support.
 
+Session Close retains one operation across gateway and worker recovery. A
+supported source build also provides explicit `run recover` handoff for a proved
+quiescent worker from another executable build. Busy or uncertain work remains
+fenced, and ordinary mutation keeps its exact-build checks. See the
+[Close and build recovery contract](docs/specs/dolgorae-v014-close-recovery.md).
+
 For a removed development or test home, inspect registered detached processes
 before cleanup. Use the exact digest from the inspection with the same selector:
 

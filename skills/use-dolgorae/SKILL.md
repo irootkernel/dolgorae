@@ -107,6 +107,18 @@ the complete retained-namespace proof. Missing or incompatible output, integrity
 failure and current-request rejection never resolve an earlier unknown effect.
 This native diagnostic does not establish public-v2 or consumer runtime support.
 
+## Resume retained Close and build recovery
+
+For retained session Close, preserve its operation identity and interrupt
+choice across retries. Use a current revision for authorized Recover/Reconcile.
+An ownerless stored `settling` phase requires recovery. When the exact selected
+build supports executable handoff, explicit recovery must prove quiescence,
+settled writer authority, retained history and exact old-generation absence.
+Busy or unknown work and unverified process identities remain blocked. Preserve
+the original key and receipt; do not bypass exact-build refusal or signal a PID
+from a stale locator. Installation and actual consumer qualification remain
+separate authorizations.
+
 ## Prepare a one-shot review
 
 1. Confirm that the requested source scope is exactly one of `workspace`,

@@ -1256,6 +1256,7 @@ fn control_closing_root(
     carrier: &CredentialCarrier,
     revision: u64,
     action: SessionCloseAction,
+    lifecycle: &crate::worker::RunLifecycleLease,
 ) -> Result<(), MachineError> {
     let workspace = snapshot.manifest.canonical_workspace.to_path_buf()?;
     let view = WorkspaceService::system()?.discover(Some(&workspace))?;
@@ -1279,12 +1280,10 @@ fn control_closing_root(
             )?;
         }
         SessionCloseAction::Recover { reconcile } => {
-            let history = if snapshot.manifest.schema_version == 3 {
-                history_reconciliation_admitted
-            } else {
-                history_reconciliation_typed
-            };
-            history(
+            if snapshot.manifest.schema_version != 3 {
+                snapshot.manifest.require_legacy_adapter()?;
+            }
+            history_reconciliation_with_lifecycle(
                 &view,
                 state_root,
                 snapshot.manifest.run_id,
@@ -1295,6 +1294,7 @@ fn control_closing_root(
                     "run.recover"
                 },
                 Some(revision),
+                Some(lifecycle),
             )?;
         }
     }
@@ -1310,9 +1310,87 @@ pub(crate) fn coordinate_session_close(
     expected_revision: Option<u64>,
     action: SessionCloseAction,
 ) -> Result<Option<Uuid>, MachineError> {
-    let result =
-        coordinate_session_close_inner(state_root, run_id, carrier, expected_revision, action);
-    let Err(error) = result else { return result };
+    let snapshot = RunSources::load(state_root, run_id, 0)?;
+    if !is_orchestrated_root(&snapshot.manifest) {
+        return Err(MachineError::invalid_argument(
+            "run_id",
+            "Run is not an Orchestrated Session root",
+        ));
+    }
+    snapshot.authorize_current_controller(
+        state_root,
+        carrier,
+        match action {
+            SessionCloseAction::Close { .. } => "run.close",
+            SessionCloseAction::Recover { .. } => "run.recover",
+        },
+    )?;
+    let gate = orchestration_close_gate(run_id)?;
+    let _process_guard = gate
+        .lock()
+        .map_err(|_| internal("orchestration close gate"))?;
+    let _lease = crate::worker::RunLifecycleLease::acquire(
+        state_root,
+        &snapshot.manifest.workspace_id,
+        run_id,
+        snapshot.projection.run_generation,
+    )
+    .map_err(|error| {
+        if error == crate::worker::WorkerProtocolError::StartupBusy
+            && crate::worker::lifecycle_owner_active(
+                state_root,
+                &snapshot.manifest.workspace_id,
+                run_id,
+            )
+            && let Ok(Some(close)) =
+                crate::orchestration::OrchestrationStore::open_observer(state_root)
+                    .and_then(|store| store.session_close(run_id))
+        {
+            if snapshot.manifest.schema_version == 3 {
+                return modern_close_error(
+                    run_id,
+                    action,
+                    "SESSION_CLOSE_IN_PROGRESS",
+                    Some(&close),
+                );
+            }
+            return session_close_in_progress(run_id, close.operation_id);
+        }
+        error.machine_error(run_id, state_root)
+    })?;
+    let result = coordinate_session_close_inner(
+        state_root,
+        run_id,
+        carrier,
+        expected_revision,
+        action,
+        &_lease,
+    );
+    let Err(mut error) = result else {
+        return result;
+    };
+    if error.code == "SESSION_CLOSE_IN_PROGRESS" {
+        error = crate::controller::recovery_required(
+            run_id,
+            snapshot.projection.run_generation,
+            "session_close_owner_stopped_before_completion",
+        );
+    }
+    let mut store = open_close_store(state_root)?;
+    if store
+        .session_close(run_id)?
+        .is_some_and(|close| !matches!(close.progress.as_str(), "completed" | "aborted"))
+    {
+        store.record_session_close_failure(run_id, &error.code)?;
+    }
+    if error
+        .details
+        .get("reason")
+        .and_then(Value::as_str)
+        .is_some_and(|reason| reason.starts_with("build_handoff_"))
+    {
+        return Err(error);
+    }
     let snapshot = RunSources::load(state_root, run_id, 0)?;
     if snapshot.manifest.schema_version != 3 {
         return Err(error);
@@ -1381,11 +1459,8 @@ fn coordinate_session_close_inner(
     carrier: &CredentialCarrier,
     expected_revision: Option<u64>,
     action: SessionCloseAction,
+    lifecycle: &crate::worker::RunLifecycleLease,
 ) -> Result<Option<Uuid>, MachineError> {
-    let gate = orchestration_close_gate(run_id)?;
-    let _guard = gate
-        .lock()
-        .map_err(|_| internal("orchestration close gate"))?;
     let snapshot = RunSources::load(state_root, run_id, 0)?;
     if !is_orchestrated_root(&snapshot.manifest) {
         return Err(MachineError::invalid_argument(
@@ -1428,13 +1503,26 @@ fn coordinate_session_close_inner(
             let Some(close) = retained else {
                 return Ok(None);
             };
-            if primary_close_outcome_unknown(state_root, &snapshot)?
+            let workspace = snapshot.manifest.canonical_workspace.to_path_buf()?;
+            let view = WorkspaceService::system()?.discover(Some(&workspace))?;
+            require_workspace_identity(&view, Some(&snapshot.manifest.workspace_id))?;
+            handoff_quiescent_build(
+                &view,
+                state_root,
+                run_id,
+                carrier,
+                Some(revision),
+                Some(lifecycle),
+            )?;
+            let snapshot = RunSources::load(state_root, run_id, 0)?;
+            if primary_requires_close_recovery(state_root, &snapshot)?
                 && let Err(mut error) = control_closing_root(
                     state_root,
                     &snapshot,
                     carrier,
-                    revision,
+                    snapshot.stamp.run_state_revision,
                     SessionCloseAction::Recover { reconcile },
+                    lifecycle,
                 )
             {
                 let _ = store.record_session_close_failure(run_id, &error.code);
@@ -1461,24 +1549,27 @@ fn coordinate_session_close_inner(
                 store.begin_session_close(run_id, interrupt, snapshot.controller.generation)?;
             let Some(close) = close else { return Ok(None) };
             if !newly_admitted
-                && !matches!(close.progress.as_str(), "completed" | "aborted")
+                && close.progress == "outcome_unknown"
                 && snapshot.projection.lifecycle != RunLifecycle::Closed
             {
-                return Err(match close.progress.as_str() {
-                    "settling" => session_close_in_progress(run_id, close.operation_id),
-                    "outcome_unknown" => MachineError::new(
-                        "OUTCOME_UNKNOWN",
-                        "whole-session close requires authoritative effect reconciliation",
-                        false,
-                        json!({"run_id":run_id,"operation_id":close.operation_id,"required_action":"reconcile_run"}),
-                    ),
-                    _ => MachineError::new(
-                        "RECOVERY_REQUIRED",
-                        "whole-session close requires recovery before settlement can continue",
-                        false,
-                        json!({"run_id":run_id,"operation_id":close.operation_id,"required_action":"recover_run"}),
-                    ),
-                });
+                return Err(MachineError::new(
+                    "OUTCOME_UNKNOWN",
+                    "whole-session close requires authoritative effect reconciliation",
+                    false,
+                    json!({"run_id":run_id,"operation_id":close.operation_id,"required_action":"reconcile_run"}),
+                ));
+            }
+            if primary_requires_close_recovery(state_root, &snapshot)?
+                && !primary_close_outcome_unknown(state_root, &snapshot)?
+            {
+                control_closing_root(
+                    state_root,
+                    &snapshot,
+                    carrier,
+                    snapshot.stamp.run_state_revision,
+                    SessionCloseAction::Recover { reconcile: false },
+                    lifecycle,
+                )?;
             }
             close
         }
@@ -1555,13 +1646,7 @@ fn coordinate_session_close_inner(
             return Err(error);
         }
     }
-    let revision = if current.manifest.schema_version == 3
-        || matches!(action, SessionCloseAction::Recover { .. })
-    {
-        current.stamp.run_state_revision
-    } else {
-        revision
-    };
+    let revision = current.stamp.run_state_revision;
     if current.projection.lifecycle != RunLifecycle::Closed
         && let Err(mut error) = control_closing_root(
             state_root,
@@ -1571,6 +1656,7 @@ fn coordinate_session_close_inner(
             SessionCloseAction::Close {
                 interrupt: close.interrupt,
             },
+            lifecycle,
         )
     {
         if error.code == "RUN_BUSY" {
@@ -1632,11 +1718,32 @@ fn modern_session_close_value(
         let close = crate::orchestration::OrchestrationStore::open_observer(state_root)?
             .session_close(snapshot.manifest.run_id)?;
         value["lifecycle"] = json!(snapshot.projection.lifecycle.as_str());
-        value["session_close"] = close.map(|close| json!({
-            "operation_id":close.operation_id, "interrupt":close.interrupt, "progress":close.progress,
-        })).unwrap_or(Value::Null);
+        value["session_close"] = close
+            .map(|close| {
+                json!({
+                    "operation_id":close.operation_id, "interrupt":close.interrupt,
+                    "progress":observed_close_progress(state_root, &snapshot.manifest.workspace_id,
+                        snapshot.manifest.run_id, &close.progress),
+                })
+            })
+            .unwrap_or(Value::Null);
     }
     Ok(value)
+}
+
+pub(crate) fn observed_close_progress<'a>(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    progress: &'a str,
+) -> &'a str {
+    if progress == "settling"
+        && !crate::worker::lifecycle_owner_active(state_root, workspace_id, run_id)
+    {
+        "recovery_required"
+    } else {
+        progress
+    }
 }
 
 impl CoreSemanticService {
@@ -3631,6 +3738,34 @@ pub(crate) fn primary_close_outcome_unknown(
     Ok(unknown)
 }
 
+fn primary_requires_close_recovery(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+) -> Result<bool, MachineError> {
+    if snapshot.projection.lifecycle == RunLifecycle::Closed {
+        return Ok(false);
+    }
+    if primary_close_outcome_unknown(state_root, snapshot)?
+        || durable_pending_admission(state_root, snapshot.manifest.run_id)?.is_some()
+    {
+        return Ok(true);
+    }
+    let path = crate::worker::runtime_record_path(
+        &crate::worker::runtime_root(state_root),
+        snapshot.manifest.run_id,
+    )
+    .map_err(|error| error.machine_error(snapshot.manifest.run_id, state_root))?;
+    let runtime = crate::worker::read_runtime_record(&path, DarwinSystem.current_uid()).ok();
+    Ok(runtime
+        .as_ref()
+        .is_some_and(|record| record.control_recovery_required)
+        || (snapshot.projection.thread_id.is_some()
+            && runtime.as_ref().is_none_or(|record| {
+                crate::worker::classify_worker_identity(record)
+                    == crate::worker::ProcessIdentityVerdict::Absent
+            })))
+}
+
 pub(crate) fn primary_close_reconciliation_required(
     state_root: &Path,
     snapshot: &crate::snapshot::RunSnapshot,
@@ -3684,6 +3819,233 @@ fn history_reconciliation_admitted(
     operation: &'static str,
     expected_state_revision: Option<u64>,
 ) -> Result<Value, MachineError> {
+    history_reconciliation_with_lifecycle(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        operation,
+        expected_state_revision,
+        None,
+    )
+}
+
+fn handoff_quiescent_build(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    expected_revision: Option<u64>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+) -> Result<Option<Value>, MachineError> {
+    let uid = DarwinSystem.current_uid();
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(internal(error.to_string())),
+    }
+    let record = crate::worker::read_runtime_record(&path, uid)
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    let current_build = crate::worker::current_dolgorae_build()
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    if record.validate_ordinary_peer(&current_build).is_ok() {
+        return Ok(None);
+    }
+    if crate::worker::classify_worker_identity(&record)
+        == crate::worker::ProcessIdentityVerdict::Absent
+    {
+        return Ok(None);
+    }
+    let blocked = |reason| {
+        crate::controller::recovery_required(run_id, record.identity.run_generation, reason)
+    };
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    authorize_controller(run_id, "run.recover", &binding, carrier)?;
+    let _owned_lifecycle = if lifecycle.is_none() {
+        Some(
+            crate::worker::RunLifecycleLease::acquire(
+                state_root,
+                &view.workspace_id,
+                run_id,
+                record.identity.run_generation,
+            )
+            .map_err(|_| blocked("build_handoff_lifecycle_busy"))?,
+        )
+    } else {
+        None
+    };
+    let mut startup = Some(RunStartupLock::open(state_root, run_id)?);
+    startup.as_ref().expect("startup lock").acquire()?;
+    let result = (|| {
+        let writers = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
+        let manifest = writers.observe_locked(|writer| {
+            let store = RunStore::new(SystemWorkspacePlatform, state_root);
+            let manifest = store.load_manifest(run_id)?;
+            let (before, ledger) = observe_run_ledger(state_root, run_id, true)?;
+            if manifest.workspace_id != view.workspace_id
+                || record.identity.workspace_id != view.workspace_id
+                || before.run_generation != record.identity.run_generation
+            {
+                return Err(blocked("build_handoff_identity_mismatch"));
+            }
+            let current_binding = load_reconciled_controller_binding(state_root, run_id)?;
+            authorize_controller(run_id, "run.recover", &current_binding, carrier)?;
+            if current_binding != binding {
+                return Err(blocked("build_handoff_controller_changed"));
+            }
+            if expected_revision.is_some_and(|expected| expected != before.ledger_head.sequence) {
+                return Err(run_state_conflict_error(
+                    run_id,
+                    before.lifecycle,
+                    "run.recover",
+                ));
+            }
+            if !matches!(before.lifecycle, RunLifecycle::Idle | RunLifecycle::Paused)
+                || before.active_turn_id.is_some()
+                || !before.pending_requests.is_empty()
+                || record.control_recovery_required
+            {
+                return Err(blocked("build_handoff_run_not_quiescent"));
+            }
+            if durable_pending_admission(state_root, run_id)?.is_some() {
+                return Err(blocked("build_handoff_admission_unresolved"));
+            }
+            let payloads = ledger
+                .records()
+                .iter()
+                .map(|audit| {
+                    let bytes = canonicalize(audit.payload())
+                        .map_err(|error| internal(error.to_string()))?;
+                    Ok((
+                        audit.kind(),
+                        serde_json::from_slice(&bytes)
+                            .map_err(|error| internal(error.to_string()))?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, MachineError>>()?;
+            if !crate::turn::submit_history_is_quiescent(payloads)
+                .map_err(|_| blocked("build_handoff_history_unverifiable"))?
+            {
+                return Err(blocked("build_handoff_submit_unresolved"));
+            }
+            let snapshot = RunSources::load(state_root, run_id, 0)?;
+            if primary_close_outcome_unknown(state_root, &snapshot)? {
+                return Err(blocked("build_handoff_outcome_unknown"));
+            }
+            if writer
+                .holder
+                .as_ref()
+                .is_some_and(|holder| holder.run_id == run_id)
+            {
+                return Err(blocked("build_handoff_writer_unsettled"));
+            }
+            if crate::worker::classify_worker_identity(&record)
+                != crate::worker::ProcessIdentityVerdict::Match
+                || crate::worker::read_runtime_record(&path, uid).ok().as_ref() != Some(&record)
+            {
+                return Err(blocked("build_handoff_process_unverifiable"));
+            }
+            crate::worker::prove_worker_workload_absent(&record)
+                .map_err(|_| blocked("build_handoff_workload_unverifiable"))?;
+            let status = crate::worker::call_frozen_worker_bounded(
+                state_root,
+                run_id,
+                uid,
+                Duration::from_secs(10),
+                |expected| ControlRequestV1::Status { expected },
+            )
+            .map_err(|_| blocked("build_handoff_status_unverifiable"))?;
+            match status {
+                ControlResponseV1::Status {
+                    identity,
+                    lifecycle,
+                    active_turn,
+                    ..
+                } if identity == record.identity
+                    && lifecycle == before.lifecycle.as_str()
+                    && active_turn.is_none() => {}
+                _ => return Err(blocked("build_handoff_status_not_quiescent")),
+            }
+            let exit = DarwinSystem
+                .watch_process_exit(record.identity.pid)
+                .map_err(|_| blocked("build_handoff_process_unverifiable"))?;
+            let stopped = crate::worker::call_frozen_worker_bounded(
+                state_root,
+                run_id,
+                uid,
+                Duration::from_secs(10),
+                |expected| ControlRequestV1::Shutdown { expected },
+            )
+            .map_err(|_| blocked("build_handoff_shutdown_unconfirmed"))?;
+            if !matches!(stopped, ControlResponseV1::Shutdown { identity, terminal_confirmed:true }
+            if identity == record.identity)
+            {
+                return Err(blocked("build_handoff_shutdown_unconfirmed"));
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !exit
+                .exited()
+                .map_err(|_| blocked("build_handoff_absence_unverifiable"))?
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(blocked("build_handoff_absence_unverifiable"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let (after, _) = observe_run_ledger(state_root, run_id, true)?;
+            if after != before
+                || store.load_manifest(run_id)? != manifest
+                || load_reconciled_controller_binding(state_root, run_id)? != binding
+                || writers
+                    .load()?
+                    .holder
+                    .as_ref()
+                    .is_some_and(|holder| holder.run_id == run_id)
+            {
+                return Err(blocked("build_handoff_retained_state_changed"));
+            }
+            crate::worker::remove_verified_absent_runtime(&path, uid)
+                .map_err(|_| blocked("build_handoff_absence_unverifiable"))?;
+            Ok::<_, MachineError>(manifest)
+        })??;
+        let epoch = ensure_run_worker_locked(view, state_root, run_id, manifest, &mut startup)?;
+        let snapshot = RunSources::load(state_root, run_id, epoch)?;
+        let terminal = durable_last_terminal(state_root, run_id, &snapshot)?;
+        Ok(Some(snapshot.run_value("Match", terminal)))
+    })();
+    if let Some(startup) = startup {
+        let release = startup
+            .lock
+            .release_startup_range()
+            .map_err(|error| worker_startup_range_error(error, run_id, startup.lock.path()));
+        if result.is_ok() {
+            release?;
+        }
+    }
+    result
+}
+
+fn history_reconciliation_with_lifecycle(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation: &'static str,
+    expected_state_revision: Option<u64>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+) -> Result<Value, MachineError> {
+    if let Some(value) = handoff_quiescent_build(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        expected_state_revision,
+        lifecycle,
+    )? {
+        return Ok(value);
+    }
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
     let runtime_path =
@@ -3718,7 +4080,7 @@ fn history_reconciliation_admitted(
         .is_some_and(|record| record.control_recovery_required);
     let idle_worker_lost = projection.lifecycle == RunLifecycle::Idle
         && projection.thread_id.is_some()
-        && runtime.as_ref().is_some_and(|record| {
+        && runtime.as_ref().is_none_or(|record| {
             crate::worker::classify_worker_identity(record)
                 == crate::worker::ProcessIdentityVerdict::Absent
         });

@@ -10,7 +10,7 @@ use crate::conformance::ConformantLedger;
 use crate::controller::{
     CredentialCarrier, authorize_controller, load_reconciled_controller_binding,
 };
-use crate::darwin::DarwinSystem;
+use crate::darwin::{DarwinSystem, DeadlineStream};
 use crate::domain::AggregateKind;
 use crate::engagement::EngagementStore;
 use crate::event::{EventDelivery, EventProjection};
@@ -2048,14 +2048,22 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
     if record.validate().is_err() {
         return ProcessIdentityVerdict::Unverifiable;
     }
+    classify_process_identity(&record.identity)
+}
+
+#[cfg(target_os = "macos")]
+fn classify_process_identity(identity: &WorkerIdentity) -> ProcessIdentityVerdict {
+    if identity.validate().is_err() {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
     let current_boot = match DarwinSystem.boot_session_uuid() {
         Ok(value) => value,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
-    if Uuid::parse_str(&current_boot).ok() != Some(record.identity.boot_uuid) {
+    if Uuid::parse_str(&current_boot).ok() != Some(identity.boot_uuid) {
         return ProcessIdentityVerdict::Absent;
     }
-    let exit_watch = match DarwinSystem.watch_process_exit(record.identity.pid) {
+    let exit_watch = match DarwinSystem.watch_process_exit(identity.pid) {
         Ok(watch) => watch,
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
             return ProcessIdentityVerdict::Absent;
@@ -2067,7 +2075,7 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
         Ok(false) => {}
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     }
-    let before = match DarwinSystem.bsd_process_identity(record.identity.pid) {
+    let before = match DarwinSystem.bsd_process_identity(identity.pid) {
         Ok(value) if value.zombie => return ProcessIdentityVerdict::Absent,
         Ok(value) => value,
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
@@ -2075,17 +2083,17 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
         }
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
-    if before.pid != record.identity.pid
-        || before.uid != record.identity.uid
-        || before.process_group_id != record.identity.process_group_id
-        || before.session_id != record.identity.session_id
-        || before.start_tvsec != record.identity.start_tvsec
-        || before.start_tvusec != record.identity.start_tvusec
+    if before.pid != identity.pid
+        || before.uid != identity.uid
+        || before.process_group_id != identity.process_group_id
+        || before.session_id != identity.session_id
+        || before.start_tvsec != identity.start_tvsec
+        || before.start_tvusec != identity.start_tvusec
     {
         return ProcessIdentityVerdict::Mismatch;
     }
-    let live_path = DarwinSystem.live_process_path(record.identity.pid);
-    let mut executable = match File::open(&record.identity.executable_path) {
+    let live_path = DarwinSystem.live_process_path(identity.pid);
+    let mut executable = match File::open(&identity.executable_path) {
         Ok(file) => file,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
@@ -2097,14 +2105,14 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
         Ok(value) => value,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
-    let after = match DarwinSystem.bsd_process_identity(record.identity.pid) {
+    let after = match DarwinSystem.bsd_process_identity(identity.pid) {
         Ok(value) => value,
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
             return ProcessIdentityVerdict::Absent;
         }
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
-    if DarwinSystem.live_process_path(record.identity.pid) != live_path {
+    if DarwinSystem.live_process_path(identity.pid) != live_path {
         return ProcessIdentityVerdict::Unverifiable;
     }
     if after != before {
@@ -2117,10 +2125,10 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
     }
     if live_path
         .as_ref()
-        .is_some_and(|path| path != &record.identity.executable_path)
-        || metadata.dev() != record.identity.executable_device
-        || metadata.ino() != record.identity.executable_inode
-        || digest != record.identity.executable_sha256
+        .is_some_and(|path| path != &identity.executable_path)
+        || metadata.dev() != identity.executable_device
+        || metadata.ino() != identity.executable_inode
+        || digest != identity.executable_sha256
     {
         ProcessIdentityVerdict::Mismatch
     } else {
@@ -2204,6 +2212,75 @@ pub struct StartupLockFile {
     inode: u64,
 }
 
+/// A permanent inode serializes Close and explicit build handoff across processes.
+pub struct RunLifecycleLease {
+    lock: StartupLockFile,
+}
+
+fn lifecycle_lock_path(state_root: &Path, run_id: Uuid) -> PathBuf {
+    runtime_root(state_root)
+        .join("locks/lifecycle")
+        .join(format!("{run_id}.lock"))
+}
+
+impl RunLifecycleLease {
+    pub fn acquire(
+        state_root: &Path,
+        workspace_id: &str,
+        run_id: Uuid,
+        run_generation: u64,
+    ) -> Result<Self, WorkerProtocolError> {
+        let uid = DarwinSystem.current_uid();
+        prepare_runtime_root(&runtime_root(state_root), uid)?;
+        let lock = StartupLockFile::open(&lifecycle_lock_path(state_root, run_id), uid)?;
+        DarwinSystem
+            .lock_exclusive_nonblocking(&lock.file)
+            .map_err(|_| WorkerProtocolError::StartupBusy)?;
+        let lease = Self { lock };
+        lease.lock.revalidate()?;
+        lease.lock.write_owner(&current_startup_owner(
+            workspace_id,
+            run_id,
+            run_generation.max(1),
+        )?)?;
+        Ok(lease)
+    }
+}
+
+impl Drop for RunLifecycleLease {
+    fn drop(&mut self) {
+        let _ = self.lock.clear_owner(0);
+        let _ = DarwinSystem.unlock(&self.lock.file);
+    }
+}
+
+/// Observer-only proof; it creates neither a lock inode nor an owner witness.
+pub(crate) fn lifecycle_owner_active(state_root: &Path, workspace_id: &str, run_id: Uuid) -> bool {
+    let Ok(lock) = StartupLockFile::open_with_create(
+        &lifecycle_lock_path(state_root, run_id),
+        DarwinSystem.current_uid(),
+        false,
+    ) else {
+        return false;
+    };
+    match DarwinSystem.lock_exclusive_nonblocking(&lock.file) {
+        Ok(()) => {
+            let _ = DarwinSystem.unlock(&lock.file);
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let Ok(Some(owner)) = lock.read_owner(0) else {
+                return false;
+            };
+            owner.identity.workspace_id == workspace_id
+                && owner.identity.run_id == run_id
+                && lock.revalidate().is_ok()
+                && classify_process_identity(&owner.identity) == ProcessIdentityVerdict::Match
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub struct StartupByteGuard<'a> {
     lock: &'a StartupLockFile,
@@ -2218,6 +2295,10 @@ impl StartupLockFile {
     }
 
     pub fn open(path: &Path, uid: u32) -> Result<Self, WorkerProtocolError> {
+        Self::open_with_create(path, uid, true)
+    }
+
+    fn open_with_create(path: &Path, uid: u32, create: bool) -> Result<Self, WorkerProtocolError> {
         let parent = path
             .parent()
             .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
@@ -2228,11 +2309,11 @@ impl StartupLockFile {
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
-        let created = !path.exists();
+        let created = create && !path.exists();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(path)
@@ -8154,6 +8235,7 @@ pub fn prepare_runtime_root(runtime_root: &Path, uid: u32) -> Result<(), WorkerP
         runtime_root.join("runs"),
         runtime_root.join("locks"),
         runtime_root.join("locks").join("startup"),
+        runtime_root.join("locks").join("lifecycle"),
     ] {
         if fs::symlink_metadata(&directory).is_err() {
             fs::DirBuilder::new()
@@ -8281,6 +8363,45 @@ pub fn call_run_worker(
     credential: Option<RawFd>,
     build: impl FnOnce(WorkerIdentity) -> ControlRequestV1,
 ) -> Result<ControlResponseV1, WorkerProtocolError> {
+    let (record, request) = prepare_run_worker_call(state_root, run_id, uid, build)?;
+    let mut stream =
+        UnixStream::connect(&record.socket_path).map_err(|_| WorkerProtocolError::Io)?;
+    stream
+        .set_read_timeout(Some(CONTROL_CALL_TIMEOUT))
+        .map_err(|_| WorkerProtocolError::Io)?;
+    stream
+        .set_write_timeout(Some(CONTROL_CALL_TIMEOUT))
+        .map_err(|_| WorkerProtocolError::Io)?;
+    write_control_request(&mut stream, &request, credential)?;
+    read_frame(&mut std::io::BufReader::new(stream))
+}
+
+/// Frozen, credential-free control for quiescent build handoff. One deadline
+/// covers connect, request transmission and every response chunk.
+pub(crate) fn call_frozen_worker_bounded(
+    state_root: &Path,
+    run_id: Uuid,
+    uid: u32,
+    timeout: Duration,
+    build: impl FnOnce(WorkerIdentity) -> ControlRequestV1,
+) -> Result<ControlResponseV1, WorkerProtocolError> {
+    let deadline = std::time::Instant::now() + timeout;
+    let (record, request) = prepare_run_worker_call(state_root, run_id, uid, build)?;
+    if !request.frozen_control_v1() {
+        return Err(WorkerProtocolError::MalformedFrame);
+    }
+    let mut stream = DeadlineStream::connect(&record.socket_path, deadline)
+        .map_err(|_| WorkerProtocolError::Io)?;
+    write_frame(&mut stream, &request)?;
+    read_frame(&mut std::io::BufReader::new(stream))
+}
+
+fn prepare_run_worker_call(
+    state_root: &Path,
+    run_id: Uuid,
+    uid: u32,
+    build: impl FnOnce(WorkerIdentity) -> ControlRequestV1,
+) -> Result<(WorkerRuntimeRecord, ControlRequestV1), WorkerProtocolError> {
     let runtime = runtime_root(state_root);
     let record = read_runtime_record(&runtime_record_path(&runtime, run_id)?, uid)?;
     if record.control_recovery_required {
@@ -8305,18 +8426,7 @@ pub fn call_run_worker(
         record.validate_ordinary_peer(&current)?;
         request.declare_caller(current);
     }
-    let mut stream =
-        UnixStream::connect(&record.socket_path).map_err(|_| WorkerProtocolError::Io)?;
-    stream
-        .set_read_timeout(Some(CONTROL_CALL_TIMEOUT))
-        .map_err(|_| WorkerProtocolError::Io)?;
-    stream
-        .set_write_timeout(Some(CONTROL_CALL_TIMEOUT))
-        .map_err(|_| WorkerProtocolError::Io)?;
-    write_control_request(&mut stream, &request, credential)?;
-    let reader_stream = stream.try_clone().map_err(|_| WorkerProtocolError::Io)?;
-    let mut reader = std::io::BufReader::new(reader_stream);
-    read_frame(&mut reader)
+    Ok((record, request))
 }
 
 /// Write one control request, attaching `credential` to the frame's first byte.
@@ -12227,6 +12337,72 @@ mod tests {
             StartupOwnerRecord::decode_slot(&[0; STARTUP_SLOT_BYTES]).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn frozen_control_deadline_expires_despite_incomplete_response_trickling() {
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        let started = std::time::Instant::now();
+        let stream =
+            DeadlineStream::from_connected(client, started + Duration::from_millis(100)).unwrap();
+        let sender = thread::spawn(move || {
+            for _ in 0..200 {
+                if peer.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let mut reader = BufReader::new(stream);
+        assert!(matches!(
+            read_frame::<_, ControlResponseV1>(&mut reader),
+            Err(WorkerProtocolError::Io)
+        ));
+        let elapsed = started.elapsed();
+        drop(reader);
+        sender.join().unwrap();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "response chunks renewed the deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn frozen_control_deadline_connects_and_exchanges_checked_frames() {
+        let root = std::env::temp_dir().join(format!("dc-{}", Uuid::now_v7().simple()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let expected = identity();
+        let request = ControlRequestV1::Status {
+            expected: expected.clone(),
+        };
+        let worker = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let request: ControlRequestV1 = read_frame(&mut reader).unwrap();
+            assert!(matches!(request, ControlRequestV1::Status { .. }));
+            assert_eq!(request.expected(), &expected);
+            write_frame(
+                reader.get_mut(),
+                &ControlResponseV1::Status {
+                    identity: expected,
+                    lifecycle: "idle".to_owned(),
+                    active_turn: None,
+                    last_terminal: None,
+                },
+            )
+            .unwrap();
+        });
+        let mut stream =
+            DeadlineStream::connect(&path, std::time::Instant::now() + Duration::from_secs(2))
+                .unwrap();
+        write_frame(&mut stream, &request).unwrap();
+        assert!(
+            matches!(read_frame::<_, ControlResponseV1>(&mut BufReader::new(stream)).unwrap(), ControlResponseV1::Status { lifecycle, .. } if lifecycle == "idle")
+        );
+        worker.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

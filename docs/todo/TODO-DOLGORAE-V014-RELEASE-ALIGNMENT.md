@@ -401,6 +401,11 @@ admission or authorize redispatch.
 
 ### Close and recovery
 
+TASK-071's [retained Close and build recovery specification](../specs/dolgorae-v014-close-recovery.md)
+owns the native lifecycle lock, observed-owner proof, preserved failure cause
+and typed executable-handoff blockers. Public-v2 projection remains TASK-078;
+this correction does not advance the full Phase 3/H3 or Gul E16 prerequisites.
+
 One durable close operation rejects new work and settles its owned aggregate.
 Use the current Primary revision after settlement. Persist causes and actionable
 recovery; SETTLING denotes a live advancing owner, not a stalled record.

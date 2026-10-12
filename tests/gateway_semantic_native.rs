@@ -1443,107 +1443,324 @@ async fn root_close_persists_one_operation_and_survives_gateway_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_recovery_resumes_a_close_intent_committed_before_gateway_restart() {
-    let fixture = Fixture::new("run_start_model_list.json");
-    let controller = install_orchestration_controller(&fixture, "session-close-recovery");
-    let mut gateway = fixture.start_gateway();
-    let channel = gateway.channel().await;
-    let mut runs = pb::run_service_client::RunServiceClient::new(channel);
-    let started = runs
-        .start_run(pb::StartRunRequest {
-            context: context(),
+    for scenario in 0..6 {
+        let killed_worker = scenario != 0;
+        let active = matches!(scenario, 3 | 4);
+        let retry_same_close = scenario == 5;
+        let mut orphan_admission = None;
+        let fixture = if active {
+            Fixture::with_scenario(active_turn_scenario(scenario == 4))
+        } else {
+            Fixture::new("run_start_model_list.json")
+        };
+        let controller = install_orchestration_controller(&fixture, "session-close-recovery");
+        let mut gateway = fixture.start_gateway();
+        let channel = gateway.channel().await;
+        let mut runs = pb::run_service_client::RunServiceClient::new(channel);
+        let started = runs
+            .start_run(pb::StartRunRequest {
+                context: context(),
+                workspace: Some(fixture.workspace()),
+                controller: Some(controller.clone()),
+                idempotency_key: Uuid::now_v7().to_string(),
+                profile_name: fixture.profile.clone(),
+                control_mode: pb::ControlMode::DirectInteractive as i32,
+                execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+                purpose: pb::PurposeKind::Interactive as i32,
+                purpose_label: None,
+                model: Some("gpt-5.6".to_owned()),
+                effort: Some("medium".to_owned()),
+                required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+                required_capabilities: Vec::new(),
+                instructions: Some("Recover a retained close intent without new work.".to_owned()),
+                parent: None,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .run
+            .unwrap();
+        let run_id = Uuid::parse_str(&started.run_id).unwrap();
+        let run = pb::RunRef {
             workspace: Some(fixture.workspace()),
-            controller: Some(controller.clone()),
-            idempotency_key: Uuid::now_v7().to_string(),
-            profile_name: fixture.profile.clone(),
-            control_mode: pb::ControlMode::DirectInteractive as i32,
-            execution_lane: pb::ExecutionLane::SharedReadonly as i32,
-            purpose: pb::PurposeKind::Interactive as i32,
-            purpose_label: None,
-            model: Some("gpt-5.6".to_owned()),
-            effort: Some("medium".to_owned()),
-            required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
-            required_capabilities: Vec::new(),
-            instructions: Some("Recover a retained close intent without new work.".to_owned()),
-            parent: None,
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .run
-        .unwrap();
-    let run_id = Uuid::parse_str(&started.run_id).unwrap();
-    let run = pb::RunRef {
-        workspace: Some(fixture.workspace()),
-        run_id: started.run_id.clone(),
-    };
-    gateway.terminate();
+            run_id: started.run_id.clone(),
+        };
+        let mut expected_revision = started.state_revision;
+        if killed_worker {
+            runs.submit_turn(pb::SubmitTurnRequest {
+                context: context(),
+                run: Some(run.clone()),
+                controller: Some(controller.clone()),
+                idempotency_key: "before-idle-worker-loss".to_owned(),
+                write_intent: pb::WriteIntent::Read as i32,
+                message: "Retain the completed Thread before closing.".to_owned(),
+                images: vec![],
+                effort: None,
+                expected_state_revision: expected_revision,
+            })
+            .await
+            .unwrap();
+            let current = native_wait_lifecycle(
+                &mut runs,
+                &fixture,
+                &started.run_id,
+                match scenario {
+                    3 => pb::RunLifecycle::Running,
+                    4 => pb::RunLifecycle::WaitingInteraction,
+                    _ => pb::RunLifecycle::Idle,
+                },
+            )
+            .await;
+            assert!(current.thread.is_some());
+            expected_revision = current.state_revision;
+            let path = dolgorae::worker::runtime_record_path(
+                &dolgorae::worker::runtime_root(&fixture.state_root),
+                run_id,
+            )
+            .unwrap();
+            let worker: dolgorae::worker::WorkerRuntimeRecord =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(
+                dolgorae::worker::classify_worker_identity(&worker),
+                dolgorae::worker::ProcessIdentityVerdict::Match
+            );
+            let exit = dolgorae::darwin::DarwinSystem
+                .watch_process_exit(worker.identity.pid)
+                .unwrap();
+            assert!(
+                Command::new("/bin/kill")
+                    .args(["-KILL", &worker.identity.pid.to_string()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !exit.exited().unwrap() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("killed worker remained alive");
+        }
+        gateway.terminate();
+        let retry_revision = expected_revision;
+        let mut store = OrchestrationStore::open(&fixture.state_root).unwrap();
+        let (close, admitted) = store.begin_session_close(run_id, active, 1).unwrap();
+        assert!(admitted);
+        let operation_id = close.unwrap().operation_id.to_string();
+        drop(store);
+        if scenario == 2 || retry_same_close {
+            let mut ledger = dolgorae::ledger::Ledger::open(
+                fixture.state_root.join("runs").join(&started.run_id),
+                run_id,
+            )
+            .unwrap();
+            let projection = ledger.projection().unwrap();
+            let head = ledger.head().unwrap();
+            let admission_id = Uuid::now_v7();
+            let admission = serde_json::json!({
+                "schema_version":1, "admission_id":admission_id,
+                "controller_id":controller.expected_controller_id,
+                "expected_state_revision":head.sequence, "request_sha256":"0".repeat(64),
+                "operation":if retry_same_close { "run.close" } else { "run.pause" },
+                "allow_writer_acquire":false,
+            });
+            let record = dolgorae::audit::AuditRecord::new(
+                head.sequence + 1,
+                dolgorae::ledger::LedgerClock::timestamp(
+                    &dolgorae::ledger::SystemLedgerClock::default(),
+                ),
+                run_id,
+                projection.run_generation,
+                dolgorae::audit::AuditKind::MutationAdmitted,
+                dolgorae::jcs::parse(&serde_json::to_string(&admission).unwrap()).unwrap(),
+                head.hash,
+            )
+            .unwrap();
+            ledger
+                .append(record, dolgorae::ledger::AppendDurability::Required)
+                .unwrap();
+            expected_revision = ledger.head().unwrap().sequence;
+            orphan_admission = Some(admission_id);
+        }
 
-    let mut store = OrchestrationStore::open(&fixture.state_root).unwrap();
-    let (close, admitted) = store.begin_session_close(run_id, false, 1).unwrap();
-    assert!(admitted);
-    let operation_id = close.unwrap().operation_id.to_string();
-    drop(store);
+        let mut gateway = fixture.start_gateway();
+        let channel = gateway.channel().await;
+        let mut orchestration =
+            pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
+        let interrupted = orchestration
+            .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+                context: context(),
+                root_run: Some(run.clone()),
+                controller: Some(controller.clone()),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .session
+            .unwrap();
+        assert_eq!(
+            interrupted.lifecycle,
+            if active {
+                pb::OrchestratedSessionLifecycle::Aborting
+            } else {
+                pb::OrchestratedSessionLifecycle::Completing
+            } as i32
+        );
+        assert_eq!(
+            interrupted.close_operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
 
-    let mut gateway = fixture.start_gateway();
-    let channel = gateway.channel().await;
-    let mut orchestration =
-        pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
-    let interrupted = orchestration
-        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
-            context: context(),
-            root_run: Some(run.clone()),
-            controller: Some(controller.clone()),
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .session
+        assert_eq!(
+            interrupted.close_progress,
+            pb::SessionCloseProgress::RecoveryRequired as i32
+        );
+        assert_eq!(
+            interrupted.required_action,
+            pb::RequiredClientAction::ReconcileRun as i32
+        );
+        let projection: dolgorae::projection::RunStateProjection = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .state_root
+                    .join("runs")
+                    .join(&started.run_id)
+                    .join("state.json"),
+            )
+            .unwrap(),
+        )
         .unwrap();
-    assert_eq!(
-        interrupted.lifecycle,
-        pb::OrchestratedSessionLifecycle::Completing as i32
-    );
-    assert_eq!(
-        interrupted.close_operation_id.as_deref(),
-        Some(operation_id.as_str())
-    );
-
-    let mut runs = pb::run_service_client::RunServiceClient::new(channel);
-    let recovered = runs
-        .recover_run(pb::RecoverRunRequest {
-            context: context(),
-            run: Some(run.clone()),
-            controller: Some(controller.clone()),
-            expected_state_revision: started.state_revision,
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(
-        recovered.context.unwrap().operation_id.as_deref(),
-        Some(operation_id.as_str())
-    );
-    assert_eq!(
-        recovered.run.unwrap().lifecycle,
-        pb::RunLifecycle::Closed as i32
-    );
-    let completed = orchestration
-        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
-            context: context(),
-            root_run: Some(run),
-            controller: Some(controller),
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .session
+        let owner = dolgorae::worker::RunLifecycleLease::acquire(
+            &fixture.state_root,
+            &fixture.workspace_id,
+            run_id,
+            projection.run_generation,
+        )
         .unwrap();
-    assert_eq!(
-        completed.close_progress,
-        pb::SessionCloseProgress::Completed as i32
-    );
-    assert_eq!(completed.close_operation_id, Some(operation_id));
-    gateway.terminate();
+        let active = orchestration
+            .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+                context: context(),
+                root_run: Some(run.clone()),
+                controller: Some(controller.clone()),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .session
+            .unwrap();
+        assert_eq!(
+            active.close_progress,
+            pb::SessionCloseProgress::Settling as i32
+        );
+        let mut runs = pb::run_service_client::RunServiceClient::new(channel);
+        let busy = runs
+            .recover_run(pb::RecoverRunRequest {
+                context: context(),
+                run: Some(run.clone()),
+                controller: Some(controller.clone()),
+                expected_state_revision: expected_revision,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            semantic_error(&busy, "SESSION_CLOSE_IN_PROGRESS")
+                .operation_id
+                .as_deref(),
+            Some(operation_id.as_str())
+        );
+        drop(owner);
+        let mut store = OrchestrationStore::open(&fixture.state_root).unwrap();
+        store
+            .record_session_close_failure(run_id, "TRANSPORT_FAILURE")
+            .unwrap();
+        drop(store);
+        let (recovered_operation, recovered_lifecycle) = if retry_same_close {
+            let request = pb::CloseRunRequest {
+                context: context(),
+                run: Some(run.clone()),
+                controller: Some(controller.clone()),
+                interrupt: false,
+                expected_state_revision: retry_revision,
+            };
+            let recovered = runs.close_run(request.clone()).await.unwrap().into_inner();
+            let bytes = audit(&fixture, &started.run_id);
+            let repeated = runs.close_run(request).await.unwrap().into_inner();
+            assert_eq!(audit(&fixture, &started.run_id), bytes);
+            assert_eq!(
+                repeated.context.unwrap().operation_id.as_deref(),
+                Some(operation_id.as_str())
+            );
+            (
+                recovered.context.unwrap().operation_id,
+                recovered.run.unwrap().lifecycle,
+            )
+        } else {
+            let recovered = runs
+                .recover_run(pb::RecoverRunRequest {
+                    context: context(),
+                    run: Some(run.clone()),
+                    controller: Some(controller.clone()),
+                    expected_state_revision: expected_revision,
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            (
+                recovered.context.unwrap().operation_id,
+                recovered.run.unwrap().lifecycle,
+            )
+        };
+        assert_eq!(recovered_operation.as_deref(), Some(operation_id.as_str()));
+        assert_eq!(recovered_lifecycle, pb::RunLifecycle::Closed as i32);
+        let completed = orchestration
+            .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+                context: context(),
+                root_run: Some(run),
+                controller: Some(controller),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .session
+            .unwrap();
+        assert_eq!(
+            completed.close_progress,
+            if matches!(scenario, 3 | 4) {
+                pb::SessionCloseProgress::Aborted
+            } else {
+                pb::SessionCloseProgress::Completed
+            } as i32
+        );
+        assert_eq!(completed.close_operation_id, Some(operation_id));
+        assert_eq!(
+            OrchestrationStore::open_observer(&fixture.state_root)
+                .unwrap()
+                .session_close(run_id)
+                .unwrap()
+                .unwrap()
+                .safe_error_code
+                .as_deref(),
+            Some("TRANSPORT_FAILURE")
+        );
+        if let Some(admission_id) = orphan_admission {
+            let records = String::from_utf8(audit(&fixture, &started.run_id)).unwrap();
+            assert_eq!(
+                records
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .filter(|record| record["kind"] == "mutation_completed"
+                        && record["payload"]["admission_id"] == admission_id.to_string())
+                    .count(),
+                1
+            );
+            assert_eq!(transcript_methods(&fixture, "turn/start").len(), 1);
+        }
+        if killed_worker {
+            assert_eq!(transcript_methods(&fixture, "turn/start").len(), 1);
+        }
+        gateway.terminate();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1666,7 +1883,10 @@ async fn root_close_preserves_unknown_primary_until_matching_history_is_terminal
     history["occurrence"] = serde_json::json!(3);
     steps.push(serde_json::json!({"method":"thread/read","occurrence":2,
         "respond":{"result":{"thread":{"id":"thread-alpha","turns":[]}}}}));
-    let fixture = Fixture::with_scenario(scenario);
+    let mut fixture = Fixture::with_scenario(scenario);
+    let current_binary = fixture.binary.clone();
+    let original_binary = distinct_build_binary(&fixture);
+    fixture.binary = original_binary.clone();
     let controller = install_orchestration_controller(&fixture, "unknown-primary-close");
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
@@ -1730,6 +1950,33 @@ async fn root_close_preserves_unknown_primary_until_matching_history_is_terminal
             .any(|bytes| bytes == b"\"terminal_seal\":true")
     );
     gateway.terminate();
+    fixture.binary = current_binary;
+    let before = audit(&fixture, &started.run_id);
+    let denied_handoff = fixture.command(&[
+        "run",
+        "--controller-file",
+        &controller.absolute_file_path,
+        "recover",
+        &started.run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    assert!(!denied_handoff.status.success());
+    let denied: Value = serde_json::from_slice(&denied_handoff.stdout).unwrap();
+    assert_eq!(denied["error"]["code"], "RECOVERY_REQUIRED");
+    assert_eq!(
+        denied["error"]["details"]["reason"],
+        "build_handoff_run_not_quiescent"
+    );
+    assert_eq!(audit(&fixture, &started.run_id), before);
+    let retained = OrchestrationStore::open_observer(&fixture.state_root)
+        .unwrap()
+        .session_close(Uuid::parse_str(&started.run_id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.operation_id.to_string(), operation_id);
+    assert_eq!(retained.progress, "outcome_unknown");
+    fixture.binary = original_binary;
 
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
@@ -4932,6 +5179,184 @@ async fn native_killed_worker_recovery() {
             original_lookup["lookup"]["receipt"]
         );
         gateway.terminate();
+    }
+}
+
+fn distinct_build_binary(fixture: &Fixture) -> std::path::PathBuf {
+    let binary = fixture.root.join("previous-build");
+    fs::copy(&fixture.binary, &binary).unwrap();
+    assert!(
+        Command::new("/usr/bin/codesign")
+            .args([
+                "--force",
+                "--sign",
+                "-",
+                "--identifier",
+                "dolgorae.test.previous-build"
+            ])
+            .arg(&binary)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    binary
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_build_handoff_keeps_busy_workers_and_preserves_idle_receipts() {
+    for scenario in 0..3 {
+        let busy = scenario == 1;
+        let mut fixture = Fixture::with_scenario(if busy {
+            active_turn_scenario(false)
+        } else {
+            support::base_scenario()
+        });
+        let current_binary = fixture.binary.clone();
+        let old_binary = distinct_build_binary(&fixture);
+        fixture.binary = old_binary;
+        let id = fixture.start_run(&[]);
+        let run_id = Uuid::parse_str(&id).unwrap();
+        let mut gateway = fixture.start_gateway();
+        let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+        let initial = native_snapshot(&mut runs, &fixture, &id).await;
+        runs.submit_turn(pb::SubmitTurnRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            idempotency_key: "before-build-handoff".to_owned(),
+            write_intent: pb::WriteIntent::Read as i32,
+            message: "Keep this accepted receipt across build handoff.".to_owned(),
+            images: vec![],
+            effort: None,
+            expected_state_revision: initial.state_revision,
+        })
+        .await
+        .unwrap();
+        native_wait_lifecycle(
+            &mut runs,
+            &fixture,
+            &id,
+            if busy {
+                pb::RunLifecycle::Running
+            } else {
+                pb::RunLifecycle::Idle
+            },
+        )
+        .await;
+        let runtime_path = dolgorae::worker::runtime_record_path(
+            &dolgorae::worker::runtime_root(&fixture.state_root),
+            run_id,
+        )
+        .unwrap();
+        let old: dolgorae::worker::WorkerRuntimeRecord =
+            serde_json::from_slice(&fs::read(&runtime_path).unwrap()).unwrap();
+        assert_eq!(
+            dolgorae::worker::classify_worker_identity(&old),
+            dolgorae::worker::ProcessIdentityVerdict::Match
+        );
+        let manifest_path = fixture
+            .state_root
+            .join("runs")
+            .join(&id)
+            .join("manifest.json");
+        let manifest = fs::read(&manifest_path).unwrap();
+        let lookup_args = [
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            "lookup-operation",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--idempotency-key",
+            "before-build-handoff",
+        ];
+        let original = fixture.cli(&lookup_args);
+        gateway.terminate();
+        fixture.binary = current_binary;
+        let before = audit(&fixture, &id);
+        let refused = fixture.command(&[
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            "close",
+            &id,
+            "--interrupt",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ]);
+        assert!(!refused.status.success());
+        let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+        assert_eq!(refused["error"]["code"], "DOLGORAE_PROTOCOL_MISMATCH");
+        assert_eq!(audit(&fixture, &id), before);
+        let backup = fixture.root.join("retained-previous-build");
+        if scenario == 2 {
+            fs::rename(fixture.root.join("previous-build"), &backup).unwrap();
+            fs::copy(&fixture.binary, fixture.root.join("previous-build")).unwrap();
+        }
+        let recovered = fixture.command(&[
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            "recover",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ]);
+        let envelope: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+        if scenario != 0 {
+            if scenario == 2 {
+                fs::remove_file(fixture.root.join("previous-build")).unwrap();
+                fs::rename(&backup, fixture.root.join("previous-build")).unwrap();
+            }
+            assert!(!recovered.status.success(), "{envelope}");
+            assert_eq!(envelope["error"]["code"], "RECOVERY_REQUIRED");
+            assert_eq!(
+                envelope["error"]["details"]["reason"],
+                if scenario == 2 {
+                    "build_handoff_process_unverifiable"
+                } else {
+                    "build_handoff_run_not_quiescent"
+                }
+            );
+            assert_eq!(audit(&fixture, &id), before);
+            assert_eq!(fixture.cli(&lookup_args), original);
+            assert_eq!(
+                dolgorae::worker::classify_worker_identity(&old),
+                dolgorae::worker::ProcessIdentityVerdict::Match
+            );
+            // The old executable remains available for authorized fixture cleanup.
+            fixture.binary = fixture.root.join("previous-build");
+            fixture.cli(&[
+                "run",
+                "--controller-file",
+                fixture.controller.to_str().unwrap(),
+                "close",
+                &id,
+                "--interrupt",
+                "--workspace",
+                fixture.workspace.to_str().unwrap(),
+            ]);
+        } else {
+            assert!(recovered.status.success(), "{envelope}");
+            let current: dolgorae::worker::WorkerRuntimeRecord =
+                serde_json::from_slice(&fs::read(&runtime_path).unwrap()).unwrap();
+            assert!(current.identity.run_generation > old.identity.run_generation);
+            assert_ne!(current.identity.pid, old.identity.pid);
+            assert_eq!(
+                dolgorae::worker::classify_worker_identity(&old),
+                dolgorae::worker::ProcessIdentityVerdict::Absent
+            );
+            assert_eq!(
+                dolgorae::worker::classify_worker_identity(&current),
+                dolgorae::worker::ProcessIdentityVerdict::Match
+            );
+            assert_ne!(old.binary_sha256, current.binary_sha256);
+            assert_eq!(fs::read(manifest_path).unwrap(), manifest);
+            assert_eq!(transcript_methods(&fixture, "turn/start").len(), 1);
+            assert_eq!(fixture.cli(&lookup_args), original);
+        }
     }
 }
 
