@@ -51,7 +51,7 @@
     },
     {
       "path": "docs/protocol/dolgorae/public/v2/dolgorae.proto",
-      "sha256": "e0229262e9690d1ec5534e1a3e4b1d41a7ac6d9112b0d91ebc236e02cee71683",
+      "sha256": "12aee93cfd0a93e05daa1d7b30d67c567658cd6c7302fd81d8c6db74138fe07d",
       "generation": "H1-contract-input"
     },
     {
@@ -116,7 +116,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-external-specialist-facade-v5.schema.json",
-      "sha256": "c59cd663595acae3db15a6ab1e7c36f01eb7f06c3d38712230b9537333acfc35",
+      "sha256": "ab5015e7a5b68c2e5068e29565c83b344fce6fa65a2b89cef2d1a41872deccc4",
       "generation": "https://dolgorae.local/schema/external-specialist-facade/v5"
     },
     {
@@ -141,7 +141,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-gul-consumer-v2.fixtures.json",
-      "sha256": "e0e67005e57aa3b46cb381e09b46949a177fc0e5fb8b0a1100bc295ae5cd8a3d",
+      "sha256": "13a09e105a4e4876590a214e24df71410d2ce4a433ac5ad68063add5fc429672",
       "generation": "dolgorae.gul-consumer-fixtures/v2"
     },
     {
@@ -176,7 +176,7 @@
     },
     {
       "path": "docs/protocol/dolgorae-machine-v5.schema.json",
-      "sha256": "b85e372bfdeaecfe0dfa762b03b8cf23647050278350cfb5892fead66d763358",
+      "sha256": "30c6fb15cf30d223d069669abd51b58e8aacf48ebe8797a17f01ff024e43feeb",
       "generation": "https://dolgorae.local/schema/machine-output/v5"
     },
     {
@@ -206,12 +206,12 @@
     },
     {
       "path": "docs/protocol/dolgorae-public-v2.descriptor.json",
-      "sha256": "bc936cd23238f5f55c4d9c8c15355ef2fd59f8093188c1639e044333cf023597",
+      "sha256": "39404b8d7f48b2ca39e47ebf291c31da2e3e936da86d01db19648c677529ae30",
       "generation": "dolgorae.public.v2"
     },
     {
       "path": "docs/protocol/dolgorae-public-v2.descriptor.pb",
-      "sha256": "184cf5beb00063c3993e37c18a9ce4b031458295889df413984b6e468c68adf0",
+      "sha256": "89610f4d3434bed95626ee7d495e0c3a8712f7354d3e385598e121a485e0e8f8",
       "generation": "H1-contract-input"
     },
     {
@@ -296,12 +296,12 @@
     },
     {
       "path": "docs/protocol/dolgorae-v014-digest-vectors-v1.json",
-      "sha256": "87d91cb178f38bfe9e7f748b7cb53c376102a2510041a8a1ea0527bb84b613cc",
+      "sha256": "cb79c31d8d5a8f7eaba87b21487aa3893ec336dd65a5119015e8d4eaf6a45e2d",
       "generation": "H1-contract-input"
     },
     {
       "path": "docs/protocol/dolgorae-v014-identities-v1.schema.json",
-      "sha256": "5640333e8f42e661a352e550a1b0b85a58c4a842e364018d5cc84ee6794ef5f1",
+      "sha256": "8ceb7f2fa54352a342a905926693fb39193e00ea260fc07f864d55858666a1d2",
       "generation": "https://dolgorae.local/schema/v014-identities/v1"
     },
     {
@@ -341,7 +341,7 @@
     },
     {
       "path": "docs/protocol/examples/successor-facade-v5-methods.valid.json",
-      "sha256": "bd6a55999680bcf4d678b00757227991732195c3f2f2d2d97e4b8bba329d42ad",
+      "sha256": "21a950d5b0f942e07683fba578cc4897cc82b2c27bc8e8c990d97ccba8be08ee",
       "generation": "H1-contract-input"
     },
     {
@@ -371,12 +371,12 @@
     },
     {
       "path": "docs/protocol/examples/successor-machine-v5-normalized.invalid-protected-answer.json",
-      "sha256": "6e0524c0efe2edf3bdeeda3fba12376f0a0cb83b50f97e7165cd3075f193e901",
+      "sha256": "103bb1f1b401644a8e90bea58778fc723e2815920972457e9295cf57802c3459",
       "generation": "H1-contract-input"
     },
     {
       "path": "docs/protocol/examples/successor-machine-v5-normalized.valid.json",
-      "sha256": "96cedaea52772f20d6fc6e928d8e2a9c8289a2da6f2a4720806faf0d92016d22",
+      "sha256": "7eb695c389049659aa409d5574c2b7fa8efc1f904d290db893959e6b1fcf0772",
       "generation": "H1-contract-input"
     },
     {
@@ -696,7 +696,7 @@
     },
     {
       "path": "docs/protocol/generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae.pb.go",
-      "sha256": "43d6b975173fc5d3d819ea128b3b7d7e606b34ff21c8d1c8d91b7adcf8c6e99e",
+      "sha256": "8124c40ec828e99ebcd1c5fc659e1c0d1cca3c0636a97bf426b4a70bbda36127",
       "generation": "H1-contract-input"
     },
     {
@@ -736,7 +736,7 @@
     },
     {
       "path": "docs/specs/dolgorae-v014-method-and-digest-contract.md",
-      "sha256": "651f92f51cfc96d15cff0fc08c216c70aa1b7a424fbe2b28ec91bc3ff4cf535f",
+      "sha256": "18859911f4fbf55cdac2e11c04f1adc759b39f67455f1e438917089b07c904d2",
       "generation": "H1-contract-input"
     },
     {
@@ -766,7 +766,7 @@
     },
     {
       "path": "tests/successor_contract.rs",
-      "sha256": "56263613121fed0e04f416585531bd88887b43b70edbb977887b051f08b5ffbb",
+      "sha256": "80501a66ea445aff6b8f928ec93d4b82a196150ab63a15d54bb39df9cf9f86eb",
       "generation": "H1-contract-input"
     },
     {

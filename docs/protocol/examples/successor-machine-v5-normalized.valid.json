@@ -166,7 +166,30 @@
         "thread_generation": 1,
         "decision": "accept_once",
         "granted_permissions": [],
-        "protected_input_present": true
+        "protected_input_present": true,
+        "answers": []
+      }
+    },
+    {
+      "operation": "resolve_interaction",
+      "schema_ref": "https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body",
+      "input": {
+        "run_ref": "run:fixture",
+        "interaction_ref": "interaction:fixture",
+        "turn_ref": "turn:fixture",
+        "thread_generation": 1,
+        "decision": "accept_once",
+        "granted_permissions": [],
+        "protected_input_present": false,
+        "answers": [
+          {
+            "question_id": "question:fixture",
+            "selected_labels": [
+              "allow"
+            ],
+            "text": null
+          }
+        ]
       }
     }
   ]

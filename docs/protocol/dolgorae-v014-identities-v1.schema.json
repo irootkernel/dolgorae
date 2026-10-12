@@ -941,6 +941,28 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "submit_turn"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "run"
+              },
+              "scope_ref": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+              }
+            }
+          }
         }
       ],
       "x-invariants": [
@@ -3920,10 +3942,14 @@
         "constraints": {
           "type": "array",
           "items": {
-            "type": "string"
-          }
+            "type": "string",
+            "maxLength": 8192,
+            "x-maxUtf8Bytes": 8192
+          },
+          "maxItems": 64
         }
-      }
+      },
+      "x-maxEncodedBytes": 16777216
     },
     "public_assign_synthesis_normalized_body": {
       "type": "object",
@@ -3957,7 +3983,12 @@
               "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_structured_task_body"
             },
             "accepted_task_identity": {
-              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task"
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task",
+              "properties": {
+                "task_body_schema": {
+                  "const": "dolgorae.structured-task/v1"
+                }
+              }
             },
             "deadline_seconds": {
               "type": "integer",

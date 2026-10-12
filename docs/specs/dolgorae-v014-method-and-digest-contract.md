@@ -344,7 +344,9 @@ configuration. A shared read-only configuration cannot select writable access.
  role_snapshot_digest, agent_configuration_digest}
 schema = "dolgorae.accepted-task/v1"
 purpose = exact accepted task purpose
-task_body_schema = exact closed task-body schema ID
+task_body_schema = exact closed task-body schema ID (public structured tasks use
+                   "dolgorae.structured-task/v1"; facade structured tasks use
+                   "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body")
 task_body = BytesRef of JCS closed structured task body,
             or exact UTF-8 text under the explicitly selected text schema
 contexts = [ContextRef], in accepted task order
@@ -396,6 +398,23 @@ boundary, non-secret decision or lifecycle options as applicable. Omissions and
 defaults MUST be resolved once by the owning request schema before digesting.
 Unknown fields cannot disappear through normalization.
 
+`ResolveInteraction` retains ordinary non-secret `answers` in question order.
+Each closed answer contains `question_id`, ordered `selected_labels` and
+explicit nullable `text`; changing any of them changes the normalized body and
+mutation digest. The answer array has at most 64 entries, question IDs at most
+128 UTF-8 bytes, each of at most 64 labels at most 256 UTF-8 bytes, and text at
+most 65,536 UTF-8 bytes. Empty arrays and absent text (`null`) remain explicit.
+For a secret-bearing interaction the normalized `answers` array is empty:
+secret answer bytes and protected-input paths are never stored or hashed.
+Authenticated winning-key retries use the original receipt without comparing
+the supplied secret-bearing answer body. `protected_input_present` retains
+only the non-secret carrier-presence fact; it never substitutes for ordinary
+answers. Normalized image detail admits exactly public-v2's `auto`, `low` and
+`high` values.
+
+An existing-Run `SubmitTurn` mutation uses `scope_kind = "run"` and its original
+Run ID as `scope_ref`; pre-allocation null scope is invalid for this operation.
+
 Public-v2 `AssignSynthesis` uses
 `https://dolgorae.local/schema/v014-identities/v1#/$defs/public_assign_synthesis_normalized_body`.
 Its closed body contains `member_ref`, `merged_findings_digest`, `merged_input`
@@ -406,7 +425,11 @@ retains `criterion_id`, `text` and `context_ids`. Repeated fields resolve to
 explicit arrays before digesting, including empty arrays. Context and
 constraint order is preserved. The accepted task's `task_body` BytesRef binds
 these same complete JCS bytes, including every constraint. The existing rich
-brief/context/criterion bounds apply.
+brief/context/criterion bounds apply. Ordered `constraints` has at most 64
+strings, each at most 8,192 UTF-8 bytes (including JSON control characters).
+The complete JCS public task body has a 16,777,216-byte encoded ceiling; the
+finite worst-case proof includes every constraint, context and criterion.
+An over-limit input is refused before acceptance and cannot be truncated.
 The facade/v5 normalized synthesis schema owns its separate facade task-body
 vocabulary and cannot name this public structured body. Normalized-body
 validation follows nested schema references, including task and criterion

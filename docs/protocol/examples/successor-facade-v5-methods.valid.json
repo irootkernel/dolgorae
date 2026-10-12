@@ -720,10 +720,10 @@
           "accepted_task_identity": {
             "schema": "dolgorae.accepted-task/v1",
             "purpose": "review",
-            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body",
             "task_body": {
-              "byte_length": 27,
-              "sha256": "sha256:20a880f429c88e3dd4f2250fceb16ba6f93a0666cb977d6a4a32f51dcf3df1f6"
+              "byte_length": 222,
+              "sha256": "sha256:f0140ea03b78657916a4e2021a379a1ed7c052757c23c25b44bfb343f24939b7"
             },
             "contexts": [],
             "images": [],
@@ -759,10 +759,10 @@
           "accepted_task_identity": {
             "schema": "dolgorae.accepted-task/v1",
             "purpose": "review",
-            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body",
             "task_body": {
-              "byte_length": 27,
-              "sha256": "sha256:20a880f429c88e3dd4f2250fceb16ba6f93a0666cb977d6a4a32f51dcf3df1f6"
+              "byte_length": 222,
+              "sha256": "sha256:f0140ea03b78657916a4e2021a379a1ed7c052757c23c25b44bfb343f24939b7"
             },
             "contexts": [],
             "images": [],
@@ -782,7 +782,7 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "queued",
           "result_digest": null,
           "complete_result": null,
@@ -801,7 +801,7 @@
             "operation_kind": "assign_external_specialist_task",
             "idempotency_key": "assign_external_specialist_task-original-key"
           },
-          "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+          "accepted_input_digest": "sha256:82d3c929062a26b4878638c9e0802902de0e20605f2f391d00e843a2aba44327",
           "accepted_subjects": {
             "run_ref": "run:fixture",
             "member_ref": "member:fixture",
@@ -871,9 +871,9 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "completed",
-          "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+          "result_digest": "sha256:98c8bdb515a1b607c3dec85be698e69502f82f25e7631472343c60b293f7e71f",
           "complete_result": {
             "schema": "dolgorae.complete-result/v1",
             "source": {
@@ -883,7 +883,7 @@
               "task_ref": "task:fixture",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59"
             },
             "terminal_outcome": "completed",
             "final_response": {
@@ -950,9 +950,9 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "completed",
-          "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+          "result_digest": "sha256:98c8bdb515a1b607c3dec85be698e69502f82f25e7631472343c60b293f7e71f",
           "complete_result": {
             "schema": "dolgorae.complete-result/v1",
             "source": {
@@ -962,7 +962,7 @@
               "task_ref": "task:fixture",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59"
             },
             "terminal_outcome": "completed",
             "final_response": {
@@ -1031,7 +1031,7 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "unknown",
           "result_digest": null,
           "complete_result": null,
@@ -1162,8 +1162,8 @@
           "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
           "instruction_identity_digest": "sha256:22bcd0acb32f5ab59a185a64240b0be873bf2a22a1676ba92f41dce22458ecd6",
           "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
-          "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
+          "result_digest": "sha256:98c8bdb515a1b607c3dec85be698e69502f82f25e7631472343c60b293f7e71f",
           "complete_result": {
             "schema": "dolgorae.complete-result/v1",
             "source": {
@@ -1173,7 +1173,7 @@
               "task_ref": "task:fixture",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59"
             },
             "terminal_outcome": "completed",
             "final_response": {
@@ -1200,7 +1200,7 @@
           "worker_disposition": "idle",
           "disposition_proof": {
             "state": "idle",
-            "observed_after_result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+            "observed_after_result_digest": "sha256:98c8bdb515a1b607c3dec85be698e69502f82f25e7631472343c60b293f7e71f",
             "membership_revision": 2,
             "workload_revision": 3,
             "running": 0,
@@ -1359,10 +1359,10 @@
           "accepted_task_identity": {
             "schema": "dolgorae.accepted-task/v1",
             "purpose": "review",
-            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body",
             "task_body": {
-              "byte_length": 27,
-              "sha256": "sha256:20a880f429c88e3dd4f2250fceb16ba6f93a0666cb977d6a4a32f51dcf3df1f6"
+              "byte_length": 222,
+              "sha256": "sha256:f0140ea03b78657916a4e2021a379a1ed7c052757c23c25b44bfb343f24939b7"
             },
             "contexts": [],
             "images": [],
@@ -1398,10 +1398,10 @@
           "accepted_task_identity": {
             "schema": "dolgorae.accepted-task/v1",
             "purpose": "review",
-            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body",
             "task_body": {
-              "byte_length": 27,
-              "sha256": "sha256:20a880f429c88e3dd4f2250fceb16ba6f93a0666cb977d6a4a32f51dcf3df1f6"
+              "byte_length": 222,
+              "sha256": "sha256:f0140ea03b78657916a4e2021a379a1ed7c052757c23c25b44bfb343f24939b7"
             },
             "contexts": [],
             "images": [],
@@ -1421,7 +1421,7 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "queued",
           "result_digest": null,
           "complete_result": null,
@@ -1440,7 +1440,7 @@
             "operation_kind": "assign_specialist_task",
             "idempotency_key": "assign_specialist_task-original-key"
           },
-          "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+          "accepted_input_digest": "sha256:63092f577b255c080b45ff925ce6e041dd90dd0ff5f7998f683b6f58c7be3f03",
           "accepted_subjects": {
             "run_ref": "run:fixture",
             "member_ref": "member:fixture",
@@ -1510,9 +1510,9 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "completed",
-          "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+          "result_digest": "sha256:b83c20b3c71b670ec1ae07bb96fe3445120704530218af13f9d6a2d0e84c2d92",
           "complete_result": {
             "schema": "dolgorae.complete-result/v1",
             "source": {
@@ -1522,7 +1522,7 @@
               "task_ref": "task:fixture",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59"
             },
             "terminal_outcome": "completed",
             "final_response": {
@@ -1589,9 +1589,9 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "completed",
-          "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+          "result_digest": "sha256:b83c20b3c71b670ec1ae07bb96fe3445120704530218af13f9d6a2d0e84c2d92",
           "complete_result": {
             "schema": "dolgorae.complete-result/v1",
             "source": {
@@ -1601,7 +1601,7 @@
               "task_ref": "task:fixture",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59"
             },
             "terminal_outcome": "completed",
             "final_response": {
@@ -1670,7 +1670,7 @@
         "task": {
           "task_ref": "task:fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "unknown",
           "result_digest": null,
           "complete_result": null,
@@ -1801,8 +1801,8 @@
           "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
           "instruction_identity_digest": "sha256:22bcd0acb32f5ab59a185a64240b0be873bf2a22a1676ba92f41dce22458ecd6",
           "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
-          "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
+          "result_digest": "sha256:b83c20b3c71b670ec1ae07bb96fe3445120704530218af13f9d6a2d0e84c2d92",
           "complete_result": {
             "schema": "dolgorae.complete-result/v1",
             "source": {
@@ -1812,7 +1812,7 @@
               "task_ref": "task:fixture",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+              "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59"
             },
             "terminal_outcome": "completed",
             "final_response": {
@@ -1839,7 +1839,7 @@
           "worker_disposition": "idle",
           "disposition_proof": {
             "state": "idle",
-            "observed_after_result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+            "observed_after_result_digest": "sha256:b83c20b3c71b670ec1ae07bb96fe3445120704530218af13f9d6a2d0e84c2d92",
             "membership_revision": 2,
             "workload_revision": 3,
             "running": 0,
@@ -1897,7 +1897,7 @@
               "entry_key": "task-001",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21"
+              "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2"
             }
           ]
         },
@@ -1908,8 +1908,8 @@
             "entry_key": "task-001",
             "absolute_file_path": "/fixture/workspace/inputs/task-001.json",
             "content": {
-              "byte_length": 971,
-              "sha256": "sha256:68eaa91a35dd8ada80026418dd8506cc73127ec6777be7d9d8cb2e6035beffb8"
+              "byte_length": 1020,
+              "sha256": "sha256:41a639442100a81a92d3c82c53d2e044e43f0dc17820d169603f586d7e9c63bf"
             }
           }
         ]
@@ -1925,7 +1925,7 @@
               "entry_key": "task-001",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21"
+              "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2"
             }
           ]
         },
@@ -1933,8 +1933,8 @@
           {
             "entry_key": "task-001",
             "content": {
-              "byte_length": 971,
-              "sha256": "sha256:68eaa91a35dd8ada80026418dd8506cc73127ec6777be7d9d8cb2e6035beffb8"
+              "byte_length": 1020,
+              "sha256": "sha256:41a639442100a81a92d3c82c53d2e044e43f0dc17820d169603f586d7e9c63bf"
             }
           }
         ]
@@ -1943,7 +1943,7 @@
         "schema": "dolgorae.external-specialist-response/v5",
         "operation": "assign_group",
         "group_ref": "group:fixture",
-        "manifest_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
+        "manifest_digest": "sha256:5a8b13da82ff60dc2b7fbde182f7882e02791587fb997adbdfb3cbe51e5ec08a",
         "receipt": {
           "schema": "dolgorae.operation-receipt/v1",
           "operation_ref": "01900000-0000-7000-8000-000000000068",
@@ -1956,7 +1956,7 @@
             "operation_kind": "assign_group",
             "idempotency_key": "group-original-key"
           },
-          "accepted_input_digest": "sha256:33b2bb0ca84a18835930a201fa1439acb701035b1bf8f58ca5dc7e54820ce14e",
+          "accepted_input_digest": "sha256:35442b47893f968bdc607d7f873afcb14ac942bbd2b6ff78c074429d85ec27ee",
           "accepted_subjects": {
             "run_ref": null,
             "member_ref": null,
@@ -2030,7 +2030,7 @@
         "coverage": {
           "schema": "dolgorae.group-coverage/v1",
           "group_ref": "group:fixture",
-          "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
+          "group_assignment_digest": "sha256:5a8b13da82ff60dc2b7fbde182f7882e02791587fb997adbdfb3cbe51e5ec08a",
           "sources": [
             {
               "entry_key": "task-001",
@@ -2038,7 +2038,7 @@
               "task_ref": "task:facade-group",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
+              "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2",
               "state": "completed",
               "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
               "safe_failure_code": null
@@ -2101,7 +2101,7 @@
         "coverage": {
           "schema": "dolgorae.group-coverage/v1",
           "group_ref": "group:fixture",
-          "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
+          "group_assignment_digest": "sha256:5a8b13da82ff60dc2b7fbde182f7882e02791587fb997adbdfb3cbe51e5ec08a",
           "sources": [
             {
               "entry_key": "task-001",
@@ -2109,7 +2109,7 @@
               "task_ref": "task:facade-group",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
+              "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2",
               "state": "completed",
               "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
               "safe_failure_code": null
@@ -2155,7 +2155,7 @@
         "scope_kind": "external_engagement",
         "scope_ref": "engagement:fixture",
         "group_ref": "group:fixture",
-        "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
+        "group_assignment_digest": "sha256:5a8b13da82ff60dc2b7fbde182f7882e02791587fb997adbdfb3cbe51e5ec08a",
         "sources": [
           {
             "entry_key": "task-001",
@@ -2163,7 +2163,7 @@
             "task_ref": "task:facade-group",
             "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
             "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-            "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
+            "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2",
             "state": "completed",
             "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
             "safe_failure_code": null
@@ -2176,7 +2176,7 @@
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/merge_group_results_normalized_body",
       "normalized_request_body": {
         "group_ref": "group:fixture",
-        "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
+        "group_assignment_digest": "sha256:5a8b13da82ff60dc2b7fbde182f7882e02791587fb997adbdfb3cbe51e5ec08a",
         "sources": [
           {
             "entry_key": "task-001",
@@ -2184,7 +2184,7 @@
             "task_ref": "task:facade-group",
             "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
             "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-            "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
+            "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2",
             "state": "completed",
             "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
             "safe_failure_code": null
@@ -2198,7 +2198,7 @@
         "merged_identity": {
           "schema": "dolgorae.merged-findings/v1",
           "algorithm": "merge-exact-findings-v1",
-          "group_assignment_digest": "sha256:f2645b9ac70649d9778ff3b70326847dca4bcbf57f6a70fb1aa7d565bc52cda8",
+          "group_assignment_digest": "sha256:5a8b13da82ff60dc2b7fbde182f7882e02791587fb997adbdfb3cbe51e5ec08a",
           "sources": [
             {
               "entry_key": "task-001",
@@ -2206,7 +2206,7 @@
               "task_ref": "task:facade-group",
               "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
               "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
-              "accepted_task_digest": "sha256:88523d488e0fda6be55d37ddd832824c6032ea6e1a8f3fac4853367b6f1cda21",
+              "accepted_task_digest": "sha256:68ae361740c712298f02b18702e6729cb19ef8f8e419727c0698465e7403f7e2",
               "state": "completed",
               "result_digest": "sha256:879de8117524249230d221707a65353a27bdcc6c785fe43aeb8d6bb99dabdf7c",
               "safe_failure_code": null
@@ -2217,7 +2217,7 @@
             "sha256": "sha256:af3029b304d7ac06461cee5336ef406c5f312882308c675b957fe11741ecb38b"
           }
         },
-        "merged_digest": "sha256:6803aec4178308675c946277daf8187aa630baac77a12517edce1ec688091dfa",
+        "merged_digest": "sha256:4d808c86658a36ee86213953d35d91c008808a3f86f039510c9fdab733b90f61",
         "receipt": {
           "schema": "dolgorae.operation-receipt/v1",
           "operation_ref": "01900000-0000-7000-8000-000000000068",
@@ -2230,7 +2230,7 @@
             "operation_kind": "merge_group_results",
             "idempotency_key": "merge-original-key"
           },
-          "accepted_input_digest": "sha256:38326cfaad8510d3b667a6ebed986bd0ff7d474e945b6795fb9237be065c01c2",
+          "accepted_input_digest": "sha256:8e2c80ae5f55dd60705c5bb496a1bcc05265613746c6763c2d76a403b13d3a28",
           "accepted_subjects": {
             "run_ref": null,
             "member_ref": null,
@@ -2285,7 +2285,7 @@
         "scope_kind": "external_engagement",
         "scope_ref": "engagement:fixture",
         "member_ref": "member:fixture",
-        "merged_findings_digest": "sha256:6803aec4178308675c946277daf8187aa630baac77a12517edce1ec688091dfa",
+        "merged_findings_digest": "sha256:4d808c86658a36ee86213953d35d91c008808a3f86f039510c9fdab733b90f61",
         "merged_input": {
           "byte_length": 34,
           "sha256": "sha256:af3029b304d7ac06461cee5336ef406c5f312882308c675b957fe11741ecb38b"
@@ -2307,10 +2307,10 @@
           "accepted_task_identity": {
             "schema": "dolgorae.accepted-task/v1",
             "purpose": "review",
-            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body",
             "task_body": {
-              "byte_length": 27,
-              "sha256": "sha256:20a880f429c88e3dd4f2250fceb16ba6f93a0666cb977d6a4a32f51dcf3df1f6"
+              "byte_length": 222,
+              "sha256": "sha256:f0140ea03b78657916a4e2021a379a1ed7c052757c23c25b44bfb343f24939b7"
             },
             "contexts": [],
             "images": [],
@@ -2329,7 +2329,7 @@
       "normalized_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_synthesis_normalized_body",
       "normalized_request_body": {
         "member_ref": "member:fixture",
-        "merged_findings_digest": "sha256:6803aec4178308675c946277daf8187aa630baac77a12517edce1ec688091dfa",
+        "merged_findings_digest": "sha256:4d808c86658a36ee86213953d35d91c008808a3f86f039510c9fdab733b90f61",
         "merged_input": {
           "byte_length": 34,
           "sha256": "sha256:af3029b304d7ac06461cee5336ef406c5f312882308c675b957fe11741ecb38b"
@@ -2351,10 +2351,10 @@
           "accepted_task_identity": {
             "schema": "dolgorae.accepted-task/v1",
             "purpose": "review",
-            "task_body_schema": "dolgorae.structured-task/v1",
+            "task_body_schema": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body",
             "task_body": {
-              "byte_length": 27,
-              "sha256": "sha256:20a880f429c88e3dd4f2250fceb16ba6f93a0666cb977d6a4a32f51dcf3df1f6"
+              "byte_length": 222,
+              "sha256": "sha256:f0140ea03b78657916a4e2021a379a1ed7c052757c23c25b44bfb343f24939b7"
             },
             "contexts": [],
             "images": [],
@@ -2374,7 +2374,7 @@
         "task": {
           "task_ref": "task:synthesis-fixture",
           "member_ref": "member:fixture",
-          "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+          "accepted_task_digest": "sha256:9aa73d33338c88eccd0938449b2c5a72b9cc7f5ae3b3fa1f8e10515012840f59",
           "state": "queued",
           "result_digest": null,
           "complete_result": null,
@@ -2393,7 +2393,7 @@
             "operation_kind": "assign_synthesis",
             "idempotency_key": "synthesis-original-key"
           },
-          "accepted_input_digest": "sha256:5dab6fdb63fe6f58180f150085dfb99bed30e4356ce2ed6a78c00ba6ed82d7b2",
+          "accepted_input_digest": "sha256:edcedc4146e709f5688322d5efd6570c2d6b2e88d7705c549c54ead0c3c46545",
           "accepted_subjects": {
             "run_ref": "run:fixture",
             "member_ref": "member:fixture",

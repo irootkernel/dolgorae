@@ -167,7 +167,8 @@
         "decision": "accept_once",
         "granted_permissions": [],
         "protected_input_present": true,
-        "protected_answer_sha256": "sha256:694d870b635b9d2084a4b0c32b2303665545a4b90d4a8fbc7300bd4402aa6ab4"
+        "protected_answer_sha256": "sha256:694d870b635b9d2084a4b0c32b2303665545a4b90d4a8fbc7300bd4402aa6ab4",
+        "answers": []
       }
     }
   ]

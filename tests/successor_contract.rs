@@ -866,6 +866,9 @@ fn validate_identity(domain: &str, value: &Value) -> Check {
             if value["scope_kind"].is_null() != value["scope_ref"].is_null() {
                 return Err("invalid_identity");
             }
+            if value["operation_kind"] == "submit_turn" && value["scope_kind"] != "run" {
+                return Err("invalid_identity");
+            }
             if !value["scope_kind"].is_null() {
                 one_of(
                     &value["scope_kind"],
@@ -1888,7 +1891,8 @@ fn capture_group_inputs(
             &jcs::parse(&assignment["task_body"].to_string()).map_err(|_| "group_input_invalid")?,
         )
         .map_err(|_| "group_input_invalid")?;
-        if identity["task_body_schema"] != "dolgorae.structured-task/v1"
+        if checked_structured_task(&assignment["task_body"], identity, &facade_task_schema())
+            .is_err()
             || identity["task_body"]["byte_length"] != body.len()
             || identity["task_body"]["sha256"] != format!("sha256:{}", jcs::sha256_hex(&body))
         {
@@ -2064,4 +2068,275 @@ fn cold_group_captures_complete_inputs_before_receipt_and_rejects_missing_or_mis
         inputs["maxItems"].as_u64().unwrap() * (6 * (256 + path_limit) + 1024)
             < inputs["x-maxEncodedBytes"].as_u64().unwrap()
     );
+}
+
+fn facade_task_schema() -> String {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-external-specialist-facade-v5.schema.json"
+    ))
+    .unwrap();
+    format!("{}#/$defs/task_body", schema["$id"].as_str().unwrap())
+}
+
+// Contract admission model for the complete captured structured-body binding.
+fn checked_structured_task(body: &Value, identity: &Value, schema: &str) -> Check {
+    match schema {
+        candidate if candidate == facade_task_schema() => closed(
+            body,
+            &[
+                "purpose",
+                "brief",
+                "contexts",
+                "criteria",
+                "expected_output",
+            ],
+        )?,
+        "dolgorae.structured-task/v1" => {
+            closed(
+                body,
+                &["schema", "brief", "context", "criteria", "constraints"],
+            )?;
+            if body["schema"] != schema {
+                return Err("invalid_identity");
+            }
+            public_task_constraints(body)?;
+        }
+        _ => return Err("invalid_identity"),
+    }
+    validate_identity("dolgorae.accepted-task/v1", identity)?;
+    if identity["task_body_schema"] != schema
+        || identity["task_body"] != fixture_bytes_ref(&fixture_canonical_bytes(body))
+    {
+        return Err("invalid_identity");
+    }
+    Ok(())
+}
+
+fn public_task_constraints(body: &Value) -> Check {
+    let constraints = array(&body["constraints"])?;
+    if constraints.len() > 64
+        || constraints
+            .iter()
+            .any(|item| item.as_str().is_none_or(|text| text.len() > 8192))
+        || fixture_canonical_bytes(body).len() > 16_777_216
+    {
+        return Err("capacity");
+    }
+    Ok(())
+}
+
+#[test]
+fn facade_assignments_bind_complete_task_bytes_and_distinct_schema() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/examples/successor-facade-v5-methods.valid.json"
+    ))
+    .unwrap();
+    fn check_results(value: &Value) {
+        if let Some(object) = value.as_object() {
+            if value["complete_result"].is_object() {
+                assert_eq!(
+                    value["result_digest"],
+                    fixture_digest(&value["complete_result"])
+                );
+                assert_eq!(
+                    value["accepted_task_digest"],
+                    value["complete_result"]["source"]["accepted_task_digest"]
+                );
+            }
+            for child in object.values() {
+                check_results(child);
+            }
+        } else if let Some(array) = value.as_array() {
+            for child in array {
+                check_results(child);
+            }
+        }
+    }
+    check_results(&fixtures);
+    let mut count = 0;
+    for case in fixtures["cases"].as_array().unwrap() {
+        let Some(assignment) = case["request"].get("assignment") else {
+            continue;
+        };
+        let body = &assignment["task_body"];
+        let identity = &assignment["accepted_task_identity"];
+        checked_structured_task(body, identity, &facade_task_schema()).unwrap();
+        assert_eq!(case["normalized_request_body"]["assignment"], *assignment);
+        assert_eq!(
+            case["response"]["task"]["accepted_task_digest"],
+            fixture_digest(identity)
+        );
+        let receipt = &case["response"]["receipt"];
+        let namespace = &receipt["namespace"];
+        let envelope = json!({"schema":"dolgorae.mutation-envelope/v1", "request_schema":case["normalized_body_schema"], "operation_kind":case["operation"], "workspace_ref":namespace["workspace_ref"], "scope_kind":namespace["scope_kind"], "scope_ref":namespace["scope_ref"], "controller_principal":namespace["controller_principal"], "controller_generation":namespace["controller_generation"], "idempotency_key":namespace["idempotency_key"], "trusted_invocation_ref":null, "request_body":fixture_bytes_ref(&fixture_canonical_bytes(&case["normalized_request_body"]))});
+        assert_eq!(receipt["accepted_input_digest"], fixture_digest(&envelope));
+        for field in ["byte_length", "sha256"] {
+            let mut invalid = identity.clone();
+            invalid["task_body"][field] = if field == "byte_length" {
+                json!(27)
+            } else {
+                json!(format!("sha256:{}", "0".repeat(64)))
+            };
+            assert!(checked_structured_task(body, &invalid, &facade_task_schema()).is_err());
+        }
+        let mut changed = body.clone();
+        changed["brief"] = json!("Changed complete task body");
+        assert!(checked_structured_task(&changed, identity, &facade_task_schema()).is_err());
+        let mut public_identity = identity.clone();
+        public_identity["task_body_schema"] = json!("dolgorae.structured-task/v1");
+        assert!(checked_structured_task(body, &public_identity, &facade_task_schema()).is_err());
+        assert!(
+            checked_structured_task(body, &public_identity, "dolgorae.structured-task/v1").is_err()
+        );
+        count += 1;
+    }
+    assert_eq!(count, 3);
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let task = &fixtures["positive"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "assign_synthesis_request")
+        .unwrap()["grpc_json"]["task"];
+    checked_structured_task(
+        &task["structured"],
+        &fixture_wire_identity(&task["identity"]),
+        "dolgorae.structured-task/v1",
+    )
+    .unwrap();
+    assert!(
+        checked_structured_task(
+            &task["structured"],
+            &fixture_wire_identity(&task["identity"]),
+            &facade_task_schema()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn ordinary_interaction_answers_bind_every_semantic_field_and_secrets_remain_excluded() {
+    let fixtures: Value = serde_json::from_str(VECTORS).unwrap();
+    let inputs = fixtures["normalized_interaction_inputs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(inputs.len(), 4);
+    let mut digests = BTreeSet::new();
+    for input in inputs {
+        let vector = fixtures["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["id"] == input["vector_id"])
+            .unwrap();
+        let body = &input["body"];
+        assert_eq!(
+            vector["input"]["request_body"],
+            fixture_bytes_ref(&fixture_canonical_bytes(body))
+        );
+        digests.insert(vector["expected_digest"].as_str().unwrap());
+    }
+    assert_eq!(digests.len(), 4);
+    let normalized: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/examples/successor-machine-v5-normalized.valid.json"
+    ))
+    .unwrap();
+    let protected = normalized["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| {
+            case["operation"] == "resolve_interaction"
+                && case["input"]["protected_input_present"] == true
+        })
+        .unwrap();
+    assert_eq!(protected["input"]["answers"], json!([]));
+    assert!(protected["input"].get("protected_answer_sha256").is_none());
+    assert!(protected["input"].get("protected_input_path").is_none());
+    let machine: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-machine-v5.schema.json"
+    ))
+    .unwrap();
+    let identities: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-v014-identities-v1.schema.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        machine["$defs"]["normalized_image_input"]["properties"]["detail"]["enum"],
+        identities["$defs"]["image_ref"]["properties"]["detail"]["enum"]
+    );
+    assert_eq!(
+        machine["$defs"]["normalized_image_input"]["properties"]["detail"]["enum"],
+        json!(["auto", "low", "high"])
+    );
+}
+
+#[test]
+fn submit_turn_digest_binds_original_run_scope_in_lookup_receipt() {
+    let vectors: Value = serde_json::from_str(VECTORS).unwrap();
+    let vector = vectors["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "mutation-submit-turn")
+        .unwrap();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-gul-consumer-v2.fixtures.json"
+    ))
+    .unwrap();
+    let accepted = &fixtures["positive"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "lookup_submit_turn_running")
+        .unwrap()["grpc_json"]["accepted"];
+    assert_eq!(vector["input"]["scope_kind"], "run");
+    assert_eq!(
+        vector["input"]["scope_ref"],
+        accepted["receipt"]["operation"]["caller_scope"]["run_id"]
+    );
+    assert_eq!(
+        vector["expected_digest"],
+        accepted["receipt"]["accepted_input_digest"]
+    );
+    let mut invalid = vector["input"].clone();
+    invalid["scope_kind"] = Value::Null;
+    invalid["scope_ref"] = Value::Null;
+    assert!(validate_identity("dolgorae.mutation-envelope/v1", &invalid).is_err());
+}
+
+#[test]
+fn public_task_constraints_have_utf8_count_and_complete_encoded_bounds() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-v014-identities-v1.schema.json"
+    ))
+    .unwrap();
+    let task_schema = &schema["$defs"]["public_structured_task_body"];
+    let constraints = &task_schema["properties"]["constraints"];
+    assert_eq!(constraints["maxItems"], 64);
+    assert_eq!(constraints["items"]["x-maxUtf8Bytes"], 8192);
+    assert_eq!(task_schema["x-maxEncodedBytes"], 16_777_216);
+    let mut task = json!({"schema":"dolgorae.structured-task/v1", "brief":"bounded", "context":[], "criteria":[], "constraints":vec!["é".repeat(4096);64]});
+    public_task_constraints(&task).unwrap();
+    task["constraints"][0] = json!(format!("{}a", "é".repeat(4096)));
+    assert_eq!(public_task_constraints(&task), Err("capacity"));
+    task["constraints"] = json!(vec![""; 65]);
+    assert_eq!(public_task_constraints(&task), Err("capacity"));
+    task["constraints"] = json!(vec!["\0".repeat(8192); 64]);
+    public_task_constraints(&task).unwrap();
+    // Every bounded nested field participates: brief, context identity/media,
+    // criterion ID/text/context IDs, and all constraints. Fixed JSON overhead
+    // and BytesRefs fit well within the additional 1 MiB allowance.
+    let utf8_upper = 65_536 + 64 * (512 + 128) + 64 * (128 + 8192 + 64 * 128) + 64 * 8192;
+    let encoded_upper = 6 * utf8_upper + 1_048_576;
+    assert!(encoded_upper < 16_777_216);
+    task["brief"] = json!("\0".repeat(65_536));
+    let content = fixture_bytes_ref(b"captured context");
+    task["context"] = json!((0..64).map(|index| json!({"kind":"artifact", "identity":format!("{index:02}{}", "\0".repeat(510)), "content":content, "media_type":"\0".repeat(128)})).collect::<Vec<_>>());
+    task["criteria"] = json!((0..64).map(|index| json!({"criterion_id":format!("{index:02}{}", "\0".repeat(126)), "text":"\0".repeat(8192), "context_ids":(0..64).map(|id| format!("{id:02}{}", "\0".repeat(126))).collect::<Vec<_>>()})).collect::<Vec<_>>());
+    public_task_constraints(&task).unwrap();
+    assert!(fixture_canonical_bytes(&task).len() < encoded_upper);
 }

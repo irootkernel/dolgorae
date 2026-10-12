@@ -373,8 +373,7 @@
           "enum": [
             "auto",
             "low",
-            "high",
-            "original"
+            "high"
           ]
         },
         "canonical_path": {
@@ -853,7 +852,8 @@
         "thread_generation",
         "decision",
         "granted_permissions",
-        "protected_input_present"
+        "protected_input_present",
+        "answers"
       ],
       "properties": {
         "run_ref": {
@@ -891,10 +891,18 @@
         },
         "protected_input_present": {
           "type": "boolean"
+        },
+        "answers": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/machine-output/v5#/$defs/ordinary_question_answer"
+          }
         }
       },
       "x-invariants": [
-        "Protected answer bytes, their hashes, file paths and carriers are excluded. First accepted protected resolution owns the key; replay returns its non-secret receipt without body comparison."
+        "Protected answer bytes, their hashes, file paths and carriers are excluded. First accepted protected resolution owns the key; replay returns its non-secret receipt without body comparison.",
+        "Ordinary non-secret answers bind question IDs, label order and explicit nullable text. Secret-bearing interactions use an empty answers array and never hash/store secret answer bytes or protected paths; the winning-key retry uses its original receipt."
       ],
       "x-normalizationPolicy": {
         "envelope_fields": "Controller source principal/generation, workspace/aggregate scope, key and operation kind remain in mutation envelope. Carrier paths and secret bytes are excluded.",
@@ -902,7 +910,25 @@
         "defaults": "Resolve optional Profile/model/effort/purpose/assurance/parent/instruction choices exactly once from the accepted selected configuration before creating this body. Required nulls and empty arrays remain explicit.",
         "sources": "Capture accepted message/image/instruction/handoff bytes and exact normalized semantic paths before effect; replay reads retained capture without reopening source files.",
         "unknown_fields": "Reject before normalization; never silently discard an unknown input."
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "protected_input_present": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "answers": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
     },
     "keyed_normalized_body": {
       "oneOf": [
@@ -976,7 +1002,7 @@
             "$ref": "https://dolgorae.local/schema/machine-output/v5#/$defs/normalized_fixture_case"
           },
           "minItems": 5,
-          "maxItems": 5
+          "maxItems": 6
         }
       }
     },
@@ -3359,6 +3385,41 @@
           "$ref": "https://dolgorae.local/schema/machine-output/v5#/$defs/read_artifact_chunk_machine_request"
         }
       ]
+    },
+    "ordinary_question_answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "selected_labels",
+        "text"
+      ],
+      "properties": {
+        "question_id": {
+          "type": "string",
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128,
+          "minLength": 1
+        },
+        "selected_labels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 256,
+            "x-maxUtf8Bytes": 256,
+            "minLength": 1
+          }
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 65536,
+          "x-maxUtf8Bytes": 65536
+        }
+      }
     }
   },
   "x-normalizedOperationMap": {

@@ -784,8 +784,8 @@
         "request_schema": "https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body",
         "operation_kind": "submit_turn",
         "workspace_ref": "workspace:fixture",
-        "scope_kind": null,
-        "scope_ref": null,
+        "scope_kind": "run",
+        "scope_ref": "run:fixture",
         "controller_principal": "principal:fixture",
         "controller_generation": 3,
         "idempotency_key": "original:SubmitTurn",
@@ -795,8 +795,96 @@
           "sha256": "sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3"
         }
       },
-      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:SubmitTurn\",\"operation_kind\":\"submit_turn\",\"request_body\":{\"byte_length\":214,\"sha256\":\"sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":null,\"scope_ref\":null,\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
-      "expected_digest": "sha256:e38ca9f48f5ac9171a758fb5efc35e07a2421e26646f4977ff58b006e0165fe9"
+      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:SubmitTurn\",\"operation_kind\":\"submit_turn\",\"request_body\":{\"byte_length\":214,\"sha256\":\"sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"run\",\"scope_ref\":\"run:fixture\",\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:5f27e8ff1e704aeb2cbe217ddf313ecabe1915302f1d1a40f8161309a46b44e2"
+    },
+    {
+      "id": "mutation-resolve-ordinary",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body",
+        "operation_kind": "resolve_interaction",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "run",
+        "scope_ref": "run:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:ResolveInteraction",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 282,
+          "sha256": "sha256:e5b87bbeca6822ff81bcc48b0d787b5ce8f6bee25dda7036f824237651cf9274"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:ResolveInteraction\",\"operation_kind\":\"resolve_interaction\",\"request_body\":{\"byte_length\":282,\"sha256\":\"sha256:e5b87bbeca6822ff81bcc48b0d787b5ce8f6bee25dda7036f824237651cf9274\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"run\",\"scope_ref\":\"run:fixture\",\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:55e971564dd10e9ed61f03866e1273c6d97edf2b8bfa9b2008a02b4c4c0a37ff"
+    },
+    {
+      "id": "mutation-resolve-changed-question",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body",
+        "operation_kind": "resolve_interaction",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "run",
+        "scope_ref": "run:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:ResolveInteraction",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 280,
+          "sha256": "sha256:2bcf9ba7e4195b087f939bc77bb374ff5a9396d6804a68002d2539ec0de78edb"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:ResolveInteraction\",\"operation_kind\":\"resolve_interaction\",\"request_body\":{\"byte_length\":280,\"sha256\":\"sha256:2bcf9ba7e4195b087f939bc77bb374ff5a9396d6804a68002d2539ec0de78edb\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"run\",\"scope_ref\":\"run:fixture\",\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:00a4a7fb34e4845f6e737826abe7c6f5471f08d20f363c50a2c6b29373ecc685"
+    },
+    {
+      "id": "mutation-resolve-changed-label",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body",
+        "operation_kind": "resolve_interaction",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "run",
+        "scope_ref": "run:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:ResolveInteraction",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 281,
+          "sha256": "sha256:292eb2c6db9b2aa979749d75ad09438d7af6ecc3e52d4736593e94042983c390"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:ResolveInteraction\",\"operation_kind\":\"resolve_interaction\",\"request_body\":{\"byte_length\":281,\"sha256\":\"sha256:292eb2c6db9b2aa979749d75ad09438d7af6ecc3e52d4736593e94042983c390\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"run\",\"scope_ref\":\"run:fixture\",\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:96f0c907b6f1c404888988a5acb9fa6c23258f3181083381eae037820a007bce"
+    },
+    {
+      "id": "mutation-resolve-changed-text",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "input": {
+        "schema": "dolgorae.mutation-envelope/v1",
+        "request_schema": "https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body",
+        "operation_kind": "resolve_interaction",
+        "workspace_ref": "workspace:fixture",
+        "scope_kind": "run",
+        "scope_ref": "run:fixture",
+        "controller_principal": "principal:fixture",
+        "controller_generation": 3,
+        "idempotency_key": "original:ResolveInteraction",
+        "trusted_invocation_ref": null,
+        "request_body": {
+          "byte_length": 306,
+          "sha256": "sha256:e73433a5334c80ca439946c5c6895b178a6a9a01c197347dc2fa0c768baa601a"
+        }
+      },
+      "canonical_utf8": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:ResolveInteraction\",\"operation_kind\":\"resolve_interaction\",\"request_body\":{\"byte_length\":306,\"sha256\":\"sha256:e73433a5334c80ca439946c5c6895b178a6a9a01c197347dc2fa0c768baa601a\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/resolve_interaction_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":\"run\",\"scope_ref\":\"run:fixture\",\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
+      "expected_digest": "sha256:268b76ae413bcb952a705c49805db11eabbed2aedeaf54a58603987026870396"
     }
   ],
   "invalid": [
@@ -893,7 +981,7 @@
     {
       "id": "source-alias-utf8-overflow",
       "domain": "dolgorae.role-snapshot/v1",
-      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
+      "raw_json": "{\"dependencies\":[{\"content\":{\"byte_length\":11,\"sha256\":\"sha256:b4a516812161f30dc9be9c2c6018b62069c58defafcef716e64261fb11e71dc4\"},\"name\":\"\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\"}],\"role_body\":{\"byte_length\":20,\"sha256\":\"sha256:107ad77beca72ed2a1784b9530f4b694d99e78259341c21e7ceba5d2fd4b1f2d\"},\"schema\":\"dolgorae.role-snapshot/v1\",\"selected_guidance\":[{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:3effeb72e5d39edd1f0d9a3ef77d1890ef736ccf64447ad9b025c4280c1e3e6e\"},\"name\":\"g2\"},{\"content\":{\"byte_length\":13,\"sha256\":\"sha256:d6c280988f6598f5c6f05930a74de566e93994a92b011c37d1f84f2151a9d68e\"},\"name\":\"g1\"}]}",
       "expected_error": "invalid_identity"
     },
     {
@@ -930,6 +1018,12 @@
       "id": "task-image-original-unsupported",
       "domain": "dolgorae.accepted-task/v1",
       "raw_json": "{\"schema\":\"dolgorae.accepted-task/v1\",\"purpose\":\"review\",\"task_body_schema\":\"dolgorae.task-text/v1\",\"task_body\":{\"byte_length\":27,\"sha256\":\"sha256:e1c53c5b062fd4f82b1c2200a7e2b0c82c2cba13f8a44dd849909ee81280999c\"},\"contexts\":[{\"kind\":\"accepted_context\",\"identity\":\"ctx:a\",\"content\":{\"byte_length\":5,\"sha256\":\"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8\"},\"media_type\":\"text/plain\"},{\"kind\":\"accepted_context\",\"identity\":\"ctx:b\",\"content\":{\"byte_length\":4,\"sha256\":\"sha256:f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753\"},\"media_type\":\"text/plain\"}],\"images\":[{\"content\":{\"byte_length\":68,\"sha256\":\"sha256:7327cacfa499a4dd82c7a88bb49d01d23dbf56a2b9eb7a9053cf9dd547b94da4\"},\"media_type\":\"image/png\",\"detail\":\"original\"}],\"expected_output_schema\":\"dolgorae.specialist-findings/v1\",\"execution_intent\":\"read_only\",\"admitted_model\":\"gpt-5.6-luna\",\"admitted_effort\":\"low\",\"role_snapshot_digest\":\"sha256:7dd1f735e8d0b5c220a7a67948aae946b4b4c170348bd59a1ea91d205c972dbb\",\"agent_configuration_digest\":\"sha256:74d074ade36568ef3dc17355e6cdfe1a17e1b6f6d97dee080f1fcf0ee1cc2110\"}",
+      "expected_error": "invalid_identity"
+    },
+    {
+      "id": "submit-turn-null-existing-run-scope",
+      "domain": "dolgorae.mutation-envelope/v1",
+      "raw_json": "{\"controller_generation\":3,\"controller_principal\":\"principal:fixture\",\"idempotency_key\":\"original:SubmitTurn\",\"operation_kind\":\"submit_turn\",\"request_body\":{\"byte_length\":214,\"sha256\":\"sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3\"},\"request_schema\":\"https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body\",\"schema\":\"dolgorae.mutation-envelope/v1\",\"scope_kind\":null,\"scope_ref\":null,\"trusted_invocation_ref\":null,\"workspace_ref\":\"workspace:fixture\"}",
       "expected_error": "invalid_identity"
     }
   ],
@@ -973,6 +1067,18 @@
       "kind": "different",
       "left": "mutation-base",
       "right": "mutation-non-mcp-null"
+    },
+    {
+      "left": "mutation-resolve-ordinary",
+      "right": "mutation-resolve-changed-question"
+    },
+    {
+      "left": "mutation-resolve-ordinary",
+      "right": "mutation-resolve-changed-label"
+    },
+    {
+      "left": "mutation-resolve-ordinary",
+      "right": "mutation-resolve-changed-text"
     }
   ],
   "sources": [
@@ -1046,6 +1152,92 @@
       "content": {
         "byte_length": 214,
         "sha256": "sha256:19db8669ecfff71b6f7a0a758429271ebb941f20247d758c9db2c133deda50e3"
+      }
+    }
+  ],
+  "normalized_interaction_inputs": [
+    {
+      "vector_id": "mutation-resolve-ordinary",
+      "body": {
+        "run_ref": "run:fixture",
+        "interaction_ref": "interaction:fixture",
+        "turn_ref": "turn:fixture",
+        "thread_generation": 1,
+        "decision": "accept_once",
+        "granted_permissions": [],
+        "protected_input_present": false,
+        "answers": [
+          {
+            "question_id": "question:fixture",
+            "selected_labels": [
+              "allow"
+            ],
+            "text": null
+          }
+        ]
+      }
+    },
+    {
+      "vector_id": "mutation-resolve-changed-question",
+      "body": {
+        "run_ref": "run:fixture",
+        "interaction_ref": "interaction:fixture",
+        "turn_ref": "turn:fixture",
+        "thread_generation": 1,
+        "decision": "accept_once",
+        "granted_permissions": [],
+        "protected_input_present": false,
+        "answers": [
+          {
+            "question_id": "question:other",
+            "selected_labels": [
+              "allow"
+            ],
+            "text": null
+          }
+        ]
+      }
+    },
+    {
+      "vector_id": "mutation-resolve-changed-label",
+      "body": {
+        "run_ref": "run:fixture",
+        "interaction_ref": "interaction:fixture",
+        "turn_ref": "turn:fixture",
+        "thread_generation": 1,
+        "decision": "accept_once",
+        "granted_permissions": [],
+        "protected_input_present": false,
+        "answers": [
+          {
+            "question_id": "question:fixture",
+            "selected_labels": [
+              "deny"
+            ],
+            "text": null
+          }
+        ]
+      }
+    },
+    {
+      "vector_id": "mutation-resolve-changed-text",
+      "body": {
+        "run_ref": "run:fixture",
+        "interaction_ref": "interaction:fixture",
+        "turn_ref": "turn:fixture",
+        "thread_generation": 1,
+        "decision": "accept_once",
+        "granted_permissions": [],
+        "protected_input_present": false,
+        "answers": [
+          {
+            "question_id": "question:fixture",
+            "selected_labels": [
+              "allow"
+            ],
+            "text": "additional ordinary answer"
+          }
+        ]
       }
     }
   ]

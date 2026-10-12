@@ -2097,6 +2097,7 @@ message AcceptedTaskIdentity {
   string role_snapshot_digest = 11;
   string agent_configuration_digest = 12;
 }
+// Complete JCS body <= 16,777,216 bytes; constraints <= 64 strings, each <= 8,192 UTF-8 bytes.
 message StructuredTaskBody {
   string schema = 1;
   string brief = 2;

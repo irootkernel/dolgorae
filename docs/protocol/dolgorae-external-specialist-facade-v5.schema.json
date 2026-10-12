@@ -85,7 +85,8 @@
         }
       ],
       "x-invariants": [
-        "Rich structured task context/criterion bounds remain those of facade/v4 and review/v4; no legacy objective fallback. Accepted task_body BytesRef binds complete JCS body."
+        "Rich structured task context/criterion bounds remain those of facade/v4 and review/v4; no legacy objective fallback. Accepted task_body BytesRef binds complete JCS body.",
+        "Exact accepted task_body_schema is https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body; this grammar is distinct from public dolgorae.structured-task/v1."
       ]
     },
     "provisioning_sources": {
@@ -397,7 +398,12 @@
           "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body"
         },
         "accepted_task_identity": {
-          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task"
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task",
+          "properties": {
+            "task_body_schema": {
+              "const": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body"
+            }
+          }
         },
         "deadline_seconds": {
           "type": "integer",

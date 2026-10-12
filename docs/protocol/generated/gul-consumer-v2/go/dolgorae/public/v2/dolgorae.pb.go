@@ -17798,6 +17798,7 @@ func (x *AcceptedTaskIdentity) GetAgentConfigurationDigest() string {
 	return ""
 }
 
+// Complete JCS body <= 16,777,216 bytes; constraints <= 64 strings, each <= 8,192 UTF-8 bytes.
 type StructuredTaskBody struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Schema        string                 `protobuf:"bytes,1,opt,name=schema,proto3" json:"schema,omitempty"`
