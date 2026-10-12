@@ -94,6 +94,19 @@ sources are preserved. After a partial publication failure, inspect new files
 and replan rather than replaying an assumed transaction. Migration does not
 authorize policy installation or service startup.
 
+## Read a retained Submit operation
+
+Use `run lookup-operation` only when the exact selected binary exposes it and
+the user authorized inspection of that Run. Supply its current protected
+Controller carrier and original idempotency key; do not reconstruct images or
+resubmit to discover acceptance. Check the `dolgorae-machine/v5` lookup response
+and its `data.lookup` state. Accepted receipts remain immutable while current
+outcome may advance. A definitive refusal permits only its declared exact-key
+retry. Unresolved effects require the returned recovery action; absence requires
+the complete retained-namespace proof. Missing or incompatible output, integrity
+failure and current-request rejection never resolve an earlier unknown effect.
+This native diagnostic does not establish public-v2 or consumer runtime support.
+
 ## Prepare a one-shot review
 
 1. Confirm that the requested source scope is exactly one of `workspace`,

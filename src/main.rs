@@ -844,6 +844,13 @@ fn execute(cli: Cli) -> ExitCode {
         }
         Ok(result) => {
             let data = serde_json::to_value(result).expect("typed semantic result");
+            if command_name == "run.lookup_operation" && !cli.human {
+                render_json(
+                    &json!({"schema":"dolgorae-machine/v5","ok":true,"command":"lookup_operation",
+                    "data":{"schema":"dolgorae.external-specialist-response/v5","operation":"lookup_operation","lookup":data}}),
+                );
+                return ExitCode::SUCCESS;
+            }
             if cli.human {
                 println!(
                     "{}",
@@ -961,6 +968,9 @@ fn run_verb(command: &RunCommand) -> Option<(SemanticRunVerb, &[OsString])> {
         RunCommand::Status(leaf) => (SemanticRunVerb::Status, leaf.args.as_slice()),
         RunCommand::Send(leaf) => (SemanticRunVerb::Send, leaf.args.as_slice()),
         RunCommand::Submit(leaf) => (SemanticRunVerb::Submit, leaf.args.as_slice()),
+        RunCommand::LookupOperation(leaf) => {
+            (SemanticRunVerb::LookupOperation, leaf.args.as_slice())
+        }
         RunCommand::Wait(leaf) => (SemanticRunVerb::Wait, leaf.args.as_slice()),
         RunCommand::Events(leaf) => (SemanticRunVerb::Events, leaf.args.as_slice()),
         RunCommand::Timeline(leaf) => (SemanticRunVerb::Timeline, leaf.args.as_slice()),
@@ -1017,6 +1027,37 @@ fn render_failure_version(
     modern: bool,
 ) -> ExitCode {
     let status = error.exit_status();
+    if command == "run.lookup_operation" && !human {
+        let (effect, classification, action) = match error.code.as_str() {
+            "AUDIT_INTEGRITY_FAILURE" | "RECOVERY_REQUIRED" => {
+                ("unresolved", "RecoveryNeeded", "restore_state")
+            }
+            "INTERNAL_ERROR" => ("unresolved", "Unknown", "lookup_original_key"),
+            _ => ("none", "Rejected", "fix_request"),
+        };
+        let subjects = matches!(
+            error.code.as_str(),
+            "AUDIT_INTEGRITY_FAILURE" | "RUN_STATE_CONFLICT"
+        )
+        .then(|| {
+            error
+                .details
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .flatten()
+        .map(|run| dolgorae::operation::Subjects {
+            run_ref: Some(run.to_owned()),
+            ..Default::default()
+        });
+        render_json(
+            &json!({"schema":"dolgorae-machine/v5","ok":false,"command":"lookup_operation",
+            "error":{"schema":"dolgorae.successor-error/v1","code":error.code,
+                "operation_kind":"lookup_operation","operation_ref":null,"effect":effect,
+                "classification":classification,"required_action":action,"retry_new_key":false,"subjects":subjects}}),
+        );
+        return ExitCode::from(status);
+    }
     if human {
         eprintln!("{}: {}", error.code, error.message);
     } else {

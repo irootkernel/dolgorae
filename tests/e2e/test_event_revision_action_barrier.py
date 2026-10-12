@@ -7,6 +7,14 @@ if __name__ == "__main__":
     run_case("gateway_semantic_native", "public_bootstrap_and_machine_parity")
     run_case(
         "gateway_semantic_native",
+        "lookup_requires_recovery_when_controller_binding_outran_reset_commit",
+    )
+    run_case(
+        "gateway_semantic_native",
+        "definitive_submit_refusal_survives_gateway_and_worker_restart",
+    )
+    run_case(
+        "gateway_semantic_native",
         "orchestration_queries_reject_a_low_level_run_after_controller_authentication",
     )
     run_case(

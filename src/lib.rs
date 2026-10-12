@@ -35,6 +35,7 @@ pub mod mcp_review;
 pub mod mcp_review_server;
 pub mod migration;
 pub(crate) mod mutation_admission;
+pub mod operation;
 pub mod orchestration;
 pub mod paths;
 pub mod primary_bridge;

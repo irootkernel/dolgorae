@@ -18,13 +18,102 @@ use dolgorae::workspace::SystemWorkspacePlatform;
 use prost::Message;
 use serde_json::Value;
 use std::fs;
-use std::process::Command;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{Fixture, context};
 use tonic::Code;
 use uuid::Uuid;
 
+fn assert_lookup_machine_schema(envelope: &Value) {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut validator = Command::new(repository.join(".venv/bin/python"))
+        .args(["-B", "-c", "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path(sys.argv[1])/'tests/e2e')); from schema_support import validator,assert_valid; assert_valid(json.load(sys.stdin),validator(pathlib.Path(sys.argv[1])/'docs/protocol','dolgorae-machine-v5.schema.json'),'native lookup')"])
+        .arg(repository).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    validator
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(envelope).unwrap())
+        .unwrap();
+    let output = validator.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct PublicResultAdapter;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lookup_requires_recovery_when_controller_binding_outran_reset_commit() {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let fixture = Fixture::new("run_start_model_list.json");
+    let run_id = fixture.start_run(&[]);
+    let run_root = fixture.state_root.join("runs").join(&run_id);
+    let binding_path = run_root.join("controller.json");
+    let original = fs::read(&binding_path).unwrap();
+    let mut binding: dolgorae::run::ControllerBinding = serde_json::from_slice(&original).unwrap();
+    let previous_generation = binding.identity.generation;
+    binding.identity.generation += 1;
+    let recovery = run_root.join("recovery");
+    fs::create_dir_all(&recovery).unwrap();
+    fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700)).unwrap();
+    let journal_path = recovery.join("controller-reset.jsonl");
+    let mut journal = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&journal_path)
+        .unwrap();
+    writeln!(
+        journal,
+        "{}",
+        serde_json::json!({"schema_version":1,
+        "operation_id":Uuid::now_v7(),"status":"prepared","run_id":run_id,
+        "state_revision":1,"controller_id":binding.identity.controller_id,
+        "controller_generation":previous_generation,"writer_authority":"none"})
+    )
+    .unwrap();
+    journal.sync_all().unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&binding_path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec(&binding).unwrap())
+        .unwrap();
+    file.sync_all().unwrap();
+
+    let output = fixture.command(&[
+        "run",
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+        "lookup-operation",
+        &run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--idempotency-key",
+        "reset-interrupted",
+    ]);
+    // Restore the injected interrupted reset before the fixture cleans up its Run.
+    fs::write(&binding_path, original).unwrap();
+    fs::remove_file(journal_path).unwrap();
+    assert!(!output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_lookup_machine_schema(&envelope);
+    assert_eq!(envelope["error"]["code"], "RECOVERY_REQUIRED");
+    assert_eq!(envelope["error"]["classification"], "RecoveryNeeded");
+    assert_eq!(envelope["error"]["required_action"], "restore_state");
+    assert_eq!(envelope["error"]["effect"], "unresolved");
+    assert_eq!(envelope["error"]["retry_new_key"], false);
+    assert!(envelope["error"]["subjects"].is_null());
+    assert!(envelope["error"]["operation_ref"].is_null());
+    assert!(envelope.get("data").is_none());
+}
 
 impl OrchestrationAdapter for PublicResultAdapter {
     fn resolve_task_contexts(
@@ -889,6 +978,223 @@ async fn public_bootstrap_and_machine_parity() {
         .unwrap();
     assert_eq!(forwarded["path"], absolute_image);
     assert_eq!(forwarded["detail"], "high");
+    let lookup_args = [
+        "run",
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+        "lookup-operation",
+        &run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--idempotency-key",
+        "valid-image",
+    ];
+    let original_output = fixture.command(&lookup_args);
+    assert!(original_output.status.success());
+    let original_envelope: Value = serde_json::from_slice(&original_output.stdout).unwrap();
+    assert_lookup_machine_schema(&original_envelope);
+    let original = original_envelope["data"].clone();
+    assert_eq!(
+        original["schema"],
+        "dolgorae.external-specialist-response/v5"
+    );
+    assert_eq!(original["lookup"]["state"], "accepted");
+    assert_eq!(
+        original["lookup"]["accepted_subjects"]["turn_ref"],
+        "turn-1"
+    );
+    assert_eq!(
+        original["lookup"]["operation_ref"],
+        accepted.context.unwrap().operation_id.unwrap()
+    );
+    let before_lookup = audit(&fixture, &run_id);
+    fs::rename(&image_path, fixture.workspace.join("moved.png")).unwrap();
+    assert_eq!(fixture.cli(&lookup_args), original);
+    fs::remove_file(fixture.workspace.join("moved.png")).unwrap();
+    assert_eq!(fixture.cli(&lookup_args), original);
+    let foreign = fixture.workspace.join("foreign-controller.json");
+    fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "human-cli",
+        "--instance-id",
+        "foreign-lookup",
+        "--output",
+        foreign.to_str().unwrap(),
+    ]);
+    let denied = fixture.command(&[
+        "run",
+        "--controller-file",
+        foreign.to_str().unwrap(),
+        "lookup-operation",
+        &run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--idempotency-key",
+        "valid-image",
+    ]);
+    assert!(!denied.status.success());
+    let denied: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert_eq!(denied["schema"], "dolgorae-machine/v5");
+    assert_eq!(denied["error"]["code"], "CONTROLLER_MISMATCH");
+    assert_lookup_machine_schema(&denied);
+    assert!(denied.get("data").is_none());
+    assert_eq!(audit(&fixture, &run_id), before_lookup);
+    gateway.terminate();
+    assert_eq!(fixture.cli(&lookup_args), original);
+    let mut restarted = fixture.start_gateway();
+    assert_eq!(fixture.cli(&lookup_args), original);
+    restarted.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn definitive_submit_refusal_survives_gateway_and_worker_restart() {
+    let mut scenario = support::base_scenario();
+    let steps = scenario["steps"].as_array_mut().unwrap();
+    for step in steps.iter_mut() {
+        if step["method"] == "turn/start" && step["occurrence"] == 2 {
+            *step = serde_json::json!({"method":"turn/start","occurrence":2,
+                "respond":{"error":{"code":-32000,"message":"definitive test refusal"}}});
+        }
+    }
+    steps.push(serde_json::json!({"method":"turn/start","occurrence":3,
+        "respond":{"result":{"turn":{"id":"turn-retry"}}},
+        "emit":[{"kind":"notification","method":"turn/completed","params":{
+            "threadId":"${thread_id}","turn":{"id":"turn-retry","status":"completed","items":[]}}}]}));
+    steps.retain(|step| step["method"] != "thread/read");
+    steps.push(serde_json::json!({"method":"thread/read","occurrence":1,
+        "respond":{"error":{"code":-32600,"message":"thread not found"}}}));
+    steps.push(
+        serde_json::json!({"method":"thread/read","respond":{"result":{"thread":{
+        "id":"thread-alpha","turns":[{"id":"turn-1","status":"completed","items":[]}]}}}}),
+    );
+    let fixture = Fixture::with_scenario(scenario);
+    let id = fixture.start_run(&[]);
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    native_submit(&mut runs, &fixture, &initial, pb::WriteIntent::Read).await;
+    let idle = native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+    let mut request = pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        message: "Retry the original refused operation once.".to_owned(),
+        write_intent: pb::WriteIntent::Read as i32,
+        idempotency_key: "durable-refusal".to_owned(),
+        expected_state_revision: idle.state_revision,
+        images: vec![],
+        effort: None,
+    };
+    semantic_error(
+        &runs.submit_turn(request.clone()).await.unwrap_err(),
+        "TRANSPORT_FAILURE",
+    );
+    let args = [
+        "run",
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+        "lookup-operation",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--idempotency-key",
+        "durable-refusal",
+    ];
+    let refused = fixture.cli(&args);
+    assert_eq!(refused["lookup"]["state"], "not_accepted");
+    let before = audit(&fixture, &id);
+    let mut changed = request.clone();
+    changed.message.push('!');
+    semantic_error(
+        &runs.submit_turn(changed).await.unwrap_err(),
+        "IDEMPOTENCY_CONFLICT",
+    );
+    assert_eq!(audit(&fixture, &id), before);
+    gateway.terminate();
+    let mut gateway = fixture.start_gateway();
+    assert_eq!(fixture.cli(&args), refused);
+    let runtime_path = dolgorae::worker::runtime_record_path(
+        &dolgorae::worker::runtime_root(&fixture.state_root),
+        Uuid::parse_str(&id).unwrap(),
+    )
+    .unwrap();
+    let runtime: dolgorae::worker::WorkerRuntimeRecord =
+        serde_json::from_slice(&fs::read(runtime_path).unwrap()).unwrap();
+    assert_eq!(
+        dolgorae::worker::classify_worker_identity(&runtime),
+        dolgorae::worker::ProcessIdentityVerdict::Match
+    );
+    let exit = dolgorae::darwin::DarwinSystem
+        .watch_process_exit(runtime.identity.pid)
+        .unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-KILL", &runtime.identity.pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !exit.exited().unwrap() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.cli(&args), refused);
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let current = native_snapshot(&mut runs, &fixture, &id).await;
+    let recovered = runs
+        .recover_run(pb::RecoverRunRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            expected_state_revision: current.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(fixture.cli(&args), refused);
+    request.expected_state_revision = if recovered.lifecycle == pb::RunLifecycle::Paused as i32 {
+        runs.resume_run(pb::ResumeRunRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            expected_state_revision: recovered.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap()
+        .state_revision
+    } else {
+        assert_eq!(recovered.lifecycle, pb::RunLifecycle::Idle as i32);
+        recovered.state_revision
+    };
+    let accepted = runs
+        .submit_turn(request.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let replay = runs.submit_turn(request).await.unwrap().into_inner();
+    assert_eq!(accepted, replay);
+    assert_eq!(fixture.cli(&args)["lookup"]["state"], "accepted");
+    assert_eq!(
+        turn_starts(&fixture, &id),
+        2,
+        "warmup and exactly one accepted original-key Turn"
+    );
+    assert_eq!(
+        upstream_turn_starts(&fixture),
+        3,
+        "warmup, correlated refusal and one accepted retry"
+    );
     gateway.terminate();
 }
 
@@ -4525,7 +4831,32 @@ async fn native_killed_worker_recovery() {
         let mut gateway = fixture.start_gateway();
         let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
         let initial = native_snapshot(&mut runs, &fixture, &id).await;
-        native_submit(&mut runs, &fixture, &initial, pb::WriteIntent::Read).await;
+        runs.submit_turn(pb::SubmitTurnRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            idempotency_key: "known-before-worker-loss".to_owned(),
+            write_intent: pb::WriteIntent::Read as i32,
+            message: "Exercise native lifecycle transition.".to_owned(),
+            images: vec![],
+            effort: None,
+            expected_state_revision: initial.state_revision,
+        })
+        .await
+        .unwrap();
+        let lookup_args = [
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            "lookup-operation",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--idempotency-key",
+            "known-before-worker-loss",
+        ];
+        let original_lookup = fixture.cli(&lookup_args);
+        assert_eq!(original_lookup["lookup"]["current_outcome"], "running");
         let active =
             native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Running).await;
         let runtime_path = dolgorae::worker::runtime_record_path(
@@ -4552,6 +4883,12 @@ async fn native_killed_worker_recovery() {
         })
         .await
         .expect("killed worker remained alive");
+        let lost = fixture.cli(&lookup_args);
+        assert_eq!(lost["lookup"]["current_outcome"], "unknown");
+        assert_eq!(
+            lost["lookup"]["receipt"],
+            original_lookup["lookup"]["receipt"]
+        );
         let result = if recover {
             runs.recover_run(pb::RecoverRunRequest {
                 context: context(),
@@ -4588,6 +4925,12 @@ async fn native_killed_worker_recovery() {
         );
         assert!(transcript_methods(&fixture, "thread/read").len() >= 2);
         assert_eq!(turn_starts(&fixture, &id), 1);
+        let settled = fixture.cli(&lookup_args);
+        assert_eq!(settled["lookup"]["current_outcome"], "completed");
+        assert_eq!(
+            settled["lookup"]["receipt"],
+            original_lookup["lookup"]["receipt"]
+        );
         gateway.terminate();
     }
 }

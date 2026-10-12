@@ -14,6 +14,12 @@ Document roles and the required synchronization procedure are defined by the
 
 ## System Context
 
+The [durable Submit implementation](../specs/dolgorae-v014-durable-operations.md)
+retains successor identity alongside native audit records. Definitive refusal
+releases only its matched reservation after sync. Controller-authorized lookup
+projects the verified ledger prefix without worker startup or attachment reads;
+the original acceptance chain hash and revision remain immutable.
+
 Dolgorae provides one shared execution and durability core behind exactly two
 user-facing product facades.
 

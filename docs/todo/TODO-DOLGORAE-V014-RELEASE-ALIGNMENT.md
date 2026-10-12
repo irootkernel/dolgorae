@@ -377,6 +377,11 @@ profile; production admission identifies the released v0.1.4 artifact.
 
 ### Submission, lookup and errors
 
+TASK-070's [durable Submit specification](../specs/dolgorae-v014-durable-operations.md)
+owns retained native identity, synced definitive refusal and Controller-scoped
+lookup. Its native diagnostic precedes TASK-078's public-v2 projection; the
+later consumer qualification and H3 requirements remain in force.
+
 Preserve durable intent before effect and receipt before acknowledgement.
 A definitive upstream refusal resolves the reservation durably. A same-key
 retry may then execute once; an accepted same-key replay returns its retained

@@ -53,6 +53,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         ("app_server", &["jcs"][..]),
         ("codex_socket", &[][..]),
         ("audit", &["event", "jcs"][..]),
+        ("operation", &["audit", "domain", "jcs", "turn"][..]),
         (
             "interaction",
             &["audit", "domain", "ledger", "machine", "snapshot"][..],
@@ -415,6 +416,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "machine",
                 "markdown_policy",
                 "mutation_admission",
+                "operation",
                 "orchestration",
                 "paths",
                 "profile",
@@ -479,6 +481,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "jcs",
                 "ledger",
                 "machine",
+                "operation",
                 "primary_tool",
                 "worker",
                 "workspace",

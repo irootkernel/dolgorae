@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Look up retained Submit operations by their original key and Controller,
+  preserving receipts after attachment loss and synced refusal/retry boundaries
+  across restarts.
 - Publish a separate public-v2 and Gul consumer-v2 contract package with typed
   recovery, immutable delegation identities, bounded group/findings fixtures
   and qualified native host feasibility, preserving the frozen v1 package.

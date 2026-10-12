@@ -40,6 +40,10 @@ independent acceptance of completed Gul E15/H2, its immutable source binding,
 foundation scope and watch/timing/harness agreement. Later H3/H4 and actual
 Aquarium, Podway and Gul runtime qualification remain mandatory.
 
+The [durable Submit and operation lookup specification](dolgorae-v014-durable-operations.md)
+owns TASK-070's retained operation identity, definitive refusal and native lookup.
+Later public-v2 activation and actual consumer qualification retain their owners.
+
 The [v0.1.4 successor requirements reconciliation](dolgorae-v014-successor-requirements.md)
 maps retained behavior, failure/recovery rules and adopted feedback to their
 acceptance owners. Its [method and digest contract](dolgorae-v014-method-and-digest-contract.md)

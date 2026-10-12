@@ -19,6 +19,12 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     modern_machine = validator(protocol_root, "dolgorae-machine-v4.schema.json")
     version_schema = validator(protocol_root, "dolgorae-version-v1.schema.json")
+    lookup_machine = validator(protocol_root, "dolgorae-machine-v5.schema.json")
+    invalid_lookup = subprocess.run(
+        [str(binary), "run", "lookup-operation"], check=False, capture_output=True, text=True,
+    )
+    assert invalid_lookup.returncode == 2
+    assert_valid(json.loads(invalid_lookup.stdout), lookup_machine, "lookup argument refusal")
     cases = (
         ("--help",),
         ("help",),

@@ -297,6 +297,24 @@ Development, testing, and release-engineering guidance belongs in the
 owner. Never record credentials, tokens, private keys, live secret values, or
 secret-bearing command output here.
 
+## Native Submit lookup
+
+When the selected binary exposes `run lookup-operation`, query the original Run
+and key with its current protected Controller carrier. The Machine v5 response
+contains `data.lookup`: `accepted` retains the immutable receipt and separates
+current outcome; `not_accepted` carries a durable refusal and exact-key retry
+permission; `unresolved` requires reconciliation; `absent` carries a complete
+retained-namespace proof at its durable watermark. Do not infer absence from an
+error, missing history or a foreign Controller. A current lookup rejection does
+not resolve an earlier unknown Submit. Preserve the original key and inputs.
+
+The lookup reads retained ledger facts and does not repair state, start a worker
+or reopen attachment paths. Legacy operations without successor namespace
+identity keep their original interfaces and receipts; lookup refuses to invent
+that identity. The [durable operation specification](../specs/dolgorae-v014-durable-operations.md)
+owns this diagnostic. Public-v2, H3 and actual consumer qualification remain
+separate roadmap obligations.
+
 ## Planned v0.1.4 MCP host installation and recovery
 
 TASK-067 must name the installation/configuration owner for each supported

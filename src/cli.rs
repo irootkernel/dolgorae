@@ -489,6 +489,7 @@ pub enum RunCommand {
     Status(LeafArgs),
     Send(LeafArgs),
     Submit(LeafArgs),
+    LookupOperation(LeafArgs),
     Wait(LeafArgs),
     Events(LeafArgs),
     Timeline(LeafArgs),
@@ -544,6 +545,7 @@ impl RunCommand {
             Self::Status(_) => "run.status",
             Self::Send(_) => "run.send",
             Self::Submit(_) => "run.submit",
+            Self::LookupOperation(_) => "run.lookup_operation",
             Self::Wait(_) => "run.wait",
             Self::Events(_) => "run.events",
             Self::Timeline(_) => "run.timeline",
@@ -582,6 +584,7 @@ impl RunCommand {
             | Self::Status(a)
             | Self::Send(a)
             | Self::Submit(a)
+            | Self::LookupOperation(a)
             | Self::Wait(a)
             | Self::Events(a)
             | Self::Timeline(a)
@@ -1193,6 +1196,18 @@ fn leaf_spec(command: &str) -> LeafSpec {
             1,
         ),
         "run.wait" => spec(&["--workspace", "--timeout"], &[], &[], 2, 2),
+        "run.lookup_operation" => spec(
+            &[
+                "--workspace",
+                "--idempotency-key",
+                "--controller-file",
+                "--controller-fd",
+            ],
+            &[],
+            &["--idempotency-key"],
+            1,
+            1,
+        ),
         "run.events" => spec(
             &["--workspace", "--after", "--projection"],
             &["--follow"],

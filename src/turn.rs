@@ -611,6 +611,8 @@ pub struct AcceptedUserInput {
 #[derive(Clone, Debug, PartialEq)]
 pub enum JournalEntry {
     Intent(OperationIntent),
+    SubmitIdentity(Box<crate::operation::SubmitIdentity>),
+    SubmitRefusal(crate::operation::SubmitRefusal),
     CallerNativeIntent {
         operation_id: Uuid,
         method: &'static str,
@@ -703,6 +705,10 @@ pub enum JournalEntry {
 
 pub trait DurableTurnJournal {
     fn append_and_sync(&mut self, entry: JournalEntry) -> Result<(), TurnError>;
+
+    fn workspace_ref(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -794,6 +800,12 @@ impl<C: LedgerClock, F: FaultInjector> SharedLedgerJournal<C, F> {
 impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
     for SharedLedgerJournal<C, F>
 {
+    fn workspace_ref(&self) -> Option<&str> {
+        self.event_authority
+            .as_ref()
+            .map(|authority| authority.workspace_id.as_str())
+    }
+
     fn append_and_sync(&mut self, entry: JournalEntry) -> Result<(), TurnError> {
         let (kind, mut payload) = journal_record(entry)?;
         if let Some(authority) = &self.event_authority {
@@ -891,6 +903,12 @@ fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> 
             ),
             JournalEntry::Intent(intent) => {
                 (AuditKind::IdempotencyReserved, serde_json::to_value(intent))
+            }
+            JournalEntry::SubmitIdentity(identity) => {
+                (AuditKind::TurnIntent, serde_json::to_value(identity))
+            }
+            JournalEntry::SubmitRefusal(refusal) => {
+                (AuditKind::TurnIntent, serde_json::to_value(refusal))
             }
             JournalEntry::ProvisionalThread {
                 operation_id,
@@ -1614,6 +1632,7 @@ pub struct TurnCoordinator<S, J, A> {
     streamed_history_bytes: u64,
     idempotency: BTreeMap<String, IdempotencyRecord>,
     unresolved_idempotency: BTreeMap<String, String>,
+    refused_idempotency: BTreeMap<String, String>,
     fixed_model: String,
     default_effort: String,
     supported_efforts: BTreeSet<String>,
@@ -1761,6 +1780,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             streamed_history_bytes: 0,
             idempotency: BTreeMap::new(),
             unresolved_idempotency: BTreeMap::new(),
+            refused_idempotency: BTreeMap::new(),
             fixed_model: config.fixed_model,
             default_effort: config.default_effort,
             supported_efforts: config.supported_efforts,
@@ -2309,6 +2329,18 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let mut startup_intent = false;
         let mut binding_complete = self.thread_id.is_some();
         for (kind, payload) in &records {
+            if *kind == AuditKind::TurnIntent && payload.get("schema_version").is_some() {
+                let identity: crate::operation::SubmitIdentity =
+                    serde_json::from_value(payload.clone()).map_err(|_| {
+                        TurnError::Journal("invalid retained Submit identity".to_owned())
+                    })?;
+                identity.validate()?;
+                if identity.mutation_envelope.namespace.scope_ref != self.run_id.to_string() {
+                    return Err(TurnError::Journal(
+                        "retained Submit identity crossed its Run".to_owned(),
+                    ));
+                }
+            }
             if self.is_caller_workspace()
                 && *kind == AuditKind::TurnIntent
                 && payload.get("schema").and_then(Value::as_str)
@@ -2373,6 +2405,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         let restored = restore_turn_receipt_maps(records)?;
         self.idempotency = restored.accepted;
         self.unresolved_idempotency = restored.unresolved;
+        self.refused_idempotency = restored.refused;
         if self.is_caller_workspace()
             && !binding_complete
             && (startup_intent || self.thread_id.is_some())
@@ -2835,6 +2868,14 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             image.verify()?;
         }
         let digest = request_digest(request, &effort)?;
+        if let Some(recorded) = self.refused_idempotency.get(&request.idempotency_key)
+            && recorded != &digest
+        {
+            return Err(TurnError::IdempotencyConflict {
+                recorded: recorded.clone(),
+                observed: digest,
+            });
+        }
         if let Some(recorded) = self.unresolved_idempotency.get(&request.idempotency_key) {
             return Err(if recorded == &digest {
                 TurnError::OutcomeUnknown
@@ -2937,6 +2978,22 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .then(|| self.capture_accepted_input(&request))
             .transpose()?;
         let operation_id = Uuid::now_v7();
+        let successor_identity = match (&self.acceptance_controller, self.journal.workspace_ref()) {
+            (Some(controller), Some(workspace)) if request.idempotency_key.len() <= 256 => {
+                Some(crate::operation::SubmitIdentity::prepare(
+                    operation_id,
+                    crate::operation::Namespace::submit(
+                        controller,
+                        workspace,
+                        self.run_id,
+                        &request.idempotency_key,
+                    )?,
+                    &request,
+                    &effort,
+                )?)
+            }
+            _ => None,
+        };
         let intent = OperationIntent {
             operation_id,
             idempotency_key: request.idempotency_key.clone(),
@@ -2950,11 +3007,19 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.journal.append_and_sync(JournalEntry::Intent(intent))?;
         self.unresolved_idempotency
             .insert(request.idempotency_key.clone(), digest.clone());
+        if let Some(identity) = successor_identity
+            && let Err(error) = self
+                .journal
+                .append_and_sync(JournalEntry::SubmitIdentity(Box::new(identity)))
+        {
+            self.state = CoordinatorState::OutcomeUnknown;
+            return Err(error);
+        }
         let thread_id = match self.ensure_thread(operation_id) {
             Ok(thread) => thread,
             Err(error) => {
-                if matches!(error, TurnError::AppServerRejected { .. }) {
-                    self.unresolved_idempotency.remove(&request.idempotency_key);
+                if self.definitive_submit_refusal(&error) {
+                    self.resolve_submit_refusal(operation_id, &request.idempotency_key, &digest)?;
                 }
                 return Err(self.lost_after_write(operation_id, error));
             }
@@ -2966,12 +3031,15 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         })) {
             Ok(result) => result,
             Err(error) => {
-                if matches!(error, TurnError::AppServerRejected { .. }) { self.unresolved_idempotency.remove(&request.idempotency_key); }
+                if self.definitive_submit_refusal(&error) {
+                    self.resolve_submit_refusal(operation_id, &request.idempotency_key, &digest)?;
+                }
                 return Err(self.lost_after_write(operation_id, error));
             },
         };
-        let Some(turn_id) =
-            nested_identity(&result, "turn", "id").or_else(|| identity(&result, "turnId"))
+        let Some(turn_id) = nested_identity(&result, "turn", "id")
+            .or_else(|| identity(&result, "turnId"))
+            .filter(|turn| crate::operation::valid_opaque_ref(turn))
         else {
             self.mark_unknown(operation_id)?;
             return Err(TurnError::CorrelationMismatch);
@@ -3031,6 +3099,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             replayed: false,
         };
         self.unresolved_idempotency.remove(&request.idempotency_key);
+        self.refused_idempotency.remove(&request.idempotency_key);
         self.idempotency.insert(
             request.idempotency_key,
             IdempotencyRecord {
@@ -3040,6 +3109,31 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             },
         );
         Ok(accepted)
+    }
+
+    fn definitive_submit_refusal(&self, error: &TurnError) -> bool {
+        matches!(error, TurnError::AppServerRejected { .. })
+            && !(self.is_caller_workspace()
+                && self.thread_id.is_some()
+                && self.thread_generation == 0)
+    }
+
+    fn resolve_submit_refusal(
+        &mut self,
+        operation: Uuid,
+        key: &str,
+        digest: &str,
+    ) -> Result<(), TurnError> {
+        if let Err(error) = self.journal.append_and_sync(JournalEntry::SubmitRefusal(
+            crate::operation::SubmitRefusal::new(operation, key.to_owned(), digest.to_owned()),
+        )) {
+            self.state = CoordinatorState::OutcomeUnknown;
+            return Err(error);
+        }
+        self.unresolved_idempotency.remove(key);
+        self.refused_idempotency
+            .insert(key.to_owned(), digest.to_owned());
+        Ok(())
     }
 
     fn capture_accepted_input(
@@ -4730,26 +4824,142 @@ pub fn recorded_terminal<C: LedgerClock + 'static, F: FaultInjector + 'static>(
 struct RestoredTurnReceipts {
     accepted: BTreeMap<String, IdempotencyRecord>,
     unresolved: BTreeMap<String, String>,
+    refused: BTreeMap<String, String>,
+}
+
+pub(crate) fn validate_submit_history(records: Vec<(AuditKind, Value)>) -> Result<(), TurnError> {
+    restore_turn_receipt_maps(records).map(|_| ())
 }
 
 fn restore_turn_receipt_maps(
     records: Vec<(AuditKind, Value)>,
 ) -> Result<RestoredTurnReceipts, TurnError> {
+    // Older workers released a correlated refusal only in memory. Preserve
+    // their already accepted retry, but never use an unresolved legacy repeat
+    // as permission to dispatch or relax successor operation fences.
+    let successor_operations: BTreeSet<_> = records
+        .iter()
+        .filter(|(kind, payload)| {
+            *kind == AuditKind::TurnIntent && payload.get("schema_version").is_some()
+        })
+        .filter_map(|(_, payload)| payload.get("operation_ref")?.as_str().map(str::to_owned))
+        .collect();
+    let legacy_identity = |intent: &OperationIntent| {
+        (
+            intent.idempotency_key.clone(),
+            intent.request_sha256.clone(),
+            intent.run_generation,
+            intent.server_key.clone(),
+            intent.server_epoch,
+        )
+    };
+    let mut legacy_acceptances = BTreeMap::new();
+    let mut legacy_threads = BTreeSet::new();
+    for (index, (kind, payload)) in records.iter().enumerate() {
+        if *kind == AuditKind::ThreadBound {
+            if let Some(thread) = payload.get("thread_id").and_then(Value::as_str) {
+                legacy_threads.insert(thread.to_owned());
+            }
+        } else if *kind == AuditKind::TurnStarted
+            && payload
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .is_some_and(|thread| legacy_threads.contains(thread))
+            && payload
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .is_some_and(|turn| !turn.is_empty())
+            && let Some(operation) = payload.get("operation_id").and_then(Value::as_str)
+            && !successor_operations.contains(operation)
+        {
+            legacy_acceptances
+                .entry(operation.to_owned())
+                .or_insert(index);
+        }
+    }
+    let mut accepted_legacy_chains = BTreeMap::new();
+    for (index, (kind, payload)) in records.iter().enumerate() {
+        if *kind == AuditKind::IdempotencyReserved && payload.get("operation_id").is_some() {
+            let intent: OperationIntent = serde_json::from_value(payload.clone())
+                .map_err(|_| TurnError::Journal("invalid durable Turn intent".to_owned()))?;
+            if let Some(&acceptance_index) =
+                legacy_acceptances.get(&intent.operation_id.to_string())
+                && index < acceptance_index
+            {
+                accepted_legacy_chains
+                    .entry(legacy_identity(&intent))
+                    .and_modify(|latest: &mut usize| *latest = (*latest).max(acceptance_index))
+                    .or_insert(acceptance_index);
+            }
+        }
+    }
     let mut idempotency = BTreeMap::new();
     let mut unresolved_idempotency = BTreeMap::new();
+    let mut refused_idempotency = BTreeMap::new();
+    let mut current_operations = BTreeMap::new();
     let mut bound_threads = BTreeSet::new();
     let mut intents = BTreeMap::<String, OperationIntent>::new();
     let mut accepted = BTreeMap::<String, (String, String)>::new();
-    for (kind, payload) in records {
+    for (index, (kind, payload)) in records.into_iter().enumerate() {
         match kind {
             AuditKind::IdempotencyReserved if payload.get("operation_id").is_some() => {
                 let intent: OperationIntent = serde_json::from_value(payload)
                     .map_err(|_| TurnError::Journal("invalid durable Turn intent".to_owned()))?;
+                let accepted_legacy_retry = current_operations
+                    .get(&intent.idempotency_key)
+                    .and_then(|previous: &Uuid| intents.get(&previous.to_string()))
+                    .is_some_and(|previous| {
+                        previous.operation_id != intent.operation_id
+                            && previous.request_sha256 == intent.request_sha256
+                            && previous.run_generation == intent.run_generation
+                            && previous.server_key == intent.server_key
+                            && previous.server_epoch == intent.server_epoch
+                            && !successor_operations.contains(&previous.operation_id.to_string())
+                            && !successor_operations.contains(&intent.operation_id.to_string())
+                            && !legacy_acceptances.contains_key(&previous.operation_id.to_string())
+                            && accepted_legacy_chains
+                                .get(&legacy_identity(&intent))
+                                .is_some_and(|acceptance_index| index < *acceptance_index)
+                    });
+                if (unresolved_idempotency.contains_key(&intent.idempotency_key)
+                    && !accepted_legacy_retry)
+                    || idempotency.contains_key(&intent.idempotency_key)
+                    || refused_idempotency
+                        .get(&intent.idempotency_key)
+                        .is_some_and(|digest| digest != &intent.request_sha256)
+                {
+                    return Err(TurnError::Journal(
+                        "durable Turn key was redispatched unsafely".to_owned(),
+                    ));
+                }
+                current_operations.insert(intent.idempotency_key.clone(), intent.operation_id);
                 unresolved_idempotency.insert(
                     intent.idempotency_key.clone(),
                     intent.request_sha256.clone(),
                 );
                 intents.insert(intent.operation_id.to_string(), intent);
+            }
+            AuditKind::TurnIntent
+                if payload.get("schema").and_then(Value::as_str)
+                    == Some("dolgorae.submit-refusal/v1") =>
+            {
+                let refusal: crate::operation::SubmitRefusal = serde_json::from_value(payload)
+                    .map_err(|_| TurnError::Journal("invalid durable Submit refusal".to_owned()))?;
+                let intent = intents
+                    .get(&refusal.operation_id.to_string())
+                    .ok_or_else(|| {
+                        TurnError::Journal("Submit refusal has no original intent".to_owned())
+                    })?;
+                refusal.validate_intent(intent)?;
+                if current_operations.get(&refusal.idempotency_key) != Some(&refusal.operation_id)
+                    || !unresolved_idempotency.contains_key(&refusal.idempotency_key)
+                {
+                    return Err(TurnError::Journal(
+                        "Submit refusal crossed an operation boundary".to_owned(),
+                    ));
+                }
+                unresolved_idempotency.remove(&refusal.idempotency_key);
+                refused_idempotency.insert(refusal.idempotency_key, refusal.request_sha256);
             }
             AuditKind::ThreadBound => {
                 if let Some(thread_id) = payload.get("thread_id").and_then(Value::as_str) {
@@ -4766,6 +4976,14 @@ fn restore_turn_receipt_maps(
                     continue;
                 };
                 if let Some(intent) = intents.get(operation_id) {
+                    if current_operations.get(&intent.idempotency_key) != Some(&intent.operation_id)
+                        || unresolved_idempotency.get(&intent.idempotency_key)
+                            != Some(&intent.request_sha256)
+                    {
+                        return Err(TurnError::Journal(
+                            "acceptance crossed a resolved operation boundary".to_owned(),
+                        ));
+                    }
                     let thread_id = field("thread_id")?;
                     if !bound_threads.contains(thread_id) {
                         continue;
@@ -4776,6 +4994,7 @@ fn restore_turn_receipt_maps(
                         .filter(|value| !value.is_empty())
                     {
                         unresolved_idempotency.remove(&intent.idempotency_key);
+                        refused_idempotency.remove(&intent.idempotency_key);
                         idempotency.insert(
                             intent.idempotency_key.clone(),
                             IdempotencyRecord {
@@ -4830,6 +5049,7 @@ fn restore_turn_receipt_maps(
     Ok(RestoredTurnReceipts {
         accepted: idempotency,
         unresolved: unresolved_idempotency,
+        refused: refused_idempotency,
     })
 }
 
@@ -4843,9 +5063,18 @@ pub(crate) fn replay_durable_submit(
     let RestoredTurnReceipts {
         accepted,
         unresolved,
+        refused,
     } = restore_turn_receipt_maps(records)?;
     let effort = request.effort.as_deref().unwrap_or(default_effort);
     let digest = request_digest(request, effort)?;
+    if let Some(recorded) = refused.get(&request.idempotency_key)
+        && recorded != &digest
+    {
+        return Err(TurnError::IdempotencyConflict {
+            recorded: recorded.clone(),
+            observed: digest,
+        });
+    }
     if let Some(recorded) = unresolved.get(&request.idempotency_key) {
         return Err(if recorded == &digest {
             TurnError::OutcomeUnknown
@@ -5190,7 +5419,7 @@ fn turn_input(request: &TurnRequest) -> Result<Vec<Value>, TurnError> {
     Ok(input)
 }
 
-fn image_media_type(path: &LosslessPath) -> Result<String, TurnError> {
+pub(crate) fn image_media_type(path: &LosslessPath) -> Result<String, TurnError> {
     let path = path
         .to_path_buf()
         .map_err(|_| TurnError::InvalidInput("image path encoding is invalid"))?;
@@ -7585,6 +7814,373 @@ mod tests {
             Err(TurnError::IdempotencyConflict { .. })
         ));
         assert_eq!(restored.journal.entries.len(), before);
+    }
+
+    #[test]
+    fn accepted_legacy_refusal_retry_replays_without_relaxing_unresolved_fences() {
+        for rejection_count in [1, 2, 3] {
+            for reject_thread in [true, false] {
+                let mut server = FakeServer::default();
+                if !reject_thread {
+                    server
+                        .replies
+                        .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+                }
+                for _ in 0..rejection_count {
+                    server.replies.push_back(Err(TurnError::AppServerRejected {
+                        code: -32000,
+                        message: "refused".to_owned(),
+                    }));
+                }
+                if reject_thread {
+                    server
+                        .replies
+                        .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+                }
+                server
+                    .replies
+                    .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+                let mut original = coordinator(server);
+                for _ in 0..rejection_count {
+                    assert!(matches!(
+                        original.start_turn(request("legacy-retry", DeliveryMode::Submit)),
+                        Err(TurnError::AppServerRejected { .. })
+                    ));
+                }
+                let accepted = original
+                    .start_turn(request("legacy-retry", DeliveryMode::Submit))
+                    .unwrap();
+                // This is the actual old journal shape: the refusal had no record.
+                let records: Vec<_> = original
+                    .journal
+                    .entries
+                    .into_iter()
+                    .filter(|entry| !matches!(entry, JournalEntry::SubmitRefusal(_)))
+                    .map(|entry| journal_record(entry).unwrap())
+                    .collect();
+                let retained_bytes = serde_json::to_vec(&records).unwrap();
+                let mut restored = coordinator(FakeServer::default());
+                restored.restore_turn_receipts(records.clone()).unwrap();
+                let calls_before_replay = restored.server.calls.len();
+                let replay = restored
+                    .start_turn(request("legacy-retry", DeliveryMode::Submit))
+                    .unwrap();
+                assert!(replay.replayed);
+                assert_eq!(replay.turn_id, accepted.turn_id);
+                assert_eq!(restored.server.calls.len(), calls_before_replay);
+                assert_eq!(serde_json::to_vec(&records).unwrap(), retained_bytes);
+                let mut old_acceptance = records.clone();
+                for (kind, payload) in &mut old_acceptance {
+                    if *kind == AuditKind::TurnStarted {
+                        payload.as_object_mut().unwrap().remove("effort");
+                    }
+                }
+                let mut without_receipt = coordinator(FakeServer::default());
+                without_receipt
+                    .restore_turn_receipts(old_acceptance.clone())
+                    .unwrap();
+                assert!(matches!(
+                    without_receipt.accept(request("legacy-retry", DeliveryMode::Submit)),
+                    Err(TurnError::OutcomeUnknown)
+                ));
+                let terminal = TerminalTurn {
+                    thread_id: accepted.thread_id.clone(),
+                    turn_id: accepted.turn_id.clone(),
+                    status: "completed".to_owned(),
+                    effort: "medium".to_owned(),
+                    final_response: None,
+                    usage: None,
+                };
+                old_acceptance.push((
+                    AuditKind::TurnTerminal,
+                    serde_json::to_value(&terminal).unwrap(),
+                ));
+                let mut with_terminal = coordinator(FakeServer::default());
+                with_terminal.restore_turn_receipts(old_acceptance).unwrap();
+                let calls_before_replay = with_terminal.server.calls.len();
+                assert_eq!(
+                    with_terminal
+                        .accept(request("legacy-retry", DeliveryMode::Send))
+                        .unwrap(),
+                    DeliveryResult::Terminal(terminal)
+                );
+                assert_eq!(with_terminal.server.calls.len(), calls_before_replay);
+                let unresolved: Vec<_> = records
+                    .iter()
+                    .filter(|(kind, _)| *kind != AuditKind::TurnStarted)
+                    .cloned()
+                    .collect();
+                assert!(restore_turn_receipt_maps(unresolved).is_err());
+                let mut changed = records.clone();
+                let (_, second) = changed
+                    .iter_mut()
+                    .filter(|(kind, _)| *kind == AuditKind::IdempotencyReserved)
+                    .nth(1)
+                    .unwrap();
+                second["request_sha256"] = serde_json::json!("b".repeat(64));
+                assert!(restore_turn_receipt_maps(changed).is_err());
+                for field in ["run_generation", "server_key", "server_epoch"] {
+                    let mut drift = records.clone();
+                    let second = &mut drift
+                        .iter_mut()
+                        .filter(|(kind, _)| *kind == AuditKind::IdempotencyReserved)
+                        .nth(1)
+                        .unwrap()
+                        .1;
+                    second[field] = if field == "server_key" {
+                        serde_json::json!("c".repeat(64))
+                    } else {
+                        serde_json::json!(second[field].as_u64().unwrap() + 1)
+                    };
+                    assert!(restore_turn_receipt_maps(drift).is_err(), "{field}");
+                }
+                for operation in records
+                    .iter()
+                    .filter(|(kind, _)| *kind == AuditKind::IdempotencyReserved)
+                    .map(|(_, payload)| payload["operation_id"].clone())
+                {
+                    let mut successor = records.clone();
+                    successor.insert(
+                        1,
+                        (
+                            AuditKind::TurnIntent,
+                            serde_json::json!({
+                                "schema_version":1,"operation_ref":operation
+                            }),
+                        ),
+                    );
+                    assert!(restore_turn_receipt_maps(successor).is_err());
+                }
+                // Even a missing-effort acceptance cannot authorize another dispatch.
+                let mut after_acceptance = records.clone();
+                let accepted_payload = after_acceptance
+                    .iter_mut()
+                    .find(|(kind, _)| *kind == AuditKind::TurnStarted)
+                    .unwrap()
+                    .1
+                    .as_object_mut()
+                    .unwrap();
+                accepted_payload.remove("effort");
+                let mut extra_acceptance = serde_json::Value::Object(accepted_payload.clone());
+                let mut extra_intent: OperationIntent = serde_json::from_value(
+                    records
+                        .iter()
+                        .rev()
+                        .find(|(kind, _)| *kind == AuditKind::IdempotencyReserved)
+                        .unwrap()
+                        .1
+                        .clone(),
+                )
+                .unwrap();
+                extra_intent.operation_id = Uuid::now_v7();
+                extra_acceptance["operation_id"] = serde_json::json!(extra_intent.operation_id);
+                extra_acceptance["turn_id"] = serde_json::json!("turn-extra");
+                after_acceptance.push(journal_record(JournalEntry::Intent(extra_intent)).unwrap());
+                assert!(restore_turn_receipt_maps(after_acceptance.clone()).is_err());
+                after_acceptance.push((AuditKind::TurnStarted, extra_acceptance));
+                assert!(restore_turn_receipt_maps(after_acceptance).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn definitive_submit_refusal_releases_only_the_original_key_durably() {
+        for (reject_thread, restart) in [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let mut server = FakeServer::default();
+            if !reject_thread {
+                server
+                    .replies
+                    .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+            }
+            server.replies.push_back(Err(TurnError::AppServerRejected {
+                code: -32000,
+                message: "refused".to_owned(),
+            }));
+            let mut original = coordinator(server);
+            assert!(matches!(
+                original.start_turn(request("refused", DeliveryMode::Submit)),
+                Err(TurnError::AppServerRejected { .. })
+            ));
+            let records = original
+                .journal
+                .entries
+                .clone()
+                .into_iter()
+                .map(journal_record)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                records.last().unwrap().1["schema"],
+                "dolgorae.submit-refusal/v1"
+            );
+            let mut retry = if restart {
+                let mut restored = coordinator(FakeServer::default());
+                restored.restore_turn_receipts(records.clone()).unwrap();
+                restored
+            } else {
+                original
+            };
+            let before = retry.server.calls.len();
+            let mut changed = request("refused", DeliveryMode::Submit);
+            changed.message.push('!');
+            assert!(matches!(
+                retry.start_turn(changed),
+                Err(TurnError::IdempotencyConflict { .. })
+            ));
+            assert_eq!(retry.server.calls.len(), before);
+            if retry.thread_id.is_none() {
+                retry
+                    .server
+                    .replies
+                    .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+            }
+            retry
+                .server
+                .replies
+                .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+            let accepted = retry
+                .start_turn(request("refused", DeliveryMode::Submit))
+                .unwrap();
+            assert_eq!(
+                retry
+                    .start_turn(request("refused", DeliveryMode::Submit))
+                    .unwrap()
+                    .turn_id,
+                accepted.turn_id
+            );
+            assert_eq!(
+                retry.server.calls[before..]
+                    .iter()
+                    .filter(|(method, _)| method == "turn/start")
+                    .count(),
+                1
+            );
+            let retry_records = retry
+                .journal
+                .entries
+                .into_iter()
+                .map(|entry| journal_record(entry).unwrap());
+            let accepted_records = if restart {
+                records.into_iter().chain(retry_records).collect()
+            } else {
+                retry_records.collect()
+            };
+            assert!(
+                replay_durable_submit(
+                    accepted_records,
+                    &request("refused", DeliveryMode::Submit),
+                    "medium"
+                )
+                .unwrap()
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_cannot_resolve_an_earlier_unknown_or_different_operation() {
+        let operation = Uuid::now_v7();
+        let intent = OperationIntent {
+            operation_id: operation,
+            idempotency_key: "key".to_owned(),
+            request_sha256: normalized_request_digest(
+                &request("key", DeliveryMode::Submit),
+                "medium",
+            )
+            .unwrap(),
+            run_generation: 1,
+            server_key: "a".repeat(64),
+            server_epoch: 7,
+            provisional_thread: true,
+            accepted_input: None,
+        };
+        for mutation in ["operation", "key", "digest", "duplicate", "later"] {
+            let mut refusal = crate::operation::SubmitRefusal::new(
+                operation,
+                intent.idempotency_key.clone(),
+                intent.request_sha256.clone(),
+            );
+            match mutation {
+                "operation" => refusal.operation_id = Uuid::now_v7(),
+                "key" => refusal.idempotency_key.push('!'),
+                "digest" => refusal.request_sha256 = "b".repeat(64),
+                _ => (),
+            }
+            let mut records = vec![journal_record(JournalEntry::Intent(intent.clone())).unwrap()];
+            if mutation == "later" {
+                let mut later = intent.clone();
+                later.operation_id = Uuid::now_v7();
+                records.push(journal_record(JournalEntry::Intent(later)).unwrap());
+            }
+            records.push(journal_record(JournalEntry::SubmitRefusal(refusal.clone())).unwrap());
+            if mutation == "duplicate" {
+                records.push(journal_record(JournalEntry::SubmitRefusal(refusal)).unwrap());
+            }
+            assert!(restore_turn_receipt_maps(records).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn refusal_sync_failure_retains_the_reservation_and_fences_retry() {
+        #[derive(Default)]
+        struct FailingResolution {
+            entries: Vec<JournalEntry>,
+        }
+        impl DurableTurnJournal for FailingResolution {
+            fn append_and_sync(&mut self, entry: JournalEntry) -> Result<(), TurnError> {
+                if matches!(entry, JournalEntry::SubmitRefusal(_)) {
+                    return Err(TurnError::Journal(
+                        "injected refusal sync failure".to_owned(),
+                    ));
+                }
+                self.entries.push(entry);
+                Ok(())
+            }
+        }
+        let mut server = FakeServer::default();
+        server.replies.push_back(Err(TurnError::AppServerRejected {
+            code: -32000,
+            message: "refused".to_owned(),
+        }));
+        let mut original = coordinator_with_journal(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::Standard,
+            None,
+            FailingResolution::default(),
+        );
+        assert!(matches!(
+            original.start_turn(request("key", DeliveryMode::Submit)),
+            Err(TurnError::Journal(_))
+        ));
+        assert!(matches!(
+            original.start_turn(request("key", DeliveryMode::Submit)),
+            Err(TurnError::OutcomeUnknown)
+        ));
+        let mut restored = coordinator(FakeServer::default());
+        restored
+            .restore_turn_receipts(
+                original
+                    .journal
+                    .entries
+                    .into_iter()
+                    .map(|entry| journal_record(entry).unwrap())
+                    .collect(),
+            )
+            .unwrap();
+        assert!(matches!(
+            restored.start_turn(request("key", DeliveryMode::Submit)),
+            Err(TurnError::OutcomeUnknown)
+        ));
+        assert!(
+            !restored
+                .server
+                .calls
+                .iter()
+                .any(|(method, _)| method == "thread/start" || method == "turn/start")
+        );
     }
 
     #[test]

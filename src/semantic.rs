@@ -68,6 +68,7 @@ pub enum RunVerb {
     Status,
     Send,
     Submit,
+    LookupOperation,
     Wait,
     Events,
     Timeline,
@@ -111,6 +112,61 @@ pub fn workspace_writer(
         WorkspaceWriterVerb::HandoffCommit => commit_writer_handoff(&view, &state_root, args),
         WorkspaceWriterVerb::HandoffCancel => cancel_writer_handoff(&view, &state_root, args),
     }
+}
+
+pub fn lookup_submit_operation(args: &[OsString]) -> Result<Value, MachineError> {
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let run_id = positional_run_id(args)?;
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    let binding = load_reconciled_controller_binding(&state_root, run_id)?;
+    let controller = authorize_controller(run_id, "run.lookup_operation", &binding, &carrier)?;
+    let runs = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let manifest = runs.load_manifest(run_id)?;
+    if manifest.workspace_id != view.workspace_id {
+        return Err(internal("operation lookup crossed its workspace"));
+    }
+    let key = bounded_key(args, "--idempotency-key", 256)?;
+    let namespace =
+        crate::operation::Namespace::submit(&controller, &view.workspace_id, run_id, &key)
+            .map_err(|_| {
+                MachineError::invalid_argument(
+                    "--idempotency-key",
+                    "operation namespace is invalid",
+                )
+            })?;
+    let (state, observer) = observe_run_ledger(&state_root, run_id, true)?;
+    let mut lookup = crate::operation::lookup(observer.records(), &namespace)
+        .map_err(|error| match error {
+            crate::turn::TurnError::InvalidInput(_) => MachineError::new("RUN_STATE_CONFLICT",
+                "this key has no retained successor namespace; preserve its original legacy receipt",
+                false, json!({"run_id":run_id,"state":state.lifecycle.as_str(),"operation":"run.lookup_operation"})),
+            _ => MachineError::new("AUDIT_INTEGRITY_FAILURE", "operation history requires authoritative recovery",
+                false, json!({"run_id":run_id,"sequence":state.ledger_head.sequence,"reason":"retained operation facts are inconsistent"})),
+        })?;
+    if lookup["state"] == "accepted" && lookup["current_outcome"] == "running" {
+        let current_worker =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
+                .ok()
+                .and_then(|path| {
+                    crate::worker::read_runtime_record(&path, DarwinSystem.current_uid()).ok()
+                })
+                .filter(|record| {
+                    record.identity.run_id == run_id
+                        && record.identity.workspace_id == view.workspace_id
+                        && record.identity.run_generation == state.run_generation
+                })
+                .is_some_and(|record| {
+                    crate::worker::classify_worker_identity(&record)
+                        == crate::worker::ProcessIdentityVerdict::Match
+                });
+        if !current_worker {
+            lookup["current_outcome"] = json!("unknown");
+        }
+    }
+    Ok(lookup)
 }
 
 pub fn interaction_get(args: &[OsString]) -> Result<Value, MachineError> {
@@ -318,6 +374,7 @@ impl RunVerb {
             Self::Status => "run.status",
             Self::Send => "run.send",
             Self::Submit => "run.submit",
+            Self::LookupOperation => "run.lookup_operation",
             Self::Wait => "run.wait",
             Self::Events => "run.events",
             Self::Timeline => "run.timeline",
@@ -2966,6 +3023,7 @@ impl SemanticService for CoreSemanticService {
                 RunVerb::Fork => run_fork(args).map(SemanticResult::Run),
                 RunVerb::Recover => run_recover(args).map(SemanticResult::Run),
                 RunVerb::Reconcile => run_reconcile(args).map(SemanticResult::Run),
+                RunVerb::LookupOperation => lookup_submit_operation(args).map(SemanticResult::Run),
                 other => run_control(*other, args),
             },
             SemanticCommand::Future { dotted_name } => Err(MachineError::invalid_argument(
@@ -5476,6 +5534,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         | RunVerb::Reconcile => {
             return Err(internal("run allocation is composed separately"));
         }
+        RunVerb::LookupOperation => return Err(internal("operation lookup is a durable observer")),
         RunVerb::Status | RunVerb::Interrupt | RunVerb::Resume => Prepared::Plain,
         RunVerb::Pending => Prepared::Plain,
         RunVerb::Pause => Prepared::Pause {
@@ -7486,10 +7545,31 @@ fn observe_caller_ledger(
     ),
     MachineError,
 > {
+    observe_run_ledger(state_root, run_id, false)
+}
+
+fn observe_run_ledger(
+    state_root: &Path,
+    run_id: Uuid,
+    require_complete: bool,
+) -> Result<
+    (
+        crate::projection::RunStateProjection,
+        crate::ledger::ObservedLedger,
+    ),
+    MachineError,
+> {
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
     let head = projection.ledger_head.sequence;
-    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
+    let ledger = if require_complete {
+        crate::ledger::ObservedLedger::open_complete(&run_root(state_root, run_id), run_id, head)
+            .map_err(|_| {
+                audit_integrity(run_id, head, "complete operation history is unavailable")
+            })?
+    } else {
+        crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?
+    };
     if ledger.records().last().map(crate::audit::AuditRecord::hash)
         != Some(projection.ledger_head.hash.as_str())
     {
@@ -11256,6 +11336,7 @@ mod tests {
         ));
         let original_head = worker.inner().head().unwrap();
         assert!(caller_bootstrap_is_complete(&state_root, run_id).unwrap());
+        assert!(observe_run_ledger(&state_root, run_id, true).is_ok());
         assert_eq!(worker.inner().head().unwrap(), original_head);
         let mut corrupted = worker.inner().projection().unwrap();
         corrupted.ledger_head.hash = "0".repeat(64);
@@ -11265,6 +11346,13 @@ mod tests {
         )
         .unwrap();
         assert!(caller_bootstrap_is_complete(&state_root, run_id).is_err());
+        assert_eq!(
+            observe_run_ledger(&state_root, run_id, true)
+                .err()
+                .unwrap()
+                .code,
+            "AUDIT_INTEGRITY_FAILURE"
+        );
         drop(worker);
         std::fs::remove_dir_all(state_root).unwrap();
     }

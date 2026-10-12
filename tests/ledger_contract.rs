@@ -1823,6 +1823,70 @@ fn an_observer_reconstructs_the_last_terminal_turn_from_the_ledger() {
 /// A projection head the durable bytes cannot account for is an integrity
 /// failure, not an empty answer.
 #[test]
+fn complete_operation_observation_refuses_a_synced_unpublished_reservation() {
+    for barrier in [
+        FaultBarrier::AfterLedgerFileSync,
+        FaultBarrier::BeforeProjectionReplace,
+    ] {
+        let tree = RunTree::new();
+        let faults = RecordingFaults::default();
+        let mut ledger = Ledger::open_with(
+            tree.root.clone(),
+            tree.run_id,
+            TestClock::new(),
+            faults.clone(),
+        )
+        .unwrap();
+        ledger
+            .append_required_payload(AuditKind::RunCreated, &serde_json::json!({}), 1)
+            .unwrap();
+        let published = ledger.projection().unwrap().ledger_head.sequence;
+        assert!(ObservedLedger::open_complete(&tree.root, tree.run_id, published).is_ok());
+        *faults.fail.lock().unwrap() = Some(barrier);
+        let intent = serde_json::json!({
+            "operation_id":Uuid::now_v7(),"idempotency_key":"unpublished-submit",
+            "request_sha256":"a".repeat(64),"run_generation":1,
+            "server_key":"b".repeat(64),"server_epoch":1,
+            "provisional_thread":true,"accepted_input":null
+        });
+        assert!(
+            ledger
+                .append_required_payload(AuditKind::IdempotencyReserved, &intent, 1)
+                .is_err()
+        );
+        assert!(ObservedLedger::open(&tree.root, tree.run_id, published).is_ok());
+        assert!(
+            matches!(
+                ObservedLedger::open_complete(&tree.root, tree.run_id, published),
+                Err(LedgerError::Integrity(_))
+            ),
+            "{barrier:?}"
+        );
+        drop(ledger);
+        let recovered =
+            Ledger::open_with(tree.root.clone(), tree.run_id, TestClock::new(), NoFaults).unwrap();
+        let records = recovered.durable_records().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind(), AuditKind::IdempotencyReserved);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &dolgorae::jcs::canonicalize(records[1].payload()).unwrap()
+            )
+            .unwrap(),
+            intent
+        );
+        assert!(
+            ObservedLedger::open_complete(
+                &tree.root,
+                tree.run_id,
+                recovered.projection().unwrap().ledger_head.sequence
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[test]
 fn an_observer_refuses_a_head_the_durable_bytes_do_not_reach() {
     let tree = RunTree::new();
     let mut ledger =

@@ -7152,6 +7152,7 @@ pub(crate) fn durable_submit_replay(
             matches!(
                 record.kind(),
                 crate::audit::AuditKind::IdempotencyReserved
+                    | crate::audit::AuditKind::TurnIntent
                     | crate::audit::AuditKind::ThreadBound
                     | crate::audit::AuditKind::TurnStarted
                     | crate::audit::AuditKind::TurnTerminal

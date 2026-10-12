@@ -38,6 +38,17 @@ cargo build --locked
 ./target/debug/dolgorae --human --help
 ```
 
+The source build includes a Controller-authorized Submit lookup diagnostic:
+
+```sh
+dolgorae run --controller-file /absolute/private/controller.json lookup-operation RUN_ID --workspace /absolute/workspace --idempotency-key ORIGINAL_KEY
+```
+
+It returns the retained receipt, definitive non-acceptance, unresolved effect
+or authoritative absence without reopening attachments. See the
+[durable operation contract](docs/specs/dolgorae-v014-durable-operations.md).
+This native diagnostic does not establish public-v2 or consumer runtime support.
+
 For a removed development or test home, inspect registered detached processes
 before cleanup. Use the exact digest from the inspection with the same selector:
 

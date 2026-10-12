@@ -1577,7 +1577,16 @@ impl ObservedLedger {
 
     pub fn open(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
         Ok(Self {
-            records: observe_records(root, run_id, head)?,
+            records: observe_records(root, run_id, head, false)?,
+            head,
+        })
+    }
+
+    /// Require the published prefix to cover every retained byte. Operation
+    /// absence cannot be inferred from a prefix with an unclassified tail.
+    pub fn open_complete(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
+        Ok(Self {
+            records: observe_records(root, run_id, head, true)?,
             head,
         })
     }
@@ -1757,7 +1766,12 @@ fn next_interaction_revision(revision: u64, record: &AuditRecord) -> u64 {
 }
 
 /// The durable record prefix through `head`, verified as it is read.
-fn observe_records(root: &Path, run_id: Uuid, head: u64) -> Result<Vec<AuditRecord>, LedgerError> {
+fn observe_records(
+    root: &Path,
+    run_id: Uuid,
+    head: u64,
+    require_complete: bool,
+) -> Result<Vec<AuditRecord>, LedgerError> {
     if run_id.get_version_num() != 7 {
         return Err(LedgerError::InvalidRecord(
             "run identity must be UUIDv7".to_owned(),
@@ -1815,6 +1829,17 @@ fn observe_records(root: &Path, run_id: Uuid, head: u64) -> Result<Vec<AuditReco
             "durable ledger holds {} records below the committed head {head}",
             records.len()
         )));
+    }
+    if require_complete
+        && !reader
+            .fill_buf()
+            .map_err(|error| io_at("inspect operation history tail", &audit_path, error))?
+            .is_empty()
+    {
+        return Err(LedgerError::Integrity(
+            "operation history has an unpublished tail; authoritative recovery is required"
+                .to_owned(),
+        ));
     }
     Ok(records)
 }
